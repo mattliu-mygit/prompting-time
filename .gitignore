@@ -1,3 +1,10 @@
 .DS_Store
 .superpowers/
 .worktrees/
+node_modules/
+dist/
+target/
+src-tauri/target/
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js

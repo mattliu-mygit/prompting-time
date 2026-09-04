@@ -1,0 +1,18 @@
+[package]
+name = "prompting-time"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "prompting_time_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+prompting-time-core = { path = "../crates/prompting-time-core" }
+serde.workspace = true
+tauri = { version = "2", features = [] }
+thiserror.workspace = true
+tokio.workspace = true

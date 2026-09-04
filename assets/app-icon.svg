@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title>Prompting Time</title>
+  <rect width="256" height="256" rx="48" fill="#18212f"/>
+  <circle cx="128" cy="128" r="72" fill="none" stroke="#f4f7fb" stroke-width="16"/>
+  <path d="M128 84v48l32 20" fill="none" stroke="#f4f7fb" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/>
+  <path d="M178 173l30-45-30-45" fill="none" stroke="#7be0ad" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/>
+</svg>
