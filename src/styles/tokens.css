@@ -49,13 +49,17 @@ body {
 }
 
 button,
-select {
+select,
+textarea,
+input {
   color: inherit;
   font: inherit;
 }
 
 button:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
+input:focus-visible,
 [role="treeitem"]:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

@@ -7,6 +7,7 @@ import {
   createConversation,
   getBootstrap,
   inspectWorkspace,
+  inspectProject,
   interruptRun,
   listConversations,
   loadConversation,
@@ -15,6 +16,8 @@ import {
   loadApprovalQuestions,
   loadApprovals,
   loadEventDetail,
+  listRunAudits,
+  loadRunAudit,
   listenToAppEvents,
   loadTimeline,
   respondToApproval,
@@ -79,6 +82,9 @@ describe("desktop bridge", () => {
     await interruptRun({ runId: "run-1" });
     await archiveConversation({ conversationId: "c-1" });
     await inspectWorkspace({ conversationId: "c-1" });
+    await inspectProject({ path: "/repo" });
+    await listRunAudits({ conversationId: "c-1", cursor: null, limit: 10 });
+    await loadRunAudit({ conversationId: "c-1", runId: "run-1" });
 
     expect(invokeMock.mock.calls).toEqual([
       ["bootstrap"],
@@ -134,6 +140,9 @@ describe("desktop bridge", () => {
       ["interrupt_run", { request: { runId: "run-1" } }],
       ["archive_conversation", { request: { conversationId: "c-1" } }],
       ["inspect_workspace", { request: { conversationId: "c-1" } }],
+      ["inspect_project", { request: { path: "/repo" } }],
+      ["list_run_audits", { request: { conversationId: "c-1", cursor: null, limit: 10 } }],
+      ["load_run_audit", { request: { conversationId: "c-1", runId: "run-1" } }],
     ]);
   });
 
@@ -153,11 +162,11 @@ describe("desktop bridge", () => {
     );
   });
 
-  it("does not expose unknown rejection payloads", async () => {
-    invokeMock.mockRejectedValue({
-      message: "private provider payload",
-      raw: { sessionId: "native-secret" },
-    });
+  it.each([
+    ["opaque object", { message: "private provider payload", raw: { sessionId: "native-secret" } }],
+    ["generic error", new Error("private provider payload")],
+  ])("does not expose %s rejection payloads", async (_name, rejection) => {
+    invokeMock.mockRejectedValue(rejection);
 
     await expect(getBootstrap()).rejects.toEqual(
       new BridgeError(
@@ -166,6 +175,30 @@ describe("desktop bridge", () => {
         null,
       ),
     );
+  });
+
+  it("classifies only an unstructured submit rejection as outcome-unknown", async () => {
+    invokeMock.mockRejectedValue(new Error("private transport rejection"));
+
+    await expect(submitMessage({
+      conversationId: "c-1",
+      text: "hello",
+      providerOverride: null,
+      commandId: "cmd-1",
+    })).rejects.toEqual(new BridgeError(
+      "outcome-unknown",
+      "Prompting Time could not confirm whether the message was accepted.",
+      "Retry this logical send.",
+    ));
+
+    invokeMock.mockRejectedValue({ code: "internal", message: "Safe internal failure", action: null });
+    await expect(submitMessage({ conversationId: "c-1", text: "hello", providerOverride: null, commandId: "cmd-2" }))
+      .rejects.toEqual(new BridgeError("internal", "Safe internal failure", null));
+
+    invokeMock.mockRejectedValue(new Error("private read rejection"));
+    await expect(getBootstrap()).rejects.toEqual(new BridgeError(
+      "internal", "Prompting Time could not complete the request.", null,
+    ));
   });
 
   it("subscribes to the single app event and returns its unsubscriber", async () => {

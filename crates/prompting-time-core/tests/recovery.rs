@@ -360,6 +360,35 @@ async fn conversation_listing_is_bounded_and_paginated() {
 }
 
 #[tokio::test]
+async fn active_conversation_listing_excludes_archived_rows_at_the_query_boundary() {
+    let store = Store::open_in_memory().await.unwrap();
+    let active = store
+        .create_conversation(NewConversation::projectless("Active"))
+        .await
+        .unwrap();
+    let archived = store
+        .create_conversation(NewConversation::projectless("Archived"))
+        .await
+        .unwrap();
+    store.archive_conversation(archived.id).await.unwrap();
+
+    let page = store.list_active_conversations(None, 10).await.unwrap();
+    assert_eq!(
+        page.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![active.id]
+    );
+    assert!(
+        store
+            .list_conversations(None, 10)
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == archived.id)
+    );
+}
+
+#[tokio::test]
 async fn restart_recovers_only_non_terminal_runs() {
     let directory = TempDir::new().unwrap();
     let path = directory

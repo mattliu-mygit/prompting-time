@@ -21,6 +21,9 @@ export const commands = {
 	interruptRun: (request: InterruptRunRequest) => typedError<null, CommandError>(__TAURI_INVOKE("interrupt_run", { request })),
 	archiveConversation: (request: ArchiveConversationRequest) => typedError<null, CommandError>(__TAURI_INVOKE("archive_conversation", { request })),
 	inspectWorkspace: (request: InspectWorkspaceRequest) => typedError<InspectorSnapshot, CommandError>(__TAURI_INVOKE("inspect_workspace", { request })),
+	inspectProject: (request: InspectProjectRequest) => typedError<ProjectPathSnapshot, CommandError>(__TAURI_INVOKE("inspect_project", { request })),
+	listRunAudits: (request: ListRunAuditsRequest) => typedError<RunAuditPage, CommandError>(__TAURI_INVOKE("list_run_audits", { request })),
+	loadRunAudit: (request: LoadRunAuditRequest) => typedError<RunAuditDetailSnapshot, CommandError>(__TAURI_INVOKE("load_run_audit", { request })),
 };
 
 /* Types */
@@ -50,6 +53,10 @@ export type AppEvent = { kind: "conversationChanged"; sequence: string; conversa
 
 export type ApprovalDetailSnapshot = {
 	id: string,
+	status: ApprovalStatus,
+	responsePending: boolean,
+	agentPath: string[],
+	agentPathTruncated: boolean,
 	operation: string,
 	scope: string,
 	input: UserInputRequest | null,
@@ -94,6 +101,8 @@ export type ApprovalSnapshot = {
 	scope: string,
 	status: ApprovalStatus,
 	responsePending: boolean,
+	agentPath: string[],
+	agentPathTruncated: boolean,
 };
 
 export type ApprovalStatus = "pending" | "approved" | "denied" | "answered" | "cancelled" | "failed";
@@ -135,6 +144,7 @@ export type ConversationPage = {
 export type ConversationSummary = {
 	id: string,
 	title: string,
+	routingProfile: RoutingProfile,
 	workspaceId: string | null,
 	archived: boolean,
 	projectRoot: string | null,
@@ -180,12 +190,18 @@ export type FileSystemAccess = "read" | "write" | "deny";
 
 export type FileSystemPath = { type: "path"; path: string } | { type: "glob_pattern"; pattern: string } | { type: "special"; value: SpecialPath };
 
+export type InspectProjectRequest = {
+	path: string,
+};
+
 export type InspectWorkspaceRequest = {
 	conversationId: string,
 };
 
 export type InspectorSnapshot = {
 	workspace: WorkspaceSnapshot,
+	executionPath: string,
+	ownedWorktree: boolean,
 	cleanup: CleanupSnapshot,
 	currentRun: CurrentRunSnapshot | null,
 	routing: RoutingSnapshot | null,
@@ -199,6 +215,12 @@ export type InterruptRunRequest = {
 };
 
 export type ListConversationsRequest = {
+	cursor: string | null,
+	limit: number,
+};
+
+export type ListRunAuditsRequest = {
+	conversationId: string,
 	cursor: string | null,
 	limit: number,
 };
@@ -234,6 +256,11 @@ export type LoadEventDetailRequest = {
 	eventId: string,
 };
 
+export type LoadRunAuditRequest = {
+	conversationId: string,
+	runId: string,
+};
+
 export type LoadTimelineRequest = {
 	conversationId: string,
 	cursor: string | null,
@@ -253,6 +280,10 @@ export type PermissionProfile = {
 	read: string[] | null,
 	write: string[] | null,
 	networkEnabled: boolean | null,
+};
+
+export type ProjectPathSnapshot = {
+	isGit: boolean,
 };
 
 export type ProviderCapability = "streaming" | "steering" | "deferredApproval" | "interruption" | "resume" | "childAgents";
@@ -308,6 +339,31 @@ export type RoutingSnapshot = {
 	evaluations: ProviderEvaluation[],
 	rationale: RoutingCriterion[],
 	explanation: string,
+};
+
+export type RunAuditDetailSnapshot = {
+	id: string,
+	provider: ProviderId,
+	status: RunStatus,
+	routing: RoutingSnapshot | null,
+	reason: RoutingReason | null,
+	routingTruncated: boolean,
+	handoff: string | null,
+	handoffTruncated: boolean,
+};
+
+export type RunAuditPage = {
+	items: RunAuditSummarySnapshot[],
+	nextCursor: string | null,
+};
+
+export type RunAuditSummarySnapshot = {
+	id: string,
+	provider: ProviderId,
+	status: RunStatus,
+	reason: RoutingReason | null,
+	routingTruncated: boolean,
+	hasHandoff: boolean,
 };
 
 export type RunStatus = "queued" | "running" | "waiting" | "completed" | "interrupted" | "failed";

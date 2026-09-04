@@ -2,9 +2,11 @@ import { waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
   AgentSnapshot,
+  AgentTreePage,
   AppEvent,
   ConversationPage,
   ConversationSummary,
+  InspectorSnapshot,
 } from "../bridge/types";
 import { createAppStore, selectVisibleConversations, type AppApi } from "./store";
 
@@ -23,6 +25,20 @@ function agent(
   };
 }
 
+function inspectorSnapshot(executionPath: string): InspectorSnapshot {
+  return {
+    workspace: { mode: "projectless", changes: [], truncated: false },
+    executionPath,
+    ownedWorktree: false,
+    cleanup: { eligible: false, blocker: "notOwned" },
+    currentRun: null,
+    routing: null,
+    handoff: null,
+    activeDescendantCount: 0,
+    agentsTruncated: false,
+  };
+}
+
 function conversation(
   id: string,
   overrides: Partial<ConversationSummary> = {},
@@ -30,6 +46,7 @@ function conversation(
   return {
     id,
     title: `Conversation ${id}`,
+    routingProfile: "balanced",
     workspaceId: null,
     archived: false,
     projectRoot: null,
@@ -40,6 +57,43 @@ function conversation(
     agents: [agent(`root-${id}`, null)],
     agentsTruncated: false,
     ...overrides,
+  };
+}
+
+function conversationActions(): Pick<
+  AppApi,
+  | "loadTimeline"
+  | "loadEventDetail"
+  | "loadApprovals"
+  | "loadApprovalDetail"
+  | "loadApprovalQuestions"
+  | "submitMessage"
+  | "steerRun"
+  | "respondToApproval"
+  | "interruptRun"
+  | "inspectWorkspace"
+  | "listRunAudits"
+  | "loadRunAudit"
+  | "createConversation"
+  | "archiveConversation"
+  | "inspectProject"
+> {
+  return {
+    loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
+    loadEventDetail: vi.fn(),
+    loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+    loadApprovalDetail: vi.fn(),
+    loadApprovalQuestions: vi.fn(),
+    submitMessage: vi.fn(),
+    steerRun: vi.fn(),
+    respondToApproval: vi.fn(),
+    interruptRun: vi.fn(),
+    inspectWorkspace: vi.fn(),
+    listRunAudits: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+    loadRunAudit: vi.fn(),
+    createConversation: vi.fn(),
+    archiveConversation: vi.fn(),
+    inspectProject: vi.fn().mockResolvedValue({ isGit: true }),
   };
 }
 
@@ -125,6 +179,23 @@ function createFakeApi() {
         nextCursor: null,
       };
     }),
+    loadTimeline: vi.fn().mockResolvedValue({
+      items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    }),
+    loadEventDetail: vi.fn(),
+    loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+    loadApprovalDetail: vi.fn(),
+    loadApprovalQuestions: vi.fn(),
+    submitMessage: vi.fn(),
+    steerRun: vi.fn(),
+    respondToApproval: vi.fn(),
+    interruptRun: vi.fn(),
+    inspectWorkspace: vi.fn(),
+    listRunAudits: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+    loadRunAudit: vi.fn(),
+    createConversation: vi.fn(),
+    archiveConversation: vi.fn(),
+    inspectProject: vi.fn().mockResolvedValue({ isGit: true }),
     listenToAppEvents: vi.fn(async (handler) => {
       calls.listen += 1;
       eventHandler = handler;
@@ -147,7 +218,53 @@ function createFakeApi() {
 }
 
 describe("app store", () => {
-  it("loads every conversation and every paged descendant into immutable normalized snapshots", async () => {
+  it("adds and selects a newly created projectless conversation on an empty install", async () => {
+    const fake = createFakeApi();
+    fake.api.listConversations = vi.fn().mockResolvedValue({ items: [], nextCursor: null });
+    fake.api.createConversation = vi.fn().mockResolvedValue(conversation("new", {
+      currentRunId: null, provider: null, runStatus: null, rollupStatus: null, agents: [],
+    }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+
+    await store.createConversation({
+      title: "Fresh work", objective: "Explore", constraints: [],
+      workspace: { kind: "projectless" }, routingProfile: "balanced",
+    });
+
+    expect(fake.api.createConversation).toHaveBeenCalledWith(expect.objectContaining({
+      workspace: { kind: "projectless" },
+    }));
+    expect(store.getSnapshot().selectedConversationId).toBe("new");
+    expect(store.getSnapshot().conversationIds).toEqual(["new"]);
+  });
+
+  it("archives the selected conversation and selects the next active conversation", async () => {
+    const fake = createFakeApi();
+    fake.api.archiveConversation = vi.fn().mockResolvedValue(undefined);
+    const store = createAppStore(fake.api);
+    await store.initialize();
+
+    await store.archiveConversation("c1");
+
+    expect(fake.api.archiveConversation).toHaveBeenCalledWith({ conversationId: "c1" });
+    expect(store.getSnapshot().conversationsById.c1).toBeUndefined();
+    expect(store.getSnapshot().selectedConversationId).toBe("c2");
+  });
+
+  it("removes and reselects when a targeted refresh reports the selection archived", async () => {
+    const fake = createFakeApi();
+    fake.api.loadConversation = vi.fn().mockResolvedValue(conversation("c1", { archived: true }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+
+    fake.emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
+
+    await waitFor(() => expect(store.getSnapshot().conversationsById.c1).toBeUndefined());
+    expect(store.getSnapshot().selectedConversationId).toBe("c2");
+  });
+
+  it("keeps truncated agent trees lazy during initial synchronization", async () => {
     const fake = createFakeApi();
     const store = createAppStore(fake.api);
 
@@ -155,16 +272,255 @@ describe("app store", () => {
 
     const snapshot = store.getSnapshot();
     expect(snapshot.conversationIds).toEqual(["c1", "c2"]);
-    expect(snapshot.conversationsById.c1?.agentIds).toEqual([
+    expect(snapshot.conversationsById.c1?.agentIds).toEqual(["root-c1"]);
+    expect(snapshot.agentsById.researcher).toBeUndefined();
+    expect(fake.calls.agentCursors).toEqual([]);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.conversationIds)).toBe(true);
+    expect(Object.isFrozen(snapshot.conversationsById.c1?.agentIds)).toBe(true);
+  });
+
+  it("loads one agent page only after explicit disclosure", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+
+    await store.loadAgentPage("c1");
+
+    expect(fake.calls.agentCursors).toEqual([null]);
+    expect(store.getSnapshot().conversationsById.c1?.agentIds).toEqual([
+      "root-c1",
+      "reviewer",
+    ]);
+    expect(store.getSnapshot().agentWindow).toMatchObject({
+      conversationId: "c1",
+      runId: "run-c1",
+      nextCursor: "agents-2",
+      evicted: false,
+    });
+
+    await store.loadAgentPage("c1");
+
+    expect(fake.calls.agentCursors).toEqual([null, "agents-2"]);
+    expect(store.getSnapshot().conversationsById.c1?.agentIds).toEqual([
       "root-c1",
       "reviewer",
       "researcher",
     ]);
-    expect(snapshot.agentsById.researcher?.parentId).toBe("reviewer");
-    expect(fake.calls.agentCursors).toEqual([null, "agents-2"]);
-    expect(Object.isFrozen(snapshot)).toBe(true);
-    expect(Object.isFrozen(snapshot.conversationIds)).toBe(true);
-    expect(Object.isFrozen(snapshot.conversationsById.c1?.agentIds)).toBe(true);
+    expect(store.getSnapshot().conversationsById.c1?.agentsTruncated).toBe(false);
+  });
+
+  it("coalesces agent restarts behind one in-flight page and converges on latest", async () => {
+    const fake = createFakeApi();
+    const resolvers: Array<(value: AgentTreePage) => void> = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    fake.api.loadAgentTree = vi.fn(() => new Promise<AgentTreePage>((resolve) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      resolvers.push((value) => { inFlight -= 1; resolve(value); });
+    }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    const first = store.loadAgentPage("c1", true);
+    void store.loadAgentPage("c1", true);
+    void store.loadAgentPage("c1", true);
+    expect(fake.api.loadAgentTree).toHaveBeenCalledTimes(1);
+    resolvers.shift()?.({ runId: "run-c1", items: [{ agent: agent("stale", "root-c1"), depth: 1 }], nextCursor: null });
+    await waitFor(() => expect(fake.api.loadAgentTree).toHaveBeenCalledTimes(2));
+    resolvers.shift()?.({ runId: "run-c1", items: [{ agent: agent("latest", "root-c1"), depth: 1 }], nextCursor: null });
+    await first;
+    expect(maxInFlight).toBe(1);
+    expect(store.getSnapshot().agentsById.latest).toBeDefined();
+  });
+
+  it("globally serializes workspace inspection and coalesces to the latest selection", async () => {
+    const fake = createFakeApi();
+    const requests: string[] = [];
+    const resolvers: Array<(value: InspectorSnapshot) => void> = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    fake.api.inspectWorkspace = vi.fn(({ conversationId }) => new Promise<InspectorSnapshot>((resolve) => {
+      requests.push(conversationId);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      resolvers.push((value) => { inFlight -= 1; resolve(value); });
+    }));
+    const store = createAppStore(fake.api);
+    const first = store.actions.inspectWorkspace({ conversationId: "c1" });
+    const second = store.actions.inspectWorkspace({ conversationId: "c2" });
+    const third = store.actions.inspectWorkspace({ conversationId: "c3" });
+    expect(requests).toEqual(["c1"]);
+    resolvers.shift()?.(inspectorSnapshot("A"));
+    await waitFor(() => expect(requests).toEqual(["c1", "c3"]));
+    resolvers.shift()?.(inspectorSnapshot("C"));
+    await expect(first).resolves.toMatchObject({ executionPath: "A" });
+    await expect(second).resolves.toMatchObject({ executionPath: "C" });
+    await expect(third).resolves.toMatchObject({ executionPath: "C" });
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("retains a loaded selected path when the bounded agent window evicts older pages", async () => {
+    const fake = createFakeApi();
+    let page = 0;
+    fake.api.loadAgentTree = vi.fn(async ({ cursor }) => {
+      page += 1;
+      if (cursor === null) {
+        return {
+          runId: "run-c1",
+          items: [
+            { agent: agent("root-c1", null), depth: 0 },
+            { agent: agent("reviewer", "root-c1"), depth: 1 },
+            { agent: agent("researcher", "reviewer"), depth: 2 },
+          ],
+          nextCursor: "agents-2",
+        };
+      }
+      return {
+        runId: "run-c1",
+        items: [{ agent: agent(`later-${page}`, "root-c1"), depth: 1 }],
+        nextCursor: `agents-${page + 1}`,
+      };
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadAgentPage("c1");
+    store.selectConversation("c1", "researcher");
+
+    for (let index = 0; index < 4; index += 1) await store.loadAgentPage("c1");
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.agentWindow?.evicted).toBe(true);
+    expect(snapshot.selectedAgentId).toBe("researcher");
+    expect(snapshot.conversationsById.c1?.agentIds).toEqual(expect.arrayContaining([
+      "root-c1",
+      "reviewer",
+      "researcher",
+    ]));
+    expect(snapshot.conversationsById.c1?.agentIds.length).toBeLessThanOrEqual(8);
+  });
+
+  it("releases a pinned path after selection moves away from its evicted window", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadAgentPage("c1");
+    store.selectConversation("c1", "reviewer");
+    await store.loadAgentPage("c2");
+
+    store.selectConversation("c2");
+
+    expect(store.getSnapshot().conversationsById.c1?.agentIds).toEqual(["root-c1"]);
+    expect(store.getSnapshot().agentsById.reviewer).toBeUndefined();
+  });
+
+  it("refreshes the first disclosed agent page across same-run targeted refreshes", async () => {
+    const fake = createFakeApi();
+    let reviewerStatus: AgentSnapshot["status"] = "running";
+    vi.mocked(fake.api.loadAgentTree).mockImplementation(async ({ cursor }) => {
+      fake.calls.agentCursors.push(cursor);
+      return {
+        runId: "run-c1",
+        items: [
+          { agent: agent("root-c1", null), depth: 0 },
+          { agent: agent("reviewer", "root-c1", reviewerStatus), depth: 1 },
+        ],
+        nextCursor: "agents-2",
+      };
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadAgentPage("c1");
+    store.selectConversation("c1", "reviewer");
+    reviewerStatus = "completed";
+
+    fake.emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
+
+    await waitFor(() => expect(store.getSnapshot().agentsById.reviewer?.status).toBe("completed"));
+    expect(store.getSnapshot().selectedAgentId).toBe("reviewer");
+    expect(store.getSnapshot().conversationsById.c1?.agentIds).toContain("reviewer");
+    expect(fake.calls.agentCursors).toEqual([null, null]);
+  });
+
+  it("refreshes the first disclosed agent page across a same-run full refresh", async () => {
+    const fake = createFakeApi();
+    let reviewerStatus: AgentSnapshot["status"] = "running";
+    vi.mocked(fake.api.loadAgentTree).mockImplementation(async ({ cursor }) => {
+      fake.calls.agentCursors.push(cursor);
+      return {
+        runId: "run-c1",
+        items: [
+          { agent: agent("root-c1", null), depth: 0 },
+          { agent: agent("reviewer", "root-c1", reviewerStatus), depth: 1 },
+        ],
+        nextCursor: "agents-2",
+      };
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadAgentPage("c1");
+    store.selectConversation("c1", "reviewer");
+    const initialListCalls = fake.calls.conversations;
+    reviewerStatus = "completed";
+
+    fake.emit({ kind: "reloadRequired", sequence: "1" });
+
+    await waitFor(() => expect(store.getSnapshot().agentsById.reviewer?.status).toBe("completed"));
+    expect(fake.calls.conversations).toBeGreaterThan(initialListCalls);
+    expect(store.getSnapshot().selectedAgentId).toBe("reviewer");
+    expect(store.getSnapshot().conversationsById.c1?.agentIds).toContain("reviewer");
+    expect(fake.calls.agentCursors).toEqual([null, null]);
+  });
+
+  it("retries an initially failed agent page without losing explicit disclosure", async () => {
+    const fake = createFakeApi();
+    vi.mocked(fake.api.loadAgentTree)
+      .mockRejectedValueOnce(new Error("Agent service unavailable."))
+      .mockResolvedValueOnce({
+        runId: "run-c1",
+        items: [
+          { agent: agent("root-c1", null), depth: 0 },
+          { agent: agent("reviewer", "root-c1"), depth: 1 },
+        ],
+        nextCursor: "agents-2",
+      });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+
+    await store.loadAgentPage("c1");
+    expect(store.getSnapshot().agentWindow).toMatchObject({
+      pages: [],
+      error: "Agent service unavailable.",
+    });
+
+    await store.loadAgentPage("c1", true);
+
+    expect(fake.api.loadAgentTree).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().agentWindow).toMatchObject({
+      pages: [["root-c1", "reviewer"]],
+      error: null,
+    });
+    expect(store.getSnapshot().conversationsById.c1?.agentIds).toContain("reviewer");
+  });
+
+  it("drops a loaded agent window and selection when the current run changes", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadAgentPage("c1");
+    store.selectConversation("c1", "reviewer");
+    vi.mocked(fake.api.loadConversation).mockResolvedValue(conversation("c1", {
+      currentRunId: "run-new",
+      agents: [agent("root-new", null)],
+      agentsTruncated: false,
+    }));
+
+    fake.emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
+
+    await waitFor(() => expect(store.getSnapshot().conversationsById.c1?.currentRunId).toBe("run-new"));
+    expect(store.getSnapshot().selectedAgentId).toBeNull();
+    expect(store.getSnapshot().agentWindow).toBeNull();
+    expect(store.getSnapshot().agentsById.reviewer).toBeUndefined();
   });
 
   it("subscribes once and replaces, rather than mutating, state when events arrive", async () => {
@@ -196,6 +552,7 @@ describe("app store", () => {
       expect(store.getSnapshot().conversationsById.c1?.title).toBe("Reloaded after gap");
     });
     expect(store.getSnapshot().lastSequence).toBe("3");
+    expect(store.getSnapshot().conversationVersions.c2).toBe(1);
     expect(fake.calls.conversations).toBeGreaterThanOrEqual(4);
   });
 
@@ -327,6 +684,7 @@ describe("app store", () => {
     let moved = false;
     const all = Array.from({ length: 201 }, (_, index) => conversation(`c${index}`));
     const api: AppApi = {
+      ...conversationActions(),
       getBootstrap: vi.fn().mockResolvedValue({ providers: [] }),
       listConversations: vi.fn(async ({ cursor }) => {
         if (cursor === null) {
@@ -387,6 +745,7 @@ describe("app store", () => {
     });
     const loadConversation = vi.fn().mockResolvedValue({ ...relevant, title: "Streaming" });
     const api: AppApi = {
+      ...conversationActions(),
       getBootstrap: vi.fn().mockResolvedValue({ providers: [] }),
       listConversations,
       loadConversation,
@@ -417,7 +776,8 @@ describe("app store", () => {
     });
     expect(listConversations).not.toHaveBeenCalled();
     expect(loadConversation).toHaveBeenCalledTimes(1);
-    expect(loadAgentTree.mock.calls.map(([request]) => request.conversationId)).toEqual(["c1"]);
+    expect(loadAgentTree).not.toHaveBeenCalled();
+    expect(store.getSnapshot().conversationVersions.c1).toBe(1);
   });
 
   it("does not let targeted work from an aborted scan overwrite its authoritative retry", async () => {
@@ -431,6 +791,7 @@ describe("app store", () => {
     const stale = conversation("c1", { title: "Stale targeted result" });
     const future = conversation("c1", { title: "Future targeted result" });
     const api: AppApi = {
+      ...conversationActions(),
       getBootstrap: vi.fn().mockResolvedValue({ providers: [] }),
       listConversations: vi.fn(async (): Promise<ConversationPage> => {
         listCalls += 1;

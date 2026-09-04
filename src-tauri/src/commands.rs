@@ -290,6 +290,52 @@ pub async fn inspect_workspace(
     Ok(snapshot.into())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn inspect_project(
+    state: State<'_, Arc<AppState>>,
+    request: InspectProjectRequest,
+) -> Result<ProjectPathSnapshot, CommandError> {
+    let is_git = state
+        .service()?
+        .is_git_project(std::path::Path::new(&request.path))
+        .await?;
+    Ok(ProjectPathSnapshot { is_git })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_run_audits(
+    state: State<'_, Arc<AppState>>,
+    request: ListRunAuditsRequest,
+) -> Result<RunAuditPage, CommandError> {
+    Ok(state
+        .service()?
+        .load_run_audits(
+            parse_conversation_id(&request.conversation_id)?,
+            request.cursor,
+            request.limit,
+        )
+        .await?
+        .into())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn load_run_audit(
+    state: State<'_, Arc<AppState>>,
+    request: LoadRunAuditRequest,
+) -> Result<RunAuditDetailSnapshot, CommandError> {
+    Ok(state
+        .service()?
+        .load_run_audit(
+            parse_conversation_id(&request.conversation_id)?,
+            parse_run_id(&request.run_id)?,
+        )
+        .await?
+        .into())
+}
+
 pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(tauri_specta::collect_commands![
@@ -309,6 +355,9 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             interrupt_run,
             archive_conversation,
             inspect_workspace,
+            inspect_project,
+            list_run_audits,
+            load_run_audit,
         ])
         .typ::<AppEvent>()
 }
@@ -369,6 +418,10 @@ mod tests {
             .map_or(0, |input| input.questions.len() as u32);
         prompting_time_core::store::ApprovalDetailRecord {
             id: approval.id,
+            status: approval.status,
+            response_pending: false,
+            agent_path: vec!["Root".to_owned()],
+            agent_path_truncated: false,
             operation: approval.operation,
             scope: approval.scope,
             input: approval.input,
@@ -501,6 +554,8 @@ mod tests {
             scope: "command execution".to_owned(),
             status: prompting_time_core::domain::ApprovalStatus::Pending,
             response_pending: false,
+            agent_path: vec!["orchestrator".to_owned()],
+            agent_path_truncated: false,
         });
         let encoded = serde_json::to_string(&snapshot).unwrap();
 
@@ -508,6 +563,26 @@ mod tests {
         assert_eq!(snapshot.scope, "command execution");
         assert!(!encoded.contains("provider-native-item-secret"));
         assert!(!encoded.to_ascii_lowercase().contains("native"));
+    }
+
+    #[test]
+    fn provider_run_audit_boundary_exposes_only_app_owned_ids_and_bounded_content() {
+        let snapshot = RunAuditDetailSnapshot {
+            id: RunId::new().to_string(),
+            provider: ProviderId::Claude,
+            status: RunStatus::Completed,
+            routing: None,
+            reason: Some(RoutingReason::ManualOverride),
+            routing_truncated: false,
+            handoff: Some("bounded canonical handoff".to_owned()),
+            handoff_truncated: false,
+        };
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+
+        assert!(encoded.contains("bounded canonical handoff"));
+        assert!(!encoded.to_ascii_lowercase().contains("native"));
+        assert!(!encoded.contains("sessionId"));
+        assert!(!encoded.contains("providerRequestId"));
     }
 
     #[test]

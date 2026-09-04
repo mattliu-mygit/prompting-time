@@ -24,6 +24,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "latest",
+    "axe-core": "^4.13.0",
     "eslint": "^9",
     "globals": "latest",
     "jsdom": "latest",

@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, OnceLock, Weak},
+    time::Duration,
 };
 
 use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
@@ -31,6 +32,10 @@ const MAX_SNAPSHOT_ENTRIES: usize = 512;
 const MAX_SNAPSHOT_PATH_BYTES: usize = 12 * 1024;
 const MAX_SNAPSHOT_DEPTH: usize = 32;
 const MAX_GIT_STATUS_BYTES: usize = 24 * 1024;
+const MAX_GIT_COMMAND_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GIT_STDIN_BYTES: usize = 1024 * 1024;
+const MAX_GIT_STDIN_COMMANDS: usize = 16;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub enum WorkspaceRequest {
@@ -287,6 +292,13 @@ pub enum WorkspaceError {
     },
     #[error("git operation `{operation}` returned invalid output")]
     InvalidGitOutput { operation: &'static str },
+    #[error("git operation `{operation}` exceeded its {max_bytes}-byte output limit")]
+    GitOutputTooLarge {
+        operation: &'static str,
+        max_bytes: usize,
+    },
+    #[error("git operation `{operation}` exceeded its execution deadline")]
+    GitCommandTimedOut { operation: &'static str },
     #[error("owned worktree removal blocked: {blocker:?}")]
     RemovalBlocked { blocker: WorkspaceBlocker },
     #[error("owned worktree removal task failed")]
@@ -466,6 +478,10 @@ impl Drop for OwnedProcessRegistration {
 }
 
 impl WorkspaceManager {
+    pub async fn is_git_project(&self, selected_path: &Path) -> Result<bool, WorkspaceError> {
+        let selected_path = canonicalize(selected_path, "resolve selected project")?;
+        Ok(detect_git_root(&selected_path).await?.is_some())
+    }
     pub fn new(app_data_dir: impl Into<PathBuf>) -> Self {
         let app_data_dir = app_data_dir.into();
         Self {
@@ -1825,13 +1841,18 @@ async fn git_reference_value(
     reference: &str,
 ) -> Result<Option<String>, WorkspaceError> {
     let operation = "read worktree ownership marker";
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(project_root)
-        .args(["rev-parse", "--verify", "--quiet", reference])
-        .output()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
+        .args(["rev-parse", "--verify", "--quiet", reference]);
+    let output = command_output_bounded(
+        &mut command,
+        operation,
+        MAX_GIT_COMMAND_OUTPUT_BYTES,
+        GIT_COMMAND_TIMEOUT,
+    )
+    .await?;
     match output.status.code() {
         Some(0) => String::from_utf8(output.stdout)
             .map(|value| Some(value.trim().to_owned()))
@@ -1853,13 +1874,18 @@ async fn git_path(
 
 async fn detect_git_root(directory: &Path) -> Result<Option<PathBuf>, WorkspaceError> {
     let operation = "detect Git project";
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(directory)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
+        .args(["rev-parse", "--show-toplevel"]);
+    let output = command_output_bounded(
+        &mut command,
+        operation,
+        MAX_GIT_COMMAND_OUTPUT_BYTES,
+        GIT_COMMAND_TIMEOUT,
+    )
+    .await?;
     if !output.status.success() {
         if directory
             .ancestors()
@@ -1912,10 +1938,13 @@ async fn git_worktree_descriptor_output(
     unsafe {
         command.pre_exec(move || rustix::process::fchdir(&directory).map_err(std::io::Error::from));
     }
-    command
-        .output()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })
+    command_output_bounded(
+        &mut command,
+        operation,
+        MAX_GIT_COMMAND_OUTPUT_BYTES,
+        GIT_COMMAND_TIMEOUT,
+    )
+    .await
 }
 
 async fn git_text(
@@ -2014,10 +2043,13 @@ async fn git_descriptor_output(
     unsafe {
         command.pre_exec(move || rustix::process::fchdir(&directory).map_err(std::io::Error::from));
     }
-    command
-        .output()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })
+    command_output_bounded(
+        &mut command,
+        operation,
+        MAX_GIT_COMMAND_OUTPUT_BYTES,
+        GIT_COMMAND_TIMEOUT,
+    )
+    .await
 }
 
 async fn run_git(
@@ -2034,30 +2066,21 @@ async fn run_git_with_stdin(
     input: &[u8],
     operation: &'static str,
 ) -> Result<(), WorkspaceError> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or(WorkspaceError::InvalidGitOutput { operation })?;
-    let write_result = stdin.write_all(input).await;
-    drop(stdin);
-    let status = child
-        .wait()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
-    write_result.map_err(|source| WorkspaceError::Io { operation, source })?;
-    if !status.success() {
+    validate_git_stdin(input, operation)?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(directory).args(args);
+    let output = command_output_bounded_with_stdin(
+        &mut command,
+        input,
+        operation,
+        MAX_GIT_COMMAND_OUTPUT_BYTES,
+        GIT_COMMAND_TIMEOUT,
+    )
+    .await?;
+    if !output.status.success() {
         return Err(WorkspaceError::GitCommandFailed {
             operation,
-            status: status.code(),
+            status: output.status.code(),
         });
     }
     Ok(())
@@ -2069,39 +2092,48 @@ async fn run_git_descriptor_with_stdin(
     input: &[u8],
     operation: &'static str,
 ) -> Result<(), WorkspaceError> {
+    validate_git_stdin(input, operation)?;
     let directory = directory
         .try_clone()
         .map_err(|source| WorkspaceError::Io { operation, source })?;
     let mut command = Command::new("git");
-    command
-        .arg("--git-dir=.")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    command.arg("--git-dir=.").args(args);
     // SAFETY: `fchdir` is an async-signal-safe syscall, and the closure only
     // accesses the owned directory descriptor captured before spawn.
     unsafe {
         command.pre_exec(move || rustix::process::fchdir(&directory).map_err(std::io::Error::from));
     }
-    let mut child = command
-        .spawn()
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or(WorkspaceError::InvalidGitOutput { operation })?;
-    let write_result = stdin.write_all(input).await;
-    drop(stdin);
-    let status = child
-        .wait()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
-    write_result.map_err(|source| WorkspaceError::Io { operation, source })?;
-    if !status.success() {
+    let output = command_output_bounded_with_stdin(
+        &mut command,
+        input,
+        operation,
+        MAX_GIT_COMMAND_OUTPUT_BYTES,
+        GIT_COMMAND_TIMEOUT,
+    )
+    .await?;
+    if !output.status.success() {
         return Err(WorkspaceError::GitCommandFailed {
             operation,
-            status: status.code(),
+            status: output.status.code(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_git_stdin(input: &[u8], operation: &'static str) -> Result<(), WorkspaceError> {
+    if input.len() > MAX_GIT_STDIN_BYTES
+        || input
+            .split(|byte| *byte == b'\n')
+            .filter(|command| !command.is_empty())
+            .count()
+            > MAX_GIT_STDIN_COMMANDS
+    {
+        return Err(WorkspaceError::Io {
+            operation,
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Git stdin exceeds its bounded transaction limit",
+            ),
         });
     }
     Ok(())
@@ -2112,13 +2144,15 @@ async fn git_output(
     args: &[&str],
     operation: &'static str,
 ) -> Result<std::process::Output, WorkspaceError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args(args)
-        .output()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(directory).args(args);
+    let output = command_output_bounded(
+        &mut command,
+        operation,
+        MAX_GIT_COMMAND_OUTPUT_BYTES,
+        GIT_COMMAND_TIMEOUT,
+    )
+    .await?;
     if !output.status.success() {
         return Err(WorkspaceError::GitCommandFailed {
             operation,
@@ -2126,6 +2160,222 @@ async fn git_output(
         });
     }
     Ok(output)
+}
+
+async fn command_output_bounded(
+    command: &mut Command,
+    operation: &'static str,
+    max_bytes: usize,
+    deadline: Duration,
+) -> Result<std::process::Output, WorkspaceError> {
+    command_output_bounded_inner(
+        command,
+        None,
+        operation,
+        max_bytes,
+        max_bytes,
+        deadline,
+        StdoutOverflowPolicy::Error,
+    )
+    .await
+    .map(|bounded| bounded.output)
+}
+
+async fn command_output_bounded_with_stdin(
+    command: &mut Command,
+    input: &[u8],
+    operation: &'static str,
+    max_bytes: usize,
+    deadline: Duration,
+) -> Result<std::process::Output, WorkspaceError> {
+    command_output_bounded_inner(
+        command,
+        Some(input),
+        operation,
+        max_bytes,
+        max_bytes,
+        deadline,
+        StdoutOverflowPolicy::Error,
+    )
+    .await
+    .map(|bounded| bounded.output)
+}
+
+#[derive(Clone, Copy)]
+enum StdoutOverflowPolicy {
+    Error,
+    Truncate,
+}
+
+struct BoundedCommandOutput {
+    output: std::process::Output,
+    stdout_truncated: bool,
+}
+
+enum CommandCollectionError {
+    Workspace(WorkspaceError),
+    StdoutTruncated(Vec<u8>),
+}
+
+async fn command_output_bounded_inner(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    operation: &'static str,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+    deadline: Duration,
+    stdout_overflow: StdoutOverflowPolicy,
+) -> Result<BoundedCommandOutput, WorkspaceError> {
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_and_reap(&mut child, operation).await?;
+            return Err(WorkspaceError::InvalidGitOutput { operation });
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_and_reap(&mut child, operation).await?;
+            return Err(WorkspaceError::InvalidGitOutput { operation });
+        }
+    };
+    let stdin = match input {
+        Some(_) => match child.stdin.take() {
+            Some(stdin) => Some(stdin),
+            None => {
+                terminate_and_reap(&mut child, operation).await?;
+                return Err(WorkspaceError::InvalidGitOutput { operation });
+            }
+        },
+        None => None,
+    };
+    let collect = async {
+        let (status, stdout, stderr, ()) = tokio::try_join!(
+            async {
+                child.wait().await.map_err(|source| {
+                    CommandCollectionError::Workspace(WorkspaceError::Io { operation, source })
+                })
+            },
+            read_command_output(stdout, operation, max_stdout_bytes, stdout_overflow, true),
+            read_command_output(
+                stderr,
+                operation,
+                max_stderr_bytes,
+                StdoutOverflowPolicy::Error,
+                false,
+            ),
+            write_command_input(stdin, input, operation),
+        )?;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+
+    match tokio::time::timeout(deadline, collect).await {
+        Ok(Ok(output)) => Ok(BoundedCommandOutput {
+            output,
+            stdout_truncated: false,
+        }),
+        Ok(Err(CommandCollectionError::Workspace(error))) => {
+            terminate_and_reap(&mut child, operation).await?;
+            Err(error)
+        }
+        Ok(Err(CommandCollectionError::StdoutTruncated(stdout))) => {
+            let status = terminate_and_reap(&mut child, operation).await?;
+            Ok(BoundedCommandOutput {
+                output: std::process::Output {
+                    status,
+                    stdout,
+                    stderr: Vec::new(),
+                },
+                stdout_truncated: true,
+            })
+        }
+        Err(_) => {
+            terminate_and_reap(&mut child, operation).await?;
+            Err(WorkspaceError::GitCommandTimedOut { operation })
+        }
+    }
+}
+
+async fn read_command_output(
+    output: impl tokio::io::AsyncRead + Unpin,
+    operation: &'static str,
+    max_bytes: usize,
+    overflow: StdoutOverflowPolicy,
+    is_stdout: bool,
+) -> Result<Vec<u8>, CommandCollectionError> {
+    let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
+    output
+        .take(
+            u64::try_from(max_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|source| {
+            CommandCollectionError::Workspace(WorkspaceError::Io { operation, source })
+        })?;
+    if bytes.len() > max_bytes {
+        bytes.truncate(max_bytes);
+        if is_stdout && matches!(overflow, StdoutOverflowPolicy::Truncate) {
+            return Err(CommandCollectionError::StdoutTruncated(bytes));
+        }
+        return Err(CommandCollectionError::Workspace(
+            WorkspaceError::GitOutputTooLarge {
+                operation,
+                max_bytes,
+            },
+        ));
+    }
+    Ok(bytes)
+}
+
+async fn write_command_input(
+    stdin: Option<tokio::process::ChildStdin>,
+    input: Option<&[u8]>,
+    operation: &'static str,
+) -> Result<(), CommandCollectionError> {
+    let (Some(mut stdin), Some(input)) = (stdin, input) else {
+        return Ok(());
+    };
+    stdin.write_all(input).await.map_err(|source| {
+        CommandCollectionError::Workspace(WorkspaceError::Io { operation, source })
+    })
+}
+
+async fn terminate_and_reap(
+    child: &mut tokio::process::Child,
+    operation: &'static str,
+) -> Result<std::process::ExitStatus, WorkspaceError> {
+    if let Err(source) = child.start_kill()
+        && child
+            .try_wait()
+            .map_err(|source| WorkspaceError::Io { operation, source })?
+            .is_none()
+    {
+        return Err(WorkspaceError::Io { operation, source });
+    }
+    child
+        .wait()
+        .await
+        .map_err(|source| WorkspaceError::Io { operation, source })
 }
 
 async fn git_output_bounded_descriptor(
@@ -2138,41 +2388,23 @@ async fn git_output_bounded_descriptor(
         .try_clone()
         .map_err(|source| WorkspaceError::Io { operation, source })?;
     let mut command = Command::new("git");
-    command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    command.kill_on_drop(true);
+    command.args(args);
     unsafe {
         command.pre_exec(move || rustix::process::fchdir(&directory).map_err(std::io::Error::from));
     }
-    let mut child = command
-        .spawn()
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or(WorkspaceError::InvalidGitOutput { operation })?;
-    let mut bytes = Vec::with_capacity(max_stdout_bytes.saturating_add(1));
-    stdout
-        .take(u64::try_from(max_stdout_bytes).unwrap_or(u64::MAX) + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
-    let truncated = bytes.len() > max_stdout_bytes;
-    if truncated
-        && let Err(source) = child.kill().await
-        && child
-            .try_wait()
-            .map_err(|source| WorkspaceError::Io { operation, source })?
-            .is_none()
-    {
-        return Err(WorkspaceError::Io { operation, source });
-    }
-    let status = child
-        .wait()
-        .await
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    let bounded = command_output_bounded_inner(
+        &mut command,
+        None,
+        operation,
+        max_stdout_bytes,
+        max_stdout_bytes,
+        GIT_COMMAND_TIMEOUT,
+        StdoutOverflowPolicy::Truncate,
+    )
+    .await?;
+    let status = bounded.output.status;
+    let mut bytes = bounded.output.stdout;
+    let truncated = bounded.stdout_truncated;
     if !truncated && !status.success() {
         return Err(WorkspaceError::GitCommandFailed {
             operation,
@@ -2195,6 +2427,7 @@ mod tests {
     use std::{
         os::unix::fs::{PermissionsExt, symlink},
         path::{Path, PathBuf},
+        process::Command as StdCommand,
         sync::Arc,
         time::Duration,
     };
@@ -2210,6 +2443,217 @@ mod tests {
         remove_directory_contents_nofollow,
     };
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_git_output_kills_and_reaps_a_process_that_exceeds_stdout_limit() {
+        let temp = tempdir().unwrap();
+        let pid_path = temp.path().join("oversized.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "echo $$ > \"$1\"; exec /usr/bin/yes oversized",
+                "bounded-output-test",
+            ])
+            .arg(&pid_path);
+
+        let result = command_output_bounded(
+            &mut command,
+            "test oversized Git output",
+            1024,
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::GitOutputTooLarge {
+                operation: "test oversized Git output",
+                max_bytes: 1024,
+            })
+        ));
+        assert_process_was_reaped(&pid_path).await;
+    }
+
+    #[tokio::test]
+    async fn bounded_git_output_kills_and_reaps_a_process_that_exceeds_stderr_limit() {
+        let temp = tempdir().unwrap();
+        let pid_path = temp.path().join("oversized-stderr.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "echo $$ > \"$1\"; exec /usr/bin/yes oversized >&2",
+                "bounded-output-test",
+            ])
+            .arg(&pid_path);
+
+        let result = command_output_bounded(
+            &mut command,
+            "test oversized Git stderr",
+            1024,
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::GitOutputTooLarge {
+                operation: "test oversized Git stderr",
+                max_bytes: 1024,
+            })
+        ));
+        assert_process_was_reaped(&pid_path).await;
+    }
+
+    #[tokio::test]
+    async fn inspector_git_output_rejects_oversized_stderr() {
+        let temp = tempdir().unwrap();
+        let executable = temp.path().join("git-oversized-stderr");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nhead -c 2048 /dev/zero | tr '\\0' e >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = open(
+            temp.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let exec_path = format!("--exec-path={}", temp.path().display());
+
+        let result = git_output_bounded_descriptor(
+            &directory,
+            &[&exec_path, "oversized-stderr"],
+            "inspect oversized stderr",
+            1024,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::GitOutputTooLarge {
+                operation: "inspect oversized stderr",
+                max_bytes: 1024,
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_reference_writer_rejects_oversized_stdin_before_spawn() {
+        let temp = tempdir().unwrap();
+        let mut input = vec![b'x'; 1024 * 1024 + 1];
+        *input.last_mut().unwrap() = b'\n';
+        let result = run_git_with_stdin(
+            temp.path(),
+            &["update-ref", "--stdin"],
+            &input,
+            "test oversized Git stdin",
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_reference_writer_rejects_too_many_stdin_commands_before_spawn() {
+        let temp = tempdir().unwrap();
+        let result = run_git_with_stdin(
+            temp.path(),
+            &["update-ref", "--stdin"],
+            b"one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nthirteen\nfourteen\nfifteen\nsixteen\nseventeen",
+            "test excessive Git stdin commands",
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_command_kills_and_reaps_after_stdin_write_failure() {
+        let temp = tempdir().unwrap();
+        let pid_path = temp.path().join("close-stdin.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "echo $$ > \"$1\"; dd bs=1 count=1 of=/dev/null 2>/dev/null; exec 0<&-; exec /bin/sleep 30",
+                "bounded-input-test",
+            ])
+            .arg(&pid_path);
+
+        let result = command_output_bounded_with_stdin(
+            &mut command,
+            &vec![b'x'; 1024 * 1024],
+            "test Git stdin write failure",
+            1024,
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert!(matches!(result, Err(WorkspaceError::Io { .. })));
+        assert_process_was_reaped(&pid_path).await;
+    }
+
+    #[tokio::test]
+    async fn bounded_git_output_kills_and_reaps_a_hung_process_after_its_deadline() {
+        let temp = tempdir().unwrap();
+        let pid_path = temp.path().join("hung.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "echo $$ > \"$1\"; exec /bin/sleep 30",
+                "bounded-output-test",
+            ])
+            .arg(&pid_path);
+
+        let result = command_output_bounded(
+            &mut command,
+            "test hung Git command",
+            1024,
+            Duration::from_millis(250),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::GitCommandTimedOut {
+                operation: "test hung Git command",
+            })
+        ));
+        assert_process_was_reaped(&pid_path).await;
+    }
+
+    async fn assert_process_was_reaped(pid_path: &Path) {
+        let pid = std::fs::read_to_string(pid_path).unwrap().trim().to_owned();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !StdCommand::new("/bin/kill")
+                    .args(["-0", &pid])
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bounded command runner must reap its owned process");
+    }
 
     struct TestRepository {
         _temp: TempDir,

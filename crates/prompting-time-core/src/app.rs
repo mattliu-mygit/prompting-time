@@ -80,6 +80,7 @@ pub struct Submission {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationOverview {
     pub conversation: Conversation,
+    pub routing_profile: RoutingProfile,
     pub project_root: Option<PathBuf>,
     pub run: Option<RunOverview>,
     pub rollup_status: Option<RollupStatus>,
@@ -113,6 +114,10 @@ pub struct TimelineSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalDetail {
     pub id: ApprovalId,
+    pub status: crate::domain::ApprovalStatus,
+    pub response_pending: bool,
+    pub agent_path: Vec<String>,
+    pub agent_path_truncated: bool,
     pub operation: String,
     pub scope: String,
     pub input: Option<crate::domain::UserInputRequest>,
@@ -125,6 +130,10 @@ impl From<crate::store::ApprovalDetailRecord> for ApprovalDetail {
     fn from(approval: crate::store::ApprovalDetailRecord) -> Self {
         Self {
             id: approval.id,
+            status: approval.status,
+            response_pending: approval.response_pending,
+            agent_path: approval.agent_path,
+            agent_path_truncated: approval.agent_path_truncated,
             operation: approval.operation,
             scope: approval.scope,
             input: approval.input.map(|mut input| {
@@ -143,6 +152,8 @@ impl From<crate::store::ApprovalDetailRecord> for ApprovalDetail {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InspectorSnapshot {
     pub workspace: WorkspaceSnapshot,
+    pub execution_path: PathBuf,
+    pub owned_worktree: bool,
     pub cleanup: CleanupEligibility,
     pub run: Option<RunOverview>,
     pub routing: Option<RoutingDecision>,
@@ -239,9 +250,11 @@ impl PromptingTime {
         &self,
         request: ConversationRequest,
     ) -> Result<ConversationOverview, AppError> {
+        let routing_profile = request.routing_profile;
         let (conversation, workspace) = self.create_conversation_with_workspace(request).await?;
         Ok(ConversationOverview {
             conversation,
+            routing_profile,
             project_root: workspace.project_root,
             run: None,
             rollup_status: None,
@@ -497,7 +510,7 @@ impl PromptingTime {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<Page<ConversationOverview>, AppError> {
-        let page = self.store.list_conversations(cursor, limit).await?;
+        let page = self.store.list_active_conversations(cursor, limit).await?;
         let ids = page
             .items
             .iter()
@@ -546,7 +559,7 @@ impl PromptingTime {
             .await?;
         let approvals = self
             .store
-            .load_recent_approvals(conversation_id, 200)
+            .load_recent_approvals(conversation_id, 30)
             .await?;
         Ok(TimelineSnapshot { events, approvals })
     }
@@ -606,6 +619,29 @@ impl PromptingTime {
             .map_err(Into::into)
     }
 
+    pub async fn load_run_audits(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<crate::store::RunAuditPage, AppError> {
+        self.store
+            .load_run_audits(conversation_id, cursor, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn load_run_audit(
+        &self,
+        conversation_id: ConversationId,
+        run_id: RunId,
+    ) -> Result<crate::store::RunAuditDetailRecord, AppError> {
+        self.store
+            .load_run_audit(conversation_id, run_id)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn inspect_workspace(
         &self,
         conversation_id: ConversationId,
@@ -617,11 +653,20 @@ impl PromptingTime {
             .map_err(Into::into)
     }
 
+    pub async fn is_git_project(&self, path: &std::path::Path) -> Result<bool, AppError> {
+        self.workspace_manager
+            .is_git_project(path)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn inspect_conversation(
         &self,
         conversation_id: ConversationId,
     ) -> Result<InspectorSnapshot, AppError> {
         let workspace = self.store.load_workspace(conversation_id).await?;
+        let execution_path = workspace.execution_path.clone();
+        let owned_worktree = workspace.owned_worktree;
         let snapshot = self.workspace_manager.snapshot(&workspace).await?;
         let lease = self.workspace_manager.lease(&workspace).await?;
         let cleanup = self.workspace_manager.cleanup_eligibility(&lease).await?;
@@ -656,6 +701,8 @@ impl PromptingTime {
             })?;
         Ok(InspectorSnapshot {
             workspace: snapshot,
+            execution_path,
+            owned_worktree,
             cleanup,
             run: run.map(Into::into),
             routing,
@@ -815,6 +862,7 @@ fn overview(conversation: Conversation, details: SidebarDetails) -> Conversation
     debug_assert_eq!(conversation.id, details.conversation_id);
     ConversationOverview {
         conversation,
+        routing_profile: details.routing_profile,
         project_root: details.project_root,
         run: details.run.map(Into::into),
         rollup_status: details.rollup_status,
@@ -995,6 +1043,10 @@ mod tests {
 
         let detail: ApprovalDetail = crate::store::ApprovalDetailRecord {
             id: approval.id,
+            status: approval.status,
+            response_pending: false,
+            agent_path: vec!["Root".to_owned()],
+            agent_path_truncated: false,
             operation: approval.operation.clone(),
             scope: approval.scope.clone(),
             input: approval.input.clone(),
@@ -1070,7 +1122,13 @@ mod tests {
         )
         .unwrap();
         let created = app
-            .create_conversation_overview(ConversationRequest::projectless("Targeted refresh"))
+            .create_conversation_overview(ConversationRequest {
+                title: "Targeted refresh".to_owned(),
+                objective: String::new(),
+                constraints: Vec::new(),
+                workspace: ConversationWorkspace::Projectless,
+                routing_profile: RoutingProfile::BestFit,
+            })
             .await
             .unwrap();
 
@@ -1080,6 +1138,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded, created);
+        assert_eq!(loaded.routing_profile, RoutingProfile::BestFit);
     }
 
     #[tokio::test]

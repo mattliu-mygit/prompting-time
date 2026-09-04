@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, ConversationSummary } from "../../bridge/types";
 import { ConversationTree } from "./ConversationTree";
@@ -17,6 +17,7 @@ function conversationWithThreeLevels(): ConversationSummary {
   return {
     id: "c1",
     title: "Auth refactor",
+    routingProfile: "balanced",
     workspaceId: "workspace-1",
     archived: false,
     projectRoot: "/work/alpha",
@@ -37,6 +38,7 @@ function queuedProjectless(): ConversationSummary {
   return {
     id: "c2",
     title: "Release notes",
+    routingProfile: "usageBalance",
     workspaceId: null,
     archived: false,
     projectRoot: null,
@@ -50,6 +52,25 @@ function queuedProjectless(): ConversationSummary {
 }
 
 describe("ConversationTree", () => {
+  it("forgets disclosure state for evicted agents", async () => {
+    const root = node("root", "Root", null, "running");
+    const child = node("child", "Child", "root", "running");
+    const grandchild = node("grandchild", "Grandchild", "child", "running");
+    const base = { ...conversationWithThreeLevels(), agents: [root, child, grandchild] };
+    const component = (conversations: ConversationSummary[]) => (
+      <ConversationTree conversations={conversations} selectedId="c1" selectedAgentId={null} statusFilter="all" onSelect={vi.fn()} />
+    );
+    const view = render(component([base]));
+    fireEvent.click(screen.getByRole("button", { name: `Expand ${base.title}` }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand Child" }));
+    expect(screen.getByRole("treeitem", { name: /Child/ })).toHaveAttribute("aria-expanded", "true");
+
+    view.rerender(component([{ ...base, agents: [root] }]));
+    await waitFor(() => expect(screen.queryByRole("treeitem", { name: /Child/ })).not.toBeInTheDocument());
+    view.rerender(component([base]));
+    expect(screen.getByRole("treeitem", { name: /Child/ })).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("renders an orchestrating grandchild beneath its parent", () => {
     render(
       <ConversationTree
@@ -60,6 +81,9 @@ describe("ConversationTree", () => {
         onSelect={vi.fn()}
       />,
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand API reviewer" }));
 
     expect(screen.getByRole("treeitem", { name: /Auth refactor/ })).toHaveAttribute(
       "aria-level",
@@ -123,6 +147,7 @@ describe("ConversationTree", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
     fireEvent.click(screen.getByRole("treeitem", { name: /API reviewer/ }));
     expect(onSelect).toHaveBeenCalledWith("c1", "reviewer");
   });
@@ -138,6 +163,9 @@ describe("ConversationTree", () => {
       />,
     );
 
+    expect(screen.queryByRole("treeitem", { name: /API reviewer/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand API reviewer" }));
     fireEvent.click(screen.getByRole("button", { name: "Collapse Auth refactor" }));
     expect(screen.getByRole("treeitem", { name: /Auth refactor/ })).toBeVisible();
     expect(screen.queryByRole("treeitem", { name: /API reviewer/ })).not.toBeInTheDocument();
@@ -157,7 +185,9 @@ describe("ConversationTree", () => {
       />,
     );
     const root = screen.getByRole("treeitem", { name: /Auth refactor/ });
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
     const child = screen.getByRole("treeitem", { name: /API reviewer/ });
+    fireEvent.click(screen.getByRole("button", { name: "Expand API reviewer" }));
     const grandchild = screen.getByRole("treeitem", { name: /Schema researcher/ });
 
     root.focus();
@@ -182,6 +212,7 @@ describe("ConversationTree", () => {
         onSelect={onSelect}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
     const conversation = screen.getByRole("treeitem", { name: /Auth refactor/ });
     const reviewer = screen.getByRole("treeitem", { name: /API reviewer/ });
 
@@ -202,6 +233,8 @@ describe("ConversationTree", () => {
         onSelect={vi.fn()}
       />,
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
 
     expect(screen.getByRole("treeitem", {
       name: "Auth refactor, Codex, Needs attention",
@@ -231,4 +264,133 @@ describe("ConversationTree", () => {
     expect(screen.getByRole("heading", { name: "alpha — /work/alpha" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "alpha — /other/alpha" })).toBeVisible();
   });
+
+  it("loads a truncated agent page only when its conversation is expanded", () => {
+    const onLoadAgentPage = vi.fn();
+    const truncated = {
+      ...conversationWithThreeLevels(),
+      agents: [node("root", "Root agent", null, "waiting")],
+      agentsTruncated: true,
+    };
+    render(
+      <ConversationTree
+        conversations={[truncated]}
+        selectedId="c1"
+        selectedAgentId={null}
+        statusFilter="all"
+        agentWindow={null}
+        onLoadAgentPage={onLoadAgentPage}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(onLoadAgentPage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
+    expect(onLoadAgentPage).toHaveBeenCalledWith("c1", true);
+  });
+
+  it("offers bounded next-page and restart controls for the active agent window", () => {
+    const onLoadAgentPage = vi.fn();
+    render(
+      <ConversationTree
+        conversations={[conversationWithThreeLevels()]}
+        selectedId="c1"
+        selectedAgentId={null}
+        statusFilter="all"
+        agentWindow={{
+          conversationId: "c1",
+          runId: "run-1",
+          pages: [["root", "reviewer", "researcher"]],
+          nextCursor: "agents-2",
+          loading: false,
+          error: null,
+          evicted: true,
+        }}
+        onLoadAgentPage={onLoadAgentPage}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more agents" }));
+    expect(onLoadAgentPage).toHaveBeenCalledWith("c1", false);
+    fireEvent.click(screen.getByRole("button", { name: "Reload first agents" }));
+    expect(onLoadAgentPage).toHaveBeenCalledWith("c1", true);
+    expect(screen.getByRole("note")).toHaveTextContent("outside this bounded view");
+  });
+
+  it("offers an explicit retry after the initial agent page fails", () => {
+    const onLoadAgentPage = vi.fn();
+    const truncated = {
+      ...conversationWithThreeLevels(),
+      agents: [node("root", "Root agent", null, "waiting")],
+      agentsTruncated: true,
+    };
+    render(
+      <ConversationTree
+        conversations={[truncated]}
+        selectedId="c1"
+        selectedAgentId={null}
+        statusFilter="all"
+        agentWindow={{
+          conversationId: "c1",
+          runId: "run-1",
+          pages: [],
+          nextCursor: null,
+          loading: false,
+          error: "Agent service unavailable.",
+          evicted: false,
+        }}
+        onLoadAgentPage={onLoadAgentPage}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Agent service unavailable.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry agents" }));
+    expect(onLoadAgentPage).toHaveBeenCalledWith("c1", true);
+  });
+
+  it("keeps a very deep loaded hierarchy collapsed without recursive rendering", () => {
+    const agents = [node("root", "Root agent", null, "waiting")];
+    let parentId = "root";
+    for (let index = 0; index < 20_000; index += 1) {
+      const id = `deep-${index}`;
+      agents.push(node(id, `Deep ${index}`, parentId, "queued"));
+      parentId = id;
+    }
+    render(
+      <ConversationTree
+        conversations={[{ ...conversationWithThreeLevels(), agents }]}
+        selectedId="c1"
+        selectedAgentId={null}
+        statusFilter="all"
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
+    expect(screen.getByRole("treeitem", { name: /Deep 0/ })).toBeVisible();
+    expect(screen.queryByRole("treeitem", { name: /Deep 1/ })).not.toBeInTheDocument();
+  });
+
+  it("hard-bounds mounted rows for a 200k-wide hierarchy", () => {
+    const agents = [
+      node("root", "Root agent", null, "waiting"),
+      ...Array.from({ length: 200_000 }, (_, index) => node(`wide-${index}`, `Wide ${index}`, "root", "queued")),
+    ];
+    const view = render(
+      <ConversationTree
+        conversations={[{ ...conversationWithThreeLevels(), agents }]}
+        selectedId="c1"
+        selectedAgentId={null}
+        statusFilter="all"
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Auth refactor" }));
+    expect(view.container.querySelectorAll('[role="treeitem"]')).toHaveLength(81);
+  }, 10_000);
 });

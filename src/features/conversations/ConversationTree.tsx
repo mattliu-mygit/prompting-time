@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentSnapshot,
   AgentStatus,
@@ -7,13 +7,19 @@ import type {
   RollupStatus,
   RunStatus,
 } from "../../bridge/types";
-import { effectiveConversationStatus, type StatusFilter } from "../../app/store";
+import {
+  effectiveConversationStatus,
+  type AgentWindowSnapshot,
+  type StatusFilter,
+} from "../../app/store";
 
 type ConversationTreeProps = {
   conversations: readonly ConversationSummary[];
   selectedId: string | null;
   selectedAgentId: string | null;
   statusFilter: StatusFilter;
+  agentWindow?: AgentWindowSnapshot | null;
+  onLoadAgentPage?(conversationId: string, restart: boolean): void;
   onSelect(conversationId: string, agentId?: string): void;
 };
 
@@ -52,12 +58,15 @@ const rollupStatusLabels: Record<RollupStatus, string> = {
   interrupted: "Interrupted",
   completed: "Completed",
 };
+const MAX_MOUNTED_AGENT_ROWS = 80;
 
 export function ConversationTree({
   conversations,
   selectedId,
   selectedAgentId,
   statusFilter,
+  agentWindow = null,
+  onLoadAgentPage = () => {},
   onSelect,
 }: ConversationTreeProps) {
   const groups = useMemo(
@@ -69,16 +78,28 @@ export function ConversationTree({
     ),
     [conversations, statusFilter],
   );
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const itemRefs = useRef(new Map<string, HTMLElement>());
   const visibleItems = useMemo(
-    () => flattenVisibleItems(groups, collapsed),
-    [groups, collapsed],
+    () => flattenVisibleItems(groups, expanded),
+    [groups, expanded],
   );
   const activeFocusKey = visibleItems.some(({ key }) => key === focusedKey)
     ? focusedKey
     : visibleItems[0]?.key ?? null;
+
+  useEffect(() => {
+    const valid = new Set<string>();
+    conversations.forEach((conversation) => {
+      valid.add(conversationKey(conversation.id));
+      conversation.agents.forEach((agent) => valid.add(agentKey(agent.id)));
+    });
+    setExpanded((current) => {
+      const retained = new Set([...current].filter((key) => valid.has(key)));
+      return retained.size === current.size ? current : retained;
+    });
+  }, [conversations]);
 
   function setItemRef(key: string, element: HTMLElement | null) {
     if (element) itemRefs.current.set(key, element);
@@ -91,19 +112,42 @@ export function ConversationTree({
     itemRefs.current.get(key)?.focus();
   }
 
-  function toggle(key: string) {
-    setCollapsed((current) => {
+  function toggleAgent(key: string) {
+    setExpanded((current) => {
       const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
+  }
+
+  function toggleConversation(conversation: ConversationSummary) {
+    const key = conversationKey(conversation.id);
+    const opens = !expanded.has(key);
+    setExpanded((current) => {
+      if (!opens) {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      }
+      const next = new Set([...current].filter((item) => !item.startsWith("conversation:")));
+      next.add(key);
+      return next;
+    });
+    if (
+      opens
+      && conversation.agentsTruncated
+      && (agentWindow?.conversationId !== conversation.id
+        || agentWindow.runId !== conversation.currentRunId)
+    ) {
+      onLoadAgentPage(conversation.id, true);
+    }
   }
 
   function handleKeyDown(
     event: React.KeyboardEvent<HTMLElement>,
     item: VisibleItem,
     expandable: boolean,
+    toggleItem: () => void,
   ) {
     const index = visibleItems.findIndex(({ key }) => key === item.key);
     switch (event.key) {
@@ -117,12 +161,12 @@ export function ConversationTree({
         break;
       case "ArrowRight":
         event.preventDefault();
-        if (expandable && collapsed.has(item.key)) toggle(item.key);
+        if (expandable && !expanded.has(item.key)) toggleItem();
         else if (expandable) focusItem(visibleItems[index + 1]?.key);
         break;
       case "ArrowLeft":
         event.preventDefault();
-        if (expandable && !collapsed.has(item.key)) toggle(item.key);
+        if (expandable && expanded.has(item.key)) toggleItem();
         else focusItem(item.parentKey ?? undefined);
         break;
       case "Home":
@@ -141,30 +185,39 @@ export function ConversationTree({
   }
 
   return (
-    <div className="conversation-tree" role="tree" aria-label="Conversations">
-      {groups.map((group) => (
-        <section className="tree-group" role="presentation" key={group.key}>
-          <h2 className="tree-group-heading" title={group.path ?? undefined}>{group.label}</h2>
-          <ul role="group" className="tree-group-items">
+    <div className="conversation-tree">
+      {groups.map((group, groupIndex) => {
+        const headingId = `conversation-group-${groupIndex}`;
+        return (
+        <section className="tree-group" key={group.key}>
+          <h2 id={headingId} className="tree-group-heading" title={group.path ?? undefined}>{group.label}</h2>
+          <ul role="tree" aria-labelledby={headingId} className="tree-group-items">
             {group.conversations.map((conversation) => {
-              const hierarchy = buildAgentHierarchy(conversation.agents);
               const key = conversationKey(conversation.id);
-              const isCollapsed = collapsed.has(key);
-              const expandable = hierarchy.length > 0;
+              const isExpanded = expanded.has(key);
+              const agents = buildVisibleAgentRows(conversation.agents, expanded, key);
+              const expandable = conversation.agentsTruncated || agents.length > 0;
+              const window = agentWindow?.conversationId === conversation.id
+                && agentWindow.runId === conversation.currentRunId
+                ? agentWindow
+                : null;
               return (
                 <ConversationItem
                   key={conversation.id}
                   conversation={conversation}
-                  agents={hierarchy}
+                  agents={agents}
                   selected={selectedId === conversation.id && selectedAgentId === null}
                   selectedAgentId={selectedId === conversation.id ? selectedAgentId : null}
-                  collapsed={collapsed}
-                  isCollapsed={isCollapsed}
+                  expanded={expanded}
+                  isExpanded={isExpanded}
                   expandable={expandable}
+                  agentWindow={window}
                   activeFocusKey={activeFocusKey}
                   setItemRef={setItemRef}
                   onFocusItem={setFocusedKey}
-                  onToggle={toggle}
+                  onToggleAgent={toggleAgent}
+                  onToggleConversation={() => toggleConversation(conversation)}
+                  onLoadAgentPage={onLoadAgentPage}
                   onSelect={onSelect}
                   onKeyDown={handleKeyDown}
                 />
@@ -172,27 +225,31 @@ export function ConversationTree({
             })}
           </ul>
         </section>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-type AgentBranch = {
+type AgentRow = {
   agent: AgentSnapshot;
-  children: AgentBranch[];
+  level: number;
+  parentKey: string;
+  expandable: boolean;
 };
 
 type SharedItemProps = {
-  collapsed: ReadonlySet<string>;
+  expanded: ReadonlySet<string>;
   activeFocusKey: string | null;
   setItemRef(key: string, element: HTMLElement | null): void;
   onFocusItem(key: string): void;
-  onToggle(key: string): void;
+  onToggleAgent(key: string): void;
   onSelect(conversationId: string, agentId?: string): void;
   onKeyDown(
     event: React.KeyboardEvent<HTMLElement>,
     item: VisibleItem,
     expandable: boolean,
+    toggleItem: () => void,
   ): void;
 };
 
@@ -201,22 +258,28 @@ function ConversationItem({
   agents,
   selected,
   selectedAgentId,
-  isCollapsed,
+  expanded,
+  isExpanded,
   expandable,
+  agentWindow,
   activeFocusKey,
   setItemRef,
   onFocusItem,
-  onToggle,
+  onToggleAgent,
+  onToggleConversation,
+  onLoadAgentPage,
   onSelect,
   onKeyDown,
-  ...shared
 }: SharedItemProps & {
   conversation: ConversationSummary;
-  agents: AgentBranch[];
+  agents: AgentRow[];
   selected: boolean;
   selectedAgentId: string | null;
-  isCollapsed: boolean;
+  isExpanded: boolean;
   expandable: boolean;
+  agentWindow: AgentWindowSnapshot | null;
+  onToggleConversation(): void;
+  onLoadAgentPage(conversationId: string, restart: boolean): void;
 }) {
   const key = conversationKey(conversation.id);
   const status = conversationStatus(conversation);
@@ -226,7 +289,7 @@ function ConversationItem({
       aria-label={`${conversation.title}, ${providerName(conversation.provider)}, ${status.label}`}
       aria-level={1}
       aria-selected={selected}
-      aria-expanded={expandable ? !isCollapsed : undefined}
+      aria-expanded={expandable ? isExpanded : undefined}
       tabIndex={activeFocusKey === key ? 0 : -1}
       data-tree-key={key}
       className="tree-item conversation-item"
@@ -236,7 +299,7 @@ function ConversationItem({
       }}
       onClick={() => onSelect(conversation.id)}
       onKeyDown={(event) => {
-        onKeyDown(event, { key, parentKey: null }, expandable);
+        onKeyDown(event, { key, parentKey: null }, expandable, onToggleConversation);
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onSelect(conversation.id);
@@ -248,65 +311,102 @@ function ConversationItem({
         provider={conversation.provider}
         status={status}
         expandable={expandable}
-        expanded={!isCollapsed}
-        onToggle={() => onToggle(key)}
+        expanded={isExpanded}
+        onToggle={onToggleConversation}
       />
-      {expandable && !isCollapsed ? (
-        <ul role="group" className="agent-group">
-          {agents.map((branch) => (
+      {expandable && isExpanded ? (
+        <>
+          <ul role="group" className="agent-group">
+          {agents.map((row) => (
             <AgentItem
-              {...shared}
-              key={branch.agent.id}
-              branch={branch}
+              key={row.agent.id}
+              row={row}
               selectedAgentId={selectedAgentId}
               conversationId={conversation.id}
-              level={2}
-              parentKey={key}
+              expanded={expanded}
               activeFocusKey={activeFocusKey}
               setItemRef={setItemRef}
               onFocusItem={onFocusItem}
-              onToggle={onToggle}
+              onToggleAgent={onToggleAgent}
               onSelect={onSelect}
               onKeyDown={onKeyDown}
             />
           ))}
-        </ul>
+          </ul>
+          {agentWindow?.error ? <p role="alert">{agentWindow.error}</p> : null}
+          {agentWindow?.error && agentWindow.pages.length === 0 ? (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onLoadAgentPage(conversation.id, true);
+              }}
+            >
+              Retry agents
+            </button>
+          ) : null}
+          {agentWindow?.loading ? <p role="status">Loading agents…</p> : null}
+          {agentWindow?.nextCursor ? (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={agentWindow.loading}
+              onClick={(event) => {
+                event.stopPropagation();
+                onLoadAgentPage(conversation.id, false);
+              }}
+            >
+              Load more agents
+            </button>
+          ) : null}
+          {agentWindow?.evicted ? (
+            <div role="note" className="history-window-note">
+              <span>Some agents are outside this bounded view.</span>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onLoadAgentPage(conversation.id, true);
+                }}
+              >
+                Reload first agents
+              </button>
+            </div>
+          ) : null}
+        </>
       ) : null}
     </li>
   );
 }
 
 function AgentItem({
-  branch,
+  row,
   selectedAgentId,
   conversationId,
-  level,
-  parentKey,
-  collapsed,
+  expanded,
   activeFocusKey,
   setItemRef,
   onFocusItem,
-  onToggle,
+  onToggleAgent,
   onSelect,
   onKeyDown,
 }: SharedItemProps & {
-  branch: AgentBranch;
+  row: AgentRow;
   selectedAgentId: string | null;
   conversationId: string;
-  level: number;
-  parentKey: string;
 }) {
-  const key = agentKey(branch.agent.id);
-  const expandable = branch.children.length > 0;
-  const isCollapsed = collapsed.has(key);
-  const status = { label: agentStatusLabels[branch.agent.status], key: branch.agent.status };
+  const key = agentKey(row.agent.id);
+  const isExpanded = expanded.has(key);
+  const status = { label: agentStatusLabels[row.agent.status], key: row.agent.status };
   return (
     <li
       role="treeitem"
-      aria-label={`${branch.agent.label}, ${providerName(branch.agent.provider)}, ${status.label}`}
-      aria-level={level}
-      aria-selected={selectedAgentId === branch.agent.id}
-      aria-expanded={expandable ? !isCollapsed : undefined}
+      aria-label={`${row.agent.label}, ${providerName(row.agent.provider)}, ${status.label}`}
+      aria-level={row.level}
+      aria-selected={selectedAgentId === row.agent.id}
+      aria-expanded={row.expandable ? isExpanded : undefined}
       tabIndex={activeFocusKey === key ? 0 : -1}
       data-tree-key={key}
       className="tree-item agent-item"
@@ -316,46 +416,30 @@ function AgentItem({
       }}
       onClick={(event) => {
         event.stopPropagation();
-        onSelect(conversationId, branch.agent.id);
+        onSelect(conversationId, row.agent.id);
       }}
       onKeyDown={(event) => {
         event.stopPropagation();
-        onKeyDown(event, { key, parentKey }, expandable);
+        onKeyDown(
+          event,
+          { key, parentKey: row.parentKey },
+          row.expandable,
+          () => onToggleAgent(key),
+        );
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          onSelect(conversationId, branch.agent.id);
+          onSelect(conversationId, row.agent.id);
         }
       }}
     >
       <TreeRow
-        label={branch.agent.label}
-        provider={branch.agent.provider}
+        label={row.agent.label}
+        provider={row.agent.provider}
         status={status}
-        expandable={expandable}
-        expanded={!isCollapsed}
-        onToggle={() => onToggle(key)}
+        expandable={row.expandable}
+        expanded={isExpanded}
+        onToggle={() => onToggleAgent(key)}
       />
-      {expandable && !isCollapsed ? (
-        <ul role="group" className="agent-group">
-          {branch.children.map((child) => (
-            <AgentItem
-              key={child.agent.id}
-              branch={child}
-              selectedAgentId={selectedAgentId}
-              conversationId={conversationId}
-              level={level + 1}
-              parentKey={key}
-              collapsed={collapsed}
-              activeFocusKey={activeFocusKey}
-              setItemRef={setItemRef}
-              onFocusItem={onFocusItem}
-              onToggle={onToggle}
-              onSelect={onSelect}
-              onKeyDown={onKeyDown}
-            />
-          ))}
-        </ul>
-      ) : null}
     </li>
   );
 }
@@ -438,7 +522,11 @@ function groupConversations(conversations: readonly ConversationSummary[]): Tree
   return groups;
 }
 
-function buildAgentHierarchy(agents: readonly AgentSnapshot[]): AgentBranch[] {
+function buildVisibleAgentRows(
+  agents: readonly AgentSnapshot[],
+  expanded: ReadonlySet<string>,
+  conversationParentKey: string,
+): AgentRow[] {
   const roots = new Set(agents.filter(({ parentId }) => parentId === null).map(({ id }) => id));
   const visibleAgents = agents.filter(({ id }) => !roots.has(id));
   const visibleIds = new Set(visibleAgents.map(({ id }) => id));
@@ -453,33 +541,48 @@ function buildAgentHierarchy(agents: readonly AgentSnapshot[]): AgentBranch[] {
       topLevel.push(agent);
     }
   });
+  const rows: AgentRow[] = [];
   const visited = new Set<string>();
-  const branch = (agent: AgentSnapshot): AgentBranch => {
-    if (visited.has(agent.id)) return { agent, children: [] };
-    visited.add(agent.id);
-    return {
-      agent,
-      children: (children.get(agent.id) ?? []).map(branch),
-    };
-  };
-  return topLevel.map(branch);
+  const stack: Array<{ agent: AgentSnapshot; level: number; parentKey: string }> = [];
+  for (let index = topLevel.length - 1; index >= 0; index -= 1) {
+    stack.push({ agent: topLevel[index]!, level: 2, parentKey: conversationParentKey });
+  }
+  while (stack.length > 0) {
+    if (rows.length >= MAX_MOUNTED_AGENT_ROWS) break;
+    const current = stack.pop()!;
+    if (visited.has(current.agent.id)) continue;
+    visited.add(current.agent.id);
+    const descendants = children.get(current.agent.id) ?? [];
+    rows.push({
+      agent: current.agent,
+      level: current.level,
+      parentKey: current.parentKey,
+      expandable: descendants.length > 0,
+    });
+    if (!expanded.has(agentKey(current.agent.id))) continue;
+    for (let index = descendants.length - 1; index >= 0; index -= 1) {
+      stack.push({
+        agent: descendants[index]!,
+        level: current.level + 1,
+        parentKey: agentKey(current.agent.id),
+      });
+    }
+  }
+  return rows;
 }
 
 function flattenVisibleItems(
   groups: readonly TreeGroup[],
-  collapsed: ReadonlySet<string>,
+  expanded: ReadonlySet<string>,
 ): VisibleItem[] {
   const items: VisibleItem[] = [];
-  const addBranch = (branch: AgentBranch, parentKey: string) => {
-    const key = agentKey(branch.agent.id);
-    items.push({ key, parentKey });
-    if (!collapsed.has(key)) branch.children.forEach((child) => addBranch(child, key));
-  };
   groups.forEach(({ conversations }) => conversations.forEach((conversation) => {
     const key = conversationKey(conversation.id);
     items.push({ key, parentKey: null });
-    if (!collapsed.has(key)) {
-      buildAgentHierarchy(conversation.agents).forEach((branch) => addBranch(branch, key));
+    if (expanded.has(key)) {
+      buildVisibleAgentRows(conversation.agents, expanded, key).forEach((row) => {
+        items.push({ key: agentKey(row.agent.id), parentKey: row.parentKey });
+      });
     }
   }));
   return items;

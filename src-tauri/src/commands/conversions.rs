@@ -89,6 +89,11 @@ impl From<ConversationOverview> for ConversationSummary {
         Self {
             id: value.conversation.id.to_string(),
             title: value.conversation.title,
+            routing_profile: match value.routing_profile {
+                CoreRoutingProfile::Balanced => RoutingProfile::Balanced,
+                CoreRoutingProfile::BestFit => RoutingProfile::BestFit,
+                CoreRoutingProfile::UsageBalance => RoutingProfile::UsageBalance,
+            },
             workspace_id: value.conversation.workspace_id.map(|id| id.to_string()),
             archived: value.conversation.archived,
             project_root: value
@@ -265,6 +270,8 @@ impl From<prompting_time_core::store::ApprovalSummary> for ApprovalSnapshot {
             scope: truncate_utf8(value.scope, 512),
             status: value.status.into(),
             response_pending: value.response_pending,
+            agent_path: value.agent_path,
+            agent_path_truncated: value.agent_path_truncated,
         }
     }
 }
@@ -283,6 +290,10 @@ impl ApprovalDetailSnapshot {
         const MAX_DETAIL_BYTES: usize = 256 * 1024;
         let mut detail = Self {
             id: value.id.to_string(),
+            status: value.status.into(),
+            response_pending: value.response_pending,
+            agent_path: value.agent_path,
+            agent_path_truncated: value.agent_path_truncated,
             operation: value.operation,
             scope: value.scope,
             input: value.input.map(|input| UserInputRequest {
@@ -525,40 +536,79 @@ impl From<CoreInspectorSnapshot> for InspectorSnapshot {
         };
         Self {
             workspace: value.workspace.into(),
+            execution_path: value.execution_path.to_string_lossy().into_owned(),
+            owned_worktree: value.owned_worktree,
             cleanup,
             current_run: value.run.map(|run| CurrentRunSnapshot {
                 id: run.id.to_string(),
                 provider: run.provider.into(),
                 status: run.status.into(),
             }),
-            routing: value.routing.map(|routing| {
-                let capabilities = provider_capabilities(&routing.required_capabilities);
-                RoutingSnapshot {
-                    provider: routing.provider.into(),
-                    profile: match routing.profile {
-                        CoreRoutingProfile::Balanced => RoutingProfile::Balanced,
-                        CoreRoutingProfile::BestFit => RoutingProfile::BestFit,
-                        CoreRoutingProfile::UsageBalance => RoutingProfile::UsageBalance,
-                    },
-                    reason: routing.reason.into(),
-                    task_kind: routing.task_kind.into(),
-                    override_provider: routing.override_provider.map(Into::into),
-                    eligible_providers: routing
-                        .eligible_providers
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                    required_capabilities: capabilities,
-                    evaluations: routing.evaluations.into_iter().map(Into::into).collect(),
-                    rationale: routing.rationale.into_iter().map(Into::into).collect(),
-                    explanation: routing.explanation,
-                }
-            }),
+            routing: value.routing.map(routing_snapshot),
             handoff: value.handoff,
             active_descendant_count: u32::try_from(value.active_descendant_count)
                 .unwrap_or(u32::MAX),
             agents_truncated: value.agents_truncated,
         }
+    }
+}
+
+impl From<prompting_time_core::store::RunAuditPage> for RunAuditPage {
+    fn from(value: prompting_time_core::store::RunAuditPage) -> Self {
+        Self {
+            items: value
+                .items
+                .into_iter()
+                .map(|run| RunAuditSummarySnapshot {
+                    id: run.id.to_string(),
+                    provider: run.provider.into(),
+                    status: run.status.into(),
+                    reason: run.reason.map(Into::into),
+                    routing_truncated: run.routing_truncated,
+                    has_handoff: run.has_handoff,
+                })
+                .collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+impl From<prompting_time_core::store::RunAuditDetailRecord> for RunAuditDetailSnapshot {
+    fn from(value: prompting_time_core::store::RunAuditDetailRecord) -> Self {
+        Self {
+            id: value.id.to_string(),
+            provider: value.provider.into(),
+            status: value.status.into(),
+            routing: value.routing.map(routing_snapshot),
+            reason: value.reason.map(Into::into),
+            routing_truncated: value.routing_truncated,
+            handoff: value.handoff,
+            handoff_truncated: value.handoff_truncated,
+        }
+    }
+}
+
+fn routing_snapshot(routing: prompting_time_core::router::RoutingDecision) -> RoutingSnapshot {
+    let capabilities = provider_capabilities(&routing.required_capabilities);
+    RoutingSnapshot {
+        provider: routing.provider.into(),
+        profile: match routing.profile {
+            CoreRoutingProfile::Balanced => RoutingProfile::Balanced,
+            CoreRoutingProfile::BestFit => RoutingProfile::BestFit,
+            CoreRoutingProfile::UsageBalance => RoutingProfile::UsageBalance,
+        },
+        reason: routing.reason.into(),
+        task_kind: routing.task_kind.into(),
+        override_provider: routing.override_provider.map(Into::into),
+        eligible_providers: routing
+            .eligible_providers
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        required_capabilities: capabilities,
+        evaluations: routing.evaluations.into_iter().map(Into::into).collect(),
+        rationale: routing.rationale.into_iter().map(Into::into).collect(),
+        explanation: routing.explanation,
     }
 }
 

@@ -43,6 +43,9 @@ const MAX_APPROVAL_QUESTION_PAGE_SIZE: u32 = 50;
 const MAX_APPROVAL_QUESTION_SOURCE_BYTES: i64 = 4 * 1_024;
 const MAX_APPROVAL_QUESTION_HEADER_BYTES: usize = 256;
 const MAX_APPROVAL_QUESTION_TEXT_BYTES: usize = 2 * 1_024;
+const MAX_APPROVAL_AGENT_PATH_NODES: usize = 256;
+const MAX_RUN_AUDIT_HANDOFF_BYTES: i64 = 256 * 1_024;
+const MAX_RUN_AUDIT_ROUTING_BYTES: i64 = 64 * 1_024;
 const MAX_AGENT_LABEL_PREVIEW_BYTES: usize = 256;
 const MAX_AGENT_SUMMARY_PREVIEW_BYTES: usize = 2_048;
 /// Physical queue bound: 256 complete provider events plus one reserved overflow marker.
@@ -667,6 +670,7 @@ pub struct Page<T> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SidebarDetails {
     pub conversation_id: ConversationId,
+    pub routing_profile: RoutingProfile,
     pub project_root: Option<PathBuf>,
     pub run: Option<ProviderRun>,
     pub rollup_status: Option<crate::domain::RollupStatus>,
@@ -730,17 +734,52 @@ pub struct ApprovalSummary {
     pub scope: String,
     pub status: ApprovalStatus,
     pub response_pending: bool,
+    pub agent_path: Vec<String>,
+    pub agent_path_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalDetailRecord {
     pub id: ApprovalId,
+    pub status: ApprovalStatus,
+    pub response_pending: bool,
+    pub agent_path: Vec<String>,
+    pub agent_path_truncated: bool,
     pub operation: String,
     pub scope: String,
     pub input: Option<UserInputRequest>,
     pub details: Option<ApprovalRequestDetails>,
     pub question_count: u32,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunAuditSummary {
+    pub id: RunId,
+    pub provider: ProviderId,
+    pub status: RunStatus,
+    pub reason: Option<RoutingReason>,
+    pub routing_truncated: bool,
+    pub has_handoff: bool,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunAuditPage {
+    pub items: Vec<RunAuditSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunAuditDetailRecord {
+    pub id: RunId,
+    pub provider: ProviderId,
+    pub status: RunStatus,
+    pub routing: Option<RoutingDecision>,
+    pub reason: Option<RoutingReason>,
+    pub routing_truncated: bool,
+    pub handoff: Option<String>,
+    pub handoff_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -3002,8 +3041,8 @@ impl Store {
         &self,
         approval_id: ApprovalId,
     ) -> Result<ApprovalDetailRecord, StoreError> {
-        sqlx::query_as::<_, ApprovalDetailRow>(
-            "SELECT id, question_count, \
+        let mut detail = sqlx::query_as::<_, ApprovalDetailRow>(
+            "SELECT id, question_count, status, response_intent_status, \
                     CASE WHEN length(CAST(operation AS BLOB)) + length(CAST(scope AS BLOB)) + \
                                    COALESCE(length(CAST(request_json AS BLOB)), 0) + \
                                    COALESCE(length(CAST(details_json AS BLOB)), 0) <= ? \
@@ -3037,7 +3076,46 @@ impl Store {
             entity: "approval",
             id: approval_id.to_string(),
         })?
-        .into_record()
+        .into_record()?;
+
+        let (agent_path, agent_path_truncated) = self.load_approval_agent_path(approval_id).await?;
+        detail.agent_path = agent_path;
+        detail.agent_path_truncated = agent_path_truncated;
+        Ok(detail)
+    }
+
+    async fn load_approval_agent_path(
+        &self,
+        approval_id: ApprovalId,
+    ) -> Result<(Vec<String>, bool), StoreError> {
+        let mut leaf_to_root = sqlx::query_scalar::<_, String>(
+            "WITH RECURSIVE ancestry(id, parent_id, label, depth) AS (\
+                 SELECT agent_nodes.id, agent_nodes.parent_id, agent_nodes.label, 0 \
+                 FROM agent_nodes \
+                 JOIN approvals ON approvals.agent_id = agent_nodes.id \
+                                  AND approvals.run_id = agent_nodes.run_id \
+                 WHERE approvals.id = ? \
+                 UNION ALL \
+                 SELECT parent.id, parent.parent_id, parent.label, ancestry.depth + 1 \
+                 FROM agent_nodes AS parent \
+                 JOIN ancestry ON ancestry.parent_id = parent.id \
+                 WHERE ancestry.depth < ?\
+             ) \
+             SELECT substr(label, 1, ?) FROM ancestry ORDER BY depth ASC LIMIT ?",
+        )
+        .bind(approval_id.to_string())
+        .bind(i64::try_from(MAX_APPROVAL_AGENT_PATH_NODES).expect("path limit fits i64"))
+        .bind(i64::try_from(MAX_AGENT_LABEL_PREVIEW_BYTES).expect("label limit fits i64"))
+        .bind(i64::try_from(MAX_APPROVAL_AGENT_PATH_NODES + 1).expect("path limit fits i64"))
+        .fetch_all(&self.pool)
+        .await?;
+        let truncated = leaf_to_root.len() > MAX_APPROVAL_AGENT_PATH_NODES;
+        leaf_to_root.truncate(MAX_APPROVAL_AGENT_PATH_NODES);
+        leaf_to_root.iter_mut().for_each(|label| {
+            *label = truncate_utf8(std::mem::take(label), MAX_AGENT_LABEL_PREVIEW_BYTES);
+        });
+        leaf_to_root.reverse();
+        Ok((leaf_to_root, truncated))
     }
 
     pub async fn load_approval_questions(
@@ -3225,29 +3303,48 @@ impl Store {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<Page<Conversation>, StoreError> {
+        self.list_conversations_filtered(cursor, limit, false).await
+    }
+
+    pub async fn list_active_conversations(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Page<Conversation>, StoreError> {
+        self.list_conversations_filtered(cursor, limit, true).await
+    }
+
+    async fn list_conversations_filtered(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+        active_only: bool,
+    ) -> Result<Page<Conversation>, StoreError> {
         validate_page_limit(limit)?;
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
-        let rows = if let Some(cursor) = cursor {
-            sqlx::query_as::<_, ConversationRow>(
-                "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at FROM conversations \
-                 WHERE updated_at < ? OR (updated_at = ? AND id < ?) \
-                 ORDER BY updated_at DESC, id DESC LIMIT ?",
-            )
-            .bind(cursor_sequence_i64(&cursor)?)
-            .bind(cursor_sequence_i64(&cursor)?)
-            .bind(cursor.id.to_string())
-            .bind(i64::from(limit) + 1)
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at \
+             FROM conversations WHERE 1 = 1",
+        );
+        if active_only {
+            query.push(" AND status <> 'archived'");
+        }
+        if let Some(cursor) = cursor {
+            let sequence = cursor_sequence_i64(&cursor)?;
+            query.push(" AND (updated_at < ");
+            query.push_bind(sequence);
+            query.push(" OR (updated_at = ");
+            query.push_bind(sequence);
+            query.push(" AND id < ");
+            query.push_bind(cursor.id.to_string());
+            query.push("))");
+        }
+        query.push(" ORDER BY updated_at DESC, id DESC LIMIT ");
+        query.push_bind(i64::from(limit) + 1);
+        let rows = query
+            .build_query_as::<ConversationRow>()
             .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as::<_, ConversationRow>(
-                "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at FROM conversations \
-                 ORDER BY updated_at DESC, id DESC LIMIT ?",
-            )
-            .bind(i64::from(limit) + 1)
-            .fetch_all(&self.pool)
-            .await?
-        };
+            .await?;
 
         let mut records = rows
             .into_iter()
@@ -3303,7 +3400,9 @@ impl Store {
         }
         query.push(
             ")) \
-             SELECT selected.id AS conversation_id, workspaces.project_root, \
+             SELECT selected.id AS conversation_id, \
+                    COALESCE(conversation_settings.routing_profile, 'balanced') AS routing_profile, \
+                    workspaces.project_root, \
                     latest_runs.id AS run_id, latest_runs.provider, \
                     latest_runs.fallback_from_run_id, latest_runs.native_session_id, \
                     latest_runs.status AS run_status, latest_runs.mutation_state, \
@@ -3323,6 +3422,8 @@ impl Store {
                     sidebar_agents.created_at AS agent_created_at \
              FROM selected \
              LEFT JOIN conversations ON conversations.id = selected.id \
+             LEFT JOIN conversation_settings \
+                    ON conversation_settings.conversation_id = conversations.id \
              LEFT JOIN workspaces ON workspaces.id = conversations.workspace_id \
              LEFT JOIN provider_runs AS latest_runs ON latest_runs.id = ( \
                  SELECT candidate.id FROM provider_runs AS candidate \
@@ -3344,6 +3445,7 @@ impl Store {
                 *id,
                 SidebarDetails {
                     conversation_id: *id,
+                    routing_profile: RoutingProfile::Balanced,
                     project_root: None,
                     run: None,
                     rollup_status: None,
@@ -3364,6 +3466,7 @@ impl Store {
                         detail: "query returned an unrequested conversation".to_owned(),
                     })?;
             details.project_root = row.project_root.clone().map(PathBuf::from);
+            details.routing_profile = parse_routing_profile(&row.routing_profile)?;
             if details.run.is_none() {
                 details.run = row.provider_run()?;
                 details.rollup_status = row
@@ -3519,10 +3622,15 @@ impl Store {
         } else {
             None
         };
-        let items = rows
+        let mut items = rows
             .into_iter()
             .map(ApprovalListRow::into_summary)
             .collect::<Result<Vec<_>, _>>()?;
+        for item in &mut items {
+            let (agent_path, truncated) = self.load_approval_agent_path(item.id).await?;
+            item.agent_path = agent_path;
+            item.agent_path_truncated = truncated;
+        }
         Ok(ApprovalPage {
             items,
             truncated,
@@ -3545,6 +3653,103 @@ impl Store {
         .await?
         .map(ProviderRunRow::into_domain)
         .transpose()
+    }
+
+    pub async fn load_run_audits(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<RunAuditPage, StoreError> {
+        validate_page_limit(limit)?;
+        let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT provider_runs.id, provider_runs.provider, provider_runs.status, \
+                    provider_runs.created_at, \
+                    routing_decisions.reason AS routing_reason, \
+                    COALESCE(length(CAST(routing_decisions.details_json AS BLOB)) > ",
+        );
+        query.push_bind(MAX_RUN_AUDIT_ROUTING_BYTES);
+        query.push(
+            ", FALSE) AS routing_truncated, \
+                    provider_runs.handoff_rendered IS NOT NULL AS has_handoff \
+             FROM provider_runs \
+             LEFT JOIN routing_decisions ON routing_decisions.run_id = provider_runs.id \
+             WHERE provider_runs.conversation_id = ",
+        );
+        query.push_bind(conversation_id.to_string());
+        if let Some(cursor) = cursor {
+            let created_at = cursor_sequence_i64(&cursor)?;
+            query.push(" AND (provider_runs.created_at < ");
+            query.push_bind(created_at);
+            query.push(" OR (provider_runs.created_at = ");
+            query.push_bind(created_at);
+            query.push(" AND provider_runs.id < ");
+            query.push_bind(cursor.id.to_string());
+            query.push("))");
+        }
+        query.push(" ORDER BY provider_runs.created_at DESC, provider_runs.id DESC LIMIT ");
+        query.push_bind(i64::from(limit) + 1);
+        let rows = query
+            .build_query_as::<RunAuditRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        let has_more = rows.len() > limit as usize;
+        let rows = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
+        let next_cursor = if has_more {
+            let last = rows.last().expect("a paged run audit has a last row");
+            Some(encode_cursor(Cursor {
+                sequence: u64::try_from(last.created_at).map_err(|_| StoreError::InvalidData {
+                    entity: "provider run audit",
+                    detail: "negative creation timestamp".to_owned(),
+                })?,
+                id: parse_uuid("provider run", &last.id)?,
+            })?)
+        } else {
+            None
+        };
+        Ok(RunAuditPage {
+            items: rows
+                .into_iter()
+                .map(RunAuditRow::into_summary)
+                .collect::<Result<Vec<_>, _>>()?,
+            next_cursor,
+        })
+    }
+
+    pub async fn load_run_audit(
+        &self,
+        conversation_id: ConversationId,
+        run_id: RunId,
+    ) -> Result<RunAuditDetailRecord, StoreError> {
+        sqlx::query_as::<_, RunAuditDetailRow>(
+            "SELECT provider_runs.id, provider_runs.provider, provider_runs.status, \
+                    CASE WHEN length(CAST(routing_decisions.details_json AS BLOB)) <= ? \
+                         THEN routing_decisions.details_json END AS routing_json, \
+                    routing_decisions.reason AS routing_reason, \
+                    COALESCE(length(CAST(routing_decisions.details_json AS BLOB)), 0) > ? AS routing_truncated, \
+                    CASE WHEN length(CAST(provider_runs.handoff_rendered AS BLOB)) <= ? \
+                         THEN provider_runs.handoff_rendered \
+                         ELSE substr(provider_runs.handoff_rendered, 1, ?) END AS handoff, \
+                    COALESCE(length(CAST(provider_runs.handoff_rendered AS BLOB)), 0) > ? AS handoff_truncated \
+             FROM provider_runs \
+             LEFT JOIN routing_decisions ON routing_decisions.run_id = provider_runs.id \
+             WHERE provider_runs.conversation_id = ? AND provider_runs.id = ?",
+        )
+        .bind(MAX_RUN_AUDIT_ROUTING_BYTES)
+        .bind(MAX_RUN_AUDIT_ROUTING_BYTES)
+        .bind(MAX_RUN_AUDIT_HANDOFF_BYTES)
+        .bind(MAX_RUN_AUDIT_HANDOFF_BYTES)
+        .bind(MAX_RUN_AUDIT_HANDOFF_BYTES)
+        .bind(conversation_id.to_string())
+        .bind(run_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "provider run audit",
+            id: run_id.to_string(),
+        })?
+        .into_detail()
     }
 
     pub async fn load_timeline(
@@ -5441,8 +5646,75 @@ struct ApprovalListRow {
 }
 
 #[derive(FromRow)]
+struct RunAuditRow {
+    id: String,
+    provider: String,
+    status: String,
+    created_at: i64,
+    routing_reason: Option<String>,
+    routing_truncated: bool,
+    has_handoff: bool,
+}
+
+impl RunAuditRow {
+    fn into_summary(self) -> Result<RunAuditSummary, StoreError> {
+        Ok(RunAuditSummary {
+            id: parse_uuid("provider run", &self.id)?.into(),
+            provider: parse_provider(&self.provider)?,
+            status: parse_run_status(&self.status)?,
+            reason: self
+                .routing_reason
+                .as_deref()
+                .map(parse_routing_reason)
+                .transpose()?,
+            routing_truncated: self.routing_truncated,
+            has_handoff: self.has_handoff,
+            created_at: self.created_at,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct RunAuditDetailRow {
+    id: String,
+    provider: String,
+    status: String,
+    routing_json: Option<String>,
+    routing_reason: Option<String>,
+    routing_truncated: bool,
+    handoff: Option<String>,
+    handoff_truncated: bool,
+}
+
+impl RunAuditDetailRow {
+    fn into_detail(self) -> Result<RunAuditDetailRecord, StoreError> {
+        Ok(RunAuditDetailRecord {
+            id: parse_uuid("provider run", &self.id)?.into(),
+            provider: parse_provider(&self.provider)?,
+            status: parse_run_status(&self.status)?,
+            routing: self
+                .routing_json
+                .map(|value| serde_json::from_str(&value).map_err(invalid_data("routing decision")))
+                .transpose()?,
+            reason: self
+                .routing_reason
+                .as_deref()
+                .map(parse_routing_reason)
+                .transpose()?,
+            routing_truncated: self.routing_truncated,
+            handoff: self
+                .handoff
+                .map(|value| truncate_utf8(value, MAX_RUN_AUDIT_HANDOFF_BYTES as usize)),
+            handoff_truncated: self.handoff_truncated,
+        })
+    }
+}
+
+#[derive(FromRow)]
 struct ApprovalDetailRow {
     id: String,
+    status: String,
+    response_intent_status: Option<String>,
     operation: String,
     scope: String,
     request_json: Option<String>,
@@ -5453,8 +5725,19 @@ struct ApprovalDetailRow {
 
 impl ApprovalDetailRow {
     fn into_record(self) -> Result<ApprovalDetailRecord, StoreError> {
+        let response_pending = self
+            .response_intent_status
+            .as_deref()
+            .is_some_and(|status| matches!(status, "recorded" | "dispatch_unknown"));
+        if let Some(status) = self.response_intent_status.as_deref() {
+            parse_approval_response_intent_status(status)?;
+        }
         Ok(ApprovalDetailRecord {
             id: parse_uuid("approval", &self.id)?.into(),
+            status: parse_approval_status(&self.status)?,
+            response_pending,
+            agent_path: Vec::new(),
+            agent_path_truncated: false,
             operation: truncate_utf8(self.operation, MAX_EVENT_DETAIL_BYTES),
             scope: truncate_utf8(self.scope, MAX_EVENT_DETAIL_BYTES),
             input: self
@@ -5535,6 +5818,8 @@ impl ApprovalListRow {
             scope: truncate_utf8(self.scope, 512),
             status: parse_approval_status(&self.status)?,
             response_pending,
+            agent_path: Vec::new(),
+            agent_path_truncated: false,
         })
     }
 }
@@ -5780,6 +6065,7 @@ impl TimelineRecordRow {
 #[derive(FromRow)]
 struct SidebarDetailRow {
     conversation_id: String,
+    routing_profile: String,
     project_root: Option<String>,
     run_id: Option<String>,
     provider: Option<String>,
@@ -5947,11 +6233,11 @@ mod tests {
     };
 
     use super::{
-        ConversationSettings, MAX_CANONICAL_MESSAGE_BYTES, MAX_NATIVE_AGENT_ID_BYTES,
-        MAX_OBJECTIVE_BYTES, MAX_STAGED_EVENT_BYTES, MAX_STAGED_EVENT_ROWS, MIGRATOR,
-        NewConversation, NewFallbackAttempt, NewSubmission, PreparedSubmission,
-        ProviderEventRecord, STAGED_OVERFLOW_CONTENT, STORE_CHANGE_CHANNEL_CAPACITY, Store,
-        StoreError,
+        ConversationSettings, MAX_APPROVAL_AGENT_PATH_NODES, MAX_CANONICAL_MESSAGE_BYTES,
+        MAX_NATIVE_AGENT_ID_BYTES, MAX_OBJECTIVE_BYTES, MAX_RUN_AUDIT_HANDOFF_BYTES,
+        MAX_STAGED_EVENT_BYTES, MAX_STAGED_EVENT_ROWS, MIGRATOR, NewConversation,
+        NewFallbackAttempt, NewSubmission, PreparedSubmission, ProviderEventRecord,
+        STAGED_OVERFLOW_CONTENT, STORE_CHANGE_CHANNEL_CAPACITY, Store, StoreError, provider_label,
     };
 
     async fn explain_query_plan(pool: &SqlitePool, statement: &str) -> Vec<String> {
@@ -6797,7 +7083,26 @@ mod tests {
         assert!(detail.truncated);
         assert!(detail.input.is_none());
         assert!(detail.details.is_none());
+        assert_eq!(detail.status, crate::domain::ApprovalStatus::Pending);
+        assert!(!detail.response_pending);
+        assert_eq!(detail.agent_path.len(), 1);
+        assert!(!detail.agent_path_truncated);
         assert_eq!(detail.question_count, 75);
+        sqlx::query(
+            "UPDATE approvals SET response_intent_json = '{\"kind\":\"approved\"}', \
+             response_intent_status = 'recorded' WHERE id = ?",
+        )
+        .bind(oversized_approval_id.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert!(
+            store
+                .load_approval_detail(oversized_approval_id)
+                .await
+                .unwrap()
+                .response_pending
+        );
         let first_questions = store
             .load_approval_questions(oversized_approval_id, None, 50)
             .await
@@ -6906,6 +7211,211 @@ mod tests {
                 .unwrap()
                 .contains("provider-native")
         );
+    }
+
+    #[tokio::test]
+    async fn approval_detail_returns_a_bounded_canonical_agent_path() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("deep approval"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let mut leaf = root.id;
+        for index in 0..MAX_APPROVAL_AGENT_PATH_NODES {
+            leaf = insert_child(&store, run.id, leaf, "running", &format!("child-{index}")).await;
+        }
+        store
+            .append_run_event(
+                run.id,
+                leaf,
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    "deep-approval",
+                    "edit",
+                    "one file",
+                ),
+            )
+            .await
+            .unwrap();
+        let approval_id: String = sqlx::query_scalar(
+            "SELECT id FROM approvals WHERE provider_request_id = 'deep-approval'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let detail = store
+            .load_approval_detail(uuid::Uuid::parse_str(&approval_id).unwrap().into())
+            .await
+            .unwrap();
+
+        assert_eq!(detail.agent_path.len(), MAX_APPROVAL_AGENT_PATH_NODES);
+        assert!(detail.agent_path_truncated);
+        assert_eq!(detail.agent_path.first().unwrap(), "child-0");
+        assert_eq!(detail.agent_path.last().unwrap(), "child-255");
+    }
+
+    #[tokio::test]
+    async fn provider_run_audit_is_paged_scoped_and_keeps_exact_app_owned_handoff() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("run audit"))
+            .await
+            .unwrap();
+        let other = store
+            .create_conversation(NewConversation::projectless("other"))
+            .await
+            .unwrap();
+        let (codex, _) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        let (claude, _) = store
+            .create_run(conversation.id, ProviderId::Claude)
+            .await
+            .unwrap();
+        let (unrelated, _) = store.create_run(other.id, ProviderId::Codex).await.unwrap();
+        for (run, provider) in [
+            (codex.id, ProviderId::Codex),
+            (claude.id, ProviderId::Claude),
+        ] {
+            let decision = crate::router::Router::default()
+                .route(
+                    crate::router::RouteRequest::builder("audit fixture")
+                        .eligible([
+                            crate::router::ProviderRoutingState::available(
+                                ProviderId::Codex,
+                                crate::providers::ProviderCapabilities::default(),
+                            ),
+                            crate::router::ProviderRoutingState::available(
+                                ProviderId::Claude,
+                                crate::providers::ProviderCapabilities::default(),
+                            ),
+                        ])
+                        .override_provider(provider)
+                        .build(),
+                )
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO routing_decisions \
+                 (id, run_id, chosen_provider, details_json, reason, task_kind, created_at) \
+                 VALUES (?, ?, ?, ?, 'manualOverride', 'general', 5)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(run.to_string())
+            .bind(provider_label(provider))
+            .bind(serde_json::to_string(&decision).unwrap())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE provider_runs SET handoff_rendered = 'exact claude handoff', created_at = 5 WHERE id = ?")
+            .bind(claude.id.to_string()).execute(&store.pool).await.unwrap();
+        sqlx::query("UPDATE provider_runs SET created_at = 5 WHERE id IN (?, ?)")
+            .bind(codex.id.to_string())
+            .bind(unrelated.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let first = store
+            .load_run_audits(conversation.id, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert!(first.next_cursor.is_some());
+        let second = store
+            .load_run_audits(conversation.id, first.next_cursor, 1)
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_ne!(first.items[0].id, second.items[0].id);
+        assert!([codex.id, claude.id].contains(&first.items[0].id));
+        assert!([codex.id, claude.id].contains(&second.items[0].id));
+        assert_eq!(
+            first.items[0].reason,
+            Some(crate::router::RoutingReason::ManualOverride)
+        );
+        assert_eq!(
+            second.items[0].reason,
+            Some(crate::router::RoutingReason::ManualOverride)
+        );
+
+        let detail = store
+            .load_run_audit(conversation.id, claude.id)
+            .await
+            .unwrap();
+        assert_eq!(detail.handoff.as_deref(), Some("exact claude handoff"));
+        assert!(!detail.handoff_truncated);
+        assert_eq!(detail.routing.unwrap().provider, ProviderId::Claude);
+
+        let oversized_handoff = "🦀".repeat(100_000);
+        sqlx::query("UPDATE provider_runs SET handoff_rendered = ? WHERE id = ?")
+            .bind(oversized_handoff)
+            .bind(claude.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let bounded = store
+            .load_run_audit(conversation.id, claude.id)
+            .await
+            .unwrap();
+        assert!(bounded.handoff_truncated);
+        assert!(bounded.handoff.unwrap().len() <= MAX_RUN_AUDIT_HANDOFF_BYTES as usize);
+
+        let mut oversized_routing = crate::router::Router::default()
+            .route(
+                crate::router::RouteRequest::builder("audit fixture")
+                    .eligible([crate::router::ProviderRoutingState::available(
+                        ProviderId::Claude,
+                        crate::providers::ProviderCapabilities::default(),
+                    )])
+                    .override_provider(ProviderId::Claude)
+                    .build(),
+            )
+            .unwrap();
+        oversized_routing.explanation = "x".repeat(100_000);
+        sqlx::query("UPDATE routing_decisions SET details_json = ?, reason = 'manualOverride' WHERE run_id = ?")
+            .bind(serde_json::to_string(&oversized_routing).unwrap())
+            .bind(claude.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let bounded_page = store
+            .load_run_audits(conversation.id, None, 2)
+            .await
+            .unwrap();
+        let bounded_summary = bounded_page
+            .items
+            .iter()
+            .find(|run| run.id == claude.id)
+            .unwrap();
+        assert!(bounded_summary.routing_truncated);
+        assert_eq!(
+            bounded_summary.reason,
+            Some(crate::router::RoutingReason::ManualOverride)
+        );
+        let bounded_detail = store
+            .load_run_audit(conversation.id, claude.id)
+            .await
+            .unwrap();
+        assert!(bounded_detail.routing.is_none());
+        assert!(bounded_detail.routing_truncated);
+        assert_eq!(
+            bounded_detail.reason,
+            Some(crate::router::RoutingReason::ManualOverride)
+        );
+        assert!(matches!(
+            store.load_run_audit(other.id, claude.id).await,
+            Err(StoreError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

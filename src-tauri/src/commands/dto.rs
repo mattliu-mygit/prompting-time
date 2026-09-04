@@ -52,6 +52,7 @@ pub struct LoadConversationRequest {
 pub struct ConversationSummary {
     pub id: String,
     pub title: String,
+    pub routing_profile: RoutingProfile,
     pub workspace_id: Option<String>,
     pub archived: bool,
     pub project_root: Option<String>,
@@ -219,6 +220,18 @@ pub struct CreateConversationRequest {
     pub constraints: Vec<String>,
     pub workspace: ConversationWorkspaceRequest,
     pub routing_profile: RoutingProfile,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectProjectRequest {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPathSnapshot {
+    pub is_git: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
@@ -411,6 +424,8 @@ pub struct ApprovalSnapshot {
     pub scope: String,
     pub status: ApprovalStatus,
     pub response_pending: bool,
+    pub agent_path: Vec<String>,
+    pub agent_path_truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Type)]
@@ -454,6 +469,10 @@ pub struct LoadApprovalQuestionsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalDetailSnapshot {
     pub id: String,
+    pub status: ApprovalStatus,
+    pub response_pending: bool,
+    pub agent_path: Vec<String>,
+    pub agent_path_truncated: bool,
     pub operation: String,
     pub scope: String,
     pub input: Option<UserInputRequest>,
@@ -675,12 +694,60 @@ pub struct CurrentRunSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct InspectorSnapshot {
     pub workspace: WorkspaceSnapshot,
+    pub execution_path: String,
+    pub owned_worktree: bool,
     pub cleanup: CleanupSnapshot,
     pub current_run: Option<CurrentRunSnapshot>,
     pub routing: Option<RoutingSnapshot>,
     pub handoff: Option<String>,
     pub active_descendant_count: u32,
     pub agents_truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRunAuditsRequest {
+    pub conversation_id: String,
+    pub cursor: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadRunAuditRequest {
+    pub conversation_id: String,
+    pub run_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAuditSummarySnapshot {
+    pub id: String,
+    pub provider: ProviderId,
+    pub status: RunStatus,
+    pub reason: Option<RoutingReason>,
+    pub routing_truncated: bool,
+    pub has_handoff: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAuditPage {
+    pub items: Vec<RunAuditSummarySnapshot>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAuditDetailSnapshot {
+    pub id: String,
+    pub provider: ProviderId,
+    pub status: RunStatus,
+    pub routing: Option<RoutingSnapshot>,
+    pub reason: Option<RoutingReason>,
+    pub routing_truncated: bool,
+    pub handoff: Option<String>,
+    pub handoff_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]

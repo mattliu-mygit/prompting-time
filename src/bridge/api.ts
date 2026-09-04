@@ -13,6 +13,8 @@ import type {
   ConversationSummary,
   CreateConversationRequest,
   InspectWorkspaceRequest,
+  InspectProjectRequest,
+  ProjectPathSnapshot,
   InspectorSnapshot,
   InterruptRunRequest,
   ListConversationsRequest,
@@ -23,12 +25,16 @@ import type {
   LoadApprovalsRequest,
   LoadEventDetailRequest,
   LoadTimelineRequest,
+  ListRunAuditsRequest,
+  LoadRunAuditRequest,
   EventDetailSnapshot,
   RespondToApprovalRequest,
   SteerRunRequest,
   SubmissionSnapshot,
   SubmitMessageRequest,
   TimelinePage,
+  RunAuditPage,
+  RunAuditDetailSnapshot,
 } from "./types";
 
 const APP_EVENT_NAME = "prompting-time://app-event";
@@ -71,6 +77,19 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
       : await invoke<T>(command, args);
   } catch (error) {
     throw decodeError(error);
+  }
+}
+
+async function submitCall<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    if (isCommandError(error)) throw decodeError(error);
+    throw new BridgeError(
+      "outcome-unknown",
+      "Prompting Time could not confirm whether the message was accepted.",
+      "Retry this logical send.",
+    );
   }
 }
 
@@ -119,7 +138,7 @@ export function createConversation(request: CreateConversationRequest): Promise<
 }
 
 export function submitMessage(request: SubmitMessageRequest): Promise<SubmissionSnapshot> {
-  return call("submit_message", { request });
+  return submitCall("submit_message", { request });
 }
 
 export function steerRun(request: SteerRunRequest): Promise<void> {
@@ -140,6 +159,18 @@ export function archiveConversation(request: ArchiveConversationRequest): Promis
 
 export function inspectWorkspace(request: InspectWorkspaceRequest): Promise<InspectorSnapshot> {
   return call("inspect_workspace", { request });
+}
+
+export function inspectProject(request: InspectProjectRequest): Promise<ProjectPathSnapshot> {
+  return call("inspect_project", { request });
+}
+
+export function listRunAudits(request: ListRunAuditsRequest): Promise<RunAuditPage> {
+  return call("list_run_audits", { request });
+}
+
+export function loadRunAudit(request: LoadRunAuditRequest): Promise<RunAuditDetailSnapshot> {
+  return call("load_run_audit", { request });
 }
 
 export async function listenToAppEvents(handler: (event: AppEvent) => void): Promise<() => void> {
