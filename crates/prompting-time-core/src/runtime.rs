@@ -26,6 +26,10 @@ use crate::store::{
     StageWaitingEventOutcome, Store, StoreError,
 };
 
+#[cfg(test)]
+#[path = "runtime_queue_tests.rs"]
+mod queue_tests;
+
 pub const MAX_CONCURRENT_ROOT_RUNS: usize = 4;
 pub const MAX_QUEUED_ROOT_RUNS: usize = 64;
 pub const MAX_CONCURRENT_APPROVAL_RESPONSES: usize = 4;
@@ -35,6 +39,8 @@ const SUPERVISOR_COMMAND_CAPACITY: usize =
     MAX_ADMITTED_ROOT_RUNS + MAX_CONCURRENT_APPROVAL_RESPONSES;
 const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const RESPONSE_ACK_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
+const MAX_PENDING_CONTROLS: usize = 16;
+const MAX_PENDING_CONTROL_BYTES: usize = 256 * 1024;
 const TURN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const FORCED_OWNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(not(test))]
@@ -2389,7 +2395,15 @@ async fn execute_attempt(
     let mut buffered = VecDeque::new();
     let mut staged_buffered = 0_usize;
     let mut buffered_closed = false;
+    // Controls are unpublished until their predecessor is acknowledged. They must never
+    // enter buffered's staged prefix, which acknowledgement commits and then discards.
+    let mut pending_controls: VecDeque<(ProviderEvent, usize)> = VecDeque::new();
+    let mut pending_control_bytes = 0_usize;
     loop {
+        if *cancellation.borrow() || *shutdown.borrow() {
+            return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation)
+                .await;
+        }
         if approval_pending(&job.active) {
             if buffered_closed && !approval_responding(&job.active) {
                 return finalize_attempt(
@@ -2430,6 +2444,11 @@ async fn execute_attempt(
                         let Some(event) = event else {
                             if approval_responding(&job.active) {
                                 buffered_closed = true;
+                                #[cfg(test)]
+                                if let Some(barrier) = &job.active.terminal_receipt_barrier {
+                                    barrier.received.notify_one();
+                                    barrier.release.notified().await;
+                                }
                                 continue;
                             }
                             return finalize_attempt(store, &job.active, &attempt, turn, &mut buffered, active_failure(ProviderErrorCategory::StreamClosed, MutationState::Unknown)).await;
@@ -2470,6 +2489,33 @@ async fn execute_attempt(
                             ).await;
                         }
                         let gate = job.active.attempt_gate.lock().await;
+                        if let ProviderEvent::ApprovalRequested { request_id, .. }
+                        | ProviderEvent::UserInputRequested { request_id, .. } = &event {
+                            let duplicate = job.active.attempt.lock()
+                                .expect("active attempt mutex must not be poisoned")
+                                .as_ref()
+                                .is_some_and(|attempt| attempt.pending_request_id.as_ref() == Some(request_id))
+                                || pending_controls.iter().any(|(event, _)| match event {
+                                    ProviderEvent::ApprovalRequested { request_id: queued, .. }
+                                    | ProviderEvent::UserInputRequested { request_id: queued, .. } => queued == request_id,
+                                    _ => unreachable!("only permission events enter the control queue"),
+                                });
+                            let bytes = serde_json::to_vec(&event).ok().map(|payload| payload.len());
+                            if request_id.trim().is_empty() || duplicate
+                                || pending_controls.len() >= MAX_PENDING_CONTROLS
+                                || bytes.is_none_or(|bytes| bytes > MAX_PENDING_CONTROL_BYTES - pending_control_bytes)
+                            {
+                                drop(gate);
+                                return finalize_attempt(store, &job.active, &attempt, turn, &mut buffered,
+                                    active_failure(ProviderErrorCategory::ContractViolation, MutationState::Unknown)).await;
+                            }
+                            let bytes = bytes.expect("serialized size was validated");
+                            pending_control_bytes += bytes;
+                            pending_controls.push_back((event, bytes));
+                            // Enqueue even if acknowledgement cleared the current ID while
+                            // we waited for the gate: older controls still come first.
+                            continue;
+                        }
                         if !approval_pending(&job.active) {
                             drop(gate);
                             buffered.push_back(event);
@@ -2598,10 +2644,13 @@ async fn execute_attempt(
             }
             staged_buffered = 0;
         }
-        let next = if let Some(event) = buffered.pop_front() {
-            Some(Ok(event))
-        } else if buffered_closed {
+        let next = if buffered_closed {
             None
+        } else if let Some(event) = buffered.pop_front() {
+            Some(Ok(event))
+        } else if let Some((event, bytes)) = pending_controls.pop_front() {
+            pending_control_bytes -= bytes;
+            Some(Ok(event))
         } else {
             tokio::select! {
                 _ = cancellation.changed() => return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation).await,
@@ -2897,67 +2946,79 @@ async fn execute_attempt(
                     .await;
                 }
             }
-            ProviderEvent::ApprovalRequested {
-                request_id,
-                operation,
-                scope,
-                details,
-            } if started && !approval_pending(&job.active) => {
-                if let Err(error) = store
-                    .append_owned_run_event(
-                        attempt.run_id,
-                        attempt.root_id,
-                        &attempt.dispatch_owner_id,
-                        ProviderEventRecord::approval_requested_with_details(
-                            attempt.adapter.id(),
-                            request_id.clone(),
-                            operation,
-                            scope,
-                            details,
-                        ),
+            event @ (ProviderEvent::ApprovalRequested { .. }
+            | ProviderEvent::UserInputRequested { .. })
+                if started =>
+            {
+                let gate = job.active.attempt_gate.lock().await;
+                if *cancellation.borrow() || *shutdown.borrow() {
+                    drop(gate);
+                    return interrupt_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        mutation,
                     )
-                    .await
-                {
+                    .await;
+                }
+                if approval_pending(&job.active) {
+                    drop(gate);
                     return finalize_attempt(
                         store,
                         &job.active,
                         &attempt,
                         turn,
                         &mut buffered,
-                        AttemptFinish::RuntimeError(error.into()),
+                        active_failure(
+                            ProviderErrorCategory::ContractViolation,
+                            MutationState::Unknown,
+                        ),
                     )
                     .await;
                 }
-                if let Some(active) = job
-                    .active
-                    .attempt
-                    .lock()
-                    .expect("active attempt mutex must not be poisoned")
-                    .as_mut()
-                {
-                    active.pending_request_id = Some(request_id);
-                }
-                set_status(&job.active, attempt.run_id, RunStatus::Waiting);
-            }
-            ProviderEvent::UserInputRequested {
-                request_id,
-                questions,
-                auto_resolution_ms,
-            } if started && !approval_pending(&job.active) => {
+                let (request_id, record) = match event {
+                    ProviderEvent::ApprovalRequested {
+                        request_id,
+                        operation,
+                        scope,
+                        details,
+                    } => {
+                        let record = ProviderEventRecord::approval_requested_with_details(
+                            attempt.adapter.id(),
+                            request_id.clone(),
+                            operation,
+                            scope,
+                            details,
+                        );
+                        (request_id, record)
+                    }
+                    ProviderEvent::UserInputRequested {
+                        request_id,
+                        questions,
+                        auto_resolution_ms,
+                    } => {
+                        let record = ProviderEventRecord::user_input_requested(
+                            attempt.adapter.id(),
+                            request_id.clone(),
+                            questions,
+                            auto_resolution_ms,
+                        );
+                        (request_id, record)
+                    }
+                    _ => unreachable!("only permission events enter this branch"),
+                };
                 if let Err(error) = store
                     .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
                         &attempt.dispatch_owner_id,
-                        ProviderEventRecord::user_input_requested(
-                            attempt.adapter.id(),
-                            request_id.clone(),
-                            questions,
-                            auto_resolution_ms,
-                        ),
+                        record,
                     )
                     .await
                 {
+                    drop(gate);
                     return finalize_attempt(
                         store,
                         &job.active,
