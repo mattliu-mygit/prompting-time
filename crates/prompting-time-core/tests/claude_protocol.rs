@@ -68,7 +68,7 @@ impl ApprovalHookState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChildAgentEvidence {
     parent_tool_use_id: String,
-    native_agent_id: Option<String>,
+    native_task_id: String,
     child_origin_events: usize,
     completed: bool,
 }
@@ -215,15 +215,16 @@ impl ProbeTurn {
         let starts = self
             .events
             .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("assistant"))
+            .filter(|event| {
+                event.get("session_id").and_then(Value::as_str) == Some(self.session_id.as_str())
+            })
             .filter(|event| event.get("parent_tool_use_id").is_none_or(Value::is_null))
             .filter_map(|event| event.pointer("/message/content").and_then(Value::as_array))
             .flat_map(|content| content.iter())
             .filter(|block| {
                 block.get("type").and_then(Value::as_str) == Some("tool_use")
-                    && matches!(
-                        block.get("name").and_then(Value::as_str),
-                        Some("Agent" | "Task")
-                    )
+                    && block.get("name").and_then(Value::as_str) == Some("Agent")
             })
             .filter_map(|block| block.get("id").and_then(Value::as_str))
             .collect::<Vec<_>>();
@@ -234,7 +235,10 @@ impl ProbeTurn {
                 .events
                 .iter()
                 .filter(|event| {
-                    event.get("parent_tool_use_id").and_then(Value::as_str)
+                    matches!(
+                        event.get("type").and_then(Value::as_str),
+                        Some("assistant" | "stream_event")
+                    ) && event.get("parent_tool_use_id").and_then(Value::as_str)
                         == Some(parent_tool_use_id)
                 })
                 .collect::<Vec<_>>();
@@ -244,38 +248,53 @@ impl ProbeTurn {
                 )
                 .into());
             }
-            let mut native_ids = Vec::new();
             for event in &origin_events {
-                collect_agent_ids(event, &mut native_ids);
+                if required_string(event, "session_id")? != self.session_id {
+                    return Err("child-origin event belongs to another session".into());
+                }
             }
-            native_ids.sort();
-            native_ids.dedup();
-            if native_ids.len() > 1 {
-                return Err(format!(
-                    "Agent tool {parent_tool_use_id} exposed unstable native agent IDs"
-                )
-                .into());
+            let lifecycle_starts = self
+                .events
+                .iter()
+                .filter(|event| {
+                    event["type"] == "system"
+                        && event["subtype"] == "task_started"
+                        && event["tool_use_id"] == parent_tool_use_id
+                })
+                .collect::<Vec<_>>();
+            if lifecycle_starts.len() != 1 {
+                return Err("Agent requires exactly one correlated task_started event".into());
             }
-            let completed = self.events.iter().any(|event| {
-                event
-                    .pointer("/message/content")
-                    .and_then(Value::as_array)
-                    .is_some_and(|content| {
-                        content.iter().any(|block| {
-                            block.get("type").and_then(Value::as_str) == Some("tool_result")
-                                && block.get("tool_use_id").and_then(Value::as_str)
-                                    == Some(parent_tool_use_id)
-                        })
-                    })
-            });
+            let start = lifecycle_starts[0];
+            let task_id = required_string(start, "task_id")?;
+            if required_string(start, "session_id")? != self.session_id {
+                return Err("child start belongs to another session".into());
+            }
+            let mut completed = false;
+            for event in self.events.iter().filter(|event| {
+                event["type"] == "system"
+                    && event["subtype"] == "task_notification"
+                    && (event["task_id"] == task_id || event["tool_use_id"] == parent_tool_use_id)
+            }) {
+                if required_string(event, "session_id")? != self.session_id
+                    || required_string(event, "task_id")? != task_id
+                    || event
+                        .get("tool_use_id")
+                        .is_some_and(|id| !id.is_null() && id != parent_tool_use_id)
+                {
+                    return Err("child termination identity does not match its start".into());
+                }
+                if required_string(event, "status")? != "completed" {
+                    return Err("child task did not complete successfully".into());
+                }
+                completed = true;
+            }
             if !completed {
-                return Err(
-                    format!("Agent tool {parent_tool_use_id} emitted no completion").into(),
-                );
+                return Err("child task has no successful lifecycle termination".into());
             }
             agents.push(ChildAgentEvidence {
                 parent_tool_use_id: parent_tool_use_id.to_owned(),
-                native_agent_id: native_ids.pop(),
+                native_task_id: task_id.to_owned(),
                 child_origin_events: origin_events.len(),
                 completed,
             });
@@ -568,6 +587,17 @@ impl LiveClaudeProbe {
         }
     }
 
+    async fn receive_child_turn(&mut self, deadline: Instant) -> ProbeResult<ProbeTurn> {
+        let mut turn = self.receive_turn(deadline).await?;
+        turn.require_success()?;
+        // A root result can precede background child termination. Keep the same
+        // absolute deadline; tool_result may merely acknowledge the spawn.
+        while turn.child_agents().is_err() {
+            turn.events.push(self.next_event(deadline).await?);
+        }
+        Ok(turn)
+    }
+
     async fn control(&mut self, request: Value, deadline: Instant) -> ProbeResult<Value> {
         self.request_sequence += 1;
         let request_id = format!("probe-{}", self.request_sequence);
@@ -716,27 +746,6 @@ fn hook_output(state: ApprovalHookState) -> Value {
     }
 }
 
-fn collect_agent_ids(value: &Value, output: &mut Vec<String>) {
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                if matches!(key.as_str(), "agentId" | "agent_id")
-                    && let Some(id) = value.as_str().filter(|id| !id.is_empty())
-                {
-                    output.push(id.to_owned());
-                }
-                collect_agent_ids(value, output);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_agent_ids(value, output);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn required_string<'a>(value: &'a Value, key: &str) -> ProbeResult<&'a str> {
     value
         .get(key)
@@ -841,10 +850,15 @@ async fn live_child_agent_events_have_stable_identity() {
         LiveClaudeProbe::spawn_with_tools(PermissionMode::DontAsk, ToolProfile::ChildAgent)
             .await
             .unwrap();
-    let result = probe
-        .send("Ask exactly one subagent to reply CHILD. Do not use other tools.")
+    let deadline = operation_deadline();
+    probe
+        .send_prompt(
+            "Ask exactly one subagent to reply CHILD. Do not use other tools.",
+            deadline,
+        )
         .await
         .unwrap();
+    let result = probe.receive_child_turn(deadline).await.unwrap();
     let agents = result.child_agents().unwrap();
     assert_eq!(agents.len(), 1);
     assert!(agents[0].child_origin_events > 0);
@@ -899,11 +913,13 @@ fn child_evidence_requires_child_origin_events() {
     let top_level_start = json!({
         "type": "assistant",
         "parent_tool_use_id": null,
+        "session_id": "synthetic-session",
         "message": {"content": [{"type": "tool_use", "id": parent, "name": "Agent"}]}
     });
     let child_message = json!({
         "type": "assistant",
         "parent_tool_use_id": parent,
+        "session_id": "synthetic-session",
         "agentId": "agent-native-1",
         "message": {"content": [{"type": "text", "text": "CHILD"}]}
     });
@@ -916,11 +932,72 @@ fn child_evidence_requires_child_origin_events() {
     let without_child = ProbeTurn::synthetic(vec![top_level_start.clone(), top_level_stop.clone()]);
     assert!(without_child.child_agents().is_err());
 
-    let with_child = ProbeTurn::synthetic(vec![top_level_start, child_message, top_level_stop]);
+    let mut with_child = ProbeTurn::synthetic(vec![top_level_start, child_message, top_level_stop]);
+    assert!(
+        with_child.child_agents().is_err(),
+        "spawn acknowledgement is not completion"
+    );
+    with_child.events.push(json!({"type":"system", "subtype":"task_started", "session_id":"synthetic-session", "task_id":"task-1", "tool_use_id":parent}));
+    assert!(
+        with_child.child_agents().is_err(),
+        "start is not completion"
+    );
+    with_child.events.push(json!({"type":"system", "subtype":"task_notification", "session_id":"synthetic-session", "task_id":"task-1", "status":"completed"}));
     let agents = with_child.child_agents().unwrap();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].parent_tool_use_id, parent);
-    assert_eq!(agents[0].native_agent_id.as_deref(), Some("agent-native-1"));
+    assert_eq!(agents[0].native_task_id, "task-1");
+    for (key, value) in [
+        ("status", "failed"),
+        ("status", "stopped"),
+        ("session_id", "other"),
+        ("task_id", "other"),
+        ("tool_use_id", "other"),
+    ] {
+        let mut invalid = with_child.events.clone();
+        invalid.last_mut().unwrap()[key] = json!(value);
+        assert!(
+            ProbeTurn::synthetic(invalid).child_agents().is_err(),
+            "accepted invalid {key}={value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn child_collection_handles_completion_before_and_after_root_result() {
+    for root_first in [false, true] {
+        let mut events = VecDeque::from(vec![
+            json!({"type":"assistant", "session_id":"synthetic-session", "message":{"content":[{"type":"tool_use", "name":"Agent", "id":"tool-1"}]}}),
+            json!({"type":"system", "subtype":"task_started", "session_id":"synthetic-session", "task_id":"task-1", "tool_use_id":"tool-1"}),
+            json!({"type":"assistant", "session_id":"synthetic-session", "parent_tool_use_id":"tool-1", "message":{"content":[{"type":"text", "text":"CHILD"}]}}),
+        ]);
+        let root = json!({"type":"result", "subtype":"success", "is_error":false, "session_id":"synthetic-session"});
+        let child = json!({"type":"system", "subtype":"task_notification", "session_id":"synthetic-session", "task_id":"task-1", "status":"completed", "tool_use_id":"tool-1"});
+        events.extend(if root_first {
+            [root, child]
+        } else {
+            [child, root]
+        });
+        let mut probe = LiveClaudeProbe {
+            binary: PathBuf::new(),
+            workspace: tempfile::tempdir().unwrap(),
+            runtime: tempfile::tempdir().unwrap(),
+            permission_mode: PermissionMode::DontAsk,
+            tool_profile: ToolProfile::ChildAgent,
+            session_id: "synthetic-session".into(),
+            process: None,
+            events: vec![],
+            pending_events: events,
+            request_sequence: 0,
+            approval_hook: ApprovalHookState::Allow,
+        };
+        let turn = probe
+            .receive_child_turn(operation_deadline())
+            .await
+            .unwrap();
+        assert_eq!(turn.child_agents().unwrap()[0].native_task_id, "task-1");
+        assert!(probe.pending_events.is_empty());
+    }
 }
 
 #[test]

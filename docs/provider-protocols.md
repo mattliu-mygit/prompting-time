@@ -30,8 +30,20 @@ timeout after every event. Result validation requires a non-error `success` subt
 probe additionally requires `stop_reason: tool_deferred`, a nonempty deferred `Write` ID, and the
 exact temporary path and `PROBE` content before resuming. The denial resume must finish successfully
 without another deferred call or filesystem mutation. The child probe requires a top-level
-`Agent` tool call, at least one child-origin message correlated through `parent_tool_use_id`, and a
-matching tool result. It captures and checks a stable `agentId` when that version exposes one.
+`Agent` tool call, child-origin output correlated through `parent_tool_use_id`, and explicit
+successful child lifecycle termination. A matching tool result can acknowledge a background spawn
+and is not completion evidence. The child-specific collector continues after a root success until
+the child evidence passes or the original operation deadline expires.
+
+The synthetic gate correlates `system/task_started` by session and `tool_use_id`, preserves its
+native `task_id`, and requires a `system/task_notification` with the same session/task, status
+`completed`, and matching `tool_use_id` when present. Missing evidence, wrong identities, and
+failed/stopped termination cannot pass. These are candidate wire shapes from the
+[public SDK types](https://raw.githubusercontent.com/anthropics/claude-agent-sdk-python/main/src/claude_agent_sdk/types.py),
+not authenticated observations of installed 2.1.205. The current public types also describe
+`task_updated` alternatives; this narrow probe requires `task_notification` and may remain
+inconclusive on a runtime emitting only that alternative. Synthetic regressions cover spawn-only
+acknowledgements and termination before/after the root result; they do not establish live support.
 
 Command:
 
@@ -44,9 +56,9 @@ Observed result:
 | Required behavior | Result | Sanitized evidence |
 | --- | --- | --- |
 | Two turns on one long-lived session | Inconclusive | The first turn returned `Not logged in - Please run /login` instead of model output. |
-| Deferred approval and same-session resume | Inconclusive | No `deferred_tool_use` was emitted because the unauthenticated run never proposed a tool call. |
+| Deferred denial and same-session resume | Inconclusive | No `deferred_tool_use` was emitted because the unauthenticated run never proposed a tool call. |
 | Interrupt and resume | Inconclusive | No assistant delta arrived before the bounded probe timeout because the run was unauthenticated. |
-| Stable child-agent identity | Inconclusive | No child-agent start or stop event was emitted because the unauthenticated run never started an agent. |
+| One-level child lifecycle and identity | Inconclusive | No child-agent start or stop event was emitted because the unauthenticated run never started an agent. |
 
 A separate read-only `claude auth status --json` check returned `loggedIn: false`, `authMethod:
 none`, and `apiProvider: firstParty`. This is an environment blocker, not evidence that any protocol
@@ -55,4 +67,7 @@ sidecar fallback is not selected.
 
 To unblock the gate, authenticate the installed CLI interactively with `claude` followed by
 `/login`, then rerun the command above. Adapter implementation, protocol fixtures, and any Claude
-feature commit must remain blocked until all four behaviors are demonstrated.
+feature commit must remain blocked until all four behaviors are demonstrated. These four probes
+are necessary but do not establish full adapter readiness: recursive parent/child correlation and
+affirmative approval still need live acceptance coverage. The existing defer/deny/resume mechanism
+is retained; its planned scope is denial and continuation, not an affirmative authorization path.
