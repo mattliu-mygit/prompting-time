@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::domain::MutationState;
@@ -48,7 +48,7 @@ struct AdapterInner {
     client: Client,
     shutdown: watch::Sender<bool>,
     process_shutdown: JsonLineShutdown,
-    dispatcher: Mutex<Option<JoinHandle<Result<(), ProviderError>>>>,
+    dispatcher: AsyncMutex<Option<JoinHandle<Result<(), ProviderError>>>>,
     version: Mutex<String>,
     alive: Arc<AtomicBool>,
 }
@@ -215,6 +215,14 @@ impl RpcId {
 
 impl CodexAdapter {
     pub async fn connect(binary: PathBuf) -> Result<Self, ProviderError> {
+        Self::connect_with_initialization_timeout(binary, REQUEST_TIMEOUT).await
+    }
+
+    /// Starts and initializes Codex while retaining ownership through timeout cleanup.
+    pub async fn connect_with_initialization_timeout(
+        binary: PathBuf,
+        initialization_timeout: Duration,
+    ) -> Result<Self, ProviderError> {
         let mut command = Command::new(&binary);
         command.arg("app-server");
         let process = JsonLineProcess::spawn(command)?;
@@ -246,35 +254,41 @@ impl CodexAdapter {
                 client: client.clone(),
                 shutdown,
                 process_shutdown,
-                dispatcher: Mutex::new(Some(dispatcher)),
+                dispatcher: AsyncMutex::new(Some(dispatcher)),
                 version: Mutex::new(String::new()),
                 alive,
             }),
         };
 
-        let initialized = client
-            .request(
-                "initialize",
-                json!({
-                    "clientInfo": {
-                        "name": "prompting_time",
-                        "title": "Prompting Time",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    }
-                }),
-            )
-            .await;
-        let initialized = match initialized {
-            Ok(value) => value,
-            Err(error) => {
-                provisional.stop().await;
+        let handshake = async {
+            let initialized = client
+                .request(
+                    "initialize",
+                    json!({
+                        "clientInfo": {
+                            "name": "prompting_time",
+                            "title": "Prompting Time",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        }
+                    }),
+                )
+                .await?;
+            client.notify("initialized", json!({})).await?;
+            Ok::<Value, ProviderError>(initialized)
+        };
+        let initialized = match tokio::time::timeout(initialization_timeout, handshake).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                let _ = provisional.stop().await;
                 return Err(error);
             }
+            Err(_) => {
+                let _ = provisional.stop().await;
+                return Err(ProviderError::Transport {
+                    category: "codex-initialization-timeout".to_owned(),
+                });
+            }
         };
-        if let Err(error) = client.notify("initialized", json!({})).await {
-            provisional.stop().await;
-            return Err(error);
-        }
         let version = initialized
             .get("userAgent")
             .and_then(Value::as_str)
@@ -288,18 +302,21 @@ impl CodexAdapter {
         Ok(provisional)
     }
 
-    async fn stop(&self) {
+    async fn stop(&self) -> Result<(), ProviderError> {
         self.inner.shutdown.send_replace(true);
         self.inner.process_shutdown.request();
-        let dispatcher = self
-            .inner
-            .dispatcher
-            .lock()
-            .expect("dispatcher mutex must not be poisoned")
-            .take();
-        if let Some(dispatcher) = dispatcher {
-            let _ = dispatcher.await;
-        }
+        let mut dispatcher = self.inner.dispatcher.lock().await;
+        let Some(task) = dispatcher.as_mut() else {
+            return Ok(());
+        };
+        let result = task
+            .await
+            .map_err(|_| ProviderError::Transport {
+                category: "codex-dispatcher-task".to_owned(),
+            })
+            .and_then(|result| result);
+        dispatcher.take();
+        result
     }
 
     /// Archive a session created only for an opt-in live integration probe.
@@ -793,6 +810,15 @@ impl ProviderAdapter for CodexAdapter {
                 None,
             )
             .await
+    }
+
+    async fn shutdown(&self) -> Result<(), ProviderError> {
+        self.stop().await
+    }
+
+    fn force_shutdown(&self) {
+        self.inner.shutdown.send_replace(true);
+        self.inner.process_shutdown.request();
     }
 }
 
@@ -1938,7 +1964,7 @@ fn parse_supported_server_request(
                 ProviderEvent::ApprovalRequested {
                     request_id: external_id.to_owned(),
                     operation: "command execution".to_owned(),
-                    scope: approval_scope(params),
+                    scope: approval_scope(params, "command execution"),
                     details: Some(ApprovalRequestDetails::CommandExecution {
                         command: optional_string(params, "command")?,
                         cwd: optional_string(params, "cwd")?,
@@ -1958,7 +1984,7 @@ fn parse_supported_server_request(
                 ProviderEvent::ApprovalRequested {
                     request_id: external_id.to_owned(),
                     operation: "file change".to_owned(),
-                    scope: approval_scope(params),
+                    scope: approval_scope(params, "file change"),
                     details: Some(ApprovalRequestDetails::FileChange {
                         changes,
                         grant_root: optional_string(params, "grantRoot")?,
@@ -2008,7 +2034,7 @@ fn parse_supported_server_request(
                 ProviderEvent::ApprovalRequested {
                     request_id: external_id.to_owned(),
                     operation: "permission request".to_owned(),
-                    scope: approval_scope(params),
+                    scope: approval_scope(params, "permission request"),
                     details: Some(ApprovalRequestDetails::PermissionProfile {
                         cwd: required_string(params, &["cwd"], "permission-cwd")?,
                         profile: requested,
@@ -2567,12 +2593,11 @@ async fn respond_to_server_request(
     Ok(())
 }
 
-fn approval_scope(params: &Value) -> String {
+fn approval_scope(params: &Value, canonical_fallback: &str) -> String {
     params
         .get("reason")
         .and_then(Value::as_str)
-        .or_else(|| params.get("itemId").and_then(Value::as_str))
-        .unwrap_or("Codex requested approval")
+        .unwrap_or(canonical_fallback)
         .to_owned()
 }
 
@@ -2724,12 +2749,12 @@ mod tests {
         REQUEST_FINISHED, REQUEST_QUEUED, REQUEST_WRITING, RequestKind, RpcId, ServerRequest,
         ServerRequestKind, TurnSink, TurnStartDropAction, cancel_registered_turn,
         duplicate_server_request_response, handle_command, handle_notification,
-        handle_server_request, handle_server_response, normalize_item, reject_pending_capacity,
-        reject_server_requests, respond_to_server_request, turn_start_drop_action,
-        unregister_turn_registration,
+        handle_server_request, handle_server_response, normalize_item,
+        parse_supported_server_request, reject_pending_capacity, reject_server_requests,
+        respond_to_server_request, turn_start_drop_action, unregister_turn_registration,
     };
     use crate::providers::process::JsonLineProcess;
-    use crate::providers::{ApprovalResponse, ProviderTurnOwner};
+    use crate::providers::{ApprovalResponse, ProviderEvent, ProviderTurnOwner};
 
     fn turn_sink(registration_id: u64) -> TurnSink {
         let (events, _) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
@@ -3331,5 +3356,30 @@ mod tests {
                 "accepted missing {field}"
             );
         }
+    }
+
+    #[test]
+    fn reasonless_approval_uses_a_canonical_scope_instead_of_native_item_identity() {
+        let (_, event) = parse_supported_server_request(
+            "item/commandExecution/requestApproval",
+            &json!({
+                "itemId": "provider-native-item-secret",
+                "startedAtMs": 1,
+                "command": "cargo test"
+            }),
+            "string:provider-native-request-secret",
+            None,
+        )
+        .unwrap();
+        let ProviderEvent::ApprovalRequested { scope, .. } = event else {
+            panic!("fixture must normalize to an approval");
+        };
+
+        assert_eq!(scope, "command execution");
+        assert!(
+            !serde_json::to_string(&scope)
+                .unwrap()
+                .contains("provider-native")
+        );
     }
 }

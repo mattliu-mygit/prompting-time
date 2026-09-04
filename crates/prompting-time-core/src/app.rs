@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    AgentStatus, ApprovalStatus, Conversation, ConversationId, MessageRole, RunId, Workspace,
-    WorkspaceId,
+    AgentNode, AgentStatus, Approval, ApprovalId, ApprovalStatus, Conversation, ConversationId,
+    MessageRole, ProviderRun, RollupStatus, RunId, Workspace, WorkspaceId,
 };
 use crate::handoff::{
     ChildAgentOutcome, ChildAgentStatus, DurableDecision, HandoffBuilder, HandoffCapsule,
@@ -24,10 +24,13 @@ use crate::runtime::{
     FallbackRequest, PreparedRunHandle, RunHandle, RunRequest, RunSupervisor, RuntimeError,
 };
 use crate::store::{
-    ConversationSettings, MAX_CANONICAL_MESSAGE_BYTES, NewSubmission, Store, StoreError,
-    validate_conversation_settings,
+    AgentPage, ApprovalPage, ConversationSettings, EventDetail, MAX_CANONICAL_MESSAGE_BYTES,
+    NewSubmission, Page, ProviderEventRecord, SidebarDetails, Store, StoreChange, StoreError,
+    TimelineRecord, validate_conversation_settings,
 };
-use crate::workspace::{WorkspaceError, WorkspaceManager, WorkspaceRequest};
+use crate::workspace::{
+    CleanupEligibility, WorkspaceError, WorkspaceManager, WorkspaceRequest, WorkspaceSnapshot,
+};
 
 const HANDOFF_BUDGET_CHARS: usize = 32_000;
 
@@ -74,6 +77,80 @@ pub struct Submission {
     pub duplicate: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationOverview {
+    pub conversation: Conversation,
+    pub project_root: Option<PathBuf>,
+    pub run: Option<RunOverview>,
+    pub rollup_status: Option<RollupStatus>,
+    pub agents: Vec<AgentNode>,
+    pub agents_truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunOverview {
+    pub id: RunId,
+    pub provider: ProviderId,
+    pub status: crate::domain::RunStatus,
+}
+
+impl From<ProviderRun> for RunOverview {
+    fn from(run: ProviderRun) -> Self {
+        Self {
+            id: run.id,
+            provider: run.provider,
+            status: run.status,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineSnapshot {
+    pub events: Page<TimelineRecord>,
+    pub approvals: ApprovalPage,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalDetail {
+    pub id: ApprovalId,
+    pub operation: String,
+    pub scope: String,
+    pub input: Option<crate::domain::UserInputRequest>,
+    pub details: Option<crate::domain::ApprovalRequestDetails>,
+    pub question_count: u32,
+    pub truncated: bool,
+}
+
+impl From<crate::store::ApprovalDetailRecord> for ApprovalDetail {
+    fn from(approval: crate::store::ApprovalDetailRecord) -> Self {
+        Self {
+            id: approval.id,
+            operation: approval.operation,
+            scope: approval.scope,
+            input: approval.input.map(|mut input| {
+                for (index, question) in input.questions.iter_mut().enumerate() {
+                    question.id = format!("question-{}", index + 1);
+                }
+                input
+            }),
+            details: approval.details,
+            question_count: approval.question_count,
+            truncated: approval.truncated,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InspectorSnapshot {
+    pub workspace: WorkspaceSnapshot,
+    pub cleanup: CleanupEligibility,
+    pub run: Option<RunOverview>,
+    pub routing: Option<RoutingDecision>,
+    pub handoff: Option<String>,
+    pub active_descendant_count: usize,
+    pub agents_truncated: bool,
+}
+
 pub struct PromptingTime {
     store: Store,
     router: Router,
@@ -109,6 +186,15 @@ impl PromptingTime {
         &self,
         request: ConversationRequest,
     ) -> Result<Conversation, AppError> {
+        self.create_conversation_with_workspace(request)
+            .await
+            .map(|(conversation, _)| conversation)
+    }
+
+    async fn create_conversation_with_workspace(
+        &self,
+        request: ConversationRequest,
+    ) -> Result<(Conversation, Workspace), AppError> {
         let settings = ConversationSettings {
             objective: request.objective,
             constraints: request.constraints,
@@ -137,7 +223,7 @@ impl PromptingTime {
         {
             Ok(conversation) => {
                 prepared.commit();
-                Ok(conversation)
+                Ok((conversation, workspace))
             }
             Err(source) => {
                 let cleanup_error = prepared.rollback().await.err();
@@ -147,6 +233,21 @@ impl PromptingTime {
                 })
             }
         }
+    }
+
+    pub async fn create_conversation_overview(
+        &self,
+        request: ConversationRequest,
+    ) -> Result<ConversationOverview, AppError> {
+        let (conversation, workspace) = self.create_conversation_with_workspace(request).await?;
+        Ok(ConversationOverview {
+            conversation,
+            project_root: workspace.project_root,
+            run: None,
+            rollup_status: None,
+            agents: Vec::new(),
+            agents_truncated: false,
+        })
     }
 
     pub async fn submit(&self, request: SubmitRequest) -> Result<Submission, AppError> {
@@ -341,6 +442,34 @@ impl PromptingTime {
             .map_err(Into::into)
     }
 
+    pub async fn respond_to_approval_id(
+        &self,
+        approval_id: ApprovalId,
+        response: ApprovalResponse,
+    ) -> Result<(), AppError> {
+        let approval = self.store.load_approval_by_id(approval_id).await?;
+        if approval.status != ApprovalStatus::Pending {
+            return Err(AppError::StaleApproval {
+                run_id: approval.run_id,
+                request_id: approval_id.to_string(),
+            });
+        }
+        let provider_request_id =
+            approval
+                .provider_request_id
+                .clone()
+                .ok_or_else(|| StoreError::InvalidData {
+                    entity: "approval",
+                    detail: "pending approval is missing its provider request identifier"
+                        .to_owned(),
+                })?;
+        let response = remap_approval_response(&approval, response)?;
+        self.supervisor
+            .respond(approval.run_id, &provider_request_id, response)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn interrupt(&self, run_id: RunId) -> Result<(), AppError> {
         self.supervisor.interrupt(run_id).await.map_err(Into::into)
     }
@@ -352,10 +481,219 @@ impl PromptingTime {
             .map_err(Into::into)
     }
 
+    pub async fn list_conversations(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Page<Conversation>, AppError> {
+        self.store
+            .list_conversations(cursor, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn list_conversation_overviews(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Page<ConversationOverview>, AppError> {
+        let page = self.store.list_conversations(cursor, limit).await?;
+        let ids = page
+            .items
+            .iter()
+            .map(|conversation| conversation.id)
+            .collect::<Vec<_>>();
+        let details = self.store.load_sidebar_details(&ids).await?;
+        let items = page
+            .items
+            .into_iter()
+            .zip(details)
+            .map(|(conversation, details)| overview(conversation, details))
+            .collect();
+        Ok(Page {
+            items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    pub async fn load_timeline_snapshot(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<TimelineSnapshot, AppError> {
+        let events = self
+            .store
+            .load_recent_timeline(conversation_id, cursor, limit)
+            .await?;
+        let approvals = self
+            .store
+            .load_recent_approvals(conversation_id, 200)
+            .await?;
+        Ok(TimelineSnapshot { events, approvals })
+    }
+
+    pub async fn load_event_detail(
+        &self,
+        event_id: crate::domain::TimelineEventId,
+    ) -> Result<EventDetail, AppError> {
+        self.store
+            .load_event_detail(event_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn load_approvals(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        pending: bool,
+        limit: u32,
+    ) -> Result<ApprovalPage, AppError> {
+        self.store
+            .load_approvals(conversation_id, cursor, pending, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn load_approval_detail(
+        &self,
+        approval_id: ApprovalId,
+    ) -> Result<ApprovalDetail, AppError> {
+        let approval = self.store.load_approval_detail(approval_id).await?;
+        Ok(approval.into())
+    }
+
+    pub async fn load_approval_questions(
+        &self,
+        approval_id: ApprovalId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<crate::store::ApprovalQuestionPage, AppError> {
+        self.store
+            .load_approval_questions(approval_id, cursor, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn load_agent_page(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<AgentPage, AppError> {
+        self.store
+            .load_agent_page(conversation_id, cursor, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inspect_workspace(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<WorkspaceSnapshot, AppError> {
+        let workspace = self.store.load_workspace(conversation_id).await?;
+        self.workspace_manager
+            .snapshot(&workspace)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inspect_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<InspectorSnapshot, AppError> {
+        let workspace = self.store.load_workspace(conversation_id).await?;
+        let snapshot = self.workspace_manager.snapshot(&workspace).await?;
+        let lease = self.workspace_manager.lease(&workspace).await?;
+        let cleanup = self.workspace_manager.cleanup_eligibility(&lease).await?;
+        let run = self
+            .store
+            .latest_run_for_conversation(conversation_id)
+            .await?;
+        let (routing, handoff) = if let Some(run) = &run {
+            let routing = match self.store.load_routing_decision(run.id).await {
+                Ok(decision) => Some(decision),
+                Err(StoreError::NotFound { .. }) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let handoff = self
+                .store
+                .load_handoff(run.id)
+                .await?
+                .map(|(rendered, _)| rendered);
+            (routing, handoff)
+        } else {
+            (None, None)
+        };
+        let details = self
+            .store
+            .load_sidebar_details(&[conversation_id])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::InvalidData {
+                entity: "conversation inspector",
+                detail: "sidebar details were omitted".to_owned(),
+            })?;
+        Ok(InspectorSnapshot {
+            workspace: snapshot,
+            cleanup,
+            run: run.map(Into::into),
+            routing,
+            handoff,
+            active_descendant_count: details.active_descendant_count,
+            agents_truncated: details.agents_truncated,
+        })
+    }
+
+    /// Conservatively closes work that cannot still be owned after this process starts.
+    /// Provider-aware session resumption is added at the recovery boundary in Task 13.
+    pub async fn reconcile_startup(&self) -> Result<usize, AppError> {
+        let mut interrupted_runs = 0;
+        loop {
+            let batch = self.store.load_recovery_agent_batch(200).await?;
+            if batch.is_empty() {
+                break;
+            }
+            for recovery in batch {
+                self.store
+                    .append_run_event(
+                        recovery.run_id,
+                        recovery.agent_id,
+                        ProviderEventRecord::interrupted_with_mutation(recovery.mutation_state),
+                    )
+                    .await?;
+                if recovery.is_root {
+                    interrupted_runs += 1;
+                }
+            }
+        }
+        Ok(interrupted_runs)
+    }
+
     pub async fn shutdown(&self) -> Result<(), AppError> {
         let runtime_result = self.supervisor.shutdown().await;
         self.workspace_manager.wait_for_pending_preparations().await;
         runtime_result.map_err(Into::into)
+    }
+
+    pub async fn shutdown_with_grace(&self, grace: std::time::Duration) -> Result<(), AppError> {
+        let runtime_result = self.supervisor.shutdown_with_grace(grace).await;
+        let _ = tokio::time::timeout(
+            grace,
+            self.workspace_manager.wait_for_pending_preparations(),
+        )
+        .await;
+        runtime_result.map_err(Into::into)
+    }
+
+    pub async fn force_shutdown(&self) -> Result<(), AppError> {
+        self.supervisor.force_shutdown().await.map_err(Into::into)
+    }
+
+    pub fn subscribe_changes(&self) -> tokio::sync::broadcast::Receiver<StoreChange> {
+        self.store.subscribe_changes()
     }
 
     async fn routing_states(&self) -> Vec<ProviderRoutingState> {
@@ -455,6 +793,18 @@ impl PromptingTime {
     }
 }
 
+fn overview(conversation: Conversation, details: SidebarDetails) -> ConversationOverview {
+    debug_assert_eq!(conversation.id, details.conversation_id);
+    ConversationOverview {
+        conversation,
+        project_root: details.project_root,
+        run: details.run.map(Into::into),
+        rollup_status: details.rollup_status,
+        agents: details.agents,
+        agents_truncated: details.agents_truncated,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error(transparent)]
@@ -479,6 +829,36 @@ pub enum AppError {
     MessageTooLarge { limit: usize },
     #[error("approval request {request_id} for run {run_id} is no longer pending")]
     StaleApproval { run_id: RunId, request_id: String },
+    #[error("approval response contains an unknown question identifier")]
+    InvalidApprovalQuestion,
+}
+
+fn remap_approval_response(
+    approval: &Approval,
+    response: ApprovalResponse,
+) -> Result<ApprovalResponse, AppError> {
+    let ApprovalResponse::Answers(answers) = response else {
+        return Ok(response);
+    };
+    let questions = approval
+        .input
+        .as_ref()
+        .ok_or(AppError::InvalidApprovalQuestion)?;
+    let mut native_answers = BTreeMap::new();
+    for (canonical_id, answer) in answers {
+        let ordinal = canonical_id
+            .strip_prefix("question-")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|ordinal| *ordinal > 0)
+            .ok_or(AppError::InvalidApprovalQuestion)?;
+        let native_id = questions
+            .questions
+            .get(ordinal - 1)
+            .map(|question| question.id.clone())
+            .ok_or(AppError::InvalidApprovalQuestion)?;
+        native_answers.insert(native_id, answer);
+    }
+    Ok(ApprovalResponse::Answers(native_answers))
 }
 
 fn validate_submit(request: &SubmitRequest) -> Result<(), AppError> {
@@ -515,6 +895,7 @@ fn unavailable_category(category: &str) -> ProviderUnavailability {
         ProviderUnavailability::UnsupportedVersion
     } else if category.contains("unauthenticated")
         || category.contains("not-authenticated")
+        || category.contains("not authenticated")
         || category.contains("login-required")
     {
         ProviderUnavailability::Unauthenticated
@@ -547,6 +928,7 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::domain::AgentId;
     use crate::store::{MAX_OBJECTIVE_BYTES, install_conversation_persistence_barrier};
 
     use super::*;
@@ -558,12 +940,74 @@ mod tests {
             ProviderUnavailability::Unauthenticated
         );
         assert_eq!(
+            unavailable_category("Codex is not authenticated"),
+            ProviderUnavailability::Unauthenticated
+        );
+        assert_eq!(
             unavailable_category("quota-exhausted"),
             ProviderUnavailability::QuotaBlocked
         );
         assert_eq!(
             unavailable_error(ProviderErrorCategory::NotInstalled),
             ProviderUnavailability::NotInstalled
+        );
+    }
+
+    #[test]
+    fn canonical_question_ordinals_are_remapped_to_native_keys_only_at_dispatch() {
+        let mut approval = Approval::new(
+            RunId::new(),
+            AgentId::new(),
+            ProviderId::Codex,
+            "provider-secret-question-request",
+            "questions",
+            "user",
+        );
+        approval.input = Some(crate::domain::UserInputRequest {
+            questions: vec![crate::domain::UserInputQuestion {
+                id: "provider-secret-question-key".to_owned(),
+                header: "Choice".to_owned(),
+                question: "Choose".to_owned(),
+                options: None,
+                is_other: false,
+                is_secret: false,
+            }],
+            auto_resolution_ms: None,
+        });
+
+        let detail: ApprovalDetail = crate::store::ApprovalDetailRecord {
+            id: approval.id,
+            operation: approval.operation.clone(),
+            scope: approval.scope.clone(),
+            input: approval.input.clone(),
+            details: approval.details.clone(),
+            question_count: approval
+                .input
+                .as_ref()
+                .map_or(0, |input| input.questions.len() as u32),
+            truncated: false,
+        }
+        .into();
+        assert_eq!(
+            detail.input.unwrap().questions[0].id,
+            "question-1".to_owned()
+        );
+
+        let response = remap_approval_response(
+            &approval,
+            ApprovalResponse::Answers(BTreeMap::from([(
+                "question-1".to_owned(),
+                vec!["yes".to_owned()],
+            )])),
+        )
+        .unwrap();
+
+        assert_eq!(
+            response,
+            ApprovalResponse::Answers(BTreeMap::from([(
+                "provider-secret-question-key".to_owned(),
+                vec!["yes".to_owned()],
+            )]))
         );
     }
 
@@ -595,6 +1039,134 @@ mod tests {
             AppError::Store(StoreError::InvalidData { .. })
         ));
         assert!(!app_data.exists());
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_batches_a_deep_large_tree_child_before_parent() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(crate::store::NewConversation::projectless(
+                "large recovery tree",
+            ))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .bind_native_session(run.id, "root-native")
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+
+        for batch in 0..4 {
+            let start = batch * 55;
+            let child_ids = (start..start + 55)
+                .map(|index| format!("sibling-{index}"))
+                .collect::<Vec<_>>();
+            let statuses = child_ids
+                .iter()
+                .map(|id| crate::providers::NativeChildStatus {
+                    native_thread_id: id.clone(),
+                    status: crate::providers::NativeAgentStatus::Running,
+                })
+                .collect();
+            store
+                .append_run_event(
+                    run.id,
+                    root.id,
+                    ProviderEventRecord::child_agent(
+                        format!("spawn-siblings-{batch}"),
+                        "root-native",
+                        child_ids,
+                        statuses,
+                        "spawn agents",
+                        "running",
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let mut parent_native = "sibling-0".to_owned();
+        for depth in 0..25 {
+            let child_native = format!("deep-{depth}");
+            store
+                .append_run_event(
+                    run.id,
+                    root.id,
+                    ProviderEventRecord::child_agent(
+                        format!("spawn-deep-{depth}"),
+                        &parent_native,
+                        vec![child_native.clone()],
+                        vec![crate::providers::NativeChildStatus {
+                            native_thread_id: child_native.clone(),
+                            status: crate::providers::NativeAgentStatus::Running,
+                        }],
+                        "spawn nested agent",
+                        "running",
+                    ),
+                )
+                .await
+                .unwrap();
+            parent_native = child_native;
+        }
+
+        let mut agents = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = store
+                .load_agent_page(conversation.id, cursor.take(), 200)
+                .await
+                .unwrap();
+            agents.extend(page.items.into_iter().map(|item| item.agent));
+            let Some(next) = page.next_cursor else { break };
+            cursor = Some(next);
+        }
+        assert!(agents.len() > 200);
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            Vec::<Arc<dyn ProviderAdapter>>::new(),
+        )
+        .unwrap();
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 1);
+        assert!(
+            store
+                .load_recovery_agent_batch(200)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut interrupted_at = HashMap::new();
+        let mut event_cursor = None;
+        loop {
+            let page = store
+                .load_timeline(conversation.id, event_cursor.take(), 200)
+                .await
+                .unwrap();
+            for event in page.items {
+                if event.content.ends_with("interrupted") {
+                    interrupted_at.insert(event.agent_id, event.sequence);
+                }
+            }
+            let Some(next) = page.next_cursor else { break };
+            event_cursor = Some(next);
+        }
+        assert_eq!(interrupted_at.len(), agents.len());
+        for agent in agents {
+            if let Some(parent_id) = agent.parent_id {
+                assert!(interrupted_at[&agent.id] < interrupted_at[&parent_id]);
+            }
+        }
+        app.shutdown().await.unwrap();
     }
 
     #[tokio::test]

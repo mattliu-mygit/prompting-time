@@ -59,6 +59,12 @@ export function App({ bootstrap }: AppProps) {
   return (
     <main>
       <h1>Provider diagnostics</h1>
+      {snapshot.startupDiagnostic ? (
+        <section aria-label="Startup diagnostic">
+          <p>{snapshot.startupDiagnostic.message}</p>
+          {snapshot.startupDiagnostic.action ? <p>{snapshot.startupDiagnostic.action}</p> : null}
+        </section>
+      ) : null}
       <ul>
         {snapshot.providers.map((provider) => (
           <ProviderDiagnostic key={provider.id} provider={provider} />
@@ -71,7 +77,7 @@ export function App({ bootstrap }: AppProps) {
 function ProviderDiagnostic({ provider }: { provider: ProviderInstallation }) {
   const name = providerNames[provider.id];
 
-  if (provider.installed && provider.version) {
+  if (provider.available && provider.version) {
     return <li>{`${name} ${provider.version}`}</li>;
   }
 

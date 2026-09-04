@@ -8,8 +8,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -29,7 +30,21 @@ use crate::router::{RoutingDecision, RoutingProfile, RoutingReason, TaskKind};
 
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_POOL_CONNECTIONS: u32 = 8;
+const STORE_CHANGE_CHANNEL_CAPACITY: usize = 256;
 const RECOVERY_BATCH_SIZE: i64 = 200;
+pub const MAX_TIMELINE_PREVIEW_BYTES: usize = 1_024;
+pub const MAX_TIMELINE_PAGE_CONTENT_BYTES: usize =
+    MAX_TIMELINE_PREVIEW_BYTES * MAX_PAGE_SIZE as usize;
+pub const MAX_EVENT_DETAIL_BYTES: usize = 256 * 1_024;
+pub const MAX_CONVERSATION_TITLE_BYTES: usize = 256;
+const UNTITLED_CONVERSATION_TITLE: &str = "Untitled conversation";
+const MAX_APPROVAL_DETAIL_SOURCE_BYTES: i64 = 256 * 1_024;
+const MAX_APPROVAL_QUESTION_PAGE_SIZE: u32 = 50;
+const MAX_APPROVAL_QUESTION_SOURCE_BYTES: i64 = 4 * 1_024;
+const MAX_APPROVAL_QUESTION_HEADER_BYTES: usize = 256;
+const MAX_APPROVAL_QUESTION_TEXT_BYTES: usize = 2 * 1_024;
+const MAX_AGENT_LABEL_PREVIEW_BYTES: usize = 256;
+const MAX_AGENT_SUMMARY_PREVIEW_BYTES: usize = 2_048;
 /// Physical queue bound: 256 complete provider events plus one reserved overflow marker.
 pub const MAX_STAGED_EVENT_ROWS: usize = 257;
 pub const MAX_STAGED_EVENT_BYTES: usize = 8 * 1024 * 1024;
@@ -91,6 +106,13 @@ async fn coordinate_conversation_persistence() {
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    changes: broadcast::Sender<StoreChange>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoreChange {
+    pub conversation_id: ConversationId,
+    pub run_id: Option<RunId>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -485,7 +507,7 @@ impl ProviderEventRecord {
                 (TimelineEventKind::Tool, content)
             }
             (Self::ChildAgent { operation, .. }, _) => (TimelineEventKind::Progress, operation),
-            (Self::SubAgent { agent_path, .. }, _) => (TimelineEventKind::Progress, agent_path),
+            (Self::SubAgent { .. }, _) => (TimelineEventKind::Progress, "Agent activity"),
             (Self::Unrecognized { method }, _) => (TimelineEventKind::Diagnostic, method),
             (Self::ApprovalRequested { operation, .. }, _) => {
                 (TimelineEventKind::Lifecycle, operation)
@@ -643,6 +665,103 @@ pub struct Page<T> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SidebarDetails {
+    pub conversation_id: ConversationId,
+    pub project_root: Option<PathBuf>,
+    pub run: Option<ProviderRun>,
+    pub rollup_status: Option<crate::domain::RollupStatus>,
+    pub active_descendant_count: usize,
+    pub agents: Vec<AgentNode>,
+    pub agents_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineRecord {
+    pub event: TimelineEvent,
+    pub provider: ProviderId,
+    pub content_bytes: usize,
+    pub content_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventDetail {
+    pub id: TimelineEventId,
+    pub content: String,
+    pub content_bytes: usize,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPageRecord {
+    pub agent: AgentNode,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPage {
+    pub run_id: Option<RunId>,
+    pub items: Vec<AgentPageRecord>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoveryAgent {
+    pub run_id: RunId,
+    pub agent_id: AgentId,
+    pub mutation_state: MutationState,
+    pub is_root: bool,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalPage {
+    pub items: Vec<ApprovalSummary>,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalSummary {
+    pub id: ApprovalId,
+    pub run_id: RunId,
+    pub agent_id: AgentId,
+    pub provider: ProviderId,
+    pub operation: String,
+    pub scope: String,
+    pub status: ApprovalStatus,
+    pub response_pending: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalDetailRecord {
+    pub id: ApprovalId,
+    pub operation: String,
+    pub scope: String,
+    pub input: Option<UserInputRequest>,
+    pub details: Option<ApprovalRequestDetails>,
+    pub question_count: u32,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ApprovalQuestionPreview {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Option<Vec<crate::domain::UserInputOption>>,
+    pub is_other: bool,
+    pub is_secret: bool,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalQuestionPage {
+    pub items: Vec<ApprovalQuestionPreview>,
+    pub total_count: u32,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryRun {
     pub run: ProviderRun,
     pub attempt_intent: Option<RecoveryAttemptIntent>,
@@ -720,7 +839,26 @@ impl Store {
             .connect_with(options)
             .await?;
         MIGRATOR.run(&pool).await?;
-        Ok(Self { pool })
+        let (changes, _) = broadcast::channel(STORE_CHANGE_CHANNEL_CAPACITY);
+        Ok(Self { pool, changes })
+    }
+
+    pub fn subscribe_changes(&self) -> broadcast::Receiver<StoreChange> {
+        self.changes.subscribe()
+    }
+
+    fn notify_change(&self, conversation_id: ConversationId, run_id: RunId) {
+        let _ = self.changes.send(StoreChange {
+            conversation_id,
+            run_id: Some(run_id),
+        });
+    }
+
+    fn notify_conversation_change(&self, conversation_id: ConversationId) {
+        let _ = self.changes.send(StoreChange {
+            conversation_id,
+            run_id: None,
+        });
     }
 
     pub async fn close(self) {
@@ -740,9 +878,10 @@ impl Store {
         conversation_id: ConversationId,
         new_conversation: NewConversation,
     ) -> Result<Conversation, StoreError> {
+        let title = normalize_conversation_title(new_conversation.title)?;
         let conversation = Conversation {
             id: conversation_id,
-            title: new_conversation.title,
+            title,
             workspace_id: None,
             archived: false,
         };
@@ -759,6 +898,7 @@ impl Store {
         .execute(&self.pool)
         .await?;
 
+        self.notify_conversation_change(conversation.id);
         Ok(conversation)
     }
 
@@ -769,6 +909,7 @@ impl Store {
         workspace: &Workspace,
         settings: &ConversationSettings,
     ) -> Result<Conversation, StoreError> {
+        let title = normalize_conversation_title(title)?;
         validate_conversation_settings(settings)?;
         if workspace.conversation_id != conversation_id {
             return Err(StoreError::InvalidData {
@@ -826,6 +967,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
+        self.notify_conversation_change(conversation_id);
         Ok(Conversation {
             id: conversation_id,
             title,
@@ -839,7 +981,8 @@ impl Store {
         conversation_id: ConversationId,
     ) -> Result<Conversation, StoreError> {
         sqlx::query_as::<_, ConversationRow>(
-            "SELECT id, title, workspace_id, status, updated_at FROM conversations WHERE id = ?",
+            "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at \
+             FROM conversations WHERE id = ?",
         )
         .bind(conversation_id.to_string())
         .fetch_optional(&self.pool)
@@ -1016,6 +1159,25 @@ impl Store {
         .bind(now)
         .execute(&mut *transaction)
         .await?;
+        let event_result = sqlx::query(
+            "INSERT INTO events \
+             (id, conversation_id, run_id, agent_id, kind, role, content, created_at) \
+             VALUES (?, ?, ?, ?, 'message', 'user', ?, ?)",
+        )
+        .bind(message_id.to_string())
+        .bind(run.conversation_id.to_string())
+        .bind(run.id.to_string())
+        .bind(root.id.to_string())
+        .bind(&submission.content)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        let _event_sequence = u64::try_from(event_result.last_insert_rowid()).map_err(|_| {
+            StoreError::InvalidData {
+                entity: "timeline event",
+                detail: "negative sequence".to_owned(),
+            }
+        })?;
         let message_sequence =
             u64::try_from(result.last_insert_rowid()).map_err(|_| StoreError::InvalidData {
                 entity: "message sequence",
@@ -1065,6 +1227,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
+        self.notify_change(run.conversation_id, run.id);
         Ok(PreparedSubmission::Created { run, root })
     }
 
@@ -1153,7 +1316,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-
+        self.notify_change(conversation_id, run.id);
         Ok((run, root))
     }
 
@@ -1283,6 +1446,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
+        self.notify_change(run.conversation_id, run.id);
         Ok((run, root))
     }
 
@@ -1724,6 +1888,7 @@ impl Store {
             });
         }
         transaction.commit().await?;
+        self.notify_conversation_change(conversation_id);
         Ok(())
     }
 
@@ -1777,7 +1942,7 @@ impl Store {
             && let Some(existing) = load_existing_fallback(&mut transaction, &run, fallback).await?
         {
             let event = sqlx::query_as::<_, TimelineEventRow>(
-                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content \
+                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, role, content \
                  FROM events WHERE run_id = ? AND agent_id = ? \
                  ORDER BY sequence DESC LIMIT 1",
             )
@@ -1939,6 +2104,7 @@ impl Store {
                 .execute(&mut *transaction)
                 .await?;
             transaction.commit().await?;
+            self.notify_change(run.conversation_id, run_id);
             return Ok((
                 TimelineEvent {
                     id: parse_uuid("timeline event", &existing_id)?.into(),
@@ -1950,6 +2116,7 @@ impl Store {
                         detail: "negative sequence".to_owned(),
                     })?,
                     kind,
+                    role: (kind == TimelineEventKind::Message).then_some(MessageRole::Assistant),
                     content: existing_content + content,
                 },
                 None,
@@ -2012,12 +2179,18 @@ impl Store {
                     detail: "does not match provider run".to_owned(),
                 });
             }
+            let approval_id = ApprovalId::new();
+            let question_count = match &record {
+                ProviderEventRecord::UserInputRequested { questions, .. } => questions.len(),
+                _ => 0,
+            };
             sqlx::query(
                 "INSERT INTO approvals \
-                 (id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, resolution_json, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)",
+                 (id, conversation_id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, question_count, status, resolution_json, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)",
             )
-            .bind(ApprovalId::new().to_string())
+            .bind(approval_id.to_string())
+            .bind(run.conversation_id.to_string())
             .bind(run_id.to_string())
             .bind(agent_id.to_string())
             .bind(provider_label(provider))
@@ -2026,10 +2199,17 @@ impl Store {
             .bind(scope)
             .bind(request_json)
             .bind(details_json)
+            .bind(i64::try_from(question_count).map_err(|_| StoreError::InvalidData {
+                entity: "approval question count",
+                detail: "count exceeds the supported range".to_owned(),
+            })?)
             .bind(now)
             .bind(now)
             .execute(&mut *transaction)
             .await?;
+            if let ProviderEventRecord::UserInputRequested { questions, .. } = &record {
+                persist_approval_questions(&mut transaction, approval_id, questions).await?;
+            }
         }
 
         if let Some(resolution) = terminal_approval_resolution {
@@ -2051,14 +2231,15 @@ impl Store {
 
         let result = sqlx::query(
             "INSERT INTO events \
-             (id, conversation_id, run_id, agent_id, kind, content, payload_json, native_item_id, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, conversation_id, run_id, agent_id, kind, role, content, payload_json, native_item_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event_id.to_string())
         .bind(run.conversation_id.to_string())
         .bind(run_id.to_string())
         .bind(event_agent_id.to_string())
         .bind(event_kind_label(kind))
+        .bind((kind == TimelineEventKind::Message).then_some("assistant"))
         .bind(content)
         .bind(payload_json)
         .bind(native_item_id)
@@ -2167,6 +2348,10 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
+        self.notify_change(run.conversation_id, run_id);
+        if let Some((fallback_run, _)) = &fallback {
+            self.notify_change(run.conversation_id, fallback_run.id);
+        }
 
         Ok((
             TimelineEvent {
@@ -2181,6 +2366,7 @@ impl Store {
                     }
                 })?,
                 kind,
+                role: (kind == TimelineEventKind::Message).then_some(MessageRole::Assistant),
                 content: content.to_owned(),
             },
             fallback,
@@ -2216,9 +2402,11 @@ impl Store {
             ProviderEventRecord::ChildAgent { operation, .. } => {
                 (TimelineEventKind::Progress, operation, None)
             }
-            ProviderEventRecord::SubAgent { agent_path, .. } => {
-                (TimelineEventKind::Progress, agent_path, None)
-            }
+            ProviderEventRecord::SubAgent { .. } => (
+                TimelineEventKind::Progress,
+                "Agent activity".to_owned(),
+                None,
+            ),
             ProviderEventRecord::Unrecognized { method } => {
                 (TimelineEventKind::Diagnostic, method, None)
             }
@@ -2369,6 +2557,7 @@ impl Store {
                 .execute(&mut *transaction)
                 .await?;
             transaction.commit().await?;
+            self.notify_change(run.conversation_id, run_id);
             return Ok(StageWaitingEventOutcome::Staged(StagedProviderEvent {
                 id: parse_uuid("staged provider event", &existing_id)?.into(),
                 conversation_id: run.conversation_id,
@@ -2439,6 +2628,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
+        self.notify_change(run.conversation_id, run_id);
 
         let staged = StagedProviderEvent {
             id,
@@ -2481,8 +2671,8 @@ impl Store {
             return Err(StoreError::InvalidApprovalResolution);
         }
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let run_status: String =
-            sqlx::query_scalar("SELECT status FROM provider_runs WHERE id = ?")
+        let (run_status, conversation_id): (String, String) =
+            sqlx::query_as("SELECT status, conversation_id FROM provider_runs WHERE id = ?")
                 .bind(run_id.to_string())
                 .fetch_optional(&mut *transaction)
                 .await?
@@ -2556,6 +2746,7 @@ impl Store {
             status: ApprovalResponseIntentStatus::Recorded,
         });
         transaction.commit().await?;
+        self.notify_change(parse_uuid("conversation", &conversation_id)?.into(), run_id);
         Ok(approval)
     }
 
@@ -2567,6 +2758,11 @@ impl Store {
         dispatch_certainty: DispatchCertainty,
     ) -> Result<Approval, StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let conversation_id: String =
+            sqlx::query_scalar("SELECT conversation_id FROM provider_runs WHERE id = ?")
+                .bind(run_id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
         let mut approval = sqlx::query_as::<_, ApprovalRow>(
             "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, resolution_json, \
              response_intent_json, response_intent_status \
@@ -2611,6 +2807,7 @@ impl Store {
         }
         approval.response_intent.as_mut().unwrap().status = intent_status;
         transaction.commit().await?;
+        self.notify_change(parse_uuid("conversation", &conversation_id)?.into(), run_id);
         Ok(approval)
     }
 
@@ -2743,6 +2940,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
+        self.notify_change(run.conversation_id, run_id);
         Ok(TimelineEvent {
             id: event_id,
             conversation_id: run.conversation_id,
@@ -2755,6 +2953,7 @@ impl Store {
                 }
             })?,
             kind: TimelineEventKind::Lifecycle,
+            role: None,
             content: content.to_owned(),
         })
     }
@@ -2778,6 +2977,131 @@ impl Store {
             id: provider_request_id.to_owned(),
         })?
         .into_domain()
+    }
+
+    pub async fn load_approval_by_id(
+        &self,
+        approval_id: ApprovalId,
+    ) -> Result<Approval, StoreError> {
+        sqlx::query_as::<_, ApprovalRow>(
+            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, \
+                    request_json, details_json, status, resolution_json, response_intent_json, \
+                    response_intent_status FROM approvals WHERE id = ?",
+        )
+        .bind(approval_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "approval",
+            id: approval_id.to_string(),
+        })?
+        .into_domain()
+    }
+
+    pub async fn load_approval_detail(
+        &self,
+        approval_id: ApprovalId,
+    ) -> Result<ApprovalDetailRecord, StoreError> {
+        sqlx::query_as::<_, ApprovalDetailRow>(
+            "SELECT id, question_count, \
+                    CASE WHEN length(CAST(operation AS BLOB)) + length(CAST(scope AS BLOB)) + \
+                                   COALESCE(length(CAST(request_json AS BLOB)), 0) + \
+                                   COALESCE(length(CAST(details_json AS BLOB)), 0) <= ? \
+                         THEN operation ELSE substr(operation, 1, 256) END AS operation, \
+                    CASE WHEN length(CAST(operation AS BLOB)) + length(CAST(scope AS BLOB)) + \
+                                   COALESCE(length(CAST(request_json AS BLOB)), 0) + \
+                                   COALESCE(length(CAST(details_json AS BLOB)), 0) <= ? \
+                         THEN scope ELSE substr(scope, 1, 512) END AS scope, \
+                    CASE WHEN length(CAST(operation AS BLOB)) + length(CAST(scope AS BLOB)) + \
+                                   COALESCE(length(CAST(request_json AS BLOB)), 0) + \
+                                   COALESCE(length(CAST(details_json AS BLOB)), 0) <= ? \
+                         THEN request_json END AS request_json, \
+                    CASE WHEN length(CAST(operation AS BLOB)) + length(CAST(scope AS BLOB)) + \
+                                   COALESCE(length(CAST(request_json AS BLOB)), 0) + \
+                                   COALESCE(length(CAST(details_json AS BLOB)), 0) <= ? \
+                         THEN details_json END AS details_json, \
+                    (length(CAST(operation AS BLOB)) + length(CAST(scope AS BLOB)) + \
+                     COALESCE(length(CAST(request_json AS BLOB)), 0) + \
+                     COALESCE(length(CAST(details_json AS BLOB)), 0) > ?) AS truncated \
+             FROM approvals WHERE id = ?",
+        )
+        .bind(MAX_APPROVAL_DETAIL_SOURCE_BYTES)
+        .bind(MAX_APPROVAL_DETAIL_SOURCE_BYTES)
+        .bind(MAX_APPROVAL_DETAIL_SOURCE_BYTES)
+        .bind(MAX_APPROVAL_DETAIL_SOURCE_BYTES)
+        .bind(MAX_APPROVAL_DETAIL_SOURCE_BYTES)
+        .bind(approval_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "approval",
+            id: approval_id.to_string(),
+        })?
+        .into_record()
+    }
+
+    pub async fn load_approval_questions(
+        &self,
+        approval_id: ApprovalId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<ApprovalQuestionPage, StoreError> {
+        if !(1..=MAX_APPROVAL_QUESTION_PAGE_SIZE).contains(&limit) {
+            return Err(StoreError::InvalidPageLimit(limit));
+        }
+        let offset = match cursor {
+            Some(cursor) => {
+                let cursor = decode_question_cursor(&cursor)?;
+                if cursor.approval_id != approval_id {
+                    return Err(StoreError::InvalidCursor);
+                }
+                cursor.offset
+            }
+            None => 0,
+        };
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT question_count FROM approvals WHERE id = ?")
+                .bind(approval_id.to_string())
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| StoreError::NotFound {
+                    entity: "approval",
+                    id: approval_id.to_string(),
+                })?;
+        let rows = sqlx::query_as::<_, ApprovalQuestionRow>(
+            "SELECT ordinal, header, question, options_json, is_other, is_secret, \
+                    source_bytes, header_bytes, question_bytes \
+             FROM approval_questions WHERE approval_id = ? AND ordinal >= ? \
+             ORDER BY ordinal LIMIT ?",
+        )
+        .bind(approval_id.to_string())
+        .bind(i64::from(offset))
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        let has_more = rows.len() > limit as usize;
+        let items = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(ApprovalQuestionRow::into_preview)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_cursor = if has_more {
+            let next_offset = offset.checked_add(limit).ok_or(StoreError::InvalidCursor)?;
+            Some(encode_question_cursor(QuestionCursor {
+                approval_id,
+                offset: next_offset,
+            })?)
+        } else {
+            None
+        };
+        Ok(ApprovalQuestionPage {
+            items,
+            total_count: u32::try_from(total_count).map_err(|_| StoreError::InvalidData {
+                entity: "approval question count",
+                detail: "count exceeds the supported range".to_owned(),
+            })?,
+            next_cursor,
+        })
     }
 
     /// Atomically records a sanitized provider failure unless the run already reached a terminal
@@ -2888,6 +3212,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
+        self.notify_change(run.conversation_id, run_id);
         Ok(true)
     }
 
@@ -2904,7 +3229,7 @@ impl Store {
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
         let rows = if let Some(cursor) = cursor {
             sqlx::query_as::<_, ConversationRow>(
-                "SELECT id, title, workspace_id, status, updated_at FROM conversations \
+                "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at FROM conversations \
                  WHERE updated_at < ? OR (updated_at = ? AND id < ?) \
                  ORDER BY updated_at DESC, id DESC LIMIT ?",
             )
@@ -2916,7 +3241,7 @@ impl Store {
             .await?
         } else {
             sqlx::query_as::<_, ConversationRow>(
-                "SELECT id, title, workspace_id, status, updated_at FROM conversations \
+                "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at FROM conversations \
                  ORDER BY updated_at DESC, id DESC LIMIT ?",
             )
             .bind(i64::from(limit) + 1)
@@ -2954,6 +3279,274 @@ impl Store {
         })
     }
 
+    pub async fn load_sidebar_details(
+        &self,
+        conversation_ids: &[ConversationId],
+    ) -> Result<Vec<SidebarDetails>, StoreError> {
+        if conversation_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if conversation_ids.len() > MAX_PAGE_SIZE as usize {
+            return Err(StoreError::InvalidPageLimit(
+                u32::try_from(conversation_ids.len()).unwrap_or(u32::MAX),
+            ));
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "WITH selected(id) AS (SELECT id FROM conversations WHERE id IN (",
+        );
+        {
+            let mut separated = query.separated(", ");
+            for id in conversation_ids {
+                separated.push_bind(id.to_string());
+            }
+        }
+        query.push(
+            ")) \
+             SELECT selected.id AS conversation_id, workspaces.project_root, \
+                    latest_runs.id AS run_id, latest_runs.provider, \
+                    latest_runs.fallback_from_run_id, latest_runs.native_session_id, \
+                    latest_runs.status AS run_status, latest_runs.mutation_state, \
+                    latest_runs.dispatch_certainty, latest_runs.created_at AS run_created_at, \
+                    CASE WHEN latest_runs.waiting_agent_count > 0 THEN 'needs_attention' \
+                         WHEN latest_runs.active_agent_count > 0 THEN 'active' \
+                         WHEN latest_runs.failed_agent_count > 0 THEN 'failed' \
+                         WHEN latest_runs.interrupted_agent_count > 0 THEN 'interrupted' \
+                         WHEN latest_runs.id IS NOT NULL THEN 'completed' END AS rollup_status, \
+                    latest_runs.active_descendant_count, \
+                    latest_runs.agent_total_count AS total_agent_count, sidebar_agents.id AS agent_id, \
+                    sidebar_agents.parent_id, sidebar_agents.provider AS agent_provider, \
+                    NULL AS provider_native_id, NULL AS provider_native_path, \
+                    substr(sidebar_agents.label, 1, 256) AS label, \
+                    substr(sidebar_agents.summary, 1, 2048) AS summary, \
+                    sidebar_agents.status AS agent_status, \
+                    sidebar_agents.created_at AS agent_created_at \
+             FROM selected \
+             LEFT JOIN conversations ON conversations.id = selected.id \
+             LEFT JOIN workspaces ON workspaces.id = conversations.workspace_id \
+             LEFT JOIN provider_runs AS latest_runs ON latest_runs.id = ( \
+                 SELECT candidate.id FROM provider_runs AS candidate \
+                 WHERE candidate.conversation_id = selected.id \
+                 ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT 1 \
+             ) \
+             LEFT JOIN agent_nodes AS sidebar_agents \
+                    ON sidebar_agents.run_id = latest_runs.id AND sidebar_agents.parent_id IS NULL \
+             ORDER BY selected.id",
+        );
+        let rows = query
+            .build_query_as::<SidebarDetailRow>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut by_id = std::collections::HashMap::new();
+        for id in conversation_ids {
+            by_id.insert(
+                *id,
+                SidebarDetails {
+                    conversation_id: *id,
+                    project_root: None,
+                    run: None,
+                    rollup_status: None,
+                    active_descendant_count: 0,
+                    agents: Vec::new(),
+                    agents_truncated: false,
+                },
+            );
+        }
+        for row in rows {
+            let conversation_id: ConversationId =
+                parse_uuid("conversation", &row.conversation_id)?.into();
+            let details =
+                by_id
+                    .get_mut(&conversation_id)
+                    .ok_or_else(|| StoreError::InvalidData {
+                        entity: "sidebar conversation",
+                        detail: "query returned an unrequested conversation".to_owned(),
+                    })?;
+            details.project_root = row.project_root.clone().map(PathBuf::from);
+            if details.run.is_none() {
+                details.run = row.provider_run()?;
+                details.rollup_status = row
+                    .rollup_status
+                    .as_deref()
+                    .map(parse_rollup_status)
+                    .transpose()?;
+                details.active_descendant_count =
+                    usize::try_from(row.active_descendant_count.unwrap_or(0)).map_err(|_| {
+                        StoreError::InvalidData {
+                            entity: "sidebar active descendant count",
+                            detail: "negative count".to_owned(),
+                        }
+                    })?;
+                details.agents_truncated = row.total_agent_count.unwrap_or(0) > 1;
+            }
+            if let Some(agent) = row.agent()? {
+                details.agents.push(agent);
+            }
+        }
+        conversation_ids
+            .iter()
+            .map(|id| {
+                by_id.remove(id).ok_or_else(|| StoreError::InvalidData {
+                    entity: "sidebar conversation",
+                    detail: "requested conversation was omitted".to_owned(),
+                })
+            })
+            .collect()
+    }
+
+    /// Returns a chronological page ending at the newest visible event. `next_cursor` requests
+    /// the immediately older page, so the desktop can prepend history without hydrating it all.
+    pub async fn load_recent_timeline(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Page<TimelineRecord>, StoreError> {
+        validate_page_limit(limit)?;
+        let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
+        let rows = if let Some(cursor) = cursor {
+            sqlx::query_as::<_, TimelineRecordRow>(
+                "SELECT events.id, events.conversation_id, events.run_id, events.agent_id, \
+                        events.sequence, events.kind, events.role, substr(events.content, 1, 1024) AS content, \
+                        length(CAST(events.content AS BLOB)) AS content_bytes, provider_runs.provider \
+                 FROM events JOIN provider_runs ON provider_runs.id = events.run_id \
+                 WHERE events.conversation_id = ? AND \
+                       (events.sequence < ? OR (events.sequence = ? AND events.id < ?)) \
+                 ORDER BY events.sequence DESC, events.id DESC LIMIT ?",
+            )
+            .bind(conversation_id.to_string())
+            .bind(cursor_sequence_i64(&cursor)?)
+            .bind(cursor_sequence_i64(&cursor)?)
+            .bind(cursor.id.to_string())
+            .bind(i64::from(limit) + 1)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, TimelineRecordRow>(
+                "SELECT events.id, events.conversation_id, events.run_id, events.agent_id, \
+                        events.sequence, events.kind, events.role, substr(events.content, 1, 1024) AS content, \
+                        length(CAST(events.content AS BLOB)) AS content_bytes, provider_runs.provider \
+                 FROM events JOIN provider_runs ON provider_runs.id = events.run_id \
+                 WHERE events.conversation_id = ? \
+                 ORDER BY events.sequence DESC, events.id DESC LIMIT ?",
+            )
+            .bind(conversation_id.to_string())
+            .bind(i64::from(limit) + 1)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let has_more = rows.len() > limit as usize;
+        let mut items = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(TimelineRecordRow::into_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_cursor = if has_more {
+            let oldest = items.last().expect("a page with more rows is non-empty");
+            Some(encode_cursor(Cursor {
+                sequence: oldest.event.sequence,
+                id: oldest.event.id.as_uuid(),
+            })?)
+        } else {
+            None
+        };
+        items.reverse();
+        Ok(Page { items, next_cursor })
+    }
+
+    pub async fn load_recent_approvals(
+        &self,
+        conversation_id: ConversationId,
+        limit: u32,
+    ) -> Result<ApprovalPage, StoreError> {
+        self.load_approvals(conversation_id, None, true, limit)
+            .await
+    }
+
+    /// Pages pending approvals independently from history so every actionable request remains
+    /// discoverable even when a conversation has a large approval history.
+    pub async fn load_approvals(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        pending: bool,
+        limit: u32,
+    ) -> Result<ApprovalPage, StoreError> {
+        validate_page_limit(limit)?;
+        let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT approvals.id, approvals.run_id, approvals.agent_id, approvals.provider, \
+                    substr(approvals.operation, 1, 256) AS operation, \
+                    substr(approvals.scope, 1, 512) AS scope, approvals.status, \
+                    approvals.response_intent_status, \
+                    approvals.created_at \
+             FROM approvals WHERE approvals.conversation_id = ",
+        );
+        query.push_bind(conversation_id.to_string());
+        if pending {
+            query.push(" AND approvals.status = 'pending'");
+        } else {
+            query.push(" AND approvals.status <> 'pending'");
+        }
+        if let Some(cursor) = cursor {
+            let created_at = cursor_sequence_i64(&cursor)?;
+            query.push(" AND (approvals.created_at < ");
+            query.push_bind(created_at);
+            query.push(" OR (approvals.created_at = ");
+            query.push_bind(created_at);
+            query.push(" AND approvals.id < ");
+            query.push_bind(cursor.id.to_string());
+            query.push("))");
+        }
+        query.push(" ORDER BY approvals.created_at DESC, approvals.id DESC LIMIT ");
+        query.push_bind(i64::from(limit) + 1);
+        let rows = query
+            .build_query_as::<ApprovalListRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        let truncated = rows.len() > limit as usize;
+        let rows = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
+        let next_cursor = if truncated {
+            let last = rows.last().expect("a truncated approval page is non-empty");
+            Some(encode_cursor(Cursor {
+                sequence: u64::try_from(last.created_at).map_err(|_| StoreError::InvalidData {
+                    entity: "approval",
+                    detail: "negative creation timestamp".to_owned(),
+                })?,
+                id: parse_uuid("approval", &last.id)?,
+            })?)
+        } else {
+            None
+        };
+        let items = rows
+            .into_iter()
+            .map(ApprovalListRow::into_summary)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ApprovalPage {
+            items,
+            truncated,
+            next_cursor,
+        })
+    }
+
+    pub async fn latest_run_for_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ProviderRun>, StoreError> {
+        sqlx::query_as::<_, ProviderRunRow>(
+            "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, \
+                    status, mutation_state, dispatch_certainty, created_at \
+             FROM provider_runs WHERE conversation_id = ? \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(conversation_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(ProviderRunRow::into_domain)
+        .transpose()
+    }
+
     pub async fn load_timeline(
         &self,
         conversation_id: ConversationId,
@@ -2964,7 +3557,7 @@ impl Store {
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
         let rows = if let Some(cursor) = cursor {
             sqlx::query_as::<_, TimelineEventRow>(
-                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content \
+                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, role, content \
                  FROM events WHERE conversation_id = ? \
                  AND (sequence > ? OR (sequence = ? AND id > ?)) \
                  ORDER BY sequence, id LIMIT ?",
@@ -2978,7 +3571,7 @@ impl Store {
             .await?
         } else {
             sqlx::query_as::<_, TimelineEventRow>(
-                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content \
+                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, role, content \
                  FROM events WHERE conversation_id = ? ORDER BY sequence, id LIMIT ?",
             )
             .bind(conversation_id.to_string())
@@ -3029,6 +3622,117 @@ impl Store {
                 })
             })
             .transpose()
+    }
+
+    pub async fn load_agent_page(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<AgentPage, StoreError> {
+        validate_page_limit(limit)?;
+        let cursor = cursor
+            .map(|value| decode_agent_cursor(&value))
+            .transpose()?;
+        let run = if let Some(cursor) = &cursor {
+            let run = self.load_run(cursor.run_id).await?;
+            if run.conversation_id != conversation_id {
+                return Err(StoreError::InvalidCursor);
+            }
+            Some(run)
+        } else {
+            self.latest_run_for_conversation(conversation_id).await?
+        };
+        let Some(run) = run else {
+            return Ok(AgentPage {
+                run_id: None,
+                items: Vec::new(),
+                next_cursor: None,
+            });
+        };
+        let rows = if let Some(cursor) = cursor {
+            sqlx::query_as::<_, AgentPageRow>(
+                "SELECT id, run_id, parent_id, provider, NULL AS provider_native_id, \
+                        NULL AS provider_native_path, substr(label, 1, 256) AS label, \
+                        substr(summary, 1, 2048) AS summary, status, created_at, depth \
+                 FROM agent_nodes WHERE run_id = ? AND \
+                      (created_at > ? OR (created_at = ? AND id > ?)) \
+                 ORDER BY created_at, id LIMIT ?",
+            )
+            .bind(run.id.to_string())
+            .bind(agent_cursor_created_at_i64(&cursor)?)
+            .bind(agent_cursor_created_at_i64(&cursor)?)
+            .bind(cursor.id.to_string())
+            .bind(i64::from(limit) + 1)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, AgentPageRow>(
+                "SELECT id, run_id, parent_id, provider, NULL AS provider_native_id, \
+                        NULL AS provider_native_path, substr(label, 1, 256) AS label, \
+                        substr(summary, 1, 2048) AS summary, status, created_at, depth \
+                 FROM agent_nodes WHERE run_id = ? ORDER BY created_at, id LIMIT ?",
+            )
+            .bind(run.id.to_string())
+            .bind(i64::from(limit) + 1)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let has_more = rows.len() > limit as usize;
+        let rows = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
+        let next_cursor = if has_more {
+            let last = rows.last().expect("a truncated agent page is non-empty");
+            Some(encode_agent_cursor(AgentCursor {
+                created_at: u64::try_from(last.created_at).map_err(|_| {
+                    StoreError::InvalidData {
+                        entity: "agent node",
+                        detail: "negative creation timestamp".to_owned(),
+                    }
+                })?,
+                id: parse_uuid("agent node", &last.id)?,
+                run_id: run.id,
+            })?)
+        } else {
+            None
+        };
+        Ok(AgentPage {
+            run_id: Some(run.id),
+            items: rows
+                .into_iter()
+                .map(AgentPageRow::into_record)
+                .collect::<Result<Vec<_>, _>>()?,
+            next_cursor,
+        })
+    }
+
+    /// Loads bounded display content only. Provider-native payloads stay inside the Store.
+    pub async fn load_event_detail(
+        &self,
+        event_id: TimelineEventId,
+    ) -> Result<EventDetail, StoreError> {
+        let (content, content_bytes): (String, i64) = sqlx::query_as(
+            "SELECT substr(content, 1, 262144), length(CAST(content AS BLOB)) \
+             FROM events WHERE id = ?",
+        )
+        .bind(event_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::NotFound {
+            entity: "timeline event",
+            id: event_id.to_string(),
+        })?;
+        let content_bytes =
+            usize::try_from(content_bytes).map_err(|_| StoreError::InvalidData {
+                entity: "timeline event",
+                detail: "negative content length".to_owned(),
+            })?;
+        let content = truncate_utf8(content, MAX_EVENT_DETAIL_BYTES);
+        Ok(EventDetail {
+            id: event_id,
+            truncated: content_bytes > content.len(),
+            content,
+            content_bytes,
+        })
     }
 
     pub async fn pending_recovery(&self) -> Result<Vec<RecoveryRun>, StoreError> {
@@ -3202,7 +3906,7 @@ impl Store {
                     .any(|event| event.overflowed_kind.is_some());
 
                 let event_rows = sqlx::query_as::<_, TimelineEventRow>(
-                    "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content \
+                    "SELECT id, conversation_id, run_id, agent_id, sequence, kind, role, content \
                  FROM events WHERE run_id = ? ORDER BY sequence DESC, id DESC LIMIT ?",
                 )
                 .bind(run.id.to_string())
@@ -3236,6 +3940,31 @@ impl Store {
 
         transaction.commit().await?;
         Ok(recovery)
+    }
+
+    /// Returns the deepest active agents first. Persisted depth plus the recovery index makes
+    /// repeated batches linear while preserving child-before-parent interruption semantics.
+    pub async fn load_recovery_agent_batch(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<RecoveryAgent>, StoreError> {
+        validate_page_limit(limit)?;
+        let rows = sqlx::query_as::<_, RecoveryAgentRow>(
+            "SELECT agent_nodes.run_id, agent_nodes.id AS agent_id, \
+                    provider_runs.mutation_state, agent_nodes.parent_id IS NULL AS is_root, \
+                    agent_nodes.depth \
+             FROM agent_nodes INDEXED BY idx_agents_recovery_depth \
+             CROSS JOIN provider_runs ON provider_runs.id = agent_nodes.run_id \
+             WHERE agent_nodes.status IN ('queued', 'running', 'waiting') \
+               AND provider_runs.status IN ('queued', 'running', 'waiting') \
+             ORDER BY agent_nodes.depth DESC, agent_nodes.created_at, agent_nodes.id LIMIT ?",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(RecoveryAgentRow::into_domain)
+            .collect()
     }
 }
 
@@ -3302,19 +4031,38 @@ async fn materialize_child_agents(
             }
         } else {
             let child_id = AgentId::new();
+            let parent_depth: i64 =
+                sqlx::query_scalar("SELECT depth FROM agent_nodes WHERE id = ?")
+                    .bind(parent.id.to_string())
+                    .fetch_one(&mut **transaction)
+                    .await?;
+            let sibling_ordinal: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) + 1 FROM agent_nodes WHERE run_id = ? AND parent_id = ?",
+            )
+            .bind(run.id.to_string())
+            .bind(parent.id.to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+            let label = if parent.parent_id.is_none() {
+                format!("Agent {sibling_ordinal}")
+            } else {
+                format!("{}.{}", parent.label, sibling_ordinal)
+            };
             sqlx::query(
                 "INSERT INTO agent_nodes \
-                 (id, run_id, parent_id, provider, provider_native_id, label, status, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, 'child agent', ?, ?, ?)",
+                 (id, run_id, parent_id, provider, provider_native_id, label, status, depth, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(child_id.to_string())
             .bind(run.id.to_string())
             .bind(parent.id.to_string())
             .bind(provider_label(run.provider))
             .bind(child_native_id)
+            .bind(label)
             .bind(agent_status_label(
                 reported_status.unwrap_or(AgentStatus::Queued),
             ))
+            .bind(parent_depth + 1)
             .bind(now)
             .bind(now)
             .execute(&mut **transaction)
@@ -3628,6 +4376,68 @@ async fn load_existing_fallback(
     Ok(Some((run, root)))
 }
 
+async fn persist_approval_questions(
+    transaction: &mut Transaction<'_, Sqlite>,
+    approval_id: ApprovalId,
+    questions: &[UserInputQuestion],
+) -> Result<(), StoreError> {
+    for (ordinal, question) in questions.iter().enumerate() {
+        let source_bytes = serde_json::to_vec(question)
+            .map_err(invalid_data("approval question"))?
+            .len();
+        let options_json = question
+            .options
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(invalid_data("approval options"))?
+            .filter(|options| options.len() <= MAX_APPROVAL_QUESTION_SOURCE_BYTES as usize);
+        let header_bytes =
+            i64::try_from(question.header.len()).map_err(|_| StoreError::InvalidData {
+                entity: "approval question",
+                detail: "header size exceeds the supported range".to_owned(),
+            })?;
+        let question_bytes =
+            i64::try_from(question.question.len()).map_err(|_| StoreError::InvalidData {
+                entity: "approval question",
+                detail: "question size exceeds the supported range".to_owned(),
+            })?;
+        sqlx::query(
+            "INSERT INTO approval_questions \
+             (approval_id, ordinal, header, question, options_json, is_other, is_secret, \
+              source_bytes, header_bytes, question_bytes) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(approval_id.to_string())
+        .bind(i64::try_from(ordinal).map_err(|_| StoreError::InvalidData {
+            entity: "approval question",
+            detail: "ordinal exceeds the supported range".to_owned(),
+        })?)
+        .bind(truncate_utf8(
+            question.header.clone(),
+            MAX_APPROVAL_QUESTION_HEADER_BYTES,
+        ))
+        .bind(truncate_utf8(
+            question.question.clone(),
+            MAX_APPROVAL_QUESTION_TEXT_BYTES,
+        ))
+        .bind(options_json)
+        .bind(question.is_other)
+        .bind(question.is_secret)
+        .bind(
+            i64::try_from(source_bytes).map_err(|_| StoreError::InvalidData {
+                entity: "approval question",
+                detail: "source size exceeds the supported range".to_owned(),
+            })?,
+        )
+        .bind(header_bytes)
+        .bind(question_bytes)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn persist_assistant_message_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: RunId,
@@ -3877,6 +4687,7 @@ async fn drain_staged_events_in_transaction(
                     detail: "negative sequence".to_owned(),
                 })?,
                 kind: event.kind,
+                role: canonical_assistant.then_some(MessageRole::Assistant),
                 content: existing_content + &event.content,
             });
             continue;
@@ -3898,14 +4709,15 @@ async fn drain_staged_events_in_transaction(
         });
         let inserted = sqlx::query(
             "INSERT INTO events \
-             (id, conversation_id, run_id, agent_id, kind, content, payload_json, native_item_id, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, conversation_id, run_id, agent_id, kind, role, content, payload_json, native_item_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event.id.to_string())
         .bind(event.conversation_id.to_string())
         .bind(event.run_id.to_string())
         .bind(event.agent_id.to_string())
         .bind(event_kind_label(event.kind))
+        .bind(canonical_assistant.then_some("assistant"))
         .bind(&event.content)
         .bind(payload_json)
         .bind(event.native_item_id.as_deref())
@@ -3936,6 +4748,7 @@ async fn drain_staged_events_in_transaction(
                 }
             })?,
             kind: event.kind,
+            role: canonical_assistant.then_some(MessageRole::Assistant),
             content: event.content,
         });
     }
@@ -3960,6 +4773,19 @@ struct Cursor {
     id: Uuid,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct AgentCursor {
+    created_at: u64,
+    id: Uuid,
+    run_id: RunId,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct QuestionCursor {
+    approval_id: ApprovalId,
+    offset: u32,
+}
+
 fn validate_page_limit(limit: u32) -> Result<(), StoreError> {
     if (1..=MAX_PAGE_SIZE).contains(&limit) {
         Ok(())
@@ -3981,6 +4807,40 @@ fn decode_cursor(value: &str) -> Result<Cursor, StoreError> {
         .decode(value)
         .map_err(|_| StoreError::InvalidCursor)?;
     serde_json::from_slice(&json).map_err(|_| StoreError::InvalidCursor)
+}
+
+fn encode_agent_cursor(cursor: AgentCursor) -> Result<String, StoreError> {
+    let json = serde_json::to_vec(&cursor).map_err(|error| StoreError::InvalidData {
+        entity: "agent cursor",
+        detail: error.to_string(),
+    })?;
+    Ok(URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_agent_cursor(value: &str) -> Result<AgentCursor, StoreError> {
+    let json = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| StoreError::InvalidCursor)?;
+    serde_json::from_slice(&json).map_err(|_| StoreError::InvalidCursor)
+}
+
+fn encode_question_cursor(cursor: QuestionCursor) -> Result<String, StoreError> {
+    let json = serde_json::to_vec(&cursor).map_err(|error| StoreError::InvalidData {
+        entity: "approval question cursor",
+        detail: error.to_string(),
+    })?;
+    Ok(URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_question_cursor(value: &str) -> Result<QuestionCursor, StoreError> {
+    let json = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| StoreError::InvalidCursor)?;
+    serde_json::from_slice(&json).map_err(|_| StoreError::InvalidCursor)
+}
+
+fn agent_cursor_created_at_i64(cursor: &AgentCursor) -> Result<i64, StoreError> {
+    i64::try_from(cursor.created_at).map_err(|_| StoreError::InvalidCursor)
 }
 
 fn cursor_sequence_i64(cursor: &Cursor) -> Result<i64, StoreError> {
@@ -4316,6 +5176,20 @@ fn parse_agent_status(value: &str) -> Result<AgentStatus, StoreError> {
     }
 }
 
+fn parse_rollup_status(value: &str) -> Result<crate::domain::RollupStatus, StoreError> {
+    match value {
+        "needs_attention" => Ok(crate::domain::RollupStatus::NeedsAttention),
+        "active" => Ok(crate::domain::RollupStatus::Active),
+        "failed" => Ok(crate::domain::RollupStatus::Failed),
+        "interrupted" => Ok(crate::domain::RollupStatus::Interrupted),
+        "completed" => Ok(crate::domain::RollupStatus::Completed),
+        value => Err(StoreError::InvalidData {
+            entity: "conversation rollup status",
+            detail: value.to_owned(),
+        }),
+    }
+}
+
 fn parse_mutation_state(value: &str) -> Result<MutationState, StoreError> {
     match value {
         "none_observed" => Ok(MutationState::NoneObserved),
@@ -4383,6 +5257,50 @@ fn parse_event_kind(value: &str) -> Result<TimelineEventKind, StoreError> {
     }
 }
 
+fn parse_message_role(value: &str) -> Result<MessageRole, StoreError> {
+    match value {
+        "user" => Ok(MessageRole::User),
+        "assistant" => Ok(MessageRole::Assistant),
+        _ => Err(StoreError::InvalidData {
+            entity: "timeline event role",
+            detail: format!("unknown role {value}"),
+        }),
+    }
+}
+
+fn normalize_conversation_title(title: String) -> Result<String, StoreError> {
+    let title = title.trim();
+    if title.is_empty() || title.len() > MAX_CONVERSATION_TITLE_BYTES {
+        return Err(StoreError::InvalidData {
+            entity: "conversation title",
+            detail: format!(
+                "must contain 1 to {MAX_CONVERSATION_TITLE_BYTES} bytes after trimming"
+            ),
+        });
+    }
+    Ok(title.to_owned())
+}
+
+fn normalize_legacy_conversation_title(title: String) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return UNTITLED_CONVERSATION_TITLE.to_owned();
+    }
+    truncate_utf8(title.to_owned(), MAX_CONVERSATION_TITLE_BYTES)
+}
+
+fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
+}
+
 #[derive(FromRow)]
 struct ConversationRow {
     id: String,
@@ -4416,7 +5334,7 @@ impl ConversationRow {
         Ok(ConversationRecord {
             conversation: Conversation {
                 id: parse_uuid("conversation", &self.id)?.into(),
-                title: self.title,
+                title: normalize_legacy_conversation_title(self.title),
                 workspace_id,
                 archived,
             },
@@ -4507,6 +5425,118 @@ struct ApprovalRow {
     resolution_json: Option<String>,
     response_intent_json: Option<String>,
     response_intent_status: Option<String>,
+}
+
+#[derive(FromRow)]
+struct ApprovalListRow {
+    id: String,
+    run_id: String,
+    agent_id: String,
+    provider: String,
+    operation: String,
+    scope: String,
+    status: String,
+    response_intent_status: Option<String>,
+    created_at: i64,
+}
+
+#[derive(FromRow)]
+struct ApprovalDetailRow {
+    id: String,
+    operation: String,
+    scope: String,
+    request_json: Option<String>,
+    details_json: Option<String>,
+    question_count: i64,
+    truncated: bool,
+}
+
+impl ApprovalDetailRow {
+    fn into_record(self) -> Result<ApprovalDetailRecord, StoreError> {
+        Ok(ApprovalDetailRecord {
+            id: parse_uuid("approval", &self.id)?.into(),
+            operation: truncate_utf8(self.operation, MAX_EVENT_DETAIL_BYTES),
+            scope: truncate_utf8(self.scope, MAX_EVENT_DETAIL_BYTES),
+            input: self
+                .request_json
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(invalid_data("user input request"))
+                })
+                .transpose()?,
+            details: self
+                .details_json
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(invalid_data("approval request details"))
+                })
+                .transpose()?,
+            question_count: u32::try_from(self.question_count).map_err(|_| {
+                StoreError::InvalidData {
+                    entity: "approval question count",
+                    detail: "count exceeds the supported range".to_owned(),
+                }
+            })?,
+            truncated: self.truncated,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct ApprovalQuestionRow {
+    ordinal: i64,
+    header: String,
+    question: String,
+    options_json: Option<String>,
+    is_other: bool,
+    is_secret: bool,
+    source_bytes: i64,
+    header_bytes: i64,
+    question_bytes: i64,
+}
+
+impl ApprovalQuestionRow {
+    fn into_preview(self) -> Result<ApprovalQuestionPreview, StoreError> {
+        let ordinal = u32::try_from(self.ordinal).map_err(|_| StoreError::InvalidData {
+            entity: "approval question",
+            detail: "ordinal exceeds the supported range".to_owned(),
+        })?;
+        let options = self
+            .options_json
+            .map(|value| serde_json::from_str(&value).map_err(invalid_data("approval options")))
+            .transpose()?;
+        Ok(ApprovalQuestionPreview {
+            id: format!("question-{}", ordinal.saturating_add(1)),
+            header: truncate_utf8(self.header, MAX_APPROVAL_QUESTION_HEADER_BYTES),
+            question: truncate_utf8(self.question, MAX_APPROVAL_QUESTION_TEXT_BYTES),
+            options,
+            is_other: self.is_other,
+            is_secret: self.is_secret,
+            truncated: self.source_bytes > MAX_APPROVAL_QUESTION_SOURCE_BYTES
+                || self.header_bytes > MAX_APPROVAL_QUESTION_HEADER_BYTES as i64
+                || self.question_bytes > MAX_APPROVAL_QUESTION_TEXT_BYTES as i64,
+        })
+    }
+}
+
+impl ApprovalListRow {
+    fn into_summary(self) -> Result<ApprovalSummary, StoreError> {
+        let response_pending = self
+            .response_intent_status
+            .as_deref()
+            .is_some_and(|status| matches!(status, "recorded" | "dispatch_unknown"));
+        if let Some(status) = self.response_intent_status.as_deref() {
+            parse_approval_response_intent_status(status)?;
+        }
+        Ok(ApprovalSummary {
+            id: parse_uuid("approval", &self.id)?.into(),
+            run_id: parse_uuid("provider run", &self.run_id)?.into(),
+            agent_id: parse_uuid("agent node", &self.agent_id)?.into(),
+            provider: parse_provider(&self.provider)?,
+            operation: truncate_utf8(self.operation, 256),
+            scope: truncate_utf8(self.scope, 512),
+            status: parse_approval_status(&self.status)?,
+            response_pending,
+        })
+    }
 }
 
 impl ApprovalRow {
@@ -4627,6 +5657,72 @@ impl AgentNodeRow {
 }
 
 #[derive(FromRow)]
+struct AgentPageRow {
+    id: String,
+    run_id: String,
+    parent_id: Option<String>,
+    provider: String,
+    provider_native_id: Option<String>,
+    provider_native_path: Option<String>,
+    label: String,
+    summary: Option<String>,
+    status: String,
+    created_at: i64,
+    depth: i64,
+}
+
+#[derive(FromRow)]
+struct RecoveryAgentRow {
+    run_id: String,
+    agent_id: String,
+    mutation_state: String,
+    is_root: bool,
+    depth: i64,
+}
+
+impl RecoveryAgentRow {
+    fn into_domain(self) -> Result<RecoveryAgent, StoreError> {
+        Ok(RecoveryAgent {
+            run_id: parse_uuid("provider run", &self.run_id)?.into(),
+            agent_id: parse_uuid("agent node", &self.agent_id)?.into(),
+            mutation_state: parse_mutation_state(&self.mutation_state)?,
+            is_root: self.is_root,
+            depth: u32::try_from(self.depth).map_err(|_| StoreError::InvalidData {
+                entity: "agent node",
+                detail: "depth exceeds the supported range".to_owned(),
+            })?,
+        })
+    }
+}
+
+impl AgentPageRow {
+    fn into_record(self) -> Result<AgentPageRecord, StoreError> {
+        let depth = u32::try_from(self.depth).map_err(|_| StoreError::InvalidData {
+            entity: "agent node",
+            detail: "depth exceeds the supported range".to_owned(),
+        })?;
+        Ok(AgentPageRecord {
+            agent: AgentNodeRow {
+                id: self.id,
+                run_id: self.run_id,
+                parent_id: self.parent_id,
+                provider: self.provider,
+                provider_native_id: self.provider_native_id,
+                provider_native_path: self.provider_native_path,
+                label: truncate_utf8(self.label, MAX_AGENT_LABEL_PREVIEW_BYTES),
+                summary: self
+                    .summary
+                    .map(|summary| truncate_utf8(summary, MAX_AGENT_SUMMARY_PREVIEW_BYTES)),
+                status: self.status,
+                created_at: self.created_at,
+            }
+            .into_domain()?,
+            depth,
+        })
+    }
+}
+
+#[derive(FromRow)]
 struct TimelineEventRow {
     id: String,
     conversation_id: String,
@@ -4634,7 +5730,141 @@ struct TimelineEventRow {
     agent_id: String,
     sequence: i64,
     kind: String,
+    role: Option<String>,
     content: String,
+}
+
+#[derive(FromRow)]
+struct TimelineRecordRow {
+    id: String,
+    conversation_id: String,
+    run_id: String,
+    agent_id: String,
+    sequence: i64,
+    kind: String,
+    role: Option<String>,
+    content: String,
+    content_bytes: i64,
+    provider: String,
+}
+
+impl TimelineRecordRow {
+    fn into_record(self) -> Result<TimelineRecord, StoreError> {
+        let provider = parse_provider(&self.provider)?;
+        let content_bytes =
+            usize::try_from(self.content_bytes).map_err(|_| StoreError::InvalidData {
+                entity: "timeline event",
+                detail: "negative content length".to_owned(),
+            })?;
+        let content = truncate_utf8(self.content, MAX_TIMELINE_PREVIEW_BYTES);
+        let content_truncated = content_bytes > content.len();
+        Ok(TimelineRecord {
+            event: TimelineEventRow {
+                id: self.id,
+                conversation_id: self.conversation_id,
+                run_id: self.run_id,
+                agent_id: self.agent_id,
+                sequence: self.sequence,
+                kind: self.kind,
+                role: self.role,
+                content,
+            }
+            .into_domain()?,
+            provider,
+            content_bytes,
+            content_truncated,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct SidebarDetailRow {
+    conversation_id: String,
+    project_root: Option<String>,
+    run_id: Option<String>,
+    provider: Option<String>,
+    fallback_from_run_id: Option<String>,
+    native_session_id: Option<String>,
+    run_status: Option<String>,
+    mutation_state: Option<String>,
+    dispatch_certainty: Option<String>,
+    run_created_at: Option<i64>,
+    rollup_status: Option<String>,
+    active_descendant_count: Option<i64>,
+    total_agent_count: Option<i64>,
+    agent_id: Option<String>,
+    parent_id: Option<String>,
+    agent_provider: Option<String>,
+    provider_native_id: Option<String>,
+    provider_native_path: Option<String>,
+    label: Option<String>,
+    summary: Option<String>,
+    agent_status: Option<String>,
+    agent_created_at: Option<i64>,
+}
+
+impl SidebarDetailRow {
+    fn provider_run(&self) -> Result<Option<ProviderRun>, StoreError> {
+        let Some(id) = self.run_id.as_deref() else {
+            return Ok(None);
+        };
+        ProviderRunRow {
+            id: id.to_owned(),
+            conversation_id: self.conversation_id.clone(),
+            provider: required_sidebar(&self.provider, "provider")?,
+            fallback_from_run_id: self.fallback_from_run_id.clone(),
+            native_session_id: self.native_session_id.clone(),
+            status: required_sidebar(&self.run_status, "run status")?,
+            mutation_state: required_sidebar(&self.mutation_state, "mutation state")?,
+            dispatch_certainty: self.dispatch_certainty.clone(),
+            created_at: self.run_created_at.ok_or_else(|| StoreError::InvalidData {
+                entity: "sidebar run",
+                detail: "missing creation timestamp".to_owned(),
+            })?,
+        }
+        .into_domain()
+        .map(Some)
+    }
+
+    fn agent(&self) -> Result<Option<AgentNode>, StoreError> {
+        let Some(id) = self.agent_id.as_deref() else {
+            return Ok(None);
+        };
+        let run_id = required_sidebar(&self.run_id, "run id")?;
+        let _ = self.agent_created_at;
+        AgentNodeRow {
+            id: id.to_owned(),
+            run_id,
+            parent_id: self.parent_id.clone(),
+            provider: required_sidebar(&self.agent_provider, "agent provider")?,
+            provider_native_id: self.provider_native_id.clone(),
+            provider_native_path: self.provider_native_path.clone(),
+            label: truncate_utf8(
+                required_sidebar(&self.label, "agent label")?,
+                MAX_AGENT_LABEL_PREVIEW_BYTES,
+            ),
+            summary: self
+                .summary
+                .clone()
+                .map(|summary| truncate_utf8(summary, MAX_AGENT_SUMMARY_PREVIEW_BYTES)),
+            status: required_sidebar(&self.agent_status, "agent status")?,
+            created_at: self
+                .agent_created_at
+                .ok_or_else(|| StoreError::InvalidData {
+                    entity: "sidebar agent",
+                    detail: "missing creation timestamp".to_owned(),
+                })?,
+        }
+        .into_domain()
+        .map(Some)
+    }
+}
+
+fn required_sidebar(value: &Option<String>, field: &'static str) -> Result<String, StoreError> {
+    value.clone().ok_or_else(|| StoreError::InvalidData {
+        entity: "sidebar snapshot",
+        detail: format!("missing {field}"),
+    })
 }
 
 #[derive(FromRow)]
@@ -4691,6 +5921,10 @@ impl TimelineEventRow {
                 detail: "negative sequence".to_owned(),
             })?,
             kind: parse_event_kind(&self.kind)?,
+            role: self
+                .role
+                .map(|role| parse_message_role(&role))
+                .transpose()?,
             content: self.content,
         })
     }
@@ -4701,10 +5935,12 @@ mod tests {
     use std::path::PathBuf;
 
     use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{AssertSqlSafe, SqlitePool};
+    use tokio::sync::broadcast;
 
     use crate::domain::{
-        AgentId, ApprovalId, ConversationId, RunId, RunStatus, TimelineEventId, Workspace,
-        WorkspaceId,
+        AgentId, ApprovalId, ApprovalResolution, ConversationId, MessageId, MessageRole, RunId,
+        RunStatus, TimelineEventId, TimelineEventKind, UserInputQuestion, Workspace, WorkspaceId,
     };
     use crate::providers::{
         NativeAgentStatus, NativeChildStatus, NativeSubAgentActivityKind, ProviderId,
@@ -4714,8 +5950,21 @@ mod tests {
         ConversationSettings, MAX_CANONICAL_MESSAGE_BYTES, MAX_NATIVE_AGENT_ID_BYTES,
         MAX_OBJECTIVE_BYTES, MAX_STAGED_EVENT_BYTES, MAX_STAGED_EVENT_ROWS, MIGRATOR,
         NewConversation, NewFallbackAttempt, NewSubmission, PreparedSubmission,
-        ProviderEventRecord, STAGED_OVERFLOW_CONTENT, Store, StoreError,
+        ProviderEventRecord, STAGED_OVERFLOW_CONTENT, STORE_CHANGE_CHANNEL_CAPACITY, Store,
+        StoreError,
     };
+
+    async fn explain_query_plan(pool: &SqlitePool, statement: &str) -> Vec<String> {
+        sqlx::query_as::<_, (i64, i64, i64, String)>(AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {statement}"
+        )))
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, _, detail)| detail)
+        .collect()
+    }
 
     #[tokio::test]
     async fn store_initializes_sqlite_and_all_owned_tables() {
@@ -4741,7 +5990,7 @@ mod tests {
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN \
              ('workspaces', 'conversations', 'provider_sessions', 'provider_runs', \
               'agent_nodes', 'messages', 'events', 'approvals', 'routing_decisions', \
-              'staged_provider_events')",
+              'staged_provider_events', 'approval_questions')",
         )
         .fetch_one(&store.pool)
         .await
@@ -4750,7 +5999,8 @@ mod tests {
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name IN \
              ('idx_conversations_status_updated', 'idx_conversations_workspace_updated', \
               'idx_runs_conversation_created', 'idx_agents_run_parent', \
-              'idx_events_conversation_sequence', 'idx_approvals_pending', \
+              'idx_events_conversation_sequence', 'idx_approvals_conversation_pending', \
+              'idx_approvals_conversation_history', \
               'idx_staged_provider_events_run_sequence')",
         )
         .fetch_one(&store.pool)
@@ -4760,8 +6010,8 @@ mod tests {
         assert_eq!(foreign_keys, 1);
         assert_eq!(journal_mode, "wal");
         assert_eq!(busy_timeout, 5_000);
-        assert_eq!(table_count, 10);
-        assert_eq!(index_count, 7);
+        assert_eq!(table_count, 11);
+        assert_eq!(index_count, 8);
 
         let workspace_columns: Vec<String> =
             sqlx::query_scalar("SELECT name FROM pragma_table_info('workspaces') ORDER BY cid")
@@ -4769,6 +6019,893 @@ mod tests {
                 .await
                 .unwrap();
         assert!(workspace_columns.contains(&"worktree_base_commit".to_owned()));
+        let duplicate_agent_page_index: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_schema \
+             WHERE type = 'index' AND name = 'idx_agents_run_page'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(duplicate_agent_page_index, 0);
+    }
+
+    #[tokio::test]
+    async fn conversation_titles_are_normalized_and_byte_bounded() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        for title in ["   ".to_owned(), "x".repeat(257), "界".repeat(86)] {
+            assert!(matches!(
+                store
+                    .create_conversation(NewConversation::projectless(title))
+                    .await,
+                Err(StoreError::InvalidData {
+                    entity: "conversation title",
+                    ..
+                })
+            ));
+        }
+        let normalized = store
+            .create_conversation(NewConversation::projectless("  useful title  "))
+            .await
+            .unwrap();
+        assert_eq!(normalized.title, "useful title");
+        let multibyte = store
+            .create_conversation(NewConversation::projectless("界".repeat(85)))
+            .await
+            .unwrap();
+        assert_eq!(multibyte.title.len(), 255);
+
+        let legacy_id = ConversationId::new();
+        sqlx::query(
+            "INSERT INTO conversations \
+             (id, title, workspace_id, status, created_at, updated_at) \
+             VALUES (?, ?, NULL, 'active', 1, 1)",
+        )
+        .bind(legacy_id.to_string())
+        .bind("界".repeat(1_000))
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let legacy = store.load_conversation(legacy_id).await.unwrap();
+        assert!(legacy.title.len() <= 256);
+        assert!(legacy.title.is_char_boundary(legacy.title.len()));
+
+        let blank_legacy_id = ConversationId::new();
+        sqlx::query(
+            "INSERT INTO conversations \
+             (id, title, workspace_id, status, created_at, updated_at) \
+             VALUES (?, '   ', NULL, 'active', 2, 2)",
+        )
+        .bind(blank_legacy_id.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .load_conversation(blank_legacy_id)
+                .await
+                .unwrap()
+                .title,
+            "Untitled conversation"
+        );
+        let sidebar = store.list_conversations(None, 20).await.unwrap();
+        assert_eq!(
+            sidebar
+                .items
+                .iter()
+                .find(|conversation| conversation.id == blank_legacy_id)
+                .unwrap()
+                .title,
+            "Untitled conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn visible_run_creation_publishes_only_after_commit() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("run changes"))
+            .await
+            .unwrap();
+        let mut changes = store.subscribe_changes();
+        let (primary, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            super::StoreChange {
+                conversation_id: conversation.id,
+                run_id: Some(primary.id),
+            }
+        );
+        store
+            .append_run_event(primary.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let _ = changes.recv().await.unwrap();
+        store
+            .fail_run_if_active(
+                primary.id,
+                root.id,
+                crate::providers::ProviderErrorCategory::Rejected,
+                crate::domain::MutationState::NoneObserved,
+                crate::providers::DispatchCertainty::NotDispatched,
+            )
+            .await
+            .unwrap();
+        let _ = changes.recv().await.unwrap();
+        let (fallback, _) = store
+            .create_fallback_run(primary.id, ProviderId::Claude)
+            .await
+            .unwrap();
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            super::StoreChange {
+                conversation_id: conversation.id,
+                run_id: Some(fallback.id),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_database_approval_pages_are_conversation_bounded_and_presorted() {
+        let store = Store::open_in_memory().await.unwrap();
+        for predicate in ["status = 'pending'", "status <> 'pending'"] {
+            let plan = explain_query_plan(
+                &store.pool,
+                &format!(
+                    "SELECT id FROM approvals WHERE conversation_id = 'fixture' \
+                     AND {predicate} ORDER BY created_at DESC, id DESC LIMIT 201"
+                ),
+            )
+            .await;
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.contains("idx_approvals_conversation_"))
+            );
+            assert!(!plan.iter().any(|detail| detail.contains("SCAN approvals")));
+            assert!(!plan.iter().any(|detail| detail.contains("TEMP B-TREE")));
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_pages_do_not_cross_conversations_at_scale() {
+        let store = Store::open_in_memory().await.unwrap();
+        let [
+            (target_conversation, target_run, target_root),
+            (other_conversation, other_run, other_root),
+        ] = two_runs(&store).await;
+        for index in 0..600 {
+            let (conversation_id, run_id, agent_id) = if index % 2 == 0 {
+                (target_conversation, target_run, target_root)
+            } else {
+                (other_conversation, other_run, other_root)
+            };
+            let (status, resolution) = if index % 4 < 2 {
+                ("pending", None)
+            } else {
+                ("denied", Some("{\"kind\":\"denied\"}"))
+            };
+            sqlx::query(
+                "INSERT INTO approvals \
+                 (id, conversation_id, run_id, agent_id, provider, provider_request_id, \
+                  operation, scope, status, resolution_json, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, 'codex', ?, 'command execution', 'current turn', \
+                         ?, ?, ?, ?)",
+            )
+            .bind(ApprovalId::new().to_string())
+            .bind(conversation_id.to_string())
+            .bind(run_id.to_string())
+            .bind(agent_id.to_string())
+            .bind(format!("request-{index}"))
+            .bind(status)
+            .bind(resolution)
+            .bind(index)
+            .bind(index)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        for pending in [true, false] {
+            let mut cursor = None;
+            let mut approvals = Vec::new();
+            loop {
+                let page = store
+                    .load_approvals(target_conversation, cursor.take(), pending, 50)
+                    .await
+                    .unwrap();
+                approvals.extend(page.items);
+                let Some(next) = page.next_cursor else { break };
+                cursor = Some(next);
+            }
+            assert_eq!(approvals.len(), 150);
+            assert!(
+                approvals
+                    .iter()
+                    .all(|approval| approval.run_id == target_run)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_database_recovery_batch_is_driven_by_the_depth_index_without_sorting() {
+        let store = Store::open_in_memory().await.unwrap();
+        let plan = explain_query_plan(
+            &store.pool,
+            "SELECT agent_nodes.run_id, agent_nodes.id, provider_runs.mutation_state, \
+                    agent_nodes.parent_id IS NULL, agent_nodes.depth \
+             FROM agent_nodes INDEXED BY idx_agents_recovery_depth \
+             CROSS JOIN provider_runs ON provider_runs.id = agent_nodes.run_id \
+             WHERE agent_nodes.status IN ('queued', 'running', 'waiting') \
+               AND provider_runs.status IN ('queued', 'running', 'waiting') \
+             ORDER BY agent_nodes.depth DESC, agent_nodes.created_at, agent_nodes.id LIMIT 200",
+        )
+        .await;
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_agents_recovery_depth"))
+        );
+        assert!(!plan.iter().any(|detail| detail.contains("TEMP B-TREE")));
+    }
+
+    #[tokio::test]
+    async fn committed_provider_events_publish_compact_invalidations() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("fixture"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        let mut changes = store.subscribe_changes();
+
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            super::StoreChange {
+                conversation_id: conversation.id,
+                run_id: Some(run.id),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_create_submit_and_archive_publish_store_owned_post_commit_invalidations() {
+        let store = Store::open_in_memory().await.unwrap();
+        let mut changes = store.subscribe_changes();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("post commit changes"))
+            .await
+            .unwrap();
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            super::StoreChange {
+                conversation_id: conversation.id,
+                run_id: None,
+            }
+        );
+
+        let decision = crate::router::Router::default()
+            .route(
+                crate::router::RouteRequest::builder("submit")
+                    .eligible([crate::router::ProviderRoutingState::available(
+                        ProviderId::Codex,
+                        crate::providers::ProviderCapabilities::default(),
+                    )])
+                    .override_provider(ProviderId::Codex)
+                    .build(),
+            )
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(NewSubmission {
+                command_id: "post-commit-submit".to_owned(),
+                request_hash: "post-commit-hash".to_owned(),
+                conversation_id: conversation.id,
+                provider: ProviderId::Codex,
+                content: "submit".to_owned(),
+                routing_decision: decision,
+                handoff_rendered: None,
+                handoff_hash: None,
+                turn_prompt: "submit".to_owned(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("first submit must create a run");
+        };
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            super::StoreChange {
+                conversation_id: conversation.id,
+                run_id: Some(run.id),
+            }
+        );
+        sqlx::query("UPDATE provider_runs SET status = 'completed' WHERE id = ?")
+            .bind(run.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.archive_conversation(conversation.id).await.unwrap();
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            super::StoreChange {
+                conversation_id: conversation.id,
+                run_id: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledged_approval_publishes_after_the_visible_state_commits() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("fixture"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    "approval-1",
+                    "run command",
+                    "workspace",
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .record_response_intent(run.id, root.id, "approval-1", ApprovalResolution::Approved)
+            .await
+            .unwrap();
+        let mut changes = store.subscribe_changes();
+
+        store
+            .acknowledge_response_intent(run.id, root.id, "approval-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            super::StoreChange {
+                conversation_id: conversation.id,
+                run_id: Some(run.id),
+            }
+        );
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_timeline_starts_at_the_newest_page_and_cursors_older() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("recent timeline"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        for content in ["one", "two", "three", "four"] {
+            store
+                .append_run_event(run.id, root.id, ProviderEventRecord::progress(content))
+                .await
+                .unwrap();
+        }
+
+        let newest = store
+            .load_recent_timeline(conversation.id, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            newest
+                .items
+                .iter()
+                .map(|record| record.event.content.as_str())
+                .collect::<Vec<_>>(),
+            ["three", "four"]
+        );
+        assert!(
+            newest
+                .items
+                .windows(2)
+                .all(|pair| { pair[0].event.sequence < pair[1].event.sequence })
+        );
+
+        let older = store
+            .load_recent_timeline(conversation.id, newest.next_cursor, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            older
+                .items
+                .iter()
+                .map(|record| record.event.content.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        assert!(older.next_cursor.is_some());
+    }
+
+    #[tokio::test]
+    async fn desktop_timeline_previews_and_event_detail_are_utf8_safe_and_byte_bounded() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("bounded timeline"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let large = "🦀".repeat(super::MAX_EVENT_DETAIL_BYTES);
+        let event = store
+            .append_run_event(run.id, root.id, ProviderEventRecord::progress(&large))
+            .await
+            .unwrap();
+
+        let page = store
+            .load_recent_timeline(conversation.id, None, 200)
+            .await
+            .unwrap();
+        assert!(
+            page.items
+                .iter()
+                .map(|item| item.event.content.len())
+                .sum::<usize>()
+                <= super::MAX_TIMELINE_PAGE_CONTENT_BYTES
+        );
+        let preview = page
+            .items
+            .iter()
+            .find(|item| item.event.id == event.id)
+            .unwrap();
+        assert!(preview.event.content.len() <= super::MAX_TIMELINE_PREVIEW_BYTES);
+        assert!(preview.content_truncated);
+        assert_eq!(preview.content_bytes, large.len());
+
+        let detail = store.load_event_detail(event.id).await.unwrap();
+        assert!(detail.content.len() <= super::MAX_EVENT_DETAIL_BYTES);
+        assert!(detail.truncated);
+        assert_eq!(detail.content_bytes, large.len());
+        assert!(std::str::from_utf8(detail.content.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn submitted_user_and_assistant_messages_share_one_ordered_timeline_without_retry_duplicates()
+     {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("canonical transcript"))
+            .await
+            .unwrap();
+        let decision = crate::router::Router::default()
+            .route(
+                crate::router::RouteRequest::builder("hello")
+                    .eligible([crate::router::ProviderRoutingState::available(
+                        ProviderId::Codex,
+                        crate::providers::ProviderCapabilities::default(),
+                    )])
+                    .override_provider(ProviderId::Codex)
+                    .build(),
+            )
+            .unwrap();
+        let submission = NewSubmission {
+            command_id: "canonical-transcript-command".to_owned(),
+            request_hash: "canonical-transcript-hash".to_owned(),
+            conversation_id: conversation.id,
+            provider: ProviderId::Codex,
+            content: "hello".to_owned(),
+            routing_decision: decision,
+            handoff_rendered: None,
+            handoff_hash: None,
+            turn_prompt: "hello".to_owned(),
+        };
+        let PreparedSubmission::Created { run, root } =
+            store.prepare_submission(submission.clone()).await.unwrap()
+        else {
+            panic!("first submission must create the run");
+        };
+        assert!(matches!(
+            store.prepare_submission(submission).await.unwrap(),
+            PreparedSubmission::Duplicate(existing) if existing.id == run.id
+        ));
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::message("hello back"))
+            .await
+            .unwrap();
+
+        let messages = store
+            .load_recent_timeline(conversation.id, None, 20)
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|record| record.event.kind == TimelineEventKind::Message)
+            .collect::<Vec<_>>();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].event.content, "hello");
+        assert_eq!(messages[0].event.role, Some(MessageRole::User));
+        assert_eq!(messages[0].provider, ProviderId::Codex);
+        assert_eq!(messages[1].event.content, "hello back");
+        assert_eq!(messages[1].event.role, Some(MessageRole::Assistant));
+        assert_eq!(messages[1].provider, ProviderId::Codex);
+        assert!(messages[0].event.sequence < messages[1].event.sequence);
+        let durable_user_message_id: String =
+            sqlx::query_scalar("SELECT id FROM messages WHERE run_id = ? AND role = 'user'")
+                .bind(run.id.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(messages[0].event.id.to_string(), durable_user_message_id);
+    }
+
+    #[tokio::test]
+    async fn sidebar_details_preserve_recursive_agents_and_roll_up_attention() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("agent tree"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        let child = insert_child(&store, run.id, root.id, "running", "child").await;
+        let grandchild = insert_child(&store, run.id, child, "waiting", "grandchild").await;
+
+        let details = store
+            .load_sidebar_details(&[conversation.id])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(details.run.as_ref().map(|value| value.id), Some(run.id));
+        assert_eq!(
+            details.rollup_status,
+            Some(crate::domain::RollupStatus::NeedsAttention)
+        );
+        assert_eq!(details.agents.len(), 1);
+        assert_eq!(details.agents[0].id, root.id);
+        assert!(details.agents_truncated);
+        let page = store
+            .load_agent_page(conversation.id, None, 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .find(|item| item.agent.id == child)
+                .and_then(|item| item.agent.parent_id),
+            Some(root.id)
+        );
+        assert_eq!(
+            page.items
+                .iter()
+                .find(|item| item.agent.id == grandchild)
+                .and_then(|item| item.agent.parent_id),
+            Some(child)
+        );
+        assert!(details.agents_truncated);
+        assert_eq!(details.active_descendant_count, 2);
+    }
+
+    #[tokio::test]
+    async fn agent_tree_pages_make_every_descendant_and_deep_ancestry_discoverable() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("large agent tree"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        for index in 0..225 {
+            insert_child(&store, run.id, root.id, "queued", &format!("Agent {index}")).await;
+        }
+        let mut parent = root.id;
+        for depth in 1..=40 {
+            parent = insert_child(
+                &store,
+                run.id,
+                parent,
+                "queued",
+                &format!("Deep agent {depth}"),
+            )
+            .await;
+        }
+
+        let recovery_batch = store.load_recovery_agent_batch(200).await.unwrap();
+        assert_eq!(recovery_batch.len(), 200);
+        assert!(
+            recovery_batch
+                .windows(2)
+                .all(|pair| pair[0].depth >= pair[1].depth)
+        );
+
+        let first = store
+            .load_agent_page(conversation.id, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(first.run_id, Some(run.id));
+        let (newer_run, _) = store
+            .create_run(conversation.id, ProviderId::Claude)
+            .await
+            .unwrap();
+        let mut cursor = first.next_cursor;
+        let mut agents = first.items;
+        loop {
+            let page = store
+                .load_agent_page(conversation.id, cursor.take(), 100)
+                .await
+                .unwrap();
+            assert_eq!(page.run_id, Some(run.id));
+            assert_ne!(page.run_id, Some(newer_run.id));
+            agents.extend(page.items);
+            let Some(next) = page.next_cursor else { break };
+            cursor = Some(next);
+        }
+
+        assert_eq!(agents.len(), 266);
+        assert_eq!(agents.iter().map(|item| item.depth).max(), Some(40));
+        assert!(agents.iter().any(|item| item.agent.id == parent));
+    }
+
+    #[tokio::test]
+    async fn every_pending_approval_is_cursor_discoverable_without_loading_structured_payloads() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("many approvals"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let native_secret = "provider-native-question-secret";
+        let request = serde_json::json!({
+            "questions": [{
+                "id": native_secret,
+                "header": "Header",
+                "question": "x".repeat(100_000),
+                "options": null,
+                "isOther": false,
+                "isSecret": false
+            }],
+            "autoResolutionMs": null
+        })
+        .to_string();
+        let oversized_questions = (0..75)
+            .map(|index| UserInputQuestion {
+                id: format!("{native_secret}-{index}"),
+                header: "Header".to_owned(),
+                question: "🦀".repeat(2_000),
+                options: Some(vec![crate::domain::UserInputOption {
+                    label: "Continue".to_owned(),
+                    description: "Use the bounded preview".to_owned(),
+                }]),
+                is_other: false,
+                is_secret: false,
+            })
+            .collect::<Vec<_>>();
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::user_input_requested(
+                    ProviderId::Codex,
+                    "oversized-native-request",
+                    oversized_questions,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let oversized_approval_id: String = sqlx::query_scalar(
+            "SELECT id FROM approvals WHERE provider_request_id = 'oversized-native-request'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let oversized_approval_id: ApprovalId = uuid::Uuid::parse_str(&oversized_approval_id)
+            .unwrap()
+            .into();
+        for index in 0..224 {
+            sqlx::query(
+                "INSERT INTO approvals \
+                 (id, conversation_id, run_id, agent_id, provider, provider_request_id, operation, scope, \
+                  request_json, status, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, 'codex', ?, ?, ?, ?, 'pending', ?, ?)",
+            )
+            .bind(ApprovalId::new().to_string())
+            .bind(conversation.id.to_string())
+            .bind(run.id.to_string())
+            .bind(root.id.to_string())
+            .bind(format!("native-request-{index}"))
+            .bind("🦀".repeat(4_000))
+            .bind("界".repeat(4_000))
+            .bind(&request)
+            .bind(index)
+            .bind(index)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        let first = store
+            .load_approvals(conversation.id, None, true, 200)
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 200);
+        assert!(first.next_cursor.is_some());
+        assert!(first.items.iter().all(|approval| {
+            approval.operation.len() <= 256
+                && approval.scope.len() <= 512
+                && !approval.response_pending
+        }));
+        let second = store
+            .load_approvals(conversation.id, first.next_cursor, true, 200)
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 25);
+        assert!(second.next_cursor.is_none());
+
+        let detail = store
+            .load_approval_detail(oversized_approval_id)
+            .await
+            .unwrap();
+        assert!(detail.truncated);
+        assert!(detail.input.is_none());
+        assert!(detail.details.is_none());
+        assert_eq!(detail.question_count, 75);
+        let first_questions = store
+            .load_approval_questions(oversized_approval_id, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(first_questions.items.len(), 50);
+        assert_eq!(first_questions.total_count, 75);
+        assert!(first_questions.items.iter().all(|question| {
+            question.id.starts_with("question-")
+                && question.question.len() <= super::MAX_APPROVAL_QUESTION_TEXT_BYTES
+                && question.truncated
+        }));
+        assert_eq!(
+            first_questions.items[0].options.as_ref().unwrap()[0].label,
+            "Continue"
+        );
+        assert!(
+            !serde_json::to_string(&first_questions.items)
+                .unwrap()
+                .contains(native_secret)
+        );
+        let second_questions = store
+            .load_approval_questions(oversized_approval_id, first_questions.next_cursor, 50)
+            .await
+            .unwrap();
+        assert_eq!(second_questions.items.len(), 25);
+        assert!(second_questions.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn user_input_questions_are_normalized_once_for_indexed_paging() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("normalized questions"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let questions = (0..125)
+            .map(|index| UserInputQuestion {
+                id: format!("provider-native-question-{index}"),
+                header: format!("Header {index}"),
+                question: format!("Question {index}"),
+                options: Some(vec![crate::domain::UserInputOption {
+                    label: "Yes".to_owned(),
+                    description: "Continue".to_owned(),
+                }]),
+                is_other: false,
+                is_secret: false,
+            })
+            .collect::<Vec<_>>();
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::user_input_requested(
+                    ProviderId::Codex,
+                    "provider-native-request",
+                    questions,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let approval_id: String = sqlx::query_scalar("SELECT id FROM approvals WHERE run_id = ?")
+            .bind(run.id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let approval_id: ApprovalId = uuid::Uuid::parse_str(&approval_id).unwrap().into();
+
+        let normalized_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM approval_questions WHERE approval_id = ?")
+                .bind(approval_id.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(normalized_count, 125);
+        sqlx::query("UPDATE approvals SET request_json = '{\"questions\":[]}' WHERE id = ?")
+            .bind(approval_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let first = store
+            .load_approval_questions(approval_id, None, 50)
+            .await
+            .unwrap();
+        let second = store
+            .load_approval_questions(approval_id, first.next_cursor, 50)
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 50);
+        assert_eq!(second.items.len(), 50);
+        assert_eq!(first.total_count, 125);
+        assert_eq!(first.items[0].id, "question-1");
+        assert_eq!(first.items[0].options.as_ref().unwrap()[0].label, "Yes");
+        assert_eq!(second.items[0].id, "question-51");
+        assert!(
+            !serde_json::to_string(&first.items)
+                .unwrap()
+                .contains("provider-native")
+        );
     }
 
     #[tokio::test]
@@ -5855,7 +7992,8 @@ mod tests {
 
         MIGRATOR.run_to(3, &pool).await.unwrap();
         MIGRATOR.run(&pool).await.unwrap();
-        let store = Store { pool };
+        let (changes, _) = broadcast::channel(STORE_CHANGE_CHANNEL_CAPACITY);
+        let store = Store { pool, changes };
 
         let pending = store.load_approval(run_id, "pending-v2").await.unwrap();
         assert_eq!(pending.status, crate::domain::ApprovalStatus::Pending);
@@ -5890,6 +8028,124 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(staged_table_count, 1);
+    }
+
+    #[tokio::test]
+    async fn migration_backfills_historical_user_turns_into_canonical_timeline_order() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        MIGRATOR.run_to(12, &pool).await.unwrap();
+        let conversation_id = ConversationId::new();
+        let run_id = RunId::new();
+        let agent_id = AgentId::new();
+        sqlx::query(
+            "INSERT INTO conversations \
+             (id, title, workspace_id, status, created_at, updated_at) \
+             VALUES (?, 'upgrade fixture', NULL, 'active', 1, 3)",
+        )
+        .bind(conversation_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_runs \
+             (id, conversation_id, provider, status, mutation_state, application_managed, \
+              created_at, updated_at) \
+             VALUES (?, ?, 'codex', 'completed', 'none_observed', 1, 1, 3)",
+        )
+        .bind(run_id.to_string())
+        .bind(conversation_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_nodes \
+             (id, run_id, parent_id, provider, label, status, created_at, updated_at) \
+             VALUES (?, ?, NULL, 'codex', 'orchestrator', 'completed', 1, 3)",
+        )
+        .bind(agent_id.to_string())
+        .bind(run_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let user_message_id = MessageId::new();
+        sqlx::query(
+            "INSERT INTO messages \
+             (id, conversation_id, run_id, role, content, created_at) \
+             VALUES (?, ?, ?, 'user', 'historical question', 2)",
+        )
+        .bind(user_message_id.to_string())
+        .bind(conversation_id.to_string())
+        .bind(run_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages \
+             (id, conversation_id, run_id, role, content, created_at) \
+             VALUES (?, ?, ?, 'assistant', 'historical answer', 3)",
+        )
+        .bind(MessageId::new().to_string())
+        .bind(conversation_id.to_string())
+        .bind(run_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO events \
+             (id, conversation_id, run_id, agent_id, kind, content, created_at) \
+             VALUES (?, ?, ?, ?, 'message', 'historical answer', 3)",
+        )
+        .bind(TimelineEventId::new().to_string())
+        .bind(conversation_id.to_string())
+        .bind(run_id.to_string())
+        .bind(agent_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        MIGRATOR.run_to(13, &pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO events \
+             (id, conversation_id, run_id, agent_id, kind, role, content, created_at) \
+             VALUES (?, ?, ?, ?, 'message', 'user', 'historical question', 2)",
+        )
+        .bind(TimelineEventId::new().to_string())
+        .bind(conversation_id.to_string())
+        .bind(run_id.to_string())
+        .bind(agent_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        MIGRATOR.run(&pool).await.unwrap();
+        let (changes, _) = broadcast::channel(STORE_CHANGE_CHANNEL_CAPACITY);
+        let store = Store { pool, changes };
+        let timeline = store
+            .load_recent_timeline(conversation_id, None, 20)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            timeline
+                .items
+                .iter()
+                .map(|item| (item.event.role, item.event.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(MessageRole::User), "historical question"),
+                (Some(MessageRole::Assistant), "historical answer"),
+            ]
+        );
+        let user_events: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE id = ? AND role = 'user'")
+                .bind(user_message_id.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(user_events, 1);
     }
 
     #[tokio::test]
@@ -6286,14 +8542,15 @@ mod tests {
     #[tokio::test]
     async fn approval_agent_must_belong_to_its_run() {
         let store = Store::open_in_memory().await.unwrap();
-        let [(_, _, first_root), (_, second_run, _)] = two_runs(&store).await;
+        let [(_, _, first_root), (second_conversation, second_run, _)] = two_runs(&store).await;
 
         let result = sqlx::query(
             "INSERT INTO approvals \
-             (id, run_id, agent_id, provider, operation, scope, status, resolution_json, created_at, updated_at) \
-             VALUES (?, ?, ?, 'codex', 'write', 'file', 'pending', NULL, 1, 1)",
+             (id, conversation_id, run_id, agent_id, provider, operation, scope, status, resolution_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'codex', 'write', 'file', 'pending', NULL, 1, 1)",
         )
         .bind(ApprovalId::new().to_string())
+        .bind(second_conversation.to_string())
         .bind(second_run.to_string())
         .bind(first_root.to_string())
         .execute(&store.pool)
@@ -6303,16 +8560,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_resolution_must_match_its_status() {
+    async fn approval_conversation_must_own_its_run() {
         let store = Store::open_in_memory().await.unwrap();
-        let [(_, run, root), _] = two_runs(&store).await;
+        let [(first_conversation, _, _), (_, second_run, second_root)] = two_runs(&store).await;
 
         let result = sqlx::query(
             "INSERT INTO approvals \
-             (id, run_id, agent_id, provider, operation, scope, status, resolution_json, created_at, updated_at) \
-             VALUES (?, ?, ?, 'codex', 'write', 'file', 'answered', '{\"kind\":\"denied\"}', 1, 1)",
+             (id, conversation_id, run_id, agent_id, provider, operation, scope, status, \
+              resolution_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'codex', 'write', 'file', 'pending', NULL, 1, 1)",
         )
         .bind(ApprovalId::new().to_string())
+        .bind(first_conversation.to_string())
+        .bind(second_run.to_string())
+        .bind(second_root.to_string())
+        .execute(&store.pool)
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn approval_resolution_must_match_its_status() {
+        let store = Store::open_in_memory().await.unwrap();
+        let [(conversation, run, root), _] = two_runs(&store).await;
+
+        let result = sqlx::query(
+            "INSERT INTO approvals \
+             (id, conversation_id, run_id, agent_id, provider, operation, scope, status, resolution_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'codex', 'write', 'file', 'answered', '{\"kind\":\"denied\"}', 1, 1)",
+        )
+        .bind(ApprovalId::new().to_string())
+        .bind(conversation.to_string())
         .bind(run.to_string())
         .bind(root.to_string())
         .execute(&store.pool)
@@ -6761,10 +9040,11 @@ mod tests {
             .unwrap();
         sqlx::query(
             "INSERT INTO approvals \
-             (id, run_id, agent_id, provider, operation, scope, status, resolution_json, created_at, updated_at) \
-             VALUES (?, ?, ?, 'codex', 'write', 'file', 'pending', NULL, 1, 1)",
+             (id, conversation_id, run_id, agent_id, provider, operation, scope, status, resolution_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'codex', 'write', 'file', 'pending', NULL, 1, 1)",
         )
         .bind(ApprovalId::new().to_string())
+        .bind(conversation.id.to_string())
         .bind(run.id.to_string())
         .bind(child.to_string())
         .execute(&store.pool)
@@ -6967,14 +9247,16 @@ mod tests {
         let child_id = AgentId::new();
         sqlx::query(
             "INSERT INTO agent_nodes \
-             (id, run_id, parent_id, provider, label, status, created_at, updated_at) \
-             VALUES (?, ?, ?, 'codex', ?, ?, 1, 1)",
+             (id, run_id, parent_id, provider, label, status, depth, created_at, updated_at) \
+             VALUES (?, ?, ?, 'codex', ?, ?, \
+                     (SELECT depth + 1 FROM agent_nodes WHERE id = ?), 1, 1)",
         )
         .bind(child_id.to_string())
         .bind(run_id.to_string())
         .bind(parent_id.to_string())
         .bind(label)
         .bind(status)
+        .bind(parent_id.to_string())
         .execute(&store.pool)
         .await
         .unwrap();

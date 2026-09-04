@@ -280,6 +280,82 @@ async fn adapter_turn_shutdown_awaits_its_owner_once() {
     assert_eq!(adapter.owner_shutdowns.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn codex_adapter_shutdown_awaits_app_server_reaping() {
+    let process_directory = tempfile::tempdir().unwrap();
+    let pid_file = process_directory.path().join("pid");
+    let pid_text = pid_file.to_string_lossy();
+    let extract_id = response_id_shell("request_id");
+    let script = format!(
+        r#"
+printf '%s' "$$" > '{pid_text}'
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"userAgent":"codex-cli 0.test","platformFamily":"unix","platformOs":"macos","codexHome":"/invented/codex-home"}}}}\n' "$request_id"
+IFS= read -r line
+sleep 30
+"#
+    );
+    let (_directory, binary) = fake_codex(&script);
+    let adapter = CodexAdapter::connect(binary).await.unwrap();
+    let pid = fs::read_to_string(&pid_file).unwrap();
+
+    adapter.shutdown().await.unwrap();
+
+    assert!(
+        !std::process::Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success()),
+        "adapter shutdown returned before its app-server process was reaped"
+    );
+}
+
+#[tokio::test]
+async fn codex_initialization_timeout_reaps_the_provisional_app_server() {
+    let process_directory = tempfile::tempdir().unwrap();
+    let pid_file = process_directory.path().join("pid");
+    let pid_text = pid_file.to_string_lossy();
+    let script = format!(
+        r#"
+printf '%s' "$$" > '{pid_text}'
+IFS= read -r line
+sleep 30
+"#
+    );
+    let (_directory, binary) = fake_codex(&script);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        CodexAdapter::connect_with_initialization_timeout(
+            binary,
+            std::time::Duration::from_secs(5),
+        ),
+    )
+    .await
+    .expect("owned initialization cleanup exceeded its outer test bound");
+    let error = match result {
+        Ok(_) => panic!("hung initialization unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        ProviderError::Transport { category }
+            if category == "codex-initialization-timeout"
+    ));
+
+    let pid = fs::read_to_string(&pid_file).unwrap();
+    assert!(
+        !std::process::Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success()),
+        "connect returned before its provisional app-server process was reaped"
+    );
+}
+
 fn fake_codex(script: &str) -> (TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let binary = directory.path().join("codex-fixture");

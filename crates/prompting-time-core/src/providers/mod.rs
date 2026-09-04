@@ -336,6 +336,17 @@ pub trait ProviderAdapter: Send + Sync {
         session: &ProviderSession,
         active_turn: &str,
     ) -> Result<(), ProviderError>;
+
+    /// Gracefully stops and awaits resources owned by this adapter.
+    ///
+    /// Implementations must retain ownership if this future is cancelled so a subsequent forced
+    /// shutdown can still terminate and await the resource.
+    async fn shutdown(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    /// Synchronously requests termination of every task or process owned by this adapter.
+    fn force_shutdown(&self) {}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]

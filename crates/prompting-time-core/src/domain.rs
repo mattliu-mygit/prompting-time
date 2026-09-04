@@ -451,6 +451,8 @@ pub struct TimelineEvent {
     pub agent_id: AgentId,
     pub sequence: u64,
     pub kind: TimelineEventKind,
+    /// Present only for canonical transcript messages.
+    pub role: Option<MessageRole>,
     pub content: String,
 }
 

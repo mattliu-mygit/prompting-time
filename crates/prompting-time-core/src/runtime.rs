@@ -33,6 +33,7 @@ const SUPERVISOR_COMMAND_CAPACITY: usize =
 const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const RESPONSE_ACK_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
 const TURN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const FORCED_OWNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 struct ResponseIntentBarrier {
@@ -323,6 +324,8 @@ pub enum RuntimeError {
     TaskJoin,
     #[error("an owned run task failed and was reconciled")]
     OwnedTaskFailed,
+    #[error("a provider adapter did not stop after forced shutdown")]
+    AdapterShutdownTimedOut,
     #[error("an owned run task failed and its durable state could not be reconciled")]
     ReconciliationFailed,
 }
@@ -420,6 +423,7 @@ pub struct RunSupervisor {
     active: Arc<Mutex<HashMap<RunId, Arc<ActiveRun>>>>,
     commands: mpsc::Sender<ManagerCommand>,
     shutdowns: mpsc::Sender<Option<oneshot::Sender<Result<(), RuntimeError>>>>,
+    force_shutdown: watch::Sender<bool>,
     interrupts: Arc<Notify>,
     root_admission: Arc<Semaphore>,
     response_admission: Arc<Semaphore>,
@@ -459,6 +463,7 @@ impl RunSupervisor {
         let root_admission = Arc::new(Semaphore::new(MAX_ADMITTED_ROOT_RUNS));
         let (commands, receiver) = mpsc::channel(SUPERVISOR_COMMAND_CAPACITY);
         let (shutdowns, shutdown_receiver) = mpsc::channel(1);
+        let (force_shutdown, force_shutdown_receiver) = watch::channel(false);
         let interrupts = Arc::new(Notify::new());
         let manager = tokio::spawn(run_manager(
             store.clone(),
@@ -466,6 +471,7 @@ impl RunSupervisor {
             Arc::clone(&active),
             receiver,
             shutdown_receiver,
+            force_shutdown_receiver,
             Arc::clone(&interrupts),
         ));
         Ok(Self {
@@ -474,6 +480,7 @@ impl RunSupervisor {
             active,
             commands,
             shutdowns,
+            force_shutdown,
             interrupts,
             root_admission,
             response_admission: Arc::new(Semaphore::new(MAX_CONCURRENT_APPROVAL_RESPONSES)),
@@ -839,20 +846,118 @@ impl RunSupervisor {
             }
         }
         let mut manager = self.manager.lock().await;
-        let Some(handle) = manager.take() else {
+        let Some(handle) = manager.as_mut() else {
             *self.lifecycle.lock().await = Lifecycle::Closed;
-            return Ok(());
+            return self.shutdown_adapters().await;
         };
         let (reply, response) = oneshot::channel();
         if self.shutdowns.send(Some(reply)).await.is_err() {
-            handle.await.map_err(|_| RuntimeError::TaskJoin)?;
+            let join_result = handle.await.map_err(|_| RuntimeError::TaskJoin);
+            manager.take();
+            drop(manager);
+            let _ = self.shutdown_adapters().await;
             *self.lifecycle.lock().await = Lifecycle::Closed;
-            return Err(RuntimeError::SupervisorClosed);
+            return join_result.and(Err(RuntimeError::SupervisorClosed));
         }
-        let result = response.await.map_err(|_| RuntimeError::SupervisorClosed)?;
-        handle.await.map_err(|_| RuntimeError::TaskJoin)?;
+        let result = response
+            .await
+            .map_err(|_| RuntimeError::SupervisorClosed)
+            .and_then(|result| result);
+        let join_result = handle.await.map_err(|_| RuntimeError::TaskJoin);
+        manager.take();
+        drop(manager);
+        let adapter_result = self.shutdown_adapters().await;
         *self.lifecycle.lock().await = Lifecycle::Closed;
-        result
+        result.and(join_result).and(adapter_result)
+    }
+
+    pub async fn shutdown_with_grace(&self, grace: Duration) -> Result<(), RuntimeError> {
+        match tokio::time::timeout(grace, self.shutdown()).await {
+            Ok(result) => result,
+            Err(_) => self.force_shutdown().await,
+        }
+    }
+
+    pub async fn force_shutdown(&self) -> Result<(), RuntimeError> {
+        for run in unique_active_runs(&self.active) {
+            run.shutdown.send_replace(true);
+            run.approval_changed.notify_one();
+        }
+        for adapter in self.adapters.values() {
+            adapter.force_shutdown();
+        }
+        self.force_shutdown.send_replace(true);
+        self.interrupts.notify_waiters();
+
+        let mut manager = self.manager.lock().await;
+        let manager_result = match manager.as_mut() {
+            Some(handle) => {
+                match tokio::time::timeout(FORCED_OWNER_SHUTDOWN_TIMEOUT, &mut *handle).await {
+                    Ok(result) => result.map_err(|_| RuntimeError::TaskJoin),
+                    Err(_) => {
+                        handle.abort();
+                        handle.await.map_err(|error| {
+                            if error.is_cancelled() {
+                                RuntimeError::OwnedTaskFailed
+                            } else {
+                                RuntimeError::TaskJoin
+                            }
+                        })
+                    }
+                }
+            }
+            None => Ok(()),
+        };
+        manager.take();
+        drop(manager);
+        let adapter_result = self
+            .shutdown_adapters_with_timeout(FORCED_OWNER_SHUTDOWN_TIMEOUT)
+            .await;
+        *self.lifecycle.lock().await = Lifecycle::Closed;
+        manager_result.and(adapter_result)
+    }
+
+    async fn shutdown_adapters(&self) -> Result<(), RuntimeError> {
+        let mut first_error = None;
+        for adapter in self.adapters.values() {
+            if let Err(error) = adapter.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(RuntimeError::Provider(error));
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    async fn shutdown_adapters_with_timeout(&self, timeout: Duration) -> Result<(), RuntimeError> {
+        let mut tasks = JoinSet::new();
+        for adapter in self.adapters.values() {
+            let adapter = Arc::clone(adapter);
+            tasks.spawn(async move { adapter.shutdown().await });
+        }
+        let shutdown = async {
+            let mut first_error = None;
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(Err(error)) if first_error.is_none() => {
+                        first_error = Some(RuntimeError::Provider(error));
+                    }
+                    Err(_) if first_error.is_none() => {
+                        first_error = Some(RuntimeError::TaskJoin);
+                    }
+                    _ => {}
+                }
+            }
+            first_error.map_or(Ok(()), Err)
+        };
+        match tokio::time::timeout(timeout, shutdown).await {
+            Ok(result) => result,
+            Err(_) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                Err(RuntimeError::AdapterShutdownTimedOut)
+            }
+        }
     }
 
     fn adapter(&self, id: ProviderId) -> Result<Arc<dyn ProviderAdapter>, RuntimeError> {
@@ -916,6 +1021,10 @@ impl Drop for RunSupervisor {
             run.shutdown.send_replace(true);
             run.approval_changed.notify_one();
         }
+        for adapter in self.adapters.values() {
+            adapter.force_shutdown();
+        }
+        self.force_shutdown.send_replace(true);
         let _ = self.shutdowns.try_send(None);
     }
 }
@@ -926,6 +1035,7 @@ async fn run_manager(
     active: Arc<Mutex<HashMap<RunId, Arc<ActiveRun>>>>,
     mut commands: mpsc::Receiver<ManagerCommand>,
     mut shutdowns: mpsc::Receiver<Option<oneshot::Sender<Result<(), RuntimeError>>>>,
+    mut force_shutdown: watch::Receiver<bool>,
     interrupts: Arc<Notify>,
 ) {
     let mut tasks = JoinSet::new();
@@ -944,6 +1054,11 @@ async fn run_manager(
         }
         tokio::select! {
             biased;
+            changed = force_shutdown.changed() => {
+                if changed.is_err() || *force_shutdown.borrow() {
+                    break None;
+                }
+            }
             shutdown = shutdowns.recv() => break shutdown.flatten(),
             _ = interrupts.notified() => {}
             command = commands.recv() => match command {
@@ -1027,8 +1142,25 @@ async fn run_manager(
         }
         remove_joined_run(&active, &job.job.active);
     }
-    while let Some(result) = tasks.join_next_with_id().await {
-        task_failed |= reconcile_task(&store, &active, &mut owners, result).await;
+    let mut forced = *force_shutdown.borrow();
+    if forced {
+        tasks.abort_all();
+    }
+    while !tasks.is_empty() {
+        tokio::select! {
+            biased;
+            changed = force_shutdown.changed(), if !forced => {
+                if changed.is_err() || *force_shutdown.borrow() {
+                    forced = true;
+                    tasks.abort_all();
+                }
+            }
+            result = tasks.join_next_with_id() => {
+                if let Some(result) = result {
+                    task_failed |= reconcile_task(&store, &active, &mut owners, result).await;
+                }
+            }
+        }
     }
     if let Some(reply) = shutdown_reply {
         let result = if task_failed {
@@ -2616,6 +2748,8 @@ mod tests {
         reject_before_dispatch: bool,
     }
 
+    struct HungShutdownAdapter(ImmediateAdapter);
+
     #[async_trait]
     impl ProviderAdapter for ImmediateAdapter {
         fn id(&self) -> ProviderId {
@@ -2704,6 +2838,74 @@ mod tests {
             _active_turn: &str,
         ) -> Result<(), ProviderError> {
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for HungShutdownAdapter {
+        fn id(&self) -> ProviderId {
+            self.0.id()
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            self.0.capabilities()
+        }
+
+        async fn health(&self) -> Result<ProviderHealth, ProviderError> {
+            self.0.health().await
+        }
+
+        async fn start_session(
+            &self,
+            request: StartSession,
+        ) -> Result<ProviderSession, ProviderError> {
+            self.0.start_session(request).await
+        }
+
+        async fn resume_session(
+            &self,
+            native_id: &str,
+            request: ResumeSession,
+        ) -> Result<ProviderSession, ProviderError> {
+            self.0.resume_session(native_id, request).await
+        }
+
+        async fn start_turn(
+            &self,
+            session: &ProviderSession,
+            request: TurnRequest,
+        ) -> Result<ProviderTurn, ProviderError> {
+            self.0.start_turn(session, request).await
+        }
+
+        async fn steer(
+            &self,
+            session: &ProviderSession,
+            active_turn: &str,
+            text: &str,
+        ) -> Result<(), ProviderError> {
+            self.0.steer(session, active_turn, text).await
+        }
+
+        async fn respond(
+            &self,
+            session: &ProviderSession,
+            request_id: &str,
+            response: ApprovalResponse,
+        ) -> Result<(), ProviderError> {
+            self.0.respond(session, request_id, response).await
+        }
+
+        async fn interrupt(
+            &self,
+            session: &ProviderSession,
+            active_turn: &str,
+        ) -> Result<(), ProviderError> {
+            self.0.interrupt(session, active_turn).await
+        }
+
+        async fn shutdown(&self) -> Result<(), ProviderError> {
+            std::future::pending().await
         }
     }
 
@@ -3772,6 +3974,81 @@ mod tests {
         .expect("manager reconciliation must release root admission");
         drop(held);
         supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_forces_and_awaits_a_stuck_owned_run_task() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("forced manager shutdown"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let completion = Arc::new(OwnedTaskCompletionBarrier::new());
+        let mut supervisor = RunSupervisor::new(store, vec![adapter.clone()]).unwrap();
+        supervisor.set_root_task_completion_barrier(Arc::clone(&completion));
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/forced-manager-shutdown"),
+                ProviderId::Codex,
+                TurnRequest::new("fixture"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        supervisor
+            .respond(
+                handle.run_id(),
+                "fixture-approval",
+                ApprovalResponse::Approved,
+            )
+            .await
+            .unwrap();
+        let sender = adapter.sender.lock().unwrap().take().unwrap();
+        sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+        drop(sender);
+        completion.completed.notified().await;
+        // Local test ownership, the supervisor fixture, the active run, and its task.
+        assert_eq!(Arc::strong_count(&completion), 4);
+
+        supervisor
+            .shutdown_with_grace(Duration::from_millis(10))
+            .await
+            .unwrap();
+
+        assert_eq!(Arc::strong_count(&completion), 2);
+        assert!(supervisor.manager.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn forced_shutdown_is_bounded_when_an_adapter_reaper_is_stuck() {
+        let store = Store::open_in_memory().await.unwrap();
+        let supervisor = RunSupervisor::new(
+            store,
+            vec![Arc::new(HungShutdownAdapter(ImmediateAdapter {
+                provider: ProviderId::Codex,
+                reject_before_dispatch: false,
+            }))],
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(3), supervisor.force_shutdown())
+            .await
+            .expect("forced shutdown must retain a hard deadline");
+
+        assert!(matches!(result, Err(RuntimeError::AdapterShutdownTimedOut)));
+        assert!(supervisor.manager.lock().await.is_none());
     }
 
     #[tokio::test]

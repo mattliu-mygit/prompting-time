@@ -4,8 +4,22 @@ import { App } from "./App";
 
 const installedProviders = {
   providers: [
-    { id: "codex" as const, installed: true, version: "0.144.1", diagnostic: null },
-    { id: "claude" as const, installed: true, version: "2.1.205", diagnostic: null }
+    {
+      id: "codex" as const,
+      installed: true,
+      available: true,
+      version: "0.144.1",
+      diagnostic: null,
+      capabilities: []
+    },
+    {
+      id: "claude" as const,
+      installed: true,
+      available: false,
+      version: "2.1.205",
+      diagnostic: "Claude protocol gate has not passed.",
+      capabilities: []
+    }
   ]
 };
 
@@ -13,15 +27,31 @@ describe("App", () => {
   it("shows both provider diagnostics", async () => {
     const bootstrap = vi.fn().mockResolvedValue({
       providers: [
-        { id: "codex", installed: true, version: "0.144.1", diagnostic: null },
-        { id: "claude", installed: true, version: "2.1.205", diagnostic: null }
+        {
+          id: "codex",
+          installed: true,
+          available: true,
+          version: "0.144.1",
+          diagnostic: null,
+          capabilities: []
+        },
+        {
+          id: "claude",
+          installed: true,
+          available: false,
+          version: "2.1.205",
+          diagnostic: "Claude protocol gate has not passed.",
+          capabilities: []
+        }
       ]
     });
 
     render(<App bootstrap={bootstrap} />);
 
     expect(await screen.findByText("Codex 0.144.1")).toBeVisible();
-    expect(screen.getByText("Claude 2.1.205")).toBeVisible();
+    expect(
+      screen.getByText("Claude unavailable: Claude protocol gate has not passed.")
+    ).toBeVisible();
   });
 
   it("shows loading while bootstrap is pending", () => {
@@ -38,8 +68,10 @@ describe("App", () => {
             {
               id: "codex",
               installed: false,
+              available: false,
               version: null,
-              diagnostic: "codex was not found"
+              diagnostic: "codex was not found",
+              capabilities: []
             }
           ]
         })}
@@ -47,6 +79,34 @@ describe("App", () => {
     );
 
     expect(await screen.findByText("Codex unavailable: codex was not found")).toBeVisible();
+  });
+
+  it("shows an initialization diagnostic without losing provider status", async () => {
+    render(
+      <App
+        bootstrap={async () => ({
+          providers: [
+            {
+              id: "claude",
+              installed: true,
+              available: false,
+              version: "2.1.205",
+              diagnostic: "Claude integration is not authenticated. Run /login.",
+              capabilities: []
+            }
+          ],
+          startupDiagnostic: {
+            code: "recovery-error",
+            message: "Unfinished runs could not be reconciled.",
+            action: "Restart before submitting more work."
+          }
+        })}
+      />
+    );
+
+    expect(await screen.findByText("Unfinished runs could not be reconciled.")).toBeVisible();
+    expect(screen.getByText("Restart before submitting more work.")).toBeVisible();
+    expect(screen.getByText(/Claude unavailable:.*Run \/login/)).toBeVisible();
   });
 
   it("shows a rejected bootstrap error", async () => {
