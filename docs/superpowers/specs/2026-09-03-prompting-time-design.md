@@ -181,7 +181,7 @@ Concurrent reconcilers may admit or mutate only the single successful CAS winner
 
 On normal shutdown the app closes admission, cancels owned run and approval-response tasks, awaits graceful completion for five seconds, then requests forced adapter/process termination and awaits the remaining owners. No provider process or event-forwarding task is intentionally detached from its recorded owner.
 
-Per-conversation serialization prevents interleaved user turns. Bounded channels and pagination prevent unbounded memory growth. Cancellation propagates from the root run to owned processes, while provider-created descendants are reconciled from provider events.
+Per-conversation serialization prevents interleaved user turns. Bounded channels and pagination prevent unbounded memory growth. Cancellation propagates from the root run to owned processes. On cancellation, successful owned shutdown makes unresolved descendants locally Interrupted, deepest first, before the root becomes terminal; provider failures or unsuccessful shutdown instead mark them Failed. These local outcomes carry Unknown mutation certainty and preserve already terminal descendants. Provider completion with active descendants is a contract failure. Every cleanup write remains fenced by durable run ownership, including children materialized while approval output is staged.
 
 ## Workspace and worktree lifecycle
 

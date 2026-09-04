@@ -30,6 +30,10 @@ use crate::store::{
 #[path = "runtime_queue_tests.rs"]
 mod queue_tests;
 
+#[cfg(test)]
+#[path = "runtime_finalization_tests.rs"]
+mod finalization_tests;
+
 pub const MAX_CONCURRENT_ROOT_RUNS: usize = 4;
 pub const MAX_QUEUED_ROOT_RUNS: usize = 64;
 pub const MAX_CONCURRENT_APPROVAL_RESPONSES: usize = 4;
@@ -3239,6 +3243,56 @@ async fn finalize_attempt(
             mutation: MutationState::Unknown,
             dispatch_certainty: DispatchCertainty::MayHaveDispatched,
         };
+    }
+
+    loop {
+        let mut descendants = store
+            .load_recovery_agent_batch_for_run(attempt.run_id, 200)
+            .await?;
+        descendants.retain(|agent| !agent.is_root);
+        if descendants.is_empty() {
+            break;
+        }
+        if matches!(
+            finish,
+            AttemptFinish::ProviderTerminal(RunStatus::Completed)
+        ) {
+            finish = active_failure(
+                ProviderErrorCategory::ContractViolation,
+                MutationState::Unknown,
+            );
+        }
+        // Owned shutdown has finished or failed. These are local outcomes for unresolved work,
+        // not fabricated provider results. The query orders children before parents.
+        for descendant in descendants {
+            let record = match &finish {
+                AttemptFinish::Interrupted(_)
+                | AttemptFinish::ProviderTerminal(RunStatus::Interrupted) => {
+                    ProviderEventRecord::interrupted_with_mutation(MutationState::Unknown)
+                }
+                AttemptFinish::Failed { category, .. } => ProviderEventRecord::provider_failed(
+                    *category,
+                    MutationState::Unknown,
+                    DispatchCertainty::MayHaveDispatched,
+                ),
+                AttemptFinish::RuntimeError(_) => ProviderEventRecord::provider_failed(
+                    ProviderErrorCategory::ContractViolation,
+                    MutationState::Unknown,
+                    DispatchCertainty::MayHaveDispatched,
+                ),
+                AttemptFinish::ProviderTerminal(_) => {
+                    unreachable!("terminal mapping is exhaustive")
+                }
+            };
+            store
+                .append_owned_run_event(
+                    attempt.run_id,
+                    descendant.agent_id,
+                    &attempt.dispatch_owner_id,
+                    record,
+                )
+                .await?;
+        }
     }
 
     match finish {
