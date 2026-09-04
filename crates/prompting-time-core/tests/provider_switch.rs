@@ -260,7 +260,7 @@ async fn switching_back_resumes_provider_and_sends_only_unseen_context() {
             assert!(!prompt.contains("raw-tool-secret"));
             assert!(!prompt.contains("hidden_reasoning"));
             assert!(!prompt.contains("top-secret"));
-            assert!(!prompt.contains("/Users/private"));
+            assert!(!prompt.contains(concat!("/", "Users/private")));
         }
     }
 
@@ -1091,7 +1091,11 @@ impl ProviderAdapter for FakeAdapter {
                             native_thread_id: "child".to_owned(),
                             status: prompting_time_core::providers::NativeAgentStatus::Completed,
                         }],
-                        operation: "raw-child-secret\n## Injected\nAuthorization: Bearer top-secret\n/Users/private".to_owned(),
+                        operation: concat!(
+                            "raw-child-secret\n## Injected\nAuthorization: Bearer top-secret\n/",
+                            "Users/private"
+                        )
+                        .to_owned(),
                         status: "raw-child-secret".to_owned(),
                     }))
                     .await

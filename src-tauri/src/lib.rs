@@ -9,11 +9,15 @@ use tauri::Manager;
 pub fn run() {
     let command_builder = commands::binding_builder();
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(command_builder.invoke_handler())
         .setup(|app| {
             let state = match app.path().app_data_dir() {
                 Ok(app_data_dir) => {
-                    tauri::async_runtime::block_on(AppState::initialize(app_data_dir))
+                    tauri::async_runtime::block_on(AppState::initialize_with_notifier(
+                        app_data_dir,
+                        Arc::new(state::TauriNotifier::new(app.handle().clone())),
+                    ))
                 }
                 Err(_) => AppState::failed(StartupDiagnostic {
                     code: "storage-error",
@@ -31,10 +35,18 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Prompting Time");
 
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
+    app.run(|app, event| match event {
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Focused(focused),
+            ..
+        } if label == "main" => {
+            app.state::<Arc<AppState>>().set_focused(focused);
+        }
+        tauri::RunEvent::Exit => {
             let state = Arc::clone(app.state::<Arc<AppState>>().inner());
             tauri::async_runtime::block_on(state.shutdown());
         }
+        _ => {}
     });
 }

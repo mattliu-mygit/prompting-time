@@ -184,6 +184,8 @@ pub enum StoreError {
     NativeAgentIdentityConflict,
     #[error("canonical message exceeds the {limit}-byte limit")]
     MessageTooLarge { limit: usize },
+    #[error("provider run {0} is no longer owned by this supervisor")]
+    DispatchOwnerMismatch(RunId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -295,6 +297,7 @@ pub enum ProviderEventRecord {
     Unrecognized {
         method: String,
     },
+    Diagnostic(String),
     ApprovalRequested {
         provider: ProviderId,
         request_id: String,
@@ -410,6 +413,10 @@ impl ProviderEventRecord {
         }
     }
 
+    pub fn diagnostic(content: impl Into<String>) -> Self {
+        Self::Diagnostic(content.into())
+    }
+
     pub fn approval_requested(
         provider: ProviderId,
         request_id: impl Into<String>,
@@ -512,6 +519,7 @@ impl ProviderEventRecord {
             (Self::ChildAgent { operation, .. }, _) => (TimelineEventKind::Progress, operation),
             (Self::SubAgent { .. }, _) => (TimelineEventKind::Progress, "Agent activity"),
             (Self::Unrecognized { method }, _) => (TimelineEventKind::Diagnostic, method),
+            (Self::Diagnostic(content), _) => (TimelineEventKind::Diagnostic, content),
             (Self::ApprovalRequested { operation, .. }, _) => {
                 (TimelineEventKind::Lifecycle, operation)
             }
@@ -563,7 +571,8 @@ impl ProviderEventRecord {
             | Self::NativeItem { .. }
             | Self::ChildAgent { .. }
             | Self::SubAgent { .. }
-            | Self::Unrecognized { .. } => None,
+            | Self::Unrecognized { .. }
+            | Self::Diagnostic(_) => None,
         }
     }
 
@@ -625,6 +634,7 @@ impl ProviderEventRecord {
             Self::Unrecognized { method } => {
                 Some(serde_json::json!({ "method": method }).to_string())
             }
+            Self::Diagnostic(_) => None,
             Self::ApprovalRequested { request_id, .. } => {
                 Some(serde_json::json!({ "requestId": request_id }).to_string())
             }
@@ -821,6 +831,13 @@ pub struct RecoveryAttemptIntent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QueuedRecovery {
+    pub run: ProviderRun,
+    pub attempt_intent: Option<RecoveryAttemptIntent>,
+    pub roots: Vec<AgentNode>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedProviderEvent {
     pub id: TimelineEventId,
     pub conversation_id: ConversationId,
@@ -867,6 +884,86 @@ impl Store {
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
         Self::connect(options, 1).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reject_dispatch_claims_for_test(&self) -> Result<(), StoreError> {
+        sqlx::query(
+            "CREATE TRIGGER reject_dispatch_claim_for_test \
+             BEFORE UPDATE OF dispatch_certainty ON provider_runs \
+             WHEN NEW.dispatch_certainty = 'may_have_dispatched' \
+             BEGIN SELECT RAISE(ABORT, 'dispatch claim rejected by test'); END",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn allow_dispatch_claims_for_test(&self) -> Result<(), StoreError> {
+        sqlx::query("DROP TRIGGER reject_dispatch_claim_for_test")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reject_recovery_events_for_test(&self) -> Result<(), StoreError> {
+        sqlx::query(
+            "CREATE TRIGGER reject_recovery_event_for_test \
+             BEFORE INSERT ON events \
+             BEGIN SELECT RAISE(ABORT, 'recovery event rejected by test'); END",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn allow_recovery_events_for_test(&self) -> Result<(), StoreError> {
+        sqlx::query("DROP TRIGGER reject_recovery_event_for_test")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn expire_dispatch_lease_for_test(
+        &self,
+        run_id: RunId,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE provider_runs SET dispatch_lease_expires_at = 0 WHERE id = ?")
+            .bind(run_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn delay_dispatch_lease_for_test(
+        &self,
+        run_id: RunId,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE provider_runs SET dispatch_lease_expires_at = ? WHERE id = ?")
+            .bind(now_millis().saturating_sub(10))
+            .bind(run_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn replace_dispatch_owner_for_test(
+        &self,
+        run_id: RunId,
+        owner_id: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE provider_runs SET dispatch_owner_id = ? WHERE id = ?")
+            .bind(owner_id)
+            .bind(run_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn connect(
@@ -1098,9 +1195,28 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_submission(
         &self,
         submission: NewSubmission,
+    ) -> Result<PreparedSubmission, StoreError> {
+        self.prepare_submission_inner(submission, None).await
+    }
+
+    pub(crate) async fn prepare_claimed_submission(
+        &self,
+        submission: NewSubmission,
+        owner_id: &str,
+        lease_duration: Duration,
+    ) -> Result<PreparedSubmission, StoreError> {
+        self.prepare_submission_inner(submission, Some((owner_id, lease_duration)))
+            .await
+    }
+
+    async fn prepare_submission_inner(
+        &self,
+        submission: NewSubmission,
+        dispatch_claim: Option<(&str, Duration)>,
     ) -> Result<PreparedSubmission, StoreError> {
         validate_message_size(&submission.content)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -1265,6 +1381,19 @@ impl Store {
             .bind(run.conversation_id.to_string())
             .execute(&mut *transaction)
             .await?;
+        if let Some((owner_id, lease_duration)) = dispatch_claim {
+            sqlx::query(
+                "UPDATE provider_runs \
+                 SET dispatch_certainty = 'may_have_dispatched', dispatch_owner_id = ?, \
+                     dispatch_lease_expires_at = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(owner_id)
+            .bind(lease_expires_at(lease_duration))
+            .bind(now_millis())
+            .bind(run.id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         self.notify_change(run.conversation_id, run.id);
         Ok(PreparedSubmission::Created { run, root })
@@ -1489,6 +1618,32 @@ impl Store {
         Ok((run, root))
     }
 
+    pub(crate) async fn fail_and_create_owned_fallback(
+        &self,
+        primary_run_id: RunId,
+        primary_root_id: AgentId,
+        expected_owner_id: &str,
+        lease_duration: Duration,
+        category: ProviderErrorCategory,
+        fallback: NewFallbackAttempt,
+    ) -> Result<(ProviderRun, AgentNode), StoreError> {
+        let (_, created) = self
+            .append_run_event_inner(
+                primary_run_id,
+                primary_root_id,
+                ProviderEventRecord::provider_failed(
+                    category,
+                    MutationState::NoneObserved,
+                    DispatchCertainty::NotDispatched,
+                ),
+                Some(expected_owner_id),
+                Some((fallback, Some((expected_owner_id, lease_duration)))),
+            )
+            .await?;
+        created.ok_or(StoreError::UnsafeFallbackState)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn fail_and_create_fallback(
         &self,
         primary_run_id: RunId,
@@ -1505,7 +1660,8 @@ impl Store {
                     MutationState::NoneObserved,
                     DispatchCertainty::NotDispatched,
                 ),
-                Some(fallback),
+                None,
+                Some((fallback, None)),
             )
             .await?;
         created.ok_or(StoreError::UnsafeFallbackState)
@@ -1526,6 +1682,27 @@ impl Store {
         .into_domain()
     }
 
+    pub(crate) async fn is_owned_fallback_transition(
+        &self,
+        run_id: RunId,
+        owner_id: &str,
+    ) -> Result<bool, StoreError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM provider_runs AS primary_run \
+             WHERE primary_run.id = ? AND primary_run.dispatch_owner_id = ? \
+             AND primary_run.status IN ('completed', 'failed', 'interrupted') \
+             AND EXISTS(SELECT 1 FROM provider_runs AS fallback_run \
+                 WHERE fallback_run.fallback_from_run_id = primary_run.id \
+                 AND fallback_run.dispatch_owner_id = primary_run.dispatch_owner_id \
+                 AND fallback_run.status IN ('queued', 'running', 'waiting')))",
+        )
+        .bind(run_id.to_string())
+        .bind(owner_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn bind_native_session(
         &self,
         run_id: RunId,
@@ -1541,7 +1718,37 @@ impl Store {
         native_session_id: &str,
         native_group_id: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.bind_native_session_with_group_inner(run_id, native_session_id, native_group_id, None)
+            .await
+    }
+
+    pub(crate) async fn bind_owned_native_session_with_group(
+        &self,
+        run_id: RunId,
+        native_session_id: &str,
+        native_group_id: Option<&str>,
+        expected_owner_id: &str,
+    ) -> Result<(), StoreError> {
+        self.bind_native_session_with_group_inner(
+            run_id,
+            native_session_id,
+            native_group_id,
+            Some(expected_owner_id),
+        )
+        .await
+    }
+
+    async fn bind_native_session_with_group_inner(
+        &self,
+        run_id: RunId,
+        native_session_id: &str,
+        native_group_id: Option<&str>,
+        expected_owner_id: Option<&str>,
+    ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let run = sqlx::query_as::<_, ProviderRunRow>(
             "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
              FROM provider_runs WHERE id = ?",
@@ -1764,6 +1971,27 @@ impl Store {
     }
 
     pub async fn advance_provider_context(&self, run_id: RunId) -> Result<(), StoreError> {
+        self.advance_provider_context_inner(run_id, None).await
+    }
+
+    pub(crate) async fn advance_owned_provider_context(
+        &self,
+        run_id: RunId,
+        expected_owner_id: &str,
+    ) -> Result<(), StoreError> {
+        self.advance_provider_context_inner(run_id, Some(expected_owner_id))
+            .await
+    }
+
+    async fn advance_provider_context_inner(
+        &self,
+        run_id: RunId,
+        expected_owner_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let changed = sqlx::query(
             "UPDATE provider_sessions SET context_through_sequence = \
              max(context_through_sequence, coalesce((SELECT context_through_sequence \
@@ -1775,7 +2003,7 @@ impl Store {
         .bind(now_millis())
         .bind(run_id.to_string())
         .bind(run_id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if changed.rows_affected() != 1 {
             return Err(StoreError::NotFound {
@@ -1783,6 +2011,7 @@ impl Store {
                 id: run_id.to_string(),
             });
         }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1937,7 +2166,19 @@ impl Store {
         agent_id: AgentId,
         record: ProviderEventRecord,
     ) -> Result<TimelineEvent, StoreError> {
-        self.append_run_event_inner(run_id, agent_id, record, None)
+        self.append_run_event_inner(run_id, agent_id, record, None, None)
+            .await
+            .map(|(event, _)| event)
+    }
+
+    pub(crate) async fn append_owned_run_event(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        expected_owner_id: &str,
+        record: ProviderEventRecord,
+    ) -> Result<TimelineEvent, StoreError> {
+        self.append_run_event_inner(run_id, agent_id, record, Some(expected_owner_id), None)
             .await
             .map(|(event, _)| event)
     }
@@ -1947,9 +2188,13 @@ impl Store {
         run_id: RunId,
         agent_id: AgentId,
         record: ProviderEventRecord,
-        fallback: Option<NewFallbackAttempt>,
+        expected_owner_id: Option<&str>,
+        fallback: Option<(NewFallbackAttempt, Option<(&str, Duration)>)>,
     ) -> Result<(TimelineEvent, Option<(ProviderRun, AgentNode)>), StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let run_row = sqlx::query_as::<_, ProviderRunRow>(
             "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
              FROM provider_runs WHERE id = ?",
@@ -1977,8 +2222,9 @@ impl Store {
         let agent = agent_row.into_domain()?;
         let is_root = agent.parent_id.is_none();
         if run.status == RunStatus::Failed
-            && let Some(fallback) = fallback.as_ref()
-            && let Some(existing) = load_existing_fallback(&mut transaction, &run, fallback).await?
+            && let Some((fallback, _)) = fallback.as_ref()
+            && let Some(existing) =
+                load_existing_fallback(&mut transaction, &run, fallback, expected_owner_id).await?
         {
             let event = sqlx::query_as::<_, TimelineEventRow>(
                 "SELECT id, conversation_id, run_id, agent_id, sequence, kind, role, content \
@@ -1994,7 +2240,7 @@ impl Store {
             return Ok((event, Some(existing)));
         }
         validate_event_state(&record, &run, &agent)?;
-        if fallback.as_ref().is_some_and(|fallback| {
+        if fallback.as_ref().is_some_and(|(fallback, _)| {
             !is_root
                 || fallback.provider == run.provider
                 || !matches!(
@@ -2375,9 +2621,10 @@ impl Store {
         }
 
         let fallback = match fallback {
-            Some(fallback) => {
-                Some(insert_atomic_fallback(&mut transaction, &run, fallback, now).await?)
-            }
+            Some((fallback, dispatch_claim)) => Some(
+                insert_atomic_fallback(&mut transaction, &run, fallback, dispatch_claim, now)
+                    .await?,
+            ),
             None => None,
         };
 
@@ -2418,6 +2665,28 @@ impl Store {
         agent_id: AgentId,
         record: ProviderEventRecord,
     ) -> Result<StageWaitingEventOutcome, StoreError> {
+        self.stage_waiting_event_inner(run_id, agent_id, record, None)
+            .await
+    }
+
+    pub(crate) async fn stage_owned_waiting_event(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        expected_owner_id: &str,
+        record: ProviderEventRecord,
+    ) -> Result<StageWaitingEventOutcome, StoreError> {
+        self.stage_waiting_event_inner(run_id, agent_id, record, Some(expected_owner_id))
+            .await
+    }
+
+    async fn stage_waiting_event_inner(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        record: ProviderEventRecord,
+        expected_owner_id: Option<&str>,
+    ) -> Result<StageWaitingEventOutcome, StoreError> {
         let canonical_record = record.clone();
         let native_item_id = match &record {
             ProviderEventRecord::NativeMessage { native_item_id, .. } => {
@@ -2452,6 +2721,9 @@ impl Store {
             _ => return Err(StoreError::InvalidStagedEvent),
         };
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let run = sqlx::query_as::<_, ProviderRunRow>(
             "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
              FROM provider_runs WHERE id = ?",
@@ -2703,6 +2975,36 @@ impl Store {
         provider_request_id: &str,
         resolution: ApprovalResolution,
     ) -> Result<Approval, StoreError> {
+        self.record_response_intent_inner(run_id, agent_id, provider_request_id, resolution, None)
+            .await
+    }
+
+    pub(crate) async fn record_owned_response_intent(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        provider_request_id: &str,
+        resolution: ApprovalResolution,
+        expected_owner_id: &str,
+    ) -> Result<Approval, StoreError> {
+        self.record_response_intent_inner(
+            run_id,
+            agent_id,
+            provider_request_id,
+            resolution,
+            Some(expected_owner_id),
+        )
+        .await
+    }
+
+    async fn record_response_intent_inner(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        provider_request_id: &str,
+        resolution: ApprovalResolution,
+        expected_owner_id: Option<&str>,
+    ) -> Result<Approval, StoreError> {
         if matches!(
             resolution,
             ApprovalResolution::Cancelled | ApprovalResolution::Failed
@@ -2710,6 +3012,9 @@ impl Store {
             return Err(StoreError::InvalidApprovalResolution);
         }
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let (run_status, conversation_id): (String, String) =
             sqlx::query_as("SELECT status, conversation_id FROM provider_runs WHERE id = ?")
                 .bind(run_id.to_string())
@@ -2796,7 +3101,46 @@ impl Store {
         provider_request_id: &str,
         dispatch_certainty: DispatchCertainty,
     ) -> Result<Approval, StoreError> {
+        self.reject_response_intent_inner(
+            run_id,
+            agent_id,
+            provider_request_id,
+            dispatch_certainty,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn reject_owned_response_intent(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        provider_request_id: &str,
+        dispatch_certainty: DispatchCertainty,
+        expected_owner_id: &str,
+    ) -> Result<Approval, StoreError> {
+        self.reject_response_intent_inner(
+            run_id,
+            agent_id,
+            provider_request_id,
+            dispatch_certainty,
+            Some(expected_owner_id),
+        )
+        .await
+    }
+
+    async fn reject_response_intent_inner(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        provider_request_id: &str,
+        dispatch_certainty: DispatchCertainty,
+        expected_owner_id: Option<&str>,
+    ) -> Result<Approval, StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let conversation_id: String =
             sqlx::query_scalar("SELECT conversation_id FROM provider_runs WHERE id = ?")
                 .bind(run_id.to_string())
@@ -2856,7 +3200,37 @@ impl Store {
         agent_id: AgentId,
         provider_request_id: &str,
     ) -> Result<TimelineEvent, StoreError> {
+        self.acknowledge_response_intent_inner(run_id, agent_id, provider_request_id, None)
+            .await
+    }
+
+    pub(crate) async fn acknowledge_owned_response_intent(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        provider_request_id: &str,
+        expected_owner_id: &str,
+    ) -> Result<TimelineEvent, StoreError> {
+        self.acknowledge_response_intent_inner(
+            run_id,
+            agent_id,
+            provider_request_id,
+            Some(expected_owner_id),
+        )
+        .await
+    }
+
+    async fn acknowledge_response_intent_inner(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        provider_request_id: &str,
+        expected_owner_id: Option<&str>,
+    ) -> Result<TimelineEvent, StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let run_row = sqlx::query_as::<_, ProviderRunRow>(
             "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
              FROM provider_runs WHERE id = ?",
@@ -3193,7 +3567,50 @@ impl Store {
         mutation: MutationState,
         dispatch_certainty: DispatchCertainty,
     ) -> Result<bool, StoreError> {
+        self.fail_run_if_active_inner(
+            run_id,
+            root_id,
+            category,
+            mutation,
+            dispatch_certainty,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn fail_owned_run_if_active(
+        &self,
+        run_id: RunId,
+        root_id: AgentId,
+        category: ProviderErrorCategory,
+        mutation: MutationState,
+        dispatch_certainty: DispatchCertainty,
+        expected_owner_id: &str,
+    ) -> Result<bool, StoreError> {
+        self.fail_run_if_active_inner(
+            run_id,
+            root_id,
+            category,
+            mutation,
+            dispatch_certainty,
+            Some(expected_owner_id),
+        )
+        .await
+    }
+
+    async fn fail_run_if_active_inner(
+        &self,
+        run_id: RunId,
+        root_id: AgentId,
+        category: ProviderErrorCategory,
+        mutation: MutationState,
+        dispatch_certainty: DispatchCertainty,
+        expected_owner_id: Option<&str>,
+    ) -> Result<bool, StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(expected_owner_id) = expected_owner_id {
+            require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        }
         let run = sqlx::query_as::<_, ProviderRunRow>(
             "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
              FROM provider_runs WHERE id = ?",
@@ -4147,6 +4564,274 @@ impl Store {
         Ok(recovery)
     }
 
+    /// Atomically records that this process owns the next provider dispatch for a queued run.
+    /// A false result means another process claimed it or the run is no longer recoverable.
+    pub(crate) async fn claim_provider_dispatch(
+        &self,
+        run_id: RunId,
+        owner_id: &str,
+        lease_duration: Duration,
+    ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let expires_at = lease_expires_at(lease_duration);
+        let claimed = sqlx::query(
+            "UPDATE provider_runs \
+             SET dispatch_certainty = 'may_have_dispatched', dispatch_owner_id = ?, \
+                 dispatch_lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND status = 'queued' AND mutation_state = 'none_observed' \
+             AND dispatch_owner_id IS NULL \
+             AND (dispatch_certainty IS NULL OR dispatch_certainty = 'not_dispatched')",
+        )
+        .bind(owner_id)
+        .bind(expires_at)
+        .bind(now_millis())
+        .bind(run_id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+        transaction.commit().await?;
+        Ok(claimed)
+    }
+
+    pub(crate) async fn refresh_provider_dispatch_lease(
+        &self,
+        run_id: RunId,
+        owner_id: &str,
+        lease_duration: Duration,
+        stale_grace: Duration,
+    ) -> Result<bool, StoreError> {
+        let now = now_millis();
+        let refreshed = sqlx::query(
+            "UPDATE provider_runs SET dispatch_lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND dispatch_owner_id = ? \
+             AND dispatch_lease_expires_at >= ? \
+             AND status IN ('queued', 'running', 'waiting')",
+        )
+        .bind(lease_expires_at(lease_duration))
+        .bind(now)
+        .bind(run_id.to_string())
+        .bind(owner_id)
+        .bind(now.saturating_sub(duration_millis(stale_grace)))
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        Ok(refreshed)
+    }
+
+    /// Atomically transfers an abandoned dispatch lease to a recovery owner.
+    /// A successful transfer fences the prior owner before recovery interrupts the run.
+    pub(crate) async fn claim_stale_provider_dispatch(
+        &self,
+        run_id: RunId,
+        recovery_owner_id: &str,
+        excluded_owner_id: &str,
+        lease_duration: Duration,
+        stale_grace: Duration,
+    ) -> Result<bool, StoreError> {
+        let now = now_millis();
+        let claimed = sqlx::query(
+            "UPDATE provider_runs \
+             SET dispatch_owner_id = ?, dispatch_lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND dispatch_owner_id IS NOT NULL \
+             AND dispatch_owner_id != ? AND dispatch_lease_expires_at < ? \
+             AND status IN ('queued', 'running', 'waiting')",
+        )
+        .bind(recovery_owner_id)
+        .bind(lease_expires_at(lease_duration))
+        .bind(now)
+        .bind(run_id.to_string())
+        .bind(excluded_owner_id)
+        .bind(now.saturating_sub(duration_millis(stale_grace)))
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        Ok(claimed)
+    }
+
+    pub(crate) async fn claim_unowned_provider_dispatch_recovery(
+        &self,
+        run_id: RunId,
+        recovery_owner_id: &str,
+        lease_duration: Duration,
+    ) -> Result<bool, StoreError> {
+        let claimed = sqlx::query(
+            "UPDATE provider_runs \
+             SET dispatch_owner_id = ?, dispatch_lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND dispatch_owner_id IS NULL \
+             AND status IN ('queued', 'running', 'waiting')",
+        )
+        .bind(recovery_owner_id)
+        .bind(lease_expires_at(lease_duration))
+        .bind(now_millis())
+        .bind(run_id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        Ok(claimed)
+    }
+
+    pub(crate) async fn promote_recovery_dispatch_claim(
+        &self,
+        run_id: RunId,
+        recovery_owner_id: &str,
+        supervisor_owner_id: &str,
+        lease_duration: Duration,
+    ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let promoted = sqlx::query(
+            "UPDATE provider_runs \
+             SET dispatch_certainty = 'may_have_dispatched', dispatch_owner_id = ?, \
+                 dispatch_lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND dispatch_owner_id = ? \
+             AND status = 'queued' AND mutation_state = 'none_observed' \
+             AND (dispatch_certainty IS NULL OR dispatch_certainty = 'not_dispatched') \
+             AND native_session_id IS NULL",
+        )
+        .bind(supervisor_owner_id)
+        .bind(lease_expires_at(lease_duration))
+        .bind(now_millis())
+        .bind(run_id.to_string())
+        .bind(recovery_owner_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+        transaction.commit().await?;
+        Ok(promoted)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_protected_provider_dispatch_lease(
+        &self,
+        run_id: RunId,
+        stale_grace: Duration,
+    ) -> Result<bool, StoreError> {
+        let lease = sqlx::query_as::<_, (Option<String>, Option<i64>)>(
+            "SELECT dispatch_owner_id, dispatch_lease_expires_at \
+             FROM provider_runs WHERE id = ?",
+        )
+        .bind(run_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "provider run",
+            id: run_id.to_string(),
+        })?;
+        Ok(dispatch_lease_is_protected(
+            lease.0.as_deref(),
+            lease.1,
+            now_millis(),
+            stale_grace,
+        ))
+    }
+
+    pub(crate) async fn load_ambiguous_recovery_run_ids(
+        &self,
+        after_run_id: Option<RunId>,
+        limit: u32,
+    ) -> Result<Vec<RunId>, StoreError> {
+        validate_page_limit(limit)?;
+        let rows = match after_run_id {
+            Some(after_run_id) => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM provider_runs \
+                     WHERE status IN ('running', 'waiting') AND id > ? \
+                     ORDER BY id LIMIT ?",
+                )
+                .bind(after_run_id.to_string())
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM provider_runs WHERE status IN ('running', 'waiting') \
+                     ORDER BY id LIMIT ?",
+                )
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        rows.into_iter()
+            .map(|id| parse_uuid("provider run", &id).map(Into::into))
+            .collect()
+    }
+
+    pub(crate) async fn load_queued_recovery_batch(
+        &self,
+        after_run_id: Option<RunId>,
+        limit: u32,
+    ) -> Result<Vec<QueuedRecovery>, StoreError> {
+        validate_page_limit(limit)?;
+        let rows = match after_run_id {
+            Some(after_run_id) => {
+                sqlx::query_as::<_, ProviderRunRow>(
+                    "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
+                     FROM provider_runs WHERE status = 'queued' AND id > ? ORDER BY id LIMIT ?",
+                )
+                .bind(after_run_id.to_string())
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as::<_, ProviderRunRow>(
+                    "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
+                     FROM provider_runs WHERE status = 'queued' ORDER BY id LIMIT ?",
+                )
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        let mut recovery = Vec::with_capacity(rows.len());
+        for row in rows {
+            let run = row.into_domain()?;
+            let (turn_prompt, handoff_rendered, handoff_hash): (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = sqlx::query_as(
+                "SELECT turn_prompt, handoff_rendered, handoff_hash FROM provider_runs WHERE id = ?",
+            )
+            .bind(run.id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+            if handoff_rendered.is_some() != handoff_hash.is_some() {
+                return Err(StoreError::InvalidData {
+                    entity: "provider run recovery intent",
+                    detail: "rendered capsule and hash must both be present".to_owned(),
+                });
+            }
+            let attempt_intent = turn_prompt.map(|turn_prompt| RecoveryAttemptIntent {
+                turn_prompt,
+                handoff_rendered,
+                handoff_hash,
+            });
+            let roots = sqlx::query_as::<_, AgentNodeRow>(
+                "SELECT id, run_id, parent_id, provider, provider_native_id, provider_native_path, label, summary, status, created_at \
+                 FROM agent_nodes WHERE run_id = ? AND parent_id IS NULL ORDER BY id LIMIT 2",
+            )
+            .bind(run.id.to_string())
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(AgentNodeRow::into_domain)
+            .collect::<Result<Vec<_>, _>>()?;
+            recovery.push(QueuedRecovery {
+                run,
+                attempt_intent,
+                roots,
+            });
+        }
+        Ok(recovery)
+    }
+
     /// Returns the deepest active agents first. Persisted depth plus the recovery index makes
     /// repeated batches linear while preserving child-before-parent interruption semantics.
     pub async fn load_recovery_agent_batch(
@@ -4164,6 +4849,32 @@ impl Store {
                AND provider_runs.status IN ('queued', 'running', 'waiting') \
              ORDER BY agent_nodes.depth DESC, agent_nodes.created_at, agent_nodes.id LIMIT ?",
         )
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(RecoveryAgentRow::into_domain)
+            .collect()
+    }
+
+    pub(crate) async fn load_recovery_agent_batch_for_run(
+        &self,
+        run_id: RunId,
+        limit: u32,
+    ) -> Result<Vec<RecoveryAgent>, StoreError> {
+        validate_page_limit(limit)?;
+        let rows = sqlx::query_as::<_, RecoveryAgentRow>(
+            "SELECT agent_nodes.run_id, agent_nodes.id AS agent_id, \
+                    provider_runs.mutation_state, agent_nodes.parent_id IS NULL AS is_root, \
+                    agent_nodes.depth \
+             FROM agent_nodes INDEXED BY idx_agents_recovery_depth \
+             CROSS JOIN provider_runs ON provider_runs.id = agent_nodes.run_id \
+             WHERE agent_nodes.run_id = ? \
+               AND agent_nodes.status IN ('queued', 'running', 'waiting') \
+               AND provider_runs.status IN ('queued', 'running', 'waiting') \
+             ORDER BY agent_nodes.depth DESC, agent_nodes.created_at, agent_nodes.id LIMIT ?",
+        )
+        .bind(run_id.to_string())
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?;
@@ -4399,6 +5110,7 @@ async fn insert_atomic_fallback(
     transaction: &mut Transaction<'_, Sqlite>,
     primary: &ProviderRun,
     fallback: NewFallbackAttempt,
+    dispatch_claim: Option<(&str, Duration)>,
     now: i64,
 ) -> Result<(ProviderRun, AgentNode), StoreError> {
     if primary.fallback_from_run_id.is_some()
@@ -4477,12 +5189,22 @@ async fn insert_atomic_fallback(
     run.fallback_from_run_id = Some(primary.id);
     run.native_session_id = fallback.native_session_id.clone();
     let root = AgentNode::root(run.id, fallback.provider, "orchestrator");
+    let (dispatch_certainty, dispatch_owner_id, dispatch_lease_expires_at) = dispatch_claim
+        .map(|(owner_id, lease_duration)| {
+            (
+                Some("may_have_dispatched"),
+                Some(owner_id),
+                Some(lease_expires_at(lease_duration)),
+            )
+        })
+        .unwrap_or((None, None, None));
     sqlx::query(
         "INSERT INTO provider_runs \
          (id, conversation_id, provider_session_id, provider, fallback_from_run_id, \
           native_session_id, status, mutation_state, handoff_rendered, handoff_hash, \
-          context_through_sequence, application_managed, turn_prompt, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', 'none_observed', ?, ?, ?, ?, ?, ?, ?)",
+          context_through_sequence, application_managed, turn_prompt, dispatch_certainty, \
+          dispatch_owner_id, dispatch_lease_expires_at, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', 'none_observed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(run.id.to_string())
     .bind(run.conversation_id.to_string())
@@ -4495,6 +5217,9 @@ async fn insert_atomic_fallback(
     .bind(context_through_sequence)
     .bind(application_managed)
     .bind(&fallback.turn_prompt)
+    .bind(dispatch_certainty)
+    .bind(dispatch_owner_id)
+    .bind(dispatch_lease_expires_at)
     .bind(now)
     .bind(now)
     .execute(&mut **transaction)
@@ -4532,10 +5257,31 @@ async fn insert_atomic_fallback(
     Ok((run, root))
 }
 
+async fn require_dispatch_owner(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: RunId,
+    expected_owner_id: &str,
+) -> Result<(), StoreError> {
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM provider_runs \
+         WHERE id = ? AND dispatch_owner_id = ?)",
+    )
+    .bind(run_id.to_string())
+    .bind(expected_owner_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if owned {
+        Ok(())
+    } else {
+        Err(StoreError::DispatchOwnerMismatch(run_id))
+    }
+}
+
 async fn load_existing_fallback(
     transaction: &mut Transaction<'_, Sqlite>,
     primary: &ProviderRun,
     expected: &NewFallbackAttempt,
+    expected_owner_id: Option<&str>,
 ) -> Result<Option<(ProviderRun, AgentNode)>, StoreError> {
     type ExistingFallbackRow = (
         String,
@@ -4543,17 +5289,24 @@ async fn load_existing_fallback(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     );
     let row: Option<ExistingFallbackRow> = sqlx::query_as(
-        "SELECT id, provider, native_session_id, handoff_hash, turn_prompt \
+        "SELECT id, provider, native_session_id, handoff_hash, turn_prompt, dispatch_owner_id \
              FROM provider_runs WHERE fallback_from_run_id = ?",
     )
     .bind(primary.id.to_string())
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((id, provider, native_session_id, handoff_hash, turn_prompt)) = row else {
+    let Some((id, provider, native_session_id, handoff_hash, turn_prompt, owner_id)) = row else {
         return Ok(None);
     };
+    let fallback_run_id = parse_uuid("provider run", &id)?.into();
+    if expected_owner_id
+        .is_some_and(|expected_owner_id| owner_id.as_deref() != Some(expected_owner_id))
+    {
+        return Err(StoreError::DispatchOwnerMismatch(fallback_run_id));
+    }
     if parse_provider(&provider)? != expected.provider
         || native_session_id != expected.native_session_id
         || handoff_hash != expected.handoff_hash
@@ -5055,6 +5808,27 @@ fn cursor_sequence_i64(cursor: &Cursor) -> Result<i64, StoreError> {
 fn now_millis() -> i64 {
     i64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
         .expect("the current timestamp fits in SQLite INTEGER")
+}
+
+fn lease_expires_at(duration: Duration) -> i64 {
+    now_millis().saturating_add(duration_millis(duration))
+}
+
+fn duration_millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+fn dispatch_lease_is_protected(
+    owner_id: Option<&str>,
+    expires_at: Option<i64>,
+    now: i64,
+    stale_grace: Duration,
+) -> bool {
+    owner_id.is_some()
+        && expires_at.is_some_and(|expires_at| {
+            expires_at.saturating_add(duration_millis(stale_grace)) >= now
+        })
 }
 
 fn validate_agent_transition(from: AgentStatus, to: AgentStatus) -> Result<(), StoreError> {
@@ -6219,17 +6993,20 @@ impl TimelineEventRow {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::{AssertSqlSafe, SqlitePool};
     use tokio::sync::broadcast;
 
     use crate::domain::{
-        AgentId, ApprovalId, ApprovalResolution, ConversationId, MessageId, MessageRole, RunId,
-        RunStatus, TimelineEventId, TimelineEventKind, UserInputQuestion, Workspace, WorkspaceId,
+        AgentId, ApprovalId, ApprovalResolution, ConversationId, MessageId, MessageRole,
+        MutationState, RunId, RunStatus, TimelineEventId, TimelineEventKind, UserInputQuestion,
+        Workspace, WorkspaceId,
     };
     use crate::providers::{
-        NativeAgentStatus, NativeChildStatus, NativeSubAgentActivityKind, ProviderId,
+        DispatchCertainty, NativeAgentStatus, NativeChildStatus, NativeSubAgentActivityKind,
+        ProviderErrorCategory, ProviderId,
     };
 
     use super::{
@@ -6237,8 +7014,221 @@ mod tests {
         MAX_NATIVE_AGENT_ID_BYTES, MAX_OBJECTIVE_BYTES, MAX_RUN_AUDIT_HANDOFF_BYTES,
         MAX_STAGED_EVENT_BYTES, MAX_STAGED_EVENT_ROWS, MIGRATOR, NewConversation,
         NewFallbackAttempt, NewSubmission, PreparedSubmission, ProviderEventRecord,
-        STAGED_OVERFLOW_CONTENT, STORE_CHANGE_CHANNEL_CAPACITY, Store, StoreError, provider_label,
+        STAGED_OVERFLOW_CONTENT, STORE_CHANGE_CHANNEL_CAPACITY, Store, StoreError,
+        dispatch_lease_is_protected, provider_label,
     };
+
+    #[test]
+    fn dispatch_lease_grace_tolerates_delayed_renewal_but_eventually_expires() {
+        let expiry = 1_000_000;
+        let grace = Duration::from_secs(300);
+
+        assert!(dispatch_lease_is_protected(
+            Some("live-owner"),
+            Some(expiry),
+            expiry + 120_000,
+            grace,
+        ));
+        assert!(!dispatch_lease_is_protected(
+            Some("crashed-owner"),
+            Some(expiry),
+            expiry + 300_001,
+            grace,
+        ));
+        assert!(!dispatch_lease_is_protected(
+            None,
+            Some(expiry),
+            expiry,
+            grace,
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_recovery_claim_atomically_fences_the_previous_owner() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("stale lease fence"))
+            .await
+            .unwrap();
+        let (run, _) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        let lease = Duration::from_secs(120);
+        let grace = Duration::from_secs(300);
+        assert!(
+            store
+                .claim_provider_dispatch(run.id, "provider-owner", lease)
+                .await
+                .unwrap()
+        );
+        store.delay_dispatch_lease_for_test(run.id).await.unwrap();
+        assert!(
+            store
+                .refresh_provider_dispatch_lease(run.id, "provider-owner", lease, grace)
+                .await
+                .unwrap()
+        );
+        store.expire_dispatch_lease_for_test(run.id).await.unwrap();
+
+        let (late_refresh, recovery_claim) = tokio::join!(
+            store.refresh_provider_dispatch_lease(run.id, "provider-owner", lease, grace),
+            store.claim_stale_provider_dispatch(
+                run.id,
+                "recovery-owner",
+                "current-supervisor",
+                lease,
+                grace,
+            ),
+        );
+
+        assert!(!late_refresh.unwrap());
+        assert!(recovery_claim.unwrap());
+        assert!(
+            store
+                .refresh_provider_dispatch_lease(run.id, "recovery-owner", lease, grace)
+                .await
+                .unwrap()
+        );
+        store.expire_dispatch_lease_for_test(run.id).await.unwrap();
+        assert!(
+            !store
+                .claim_stale_provider_dispatch(
+                    run.id,
+                    "next-recovery-owner",
+                    "recovery-owner",
+                    lease,
+                    grace,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .claim_stale_provider_dispatch(
+                    run.id,
+                    "next-recovery-owner",
+                    "current-supervisor",
+                    lease,
+                    grace,
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn every_owned_write_rejects_a_superseded_owner_before_state_validation() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("owned write fence"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .claim_provider_dispatch(run.id, "former-owner", Duration::from_secs(120))
+                .await
+                .unwrap()
+        );
+        store
+            .replace_dispatch_owner_for_test(run.id, "current-owner")
+            .await
+            .unwrap();
+
+        macro_rules! assert_fenced {
+            ($future:expr) => {
+                assert!(matches!(
+                    $future.await.unwrap_err(),
+                    StoreError::DispatchOwnerMismatch(id) if id == run.id
+                ));
+            };
+        }
+
+        assert_fenced!(store.bind_owned_native_session_with_group(
+            run.id,
+            "native-session",
+            None,
+            "former-owner",
+        ));
+        assert_fenced!(store.advance_owned_provider_context(run.id, "former-owner"));
+        assert_fenced!(store.append_owned_run_event(
+            run.id,
+            root.id,
+            "former-owner",
+            ProviderEventRecord::started(),
+        ));
+        assert_fenced!(store.stage_owned_waiting_event(
+            run.id,
+            root.id,
+            "former-owner",
+            ProviderEventRecord::progress("late output"),
+        ));
+        assert_fenced!(store.record_owned_response_intent(
+            run.id,
+            root.id,
+            "missing-request",
+            ApprovalResolution::Approved,
+            "former-owner",
+        ));
+        assert_fenced!(store.reject_owned_response_intent(
+            run.id,
+            root.id,
+            "missing-request",
+            DispatchCertainty::MayHaveDispatched,
+            "former-owner",
+        ));
+        assert_fenced!(store.acknowledge_owned_response_intent(
+            run.id,
+            root.id,
+            "missing-request",
+            "former-owner",
+        ));
+        assert_fenced!(store.fail_owned_run_if_active(
+            run.id,
+            root.id,
+            ProviderErrorCategory::ContractViolation,
+            MutationState::Unknown,
+            DispatchCertainty::MayHaveDispatched,
+            "former-owner",
+        ));
+        assert_fenced!(store.fail_and_create_owned_fallback(
+            run.id,
+            root.id,
+            "former-owner",
+            Duration::from_secs(120),
+            ProviderErrorCategory::Rejected,
+            NewFallbackAttempt {
+                provider: ProviderId::Claude,
+                native_session_id: None,
+                handoff_rendered: None,
+                handoff_hash: None,
+                routing_decision: None,
+                turn_prompt: "fallback".to_owned(),
+            },
+        ));
+
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Queued
+        );
+        let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE run_id = ?")
+            .bind(run.id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let session_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM provider_sessions WHERE conversation_id = ?")
+                .bind(conversation.id.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(event_count, 0);
+        assert_eq!(session_count, 0);
+    }
 
     async fn explain_query_plan(pool: &SqlitePool, statement: &str) -> Vec<String> {
         sqlx::query_as::<_, (i64, i64, i64, String)>(AssertSqlSafe(format!(

@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(test)]
+use tokio::sync::Barrier;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::{Id, JoinHandle, JoinSet};
+use uuid::Uuid;
 
 use crate::domain::{
     AgentId, ApprovalResolution, ApprovalResponseIntentStatus, ConversationId, MutationState,
@@ -34,6 +37,15 @@ const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const RESPONSE_ACK_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
 const TURN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const FORCED_OWNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(not(test))]
+pub(crate) const DISPATCH_LEASE_DURATION: Duration = Duration::from_secs(120);
+#[cfg(test)]
+pub(crate) const DISPATCH_LEASE_DURATION: Duration = Duration::from_millis(300);
+#[cfg(not(test))]
+const DISPATCH_LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const DISPATCH_LEASE_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const DISPATCH_LEASE_STALE_GRACE: Duration = Duration::from_secs(300);
 
 #[cfg(test)]
 struct ResponseIntentBarrier {
@@ -46,6 +58,22 @@ struct ResponseAcknowledgementBarrier {
     committed: Notify,
     release: Notify,
     panic_after_release: bool,
+}
+
+#[cfg(test)]
+struct ResponsePreAcknowledgementBarrier {
+    ready: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl ResponsePreAcknowledgementBarrier {
+    fn new() -> Self {
+        Self {
+            ready: Notify::new(),
+            release: Notify::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -112,11 +140,77 @@ struct FallbackCreationBarrier {
 }
 
 #[cfg(test)]
+struct FallbackTransitionBarrier {
+    ready: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+struct RecoveryClaimBarrier {
+    ready: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+struct RecoveryPromotionBarrier {
+    ready: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl RecoveryClaimBarrier {
+    fn new() -> Self {
+        Self {
+            ready: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RecoveryPromotionBarrier {
+    fn new() -> Self {
+        Self {
+            ready: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+struct QueuedInterruptBarrier {
+    ready: Notify,
+    release: Notify,
+    finished: Notify,
+}
+
+#[cfg(test)]
 impl FallbackCreationBarrier {
     fn new() -> Self {
         Self {
             created: Notify::new(),
             release: Notify::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl FallbackTransitionBarrier {
+    fn new() -> Self {
+        Self {
+            ready: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl QueuedInterruptBarrier {
+    fn new() -> Self {
+        Self {
+            ready: Notify::new(),
+            release: Notify::new(),
+            finished: Notify::new(),
         }
     }
 }
@@ -227,6 +321,18 @@ pub(crate) struct PreparedRunHandle {
     pub duplicate: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RecoveryClaim {
+    run_id: RunId,
+    owner_id: String,
+}
+
+impl RecoveryClaim {
+    pub(crate) fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+}
+
 impl RunHandle {
     pub fn run_id(&self) -> RunId {
         self.primary_run_id
@@ -303,6 +409,12 @@ pub enum RuntimeError {
     UnknownApproval { run_id: RunId, request_id: String },
     #[error("run supervisor is closed")]
     SupervisorClosed,
+    #[error("persisted run is not a queued root that can be recovered safely")]
+    InvalidRecoveryState,
+    #[error("provider dispatch for run {0} was already claimed")]
+    DispatchAlreadyClaimed(RunId),
+    #[error("provider dispatch lease for run {0} is no longer owned by this supervisor")]
+    DispatchLeaseLost(RunId),
     #[error("run admission queue is full (limit {limit})")]
     RunQueueFull { limit: usize },
     #[error("supervisor command queue is full (limit {limit})")]
@@ -361,12 +473,18 @@ struct ActiveRun {
     response_task_completion_barrier: Option<Arc<OwnedTaskCompletionBarrier>>,
     #[cfg(test)]
     fallback_creation_barrier: Option<Arc<FallbackCreationBarrier>>,
+    #[cfg(test)]
+    fallback_transition_barrier: Option<Arc<FallbackTransitionBarrier>>,
+    #[cfg(test)]
+    queued_interrupt_barrier: Option<Arc<QueuedInterruptBarrier>>,
 }
 
 struct Job {
     request: RunRequest,
     primary_run_id: RunId,
     primary_root_id: AgentId,
+    primary_dispatch_claimed: bool,
+    dispatch_owner_id: String,
     active: Arc<ActiveRun>,
 }
 
@@ -378,10 +496,12 @@ struct AdmittedJob {
 enum TaskOwner {
     Run {
         active: Arc<ActiveRun>,
+        dispatch_owner_id: String,
         admission: OwnedSemaphorePermit,
     },
     Response {
         active: Arc<ActiveRun>,
+        dispatch_owner_id: String,
         request_id: String,
         operation_id: u64,
         admission: OwnedSemaphorePermit,
@@ -394,11 +514,14 @@ struct ResponseJob {
     request_id: String,
     response: ApprovalResponse,
     operation_id: u64,
+    dispatch_owner_id: String,
     active: Arc<ActiveRun>,
     #[cfg(test)]
     intent_barrier: Option<Arc<ResponseIntentBarrier>>,
     #[cfg(test)]
     acknowledgement_barrier: Option<Arc<ResponseAcknowledgementBarrier>>,
+    #[cfg(test)]
+    pre_acknowledgement_barrier: Option<Arc<ResponsePreAcknowledgementBarrier>>,
 }
 
 enum ManagerCommand {
@@ -410,6 +533,11 @@ enum ManagerCommand {
     },
 }
 
+struct ManagerPersistence {
+    store: Store,
+    instance_id: String,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Lifecycle {
     Open,
@@ -419,6 +547,7 @@ enum Lifecycle {
 
 pub struct RunSupervisor {
     store: Store,
+    instance_id: String,
     adapters: Arc<HashMap<ProviderId, Arc<dyn ProviderAdapter>>>,
     active: Arc<Mutex<HashMap<RunId, Arc<ActiveRun>>>>,
     commands: mpsc::Sender<ManagerCommand>,
@@ -435,6 +564,8 @@ pub struct RunSupervisor {
     #[cfg(test)]
     response_acknowledgement_barrier: Option<Arc<ResponseAcknowledgementBarrier>>,
     #[cfg(test)]
+    response_pre_acknowledgement_barrier: Option<Arc<ResponsePreAcknowledgementBarrier>>,
+    #[cfg(test)]
     terminal_receipt_barrier: Option<Arc<TerminalReceiptBarrier>>,
     #[cfg(test)]
     active_turn_panic_barrier: Option<Arc<ActiveTurnPanicBarrier>>,
@@ -444,6 +575,16 @@ pub struct RunSupervisor {
     response_task_completion_barrier: Option<Arc<OwnedTaskCompletionBarrier>>,
     #[cfg(test)]
     fallback_creation_barrier: Option<Arc<FallbackCreationBarrier>>,
+    #[cfg(test)]
+    fallback_transition_barrier: Option<Arc<FallbackTransitionBarrier>>,
+    #[cfg(test)]
+    queued_interrupt_barrier: Option<Arc<QueuedInterruptBarrier>>,
+    #[cfg(test)]
+    recovery_claim_barrier: Mutex<Option<Arc<Barrier>>>,
+    #[cfg(test)]
+    recovery_claim_gate: Mutex<Option<Arc<RecoveryClaimBarrier>>>,
+    #[cfg(test)]
+    recovery_promotion_gate: Mutex<Option<Arc<RecoveryPromotionBarrier>>>,
 }
 
 impl RunSupervisor {
@@ -465,8 +606,12 @@ impl RunSupervisor {
         let (shutdowns, shutdown_receiver) = mpsc::channel(1);
         let (force_shutdown, force_shutdown_receiver) = watch::channel(false);
         let interrupts = Arc::new(Notify::new());
+        let instance_id = Uuid::now_v7().to_string();
         let manager = tokio::spawn(run_manager(
-            store.clone(),
+            ManagerPersistence {
+                store: store.clone(),
+                instance_id: instance_id.clone(),
+            },
             Arc::clone(&adapters),
             Arc::clone(&active),
             receiver,
@@ -476,6 +621,7 @@ impl RunSupervisor {
         ));
         Ok(Self {
             store,
+            instance_id,
             adapters,
             active,
             commands,
@@ -492,6 +638,8 @@ impl RunSupervisor {
             #[cfg(test)]
             response_acknowledgement_barrier: None,
             #[cfg(test)]
+            response_pre_acknowledgement_barrier: None,
+            #[cfg(test)]
             terminal_receipt_barrier: None,
             #[cfg(test)]
             active_turn_panic_barrier: None,
@@ -501,7 +649,49 @@ impl RunSupervisor {
             response_task_completion_barrier: None,
             #[cfg(test)]
             fallback_creation_barrier: None,
+            #[cfg(test)]
+            fallback_transition_barrier: None,
+            #[cfg(test)]
+            queued_interrupt_barrier: None,
+            #[cfg(test)]
+            recovery_claim_barrier: Mutex::new(None),
+            #[cfg(test)]
+            recovery_claim_gate: Mutex::new(None),
+            #[cfg(test)]
+            recovery_promotion_gate: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn crash_for_test(&self) {
+        if let Some(manager) = self.manager.lock().await.take() {
+            manager.abort();
+            let _ = manager.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synchronize_recovery_claim_for_test(&self, barrier: Arc<Barrier>) {
+        *self
+            .recovery_claim_barrier
+            .lock()
+            .expect("recovery claim barrier mutex must not be poisoned") = Some(barrier);
+    }
+
+    #[cfg(test)]
+    fn hold_recovery_claim_for_test(&self, barrier: Arc<RecoveryClaimBarrier>) {
+        *self
+            .recovery_claim_gate
+            .lock()
+            .expect("recovery claim gate mutex must not be poisoned") = Some(barrier);
+    }
+
+    #[cfg(test)]
+    fn hold_recovery_promotion_for_test(&self, barrier: Arc<RecoveryPromotionBarrier>) {
+        *self
+            .recovery_promotion_gate
+            .lock()
+            .expect("recovery promotion gate mutex must not be poisoned") = Some(barrier);
     }
 
     pub async fn submit(&self, request: RunRequest) -> Result<RunHandle, RuntimeError> {
@@ -538,7 +728,14 @@ impl RunSupervisor {
             .store
             .create_run(request.conversation_id, request.provider)
             .await?;
-        let handle = self.enqueue_prepared(request, run, root, admission, command);
+        if !self
+            .store
+            .claim_provider_dispatch(run.id, &self.instance_id, DISPATCH_LEASE_DURATION)
+            .await?
+        {
+            return Err(RuntimeError::DispatchAlreadyClaimed(run.id));
+        }
+        let handle = self.enqueue_prepared(request, run, root, true, admission, command);
         drop(lifecycle);
         Ok(handle)
     }
@@ -577,9 +774,13 @@ impl RunSupervisor {
                 },
                 mpsc::error::TrySendError::Closed(_) => RuntimeError::SupervisorClosed,
             })?;
-        match self.store.prepare_submission(submission).await? {
+        match self
+            .store
+            .prepare_claimed_submission(submission, &self.instance_id, DISPATCH_LEASE_DURATION)
+            .await?
+        {
             PreparedSubmission::Created { run, root } => {
-                let handle = self.enqueue_prepared(request, run, root, admission, command);
+                let handle = self.enqueue_prepared(request, run, root, true, admission, command);
                 drop(lifecycle);
                 Ok(PreparedRunHandle {
                     handle,
@@ -599,11 +800,136 @@ impl RunSupervisor {
         }
     }
 
+    /// Acquires a unique durable recovery owner before admission or any run mutation. A caller
+    /// that loses this CAS must leave the run to the winning reconciler.
+    pub(crate) async fn claim_recovery_run(
+        &self,
+        run_id: RunId,
+        reap_stale_claim: bool,
+    ) -> Result<Option<RecoveryClaim>, RuntimeError> {
+        let lifecycle = self.lifecycle.lock().await;
+        if *lifecycle != Lifecycle::Open {
+            return Err(RuntimeError::SupervisorClosed);
+        }
+        #[cfg(test)]
+        let recovery_claim_gate = self
+            .recovery_claim_gate
+            .lock()
+            .expect("recovery claim gate mutex must not be poisoned")
+            .clone();
+        #[cfg(test)]
+        if let Some(barrier) = recovery_claim_gate {
+            barrier.ready.notify_one();
+            barrier.release.notified().await;
+        }
+        #[cfg(test)]
+        let recovery_claim_barrier = self
+            .recovery_claim_barrier
+            .lock()
+            .expect("recovery claim barrier mutex must not be poisoned")
+            .clone();
+        #[cfg(test)]
+        if let Some(barrier) = recovery_claim_barrier {
+            barrier.wait().await;
+        }
+        let owner_id = format!("recovery:{}", Uuid::now_v7());
+        let claimed = if reap_stale_claim {
+            self.store
+                .claim_stale_provider_dispatch(
+                    run_id,
+                    &owner_id,
+                    &self.instance_id,
+                    DISPATCH_LEASE_DURATION,
+                    DISPATCH_LEASE_STALE_GRACE,
+                )
+                .await?
+        } else {
+            self.store
+                .claim_unowned_provider_dispatch_recovery(
+                    run_id,
+                    &owner_id,
+                    DISPATCH_LEASE_DURATION,
+                )
+                .await?
+        };
+        drop(lifecycle);
+        Ok(claimed.then_some(RecoveryClaim { run_id, owner_id }))
+    }
+
+    /// Re-enters an already durable queued run after a unique recovery claim. Admission and
+    /// command reservation happen only after that claim, and promotion to this supervisor is a
+    /// second owner-fenced CAS immediately before enqueue.
+    pub(crate) async fn recover_persisted(
+        &self,
+        request: RunRequest,
+        run: crate::domain::ProviderRun,
+        root: crate::domain::AgentNode,
+        claim: &RecoveryClaim,
+    ) -> Result<RunHandle, RuntimeError> {
+        let lifecycle = self.lifecycle.lock().await;
+        if *lifecycle != Lifecycle::Open {
+            return Err(RuntimeError::SupervisorClosed);
+        }
+        if claim.run_id != run.id
+            || run.status != RunStatus::Queued
+            || root.run_id != run.id
+            || root.parent_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRecoveryState);
+        }
+        self.adapter(request.provider)?;
+        let admission = Arc::clone(&self.root_admission)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::NoPermits => RuntimeError::RunQueueFull {
+                    limit: MAX_QUEUED_ROOT_RUNS,
+                },
+                tokio::sync::TryAcquireError::Closed => RuntimeError::SupervisorClosed,
+            })?;
+        let command = self
+            .commands
+            .clone()
+            .try_reserve_owned()
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RuntimeError::CommandQueueFull {
+                    limit: SUPERVISOR_COMMAND_CAPACITY,
+                },
+                mpsc::error::TrySendError::Closed(_) => RuntimeError::SupervisorClosed,
+            })?;
+        #[cfg(test)]
+        let recovery_promotion_gate = self
+            .recovery_promotion_gate
+            .lock()
+            .expect("recovery promotion gate mutex must not be poisoned")
+            .clone();
+        #[cfg(test)]
+        if let Some(barrier) = recovery_promotion_gate {
+            barrier.ready.notify_one();
+            barrier.release.notified().await;
+        }
+        if !self
+            .store
+            .promote_recovery_dispatch_claim(
+                run.id,
+                &claim.owner_id,
+                &self.instance_id,
+                DISPATCH_LEASE_DURATION,
+            )
+            .await?
+        {
+            return Err(RuntimeError::DispatchAlreadyClaimed(run.id));
+        }
+        let handle = self.enqueue_prepared(request, run, root, true, admission, command);
+        drop(lifecycle);
+        Ok(handle)
+    }
+
     fn enqueue_prepared(
         &self,
         request: RunRequest,
         run: crate::domain::ProviderRun,
         root: crate::domain::AgentNode,
+        dispatch_claimed: bool,
         admission: OwnedSemaphorePermit,
         command: mpsc::OwnedPermit<ManagerCommand>,
     ) -> RunHandle {
@@ -635,6 +961,10 @@ impl RunSupervisor {
             response_task_completion_barrier: self.response_task_completion_barrier.clone(),
             #[cfg(test)]
             fallback_creation_barrier: self.fallback_creation_barrier.clone(),
+            #[cfg(test)]
+            fallback_transition_barrier: self.fallback_transition_barrier.clone(),
+            #[cfg(test)]
+            queued_interrupt_barrier: self.queued_interrupt_barrier.clone(),
         });
         self.active
             .lock()
@@ -645,6 +975,8 @@ impl RunSupervisor {
                 request,
                 primary_run_id: run.id,
                 primary_root_id: root.id,
+                primary_dispatch_claimed: dispatch_claimed,
+                dispatch_owner_id: self.instance_id.clone(),
                 active: Arc::clone(&active),
             },
             admission,
@@ -783,11 +1115,14 @@ impl RunSupervisor {
                 request_id: request_id.to_owned(),
                 response,
                 operation_id,
+                dispatch_owner_id: self.instance_id.clone(),
                 active,
                 #[cfg(test)]
                 intent_barrier: self.response_intent_barrier.clone(),
                 #[cfg(test)]
                 acknowledgement_barrier: self.response_acknowledgement_barrier.clone(),
+                #[cfg(test)]
+                pre_acknowledgement_barrier: self.response_pre_acknowledgement_barrier.clone(),
             },
             admission: response_admission,
             reply,
@@ -798,7 +1133,7 @@ impl RunSupervisor {
 
     pub async fn steer(&self, run_id: RunId, text: &str) -> Result<(), RuntimeError> {
         let active = self.active_run(run_id)?;
-        let (adapter, session, native_turn_id, mut done) = {
+        let (attempt_run_id, adapter, session, native_turn_id, mut done) = {
             let attempt = active
                 .attempt
                 .lock()
@@ -807,6 +1142,7 @@ impl RunSupervisor {
                 .as_ref()
                 .ok_or(RuntimeError::SessionNotReady(run_id))?;
             (
+                attempt.run_id,
                 Arc::clone(&attempt.adapter),
                 attempt.session.clone(),
                 attempt
@@ -818,6 +1154,18 @@ impl RunSupervisor {
         };
         let mut cancelled = active.cancellation.subscribe();
         let mut shutdown = active.shutdown.subscribe();
+        if !self
+            .store
+            .refresh_provider_dispatch_lease(
+                attempt_run_id,
+                &self.instance_id,
+                DISPATCH_LEASE_DURATION,
+                DISPATCH_LEASE_STALE_GRACE,
+            )
+            .await?
+        {
+            return Err(RuntimeError::DispatchLeaseLost(attempt_run_id));
+        }
         race_attempt_control(
             adapter.steer(&session, &native_turn_id, text),
             &mut cancelled,
@@ -982,6 +1330,14 @@ impl RunSupervisor {
     }
 
     #[cfg(test)]
+    fn set_response_pre_acknowledgement_barrier(
+        &mut self,
+        barrier: Arc<ResponsePreAcknowledgementBarrier>,
+    ) {
+        self.response_pre_acknowledgement_barrier = Some(barrier);
+    }
+
+    #[cfg(test)]
     fn set_response_acknowledgement_barrier(
         &mut self,
         barrier: Arc<ResponseAcknowledgementBarrier>,
@@ -1013,6 +1369,21 @@ impl RunSupervisor {
     fn set_fallback_creation_barrier(&mut self, barrier: Arc<FallbackCreationBarrier>) {
         self.fallback_creation_barrier = Some(barrier);
     }
+
+    #[cfg(test)]
+    fn set_fallback_transition_barrier(&mut self, barrier: Arc<FallbackTransitionBarrier>) {
+        self.fallback_transition_barrier = Some(barrier);
+    }
+
+    #[cfg(test)]
+    fn set_queued_interrupt_barrier(&mut self, barrier: Arc<QueuedInterruptBarrier>) {
+        self.queued_interrupt_barrier = Some(barrier);
+    }
+
+    #[cfg(test)]
+    fn available_root_admission_for_test(&self) -> usize {
+        self.root_admission.available_permits()
+    }
 }
 
 impl Drop for RunSupervisor {
@@ -1030,7 +1401,7 @@ impl Drop for RunSupervisor {
 }
 
 async fn run_manager(
-    store: Store,
+    persistence: ManagerPersistence,
     adapters: Arc<HashMap<ProviderId, Arc<dyn ProviderAdapter>>>,
     active: Arc<Mutex<HashMap<RunId, Arc<ActiveRun>>>>,
     mut commands: mpsc::Receiver<ManagerCommand>,
@@ -1038,11 +1409,16 @@ async fn run_manager(
     mut force_shutdown: watch::Receiver<bool>,
     interrupts: Arc<Notify>,
 ) {
+    let ManagerPersistence { store, instance_id } = persistence;
     let mut tasks = JoinSet::new();
     let mut owners: HashMap<Id, TaskOwner> = HashMap::new();
     let mut pending = VecDeque::with_capacity(MAX_QUEUED_ROOT_RUNS);
     let mut active_root_tasks = 0usize;
     let mut task_failed = false;
+    let first_lease_refresh = tokio::time::Instant::now() + DISPATCH_LEASE_REFRESH_INTERVAL;
+    let mut lease_refreshes =
+        tokio::time::interval_at(first_lease_refresh, DISPATCH_LEASE_REFRESH_INTERVAL);
+    lease_refreshes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let shutdown_reply = loop {
         task_failed |= interrupt_cancelled_pending(&store, &active, &mut pending).await;
         while active_root_tasks < MAX_CONCURRENT_ROOT_RUNS {
@@ -1061,6 +1437,12 @@ async fn run_manager(
             }
             shutdown = shutdowns.recv() => break shutdown.flatten(),
             _ = interrupts.notified() => {}
+            _ = lease_refreshes.tick() => {
+                if refresh_manager_dispatch_leases(&store, &instance_id, &active).await.is_err() {
+                    task_failed = true;
+                    break None;
+                }
+            }
             command = commands.recv() => match command {
                 Some(ManagerCommand::Spawn(job)) => {
                     if active_root_tasks < MAX_CONCURRENT_ROOT_RUNS {
@@ -1081,6 +1463,7 @@ async fn run_manager(
                 Some(ManagerCommand::Respond { job, admission, reply }) => {
                     let owner = TaskOwner::Response {
                         active: Arc::clone(&job.active),
+                        dispatch_owner_id: job.dispatch_owner_id.clone(),
                         request_id: job.request_id.clone(),
                         operation_id: job.operation_id,
                         admission,
@@ -1172,6 +1555,34 @@ async fn run_manager(
     }
 }
 
+async fn refresh_manager_dispatch_leases(
+    store: &Store,
+    owner_id: &str,
+    active: &Mutex<HashMap<RunId, Arc<ActiveRun>>>,
+) -> Result<(), StoreError> {
+    for run in unique_active_runs(active) {
+        let run_id = run
+            .attempt_identity
+            .lock()
+            .expect("attempt identity mutex must not be poisoned")
+            .0;
+        if !store
+            .refresh_provider_dispatch_lease(
+                run_id,
+                owner_id,
+                DISPATCH_LEASE_DURATION,
+                DISPATCH_LEASE_STALE_GRACE,
+            )
+            .await?
+            && !store.is_owned_fallback_transition(run_id, owner_id).await?
+        {
+            run.shutdown.send_replace(true);
+            run.approval_changed.notify_one();
+        }
+    }
+    Ok(())
+}
+
 async fn interrupt_cancelled_pending(
     store: &Store,
     active: &Mutex<HashMap<RunId, Arc<ActiveRun>>>,
@@ -1205,6 +1616,7 @@ fn spawn_root_task(
     let AdmittedJob { job, admission } = admitted;
     let owner = TaskOwner::Run {
         active: Arc::clone(&job.active),
+        dispatch_owner_id: job.dispatch_owner_id.clone(),
         admission,
     };
     let store = store.clone();
@@ -1297,25 +1709,64 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
         ApprovalResponse::Answers(answers) => ApprovalResolution::Answers(answers.clone()),
     };
     store
-        .record_response_intent(attempt_run_id, root_id, &job.request_id, resolution)
+        .record_owned_response_intent(
+            attempt_run_id,
+            root_id,
+            &job.request_id,
+            resolution,
+            &job.dispatch_owner_id,
+        )
         .await?;
-    #[cfg(test)]
-    if let Some(barrier) = &job.intent_barrier {
-        barrier.committed.notify_one();
-        barrier.release.notified().await;
-    }
     if *cancelled.borrow() || *shutdown.borrow() || *done.borrow() {
         let rejection = store
-            .reject_response_intent(
+            .reject_owned_response_intent(
                 attempt_run_id,
                 root_id,
                 &job.request_id,
                 DispatchCertainty::NotDispatched,
+                &job.dispatch_owner_id,
             )
             .await;
         job.active.approval_changed.notify_one();
         rejection?;
         return Err(RuntimeError::OperationCancelled);
+    }
+    if !store
+        .refresh_provider_dispatch_lease(
+            attempt_run_id,
+            &job.dispatch_owner_id,
+            DISPATCH_LEASE_DURATION,
+            DISPATCH_LEASE_STALE_GRACE,
+        )
+        .await?
+    {
+        store
+            .reject_owned_response_intent(
+                attempt_run_id,
+                root_id,
+                &job.request_id,
+                DispatchCertainty::NotDispatched,
+                &job.dispatch_owner_id,
+            )
+            .await?;
+        job.active.approval_changed.notify_one();
+        return Err(RuntimeError::DispatchLeaseLost(attempt_run_id));
+    }
+    #[cfg(test)]
+    if let Some(barrier) = &job.intent_barrier {
+        barrier.committed.notify_one();
+        barrier.release.notified().await;
+    }
+    if !store
+        .refresh_provider_dispatch_lease(
+            attempt_run_id,
+            &job.dispatch_owner_id,
+            DISPATCH_LEASE_DURATION,
+            DISPATCH_LEASE_STALE_GRACE,
+        )
+        .await?
+    {
+        return Err(RuntimeError::DispatchLeaseLost(attempt_run_id));
     }
     if let Some(attempt) = job
         .active
@@ -1339,11 +1790,12 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
     match response_result {
         Err(RuntimeError::OperationCancelled) => {
             let rejection = store
-                .reject_response_intent(
+                .reject_owned_response_intent(
                     attempt_run_id,
                     root_id,
                     &job.request_id,
                     DispatchCertainty::MayHaveDispatched,
+                    &job.dispatch_owner_id,
                 )
                 .await;
             clear_response_state(&job.active, attempt_run_id, &job.request_id, false);
@@ -1357,11 +1809,12 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
         Err(error) => Err(error),
         Ok(Err(error)) => {
             let rejection = store
-                .reject_response_intent(
+                .reject_owned_response_intent(
                     attempt_run_id,
                     root_id,
                     &job.request_id,
                     error.dispatch_certainty(),
+                    &job.dispatch_owner_id,
                 )
                 .await;
             clear_response_state(&job.active, attempt_run_id, &job.request_id, false);
@@ -1371,11 +1824,12 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
         Ok(Ok(())) => {
             if *cancelled.borrow() || *shutdown.borrow() || *done.borrow() {
                 let rejection = store
-                    .reject_response_intent(
+                    .reject_owned_response_intent(
                         attempt_run_id,
                         root_id,
                         &job.request_id,
                         DispatchCertainty::MayHaveDispatched,
+                        &job.dispatch_owner_id,
                     )
                     .await;
                 clear_response_state(&job.active, attempt_run_id, &job.request_id, false);
@@ -1386,8 +1840,18 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
                     Err(error) => return Err(error.into()),
                 }
             }
+            #[cfg(test)]
+            if let Some(barrier) = &job.pre_acknowledgement_barrier {
+                barrier.ready.notify_one();
+                barrier.release.notified().await;
+            }
             let acknowledgement = store
-                .acknowledge_response_intent(attempt_run_id, root_id, &job.request_id)
+                .acknowledge_owned_response_intent(
+                    attempt_run_id,
+                    root_id,
+                    &job.request_id,
+                    &job.dispatch_owner_id,
+                )
                 .await;
             #[cfg(test)]
             if acknowledgement.is_ok()
@@ -1442,7 +1906,12 @@ fn clear_response_operation(active: &ActiveRun, operation_id: u64) {
     }
 }
 
-async fn reconcile_response_panic(store: &Store, active: &ActiveRun, request_id: &str) {
+async fn reconcile_response_panic(
+    store: &Store,
+    active: &ActiveRun,
+    request_id: &str,
+    dispatch_owner_id: &str,
+) {
     let gate = active.attempt_gate.lock().await;
     let (run_id, root_id) = *active
         .attempt_identity
@@ -1459,11 +1928,12 @@ async fn reconcile_response_panic(store: &Store, active: &ActiveRun, request_id:
                 .is_some_and(|intent| intent.status == ApprovalResponseIntentStatus::Acknowledged);
             if !acknowledged {
                 let _ = store
-                    .reject_response_intent(
+                    .reject_owned_response_intent(
                         run_id,
                         root_id,
                         request_id,
                         DispatchCertainty::MayHaveDispatched,
+                        dispatch_owner_id,
                     )
                     .await;
             }
@@ -1494,7 +1964,11 @@ async fn reconcile_task(
         return true;
     };
     match owner {
-        TaskOwner::Run { active, admission } => {
+        TaskOwner::Run {
+            active,
+            dispatch_owner_id,
+            admission,
+        } => {
             let failed = match result {
                 Ok((_, result)) => result.is_err(),
                 Err(_) => true,
@@ -1507,12 +1981,13 @@ async fn reconcile_task(
                     .lock()
                     .expect("attempt identity mutex must not be poisoned");
                 let reconciled = store
-                    .fail_run_if_active(
+                    .fail_owned_run_if_active(
                         run_id,
                         root_id,
                         ProviderErrorCategory::ContractViolation,
                         MutationState::Unknown,
                         DispatchCertainty::MayHaveDispatched,
+                        &dispatch_owner_id,
                     )
                     .await;
                 match reconciled {
@@ -1532,6 +2007,7 @@ async fn reconcile_task(
         }
         TaskOwner::Response {
             active,
+            dispatch_owner_id,
             request_id,
             operation_id,
             admission,
@@ -1544,7 +2020,7 @@ async fn reconcile_task(
                 false
             }
             Err(_) => {
-                reconcile_response_panic(store, &active, &request_id).await;
+                reconcile_response_panic(store, &active, &request_id, &dispatch_owner_id).await;
                 clear_response_operation(&active, operation_id);
                 let _ = reply.send(Err(RuntimeError::OwnedTaskFailed));
                 drop(admission);
@@ -1608,6 +2084,8 @@ async fn execute_job(
     let first = AttemptSpec {
         run_id: job.primary_run_id,
         root_id: job.primary_root_id,
+        dispatch_owner_id: job.dispatch_owner_id.clone(),
+        dispatch_claimed: job.primary_dispatch_claimed,
         adapter: primary,
         resume_native_id: job.request.native_session_id.clone(),
         fallback: job.request.fallback.clone(),
@@ -1625,14 +2103,14 @@ async fn execute_job(
                 barrier.created.notify_one();
                 barrier.release.notified().await;
             }
-            let adapter = adapters
-                .get(&fallback_request.provider)
-                .cloned()
-                .ok_or(RuntimeError::MissingAdapter(fallback_request.provider))?;
             *job.active
                 .attempt_identity
                 .lock()
                 .expect("attempt identity mutex must not be poisoned") = (run.id, root.id);
+            let adapter = adapters
+                .get(&fallback_request.provider)
+                .cloned()
+                .ok_or(RuntimeError::MissingAdapter(fallback_request.provider))?;
             let mut state = *job.active.state.borrow();
             state.current_run_id = run.id;
             state.fallback_run_id = Some(run.id);
@@ -1645,6 +2123,8 @@ async fn execute_job(
             let fallback = AttemptSpec {
                 run_id: run.id,
                 root_id: root.id,
+                dispatch_owner_id: job.dispatch_owner_id.clone(),
+                dispatch_claimed: true,
                 adapter,
                 resume_native_id: fallback_request.native_session_id.clone(),
                 fallback: None,
@@ -1657,6 +2137,8 @@ async fn execute_job(
                 },
                 primary_run_id: job.primary_run_id,
                 primary_root_id: job.primary_root_id,
+                primary_dispatch_claimed: job.primary_dispatch_claimed,
+                dispatch_owner_id: job.dispatch_owner_id.clone(),
                 active: Arc::clone(&job.active),
             };
             let result = execute_attempt(&store, &fallback_job, fallback).await?;
@@ -1668,13 +2150,24 @@ async fn execute_job(
 }
 
 async fn interrupt_queued(store: &Store, job: &Job) -> Result<(), RuntimeError> {
-    store
-        .append_run_event(
+    #[cfg(test)]
+    if let Some(barrier) = &job.active.queued_interrupt_barrier {
+        barrier.ready.notify_one();
+        barrier.release.notified().await;
+    }
+    let result = store
+        .append_owned_run_event(
             job.primary_run_id,
             job.primary_root_id,
+            &job.dispatch_owner_id,
             ProviderEventRecord::interrupted(),
         )
-        .await?;
+        .await;
+    #[cfg(test)]
+    if let Some(barrier) = &job.active.queued_interrupt_barrier {
+        barrier.finished.notify_one();
+    }
+    result?;
     set_status(&job.active, job.primary_run_id, RunStatus::Interrupted);
     Ok(())
 }
@@ -1689,6 +2182,8 @@ fn remove_joined_run(active: &Mutex<HashMap<RunId, Arc<ActiveRun>>>, completed: 
 struct AttemptSpec {
     run_id: RunId,
     root_id: AgentId,
+    dispatch_owner_id: String,
+    dispatch_claimed: bool,
     adapter: Arc<dyn ProviderAdapter>,
     resume_native_id: Option<String>,
     fallback: Option<FallbackRequest>,
@@ -1740,6 +2235,28 @@ async fn execute_attempt(
     if *cancellation.borrow() || *shutdown.borrow() {
         return interrupt_before_start(store, &job.active, &attempt).await;
     }
+    if !attempt.dispatch_claimed
+        && !store
+            .claim_provider_dispatch(
+                attempt.run_id,
+                &attempt.dispatch_owner_id,
+                DISPATCH_LEASE_DURATION,
+            )
+            .await?
+    {
+        return Err(RuntimeError::DispatchAlreadyClaimed(attempt.run_id));
+    }
+    if !store
+        .refresh_provider_dispatch_lease(
+            attempt.run_id,
+            &attempt.dispatch_owner_id,
+            DISPATCH_LEASE_DURATION,
+            DISPATCH_LEASE_STALE_GRACE,
+        )
+        .await?
+    {
+        return Err(RuntimeError::DispatchLeaseLost(attempt.run_id));
+    }
     let session_request = StartSession {
         conversation_id: job.request.conversation_id,
         working_directory: job.request.working_directory.clone(),
@@ -1766,6 +2283,7 @@ async fn execute_attempt(
         Ok(Ok(_)) => {
             return fail_attempt(
                 store,
+                &job.active,
                 &attempt,
                 ProviderErrorCategory::ContractViolation,
                 MutationState::Unknown,
@@ -1780,7 +2298,15 @@ async fn execute_attempt(
             } else {
                 MutationState::Unknown
             };
-            return fail_attempt(store, &attempt, error.category(), mutation, certainty).await;
+            return fail_attempt(
+                store,
+                &job.active,
+                &attempt,
+                error.category(),
+                mutation,
+                certainty,
+            )
+            .await;
         }
         Err(RuntimeError::OperationCancelled) => {
             return interrupt_before_start(store, &job.active, &attempt).await;
@@ -1788,10 +2314,11 @@ async fn execute_attempt(
         Err(error) => return Err(error),
     };
     store
-        .bind_native_session_with_group(
+        .bind_owned_native_session_with_group(
             attempt.run_id,
             &session.native_id,
             session.native_group_id.as_deref(),
+            &attempt.dispatch_owner_id,
         )
         .await?;
     let (done, _) = watch::channel(false);
@@ -1809,6 +2336,17 @@ async fn execute_attempt(
         response_operation_id: None,
         done,
     });
+    if !store
+        .refresh_provider_dispatch_lease(
+            attempt.run_id,
+            &attempt.dispatch_owner_id,
+            DISPATCH_LEASE_DURATION,
+            DISPATCH_LEASE_STALE_GRACE,
+        )
+        .await?
+    {
+        return Err(RuntimeError::DispatchLeaseLost(attempt.run_id));
+    }
     let turn = race_control(
         attempt
             .adapter
@@ -1826,7 +2364,15 @@ async fn execute_attempt(
             } else {
                 MutationState::Unknown
             };
-            return fail_attempt(store, &attempt, error.category(), mutation, certainty).await;
+            return fail_attempt(
+                store,
+                &job.active,
+                &attempt,
+                error.category(),
+                mutation,
+                certainty,
+            )
+            .await;
         }
         Err(RuntimeError::OperationCancelled) => {
             return interrupt_before_start(store, &job.active, &attempt).await;
@@ -1998,7 +2544,12 @@ async fn execute_attempt(
                             }
                         };
                         let stage = store
-                            .stage_waiting_event(attempt.run_id, attempt.root_id, record)
+                            .stage_owned_waiting_event(
+                                attempt.run_id,
+                                attempt.root_id,
+                                &attempt.dispatch_owner_id,
+                                record,
+                            )
                             .await;
                         drop(gate);
                         match stage {
@@ -2102,9 +2653,10 @@ async fn execute_attempt(
                     active.native_turn_id = Some(native_turn_id.clone());
                 }
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::started_with_native_id(native_turn_id),
                     )
                     .await
@@ -2119,7 +2671,10 @@ async fn execute_attempt(
                     )
                     .await;
                 }
-                if let Err(error) = store.advance_provider_context(attempt.run_id).await {
+                if let Err(error) = store
+                    .advance_owned_provider_context(attempt.run_id, &attempt.dispatch_owner_id)
+                    .await
+                {
                     return finalize_attempt(
                         store,
                         &job.active,
@@ -2140,9 +2695,10 @@ async fn execute_attempt(
             }
             ProviderEvent::AssistantMessage { content } if started => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::message(content),
                     )
                     .await
@@ -2163,9 +2719,10 @@ async fn execute_attempt(
                 content,
             } if started => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::native_message(content, native_item_id),
                     )
                     .await
@@ -2183,9 +2740,10 @@ async fn execute_attempt(
             }
             ProviderEvent::Progress { content } if started => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::progress(content),
                     )
                     .await
@@ -2207,9 +2765,10 @@ async fn execute_attempt(
             } if started => {
                 mutation = merge_mutation(mutation, observed);
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::tool(description, observed),
                     )
                     .await
@@ -2232,9 +2791,10 @@ async fn execute_attempt(
             } if started => {
                 mutation = merge_mutation(mutation, observed);
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::native_item(native_item_id, description, observed),
                     )
                     .await
@@ -2259,9 +2819,10 @@ async fn execute_attempt(
                 status,
             } if started => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::child_agent(
                             native_item_id,
                             parent_native_thread_id,
@@ -2291,9 +2852,10 @@ async fn execute_attempt(
                 activity,
             } if started => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::sub_agent(
                             native_item_id,
                             agent_thread_id,
@@ -2316,9 +2878,10 @@ async fn execute_attempt(
             }
             ProviderEvent::Unrecognized { method } if started => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::unrecognized(method),
                     )
                     .await
@@ -2341,9 +2904,10 @@ async fn execute_attempt(
                 details,
             } if started && !approval_pending(&job.active) => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::approval_requested_with_details(
                             attempt.adapter.id(),
                             request_id.clone(),
@@ -2381,9 +2945,10 @@ async fn execute_attempt(
                 auto_resolution_ms,
             } if started && !approval_pending(&job.active) => {
                 if let Err(error) = store
-                    .append_run_event(
+                    .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
+                        &attempt.dispatch_owner_id,
                         ProviderEventRecord::user_input_requested(
                             attempt.adapter.id(),
                             request_id.clone(),
@@ -2415,6 +2980,11 @@ async fn execute_attempt(
                 set_status(&job.active, attempt.run_id, RunStatus::Waiting);
             }
             ProviderEvent::TurnCompleted if started => {
+                #[cfg(test)]
+                if let Some(barrier) = &job.active.terminal_receipt_barrier {
+                    barrier.received.notify_one();
+                    barrier.release.notified().await;
+                }
                 return finalize_attempt(
                     store,
                     &job.active,
@@ -2460,9 +3030,10 @@ async fn interrupt_before_start(
     attempt: &AttemptSpec,
 ) -> Result<AttemptResult, RuntimeError> {
     store
-        .append_run_event(
+        .append_owned_run_event(
             attempt.run_id,
             attempt.root_id,
+            &attempt.dispatch_owner_id,
             ProviderEventRecord::interrupted(),
         )
         .await?;
@@ -2491,6 +3062,7 @@ async fn interrupt_attempt(
 
 async fn fail_attempt(
     store: &Store,
+    _active: &ActiveRun,
     attempt: &AttemptSpec,
     category: ProviderErrorCategory,
     mutation: MutationState,
@@ -2500,10 +3072,17 @@ async fn fail_attempt(
         && dispatch_certainty == DispatchCertainty::NotDispatched
         && let Some(fallback) = &attempt.fallback
     {
+        #[cfg(test)]
+        if let Some(barrier) = &_active.fallback_transition_barrier {
+            barrier.ready.notify_one();
+            barrier.release.notified().await;
+        }
         let (run, root) = store
-            .fail_and_create_fallback(
+            .fail_and_create_owned_fallback(
                 attempt.run_id,
                 attempt.root_id,
+                &attempt.dispatch_owner_id,
+                DISPATCH_LEASE_DURATION,
                 category,
                 NewFallbackAttempt {
                     provider: fallback.provider,
@@ -2521,9 +3100,10 @@ async fn fail_attempt(
         });
     }
     store
-        .append_run_event(
+        .append_owned_run_event(
             attempt.run_id,
             attempt.root_id,
+            &attempt.dispatch_owner_id,
             ProviderEventRecord::provider_failed(category, mutation, dispatch_certainty),
         )
         .await?;
@@ -2603,9 +3183,10 @@ async fn finalize_attempt(
     match finish {
         AttemptFinish::ProviderTerminal(RunStatus::Completed) => {
             store
-                .append_run_event(
+                .append_owned_run_event(
                     attempt.run_id,
                     attempt.root_id,
+                    &attempt.dispatch_owner_id,
                     ProviderEventRecord::completed(),
                 )
                 .await?;
@@ -2613,9 +3194,10 @@ async fn finalize_attempt(
         }
         AttemptFinish::ProviderTerminal(RunStatus::Interrupted) => {
             store
-                .append_run_event(
+                .append_owned_run_event(
                     attempt.run_id,
                     attempt.root_id,
+                    &attempt.dispatch_owner_id,
                     ProviderEventRecord::interrupted(),
                 )
                 .await?;
@@ -2631,7 +3213,12 @@ async fn finalize_attempt(
                 ProviderEventRecord::interrupted_with_mutation(mutation)
             };
             store
-                .append_run_event(attempt.run_id, attempt.root_id, record)
+                .append_owned_run_event(
+                    attempt.run_id,
+                    attempt.root_id,
+                    &attempt.dispatch_owner_id,
+                    record,
+                )
                 .await?;
             Ok(AttemptResult::Interrupted)
         }
@@ -2639,7 +3226,17 @@ async fn finalize_attempt(
             category,
             mutation,
             dispatch_certainty,
-        } => fail_attempt(store, attempt, category, mutation, dispatch_certainty).await,
+        } => {
+            fail_attempt(
+                store,
+                active,
+                attempt,
+                category,
+                mutation,
+                dispatch_certainty,
+            )
+            .await
+        }
         AttemptFinish::RuntimeError(error) => Err(error),
     }
 }
@@ -2743,9 +3340,13 @@ mod tests {
     use crate::providers::{ProviderCapabilities, ProviderHealth, ProviderTurnOwner};
     use crate::store::{NewConversation, StoreError};
 
+    type HeldTurnSenders = Arc<Mutex<Vec<mpsc::Sender<Result<ProviderEvent, ProviderError>>>>>;
+
     struct ImmediateAdapter {
         provider: ProviderId,
         reject_before_dispatch: bool,
+        start_calls: Option<Arc<AtomicUsize>>,
+        held_turns: Option<HeldTurnSenders>,
     }
 
     struct HungShutdownAdapter(ImmediateAdapter);
@@ -2770,6 +3371,9 @@ mod tests {
             &self,
             _request: StartSession,
         ) -> Result<ProviderSession, ProviderError> {
+            if let Some(calls) = &self.start_calls {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(ProviderSession {
                 provider: self.provider,
                 native_id: format!("{:?}-session", self.provider),
@@ -2806,6 +3410,13 @@ mod tests {
                 }))
                 .await
                 .unwrap();
+            if let Some(held_turns) = &self.held_turns {
+                held_turns.lock().unwrap().push(sender);
+                return Ok(ProviderTurn::new(
+                    receiver,
+                    CountingOwner(Arc::new(AtomicUsize::new(0))),
+                ));
+            }
             sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
             drop(sender);
             Ok(ProviderTurn::new(
@@ -2939,6 +3550,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_claim_precedes_admission_and_loser_never_dispatches() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("recovery ownership race"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, root } = store
+            .prepare_submission(test_submission(
+                "recovery-ownership-race",
+                conversation.id,
+                ProviderId::Codex,
+            ))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        let starts = Arc::new(AtomicUsize::new(0));
+        let supervisor = RunSupervisor::new(
+            store.clone(),
+            vec![Arc::new(ImmediateAdapter {
+                provider: ProviderId::Codex,
+                reject_before_dispatch: false,
+                start_calls: Some(Arc::clone(&starts)),
+                held_turns: None,
+            })],
+        )
+        .unwrap();
+        let claim_barrier = Arc::new(RecoveryClaimBarrier::new());
+        supervisor.hold_recovery_claim_for_test(Arc::clone(&claim_barrier));
+        let supervisor = Arc::new(supervisor);
+        let run_id = run.id;
+        let root_id = root.id;
+        let recovery = {
+            let supervisor = Arc::clone(&supervisor);
+            tokio::spawn(async move {
+                let Some(claim) = supervisor.claim_recovery_run(run.id, false).await? else {
+                    return Err(RuntimeError::DispatchAlreadyClaimed(run.id));
+                };
+                supervisor
+                    .recover_persisted(
+                        RunRequest::new(
+                            conversation.id,
+                            PathBuf::from("/tmp/recovery-ownership-race"),
+                            ProviderId::Codex,
+                            TurnRequest::new("fixture"),
+                        ),
+                        run,
+                        root,
+                        &claim,
+                    )
+                    .await
+            })
+        };
+
+        claim_barrier.ready.notified().await;
+        let permits_before_release = supervisor.available_root_admission_for_test();
+        assert!(
+            store
+                .claim_provider_dispatch(run_id, "recovery-owner-b", DISPATCH_LEASE_DURATION,)
+                .await
+                .unwrap()
+        );
+        store
+            .append_run_event(run_id, root_id, ProviderEventRecord::interrupted())
+            .await
+            .unwrap();
+        claim_barrier.release.notify_one();
+
+        assert!(matches!(
+            recovery.await.unwrap(),
+            Err(RuntimeError::DispatchAlreadyClaimed(id)) if id == run_id
+        ));
+        assert_eq!(permits_before_release, MAX_ADMITTED_ROOT_RUNS);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.load_run(run_id).await.unwrap().status,
+            RunStatus::Interrupted
+        );
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_promotion_loser_releases_admission_and_never_dispatches() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("recovery promotion race"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, root } = store
+            .prepare_submission(test_submission(
+                "recovery-promotion-race",
+                conversation.id,
+                ProviderId::Codex,
+            ))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        let starts = Arc::new(AtomicUsize::new(0));
+        let supervisor = Arc::new(
+            RunSupervisor::new(
+                store.clone(),
+                vec![Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Codex,
+                    reject_before_dispatch: false,
+                    start_calls: Some(Arc::clone(&starts)),
+                    held_turns: None,
+                })],
+            )
+            .unwrap(),
+        );
+        let claim = supervisor
+            .claim_recovery_run(run.id, false)
+            .await
+            .unwrap()
+            .expect("the only reconciler must claim the run");
+        let promotion = Arc::new(RecoveryPromotionBarrier::new());
+        supervisor.hold_recovery_promotion_for_test(Arc::clone(&promotion));
+        let run_id = run.id;
+        let recovery = {
+            let supervisor = Arc::clone(&supervisor);
+            tokio::spawn(async move {
+                supervisor
+                    .recover_persisted(
+                        RunRequest::new(
+                            conversation.id,
+                            PathBuf::from("/tmp/recovery-promotion-race"),
+                            ProviderId::Codex,
+                            TurnRequest::new("fixture"),
+                        ),
+                        run,
+                        root,
+                        &claim,
+                    )
+                    .await
+            })
+        };
+
+        promotion.ready.notified().await;
+        store
+            .replace_dispatch_owner_for_test(run_id, "winning-reconciler")
+            .await
+            .unwrap();
+        promotion.release.notify_one();
+
+        assert!(matches!(
+            recovery.await.unwrap(),
+            Err(RuntimeError::DispatchAlreadyClaimed(id)) if id == run_id
+        ));
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            supervisor.available_root_admission_for_test(),
+            MAX_ADMITTED_ROOT_RUNS
+        );
+        assert_eq!(
+            store.load_run(run_id).await.unwrap().status,
+            RunStatus::Queued
+        );
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn atomic_fallback_creation_blocks_concurrent_submit_and_archive() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -2951,10 +3726,14 @@ mod tests {
                 Arc::new(ImmediateAdapter {
                     provider: ProviderId::Codex,
                     reject_before_dispatch: true,
+                    start_calls: None,
+                    held_turns: None,
                 }),
                 Arc::new(ImmediateAdapter {
                     provider: ProviderId::Claude,
                     reject_before_dispatch: false,
+                    start_calls: None,
+                    held_turns: None,
                 }),
             ],
         )
@@ -3007,6 +3786,169 @@ mod tests {
         assert_eq!(outcome.status, RunStatus::Completed);
         assert!(outcome.fallback_run_id.is_some());
         supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fallback_transition_stops_when_the_primary_lease_owner_changes() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("fallback owner fence"))
+            .await
+            .unwrap();
+        let primary_starts = Arc::new(AtomicUsize::new(0));
+        let fallback_starts = Arc::new(AtomicUsize::new(0));
+        let mut supervisor = RunSupervisor::new(
+            store.clone(),
+            vec![
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Codex,
+                    reject_before_dispatch: true,
+                    start_calls: Some(Arc::clone(&primary_starts)),
+                    held_turns: None,
+                }),
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Claude,
+                    reject_before_dispatch: false,
+                    start_calls: Some(Arc::clone(&fallback_starts)),
+                    held_turns: None,
+                }),
+            ],
+        )
+        .unwrap();
+        let barrier = Arc::new(FallbackTransitionBarrier::new());
+        supervisor.set_fallback_transition_barrier(Arc::clone(&barrier));
+        let handle = supervisor
+            .submit_persisted(
+                RunRequest::new(
+                    conversation.id,
+                    std::path::PathBuf::from("."),
+                    ProviderId::Codex,
+                    TurnRequest::new("fixture"),
+                )
+                .with_fallback(ProviderId::Claude),
+                test_submission("owner-fence", conversation.id, ProviderId::Codex),
+            )
+            .await
+            .unwrap()
+            .handle;
+
+        barrier.ready.notified().await;
+        store
+            .replace_dispatch_owner_for_test(handle.run_id(), "other-recovery")
+            .await
+            .unwrap();
+        barrier.release.notify_one();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), handle.wait())
+                .await
+                .expect("owner-fenced fallback task must terminate"),
+            Err(RuntimeError::ReconciliationFailed)
+        ));
+        assert_eq!(primary_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_starts.load(Ordering::SeqCst), 0);
+        assert!(
+            store
+                .load_submission("owner-fence")
+                .await
+                .unwrap()
+                .unwrap()
+                .fallback_run
+                .is_none()
+        );
+        assert!(matches!(
+            supervisor.shutdown().await,
+            Err(RuntimeError::OwnedTaskFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn transferred_atomic_fallback_is_never_dispatched_by_its_former_owner() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("fallback child owner fence"))
+            .await
+            .unwrap();
+        let fallback_starts = Arc::new(AtomicUsize::new(0));
+        let mut supervisor = RunSupervisor::new(
+            store.clone(),
+            vec![
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Codex,
+                    reject_before_dispatch: true,
+                    start_calls: None,
+                    held_turns: None,
+                }),
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Claude,
+                    reject_before_dispatch: false,
+                    start_calls: Some(Arc::clone(&fallback_starts)),
+                    held_turns: None,
+                }),
+            ],
+        )
+        .unwrap();
+        let barrier = Arc::new(FallbackCreationBarrier::new());
+        supervisor.set_fallback_creation_barrier(Arc::clone(&barrier));
+        let handle = supervisor
+            .submit_persisted(
+                RunRequest::new(
+                    conversation.id,
+                    PathBuf::from("."),
+                    ProviderId::Codex,
+                    TurnRequest::new("fixture"),
+                )
+                .with_fallback(ProviderId::Claude),
+                test_submission(
+                    "fallback-child-owner-fence",
+                    conversation.id,
+                    ProviderId::Codex,
+                ),
+            )
+            .await
+            .unwrap()
+            .handle;
+
+        barrier.created.notified().await;
+        let fallback_run_id = store
+            .load_submission("fallback-child-owner-fence")
+            .await
+            .unwrap()
+            .unwrap()
+            .fallback_run
+            .expect("fallback is committed before the barrier")
+            .id;
+        let fallback_before_transfer = store.load_run(fallback_run_id).await.unwrap();
+        assert_eq!(fallback_before_transfer.status, RunStatus::Queued);
+        assert_eq!(
+            fallback_before_transfer.dispatch_certainty,
+            Some(DispatchCertainty::MayHaveDispatched)
+        );
+        assert!(
+            store
+                .has_protected_provider_dispatch_lease(fallback_run_id, DISPATCH_LEASE_STALE_GRACE,)
+                .await
+                .unwrap()
+        );
+        store
+            .replace_dispatch_owner_for_test(fallback_run_id, "winning-reconciler")
+            .await
+            .unwrap();
+        barrier.release.notify_one();
+
+        assert!(matches!(
+            handle.wait().await,
+            Err(RuntimeError::ReconciliationFailed)
+        ));
+        assert_eq!(fallback_starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.load_run(fallback_run_id).await.unwrap().status,
+            RunStatus::Queued
+        );
+        assert!(matches!(
+            supervisor.shutdown().await,
+            Err(RuntimeError::OwnedTaskFailed)
+        ));
     }
 
     struct CountingOwner(Arc<AtomicUsize>);
@@ -3158,12 +4100,12 @@ mod tests {
             _response: ApprovalResponse,
         ) -> Result<(), ProviderError> {
             self.responses.fetch_add(1, Ordering::SeqCst);
-            assert!(!self.panic_response, "injected response panic");
             if let Some(barrier) = &self.response_barrier {
                 let _drop_guard = ResponseDropGuard(Arc::clone(&self.response_drops));
                 barrier.started.notify_one();
                 barrier.release.notified().await;
             }
+            assert!(!self.panic_response, "injected response panic");
             Ok(())
         }
 
@@ -3239,6 +4181,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_owner_cannot_dispatch_or_acknowledge_an_approval_response() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("approval ownership fence"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let barrier = Arc::new(ResponseIntentBarrier::new());
+        let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+        supervisor.set_response_intent_barrier(Arc::clone(&barrier));
+        let supervisor = Arc::new(supervisor);
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/approval-ownership-fence"),
+                ProviderId::Codex,
+                TurnRequest::new("fixture"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        let response = {
+            let supervisor = Arc::clone(&supervisor);
+            let run_id = handle.run_id();
+            tokio::spawn(async move {
+                supervisor
+                    .respond(run_id, "fixture-approval", ApprovalResponse::Approved)
+                    .await
+            })
+        };
+
+        barrier.committed.notified().await;
+        store
+            .replace_dispatch_owner_for_test(handle.run_id(), "recovery-owner")
+            .await
+            .unwrap();
+        barrier.release.notify_one();
+
+        assert!(response.await.unwrap().is_err());
+        assert_eq!(adapter.responses.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.load_run(handle.run_id()).await.unwrap().status,
+            RunStatus::Waiting
+        );
+        let approval = store
+            .load_approval(handle.run_id(), "fixture-approval")
+            .await
+            .unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Pending);
+        assert!(
+            approval
+                .response_intent
+                .as_ref()
+                .is_some_and(|intent| { intent.status == ApprovalResponseIntentStatus::Recorded })
+        );
+        assert!(matches!(
+            supervisor.shutdown().await,
+            Err(RuntimeError::OwnedTaskFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn owner_transfer_after_provider_response_dispatch_blocks_stale_acknowledgement() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("post-dispatch approval fence"))
+            .await
+            .unwrap();
+        let pre_acknowledgement = Arc::new(ResponsePreAcknowledgementBarrier::new());
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+        supervisor.set_response_pre_acknowledgement_barrier(Arc::clone(&pre_acknowledgement));
+        let supervisor = Arc::new(supervisor);
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/post-dispatch-approval-fence"),
+                ProviderId::Codex,
+                TurnRequest::new("fixture"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        let response = {
+            let supervisor = Arc::clone(&supervisor);
+            let run_id = handle.run_id();
+            tokio::spawn(async move {
+                supervisor
+                    .respond(run_id, "fixture-approval", ApprovalResponse::Approved)
+                    .await
+            })
+        };
+
+        pre_acknowledgement.ready.notified().await;
+        store
+            .replace_dispatch_owner_for_test(handle.run_id(), "current-owner")
+            .await
+            .unwrap();
+        pre_acknowledgement.release.notify_one();
+
+        assert!(matches!(
+            response.await.unwrap(),
+            Err(RuntimeError::Store(StoreError::DispatchOwnerMismatch(id))) if id == handle.run_id()
+        ));
+        assert_eq!(adapter.responses.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.load_run(handle.run_id()).await.unwrap().status,
+            RunStatus::Waiting
+        );
+        let approval = store
+            .load_approval(handle.run_id(), "fixture-approval")
+            .await
+            .unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Pending);
+        assert!(
+            approval
+                .response_intent
+                .as_ref()
+                .is_some_and(|intent| { intent.status == ApprovalResponseIntentStatus::Recorded })
+        );
+        assert!(matches!(
+            supervisor.shutdown().await,
+            Err(RuntimeError::OwnedTaskFailed)
+        ));
+    }
+
+    #[tokio::test]
     async fn terminal_received_before_response_forbids_provider_dispatch() {
         for close_stream in [false, true] {
             let store = Store::open_in_memory().await.unwrap();
@@ -3305,6 +4394,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_owner_cannot_finalize_a_received_provider_terminal() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("terminal ownership fence"))
+            .await
+            .unwrap();
+        let terminal = Arc::new(TerminalReceiptBarrier::new());
+        let completion = Arc::new(OwnedTaskCompletionBarrier::new());
+        let mut supervisor = RunSupervisor::new(
+            store.clone(),
+            vec![Arc::new(ImmediateAdapter {
+                provider: ProviderId::Codex,
+                reject_before_dispatch: false,
+                start_calls: None,
+                held_turns: None,
+            })],
+        )
+        .unwrap();
+        supervisor.set_terminal_receipt_barrier(Arc::clone(&terminal));
+        supervisor.set_root_task_completion_barrier(Arc::clone(&completion));
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/terminal-ownership-fence"),
+                ProviderId::Codex,
+                TurnRequest::new("fixture"),
+            ))
+            .await
+            .unwrap();
+
+        terminal.received.notified().await;
+        store
+            .replace_dispatch_owner_for_test(handle.run_id(), "recovery-owner")
+            .await
+            .unwrap();
+        terminal.release.notify_one();
+        completion.completed.notified().await;
+
+        assert_eq!(
+            store.load_run(handle.run_id()).await.unwrap().status,
+            RunStatus::Running
+        );
+        completion.release.notify_one();
+        assert!(matches!(
+            handle.wait().await,
+            Err(RuntimeError::ReconciliationFailed)
+        ));
+        assert!(matches!(
+            supervisor.shutdown().await,
+            Err(RuntimeError::OwnedTaskFailed)
+        ));
+    }
+
+    #[tokio::test]
     async fn active_turn_panic_cancels_controls_and_awaits_owner_shutdown() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -3360,6 +4503,60 @@ mod tests {
         assert_eq!(
             store.load_run(handle.run_id()).await.unwrap().status,
             RunStatus::Failed
+        );
+        assert!(matches!(
+            supervisor.shutdown().await,
+            Err(RuntimeError::OwnedTaskFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_owner_panic_reconciliation_cannot_fail_the_transferred_run() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("panic ownership fence"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let barrier = Arc::new(ActiveTurnPanicBarrier::new());
+        let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter]).unwrap();
+        supervisor.set_active_turn_panic_barrier(Arc::clone(&barrier));
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/panic-ownership-fence"),
+                ProviderId::Codex,
+                TurnRequest::new("fixture"),
+            ))
+            .await
+            .unwrap();
+
+        barrier.started.notified().await;
+        store
+            .replace_dispatch_owner_for_test(handle.run_id(), "recovery-owner")
+            .await
+            .unwrap();
+        barrier.release.notify_one();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), handle.wait())
+                .await
+                .expect("panic reconciliation must finish"),
+            Err(RuntimeError::ReconciliationFailed)
+        ));
+        assert_eq!(
+            store.load_run(handle.run_id()).await.unwrap().status,
+            RunStatus::Running
         );
         assert!(matches!(
             supervisor.shutdown().await,
@@ -3843,21 +5040,19 @@ mod tests {
             .await
             .unwrap();
         let owner_shutdowns = Arc::new(AtomicUsize::new(0));
+        let response_barrier = Arc::new(ResponseControlBarrier::new());
         let adapter = Arc::new(ApprovalAdapter {
             sender: Mutex::new(None),
             responses: AtomicUsize::new(0),
             owner_shutdowns: Arc::clone(&owner_shutdowns),
             control_started: AtomicUsize::new(0),
             block_steer: false,
-            response_barrier: None,
+            response_barrier: Some(Arc::clone(&response_barrier)),
             response_drops: Arc::new(AtomicUsize::new(0)),
             owned_pid: None,
             panic_response: true,
         });
-        let intent = Arc::new(ResponseIntentBarrier::new());
-        let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter]).unwrap();
-        supervisor.set_response_intent_barrier(Arc::clone(&intent));
-        let supervisor = Arc::new(supervisor);
+        let supervisor = Arc::new(RunSupervisor::new(store.clone(), vec![adapter]).unwrap());
         let handle = supervisor
             .submit(RunRequest::new(
                 conversation.id,
@@ -3877,9 +5072,9 @@ mod tests {
                     .await
             })
         };
-        intent.committed.notified().await;
+        response_barrier.started.notified().await;
         store.clone().close().await;
-        intent.release.notify_one();
+        response_barrier.release.notify_one();
 
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), response)
@@ -3977,6 +5172,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_owner_cannot_interrupt_a_queued_run_after_transfer() {
+        let store = Store::open_in_memory().await.unwrap();
+        let held_turns = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(ImmediateAdapter {
+            provider: ProviderId::Codex,
+            reject_before_dispatch: false,
+            start_calls: None,
+            held_turns: Some(Arc::clone(&held_turns)),
+        });
+        let barrier = Arc::new(QueuedInterruptBarrier::new());
+        let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter]).unwrap();
+        supervisor.set_queued_interrupt_barrier(Arc::clone(&barrier));
+        let supervisor = Arc::new(supervisor);
+        let mut handles = Vec::new();
+        for index in 0..5 {
+            let conversation = store
+                .create_conversation(NewConversation::projectless(format!(
+                    "queued ownership fence {index}"
+                )))
+                .await
+                .unwrap();
+            handles.push(
+                supervisor
+                    .submit(RunRequest::new(
+                        conversation.id,
+                        PathBuf::from("/tmp/queued-ownership-fence"),
+                        ProviderId::Codex,
+                        TurnRequest::new("fixture"),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+        }
+        for handle in handles.iter().take(MAX_CONCURRENT_ROOT_RUNS) {
+            handle.wait_for(RunStatus::Running).await.unwrap();
+        }
+        let queued = handles.last().unwrap();
+        assert_eq!(queued.status(), RunStatus::Queued);
+
+        supervisor.interrupt(queued.run_id()).await.unwrap();
+        barrier.ready.notified().await;
+        store
+            .replace_dispatch_owner_for_test(queued.run_id(), "recovery-owner")
+            .await
+            .unwrap();
+        barrier.release.notify_one();
+        barrier.finished.notified().await;
+
+        assert_eq!(
+            store.load_run(queued.run_id()).await.unwrap().status,
+            RunStatus::Queued
+        );
+        held_turns.lock().unwrap().clear();
+        assert!(matches!(
+            supervisor.shutdown().await,
+            Err(RuntimeError::OwnedTaskFailed)
+        ));
+    }
+
+    #[tokio::test]
     async fn bounded_shutdown_forces_and_awaits_a_stuck_owned_run_task() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -4039,6 +5294,8 @@ mod tests {
             vec![Arc::new(HungShutdownAdapter(ImmediateAdapter {
                 provider: ProviderId::Codex,
                 reject_before_dispatch: false,
+                start_calls: None,
+                held_turns: None,
             }))],
         )
         .unwrap();

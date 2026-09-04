@@ -1,10 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use prompting_time_core::app::PromptingTime;
+use prompting_time_core::app::{ConversationOverview, PromptingTime};
+use prompting_time_core::domain::{ConversationId, RollupStatus};
 use prompting_time_core::providers::codex::CodexAdapter;
 use prompting_time_core::providers::{
     ApprovalResponse, ProviderAdapter, ProviderCapabilities, ProviderError, ProviderErrorCategory,
@@ -15,13 +17,17 @@ use prompting_time_core::router::Router;
 use prompting_time_core::store::Store;
 use prompting_time_core::workspace::WorkspaceManager;
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 use crate::commands::{APP_EVENT_NAME, AppEvent};
 
 const DATABASE_FILE: &str = "prompting-time.sqlite3";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const STALE_RECOVERY_INTERVAL: Duration = Duration::from_secs(120);
+const NOTIFICATION_RESYNC_PAGE_SIZE: u32 = 200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppInvalidation {
@@ -65,6 +71,109 @@ pub struct AppState {
     shutting_down: AtomicBool,
     event_shutdown: watch::Sender<bool>,
     event_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    focused: AtomicBool,
+    notifications: Mutex<NotificationTracker>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotificationMessage {
+    title: String,
+    body: String,
+}
+
+pub(crate) trait NotificationSink: Send + Sync {
+    fn notify(&self, message: NotificationMessage);
+}
+
+pub(crate) struct TauriNotifier {
+    app: AppHandle,
+    permission_requested: AtomicBool,
+}
+
+impl TauriNotifier {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self {
+            app,
+            permission_requested: AtomicBool::new(false),
+        }
+    }
+}
+
+impl NotificationSink for TauriNotifier {
+    fn notify(&self, message: NotificationMessage) {
+        if !self.permission_requested.swap(true, Ordering::AcqRel) {
+            let _ = self.app.notification().request_permission();
+        }
+        let _ = self
+            .app
+            .notification()
+            .builder()
+            .title(message.title)
+            .body(message.body)
+            .show();
+    }
+}
+
+struct NoopNotifier;
+
+impl NotificationSink for NoopNotifier {
+    fn notify(&self, _message: NotificationMessage) {}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotificationStatus {
+    Active,
+    NeedsAttention,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl NotificationStatus {
+    fn body(self) -> Option<&'static str> {
+        match self {
+            Self::NeedsAttention => Some("Needs attention"),
+            Self::Completed => Some("Completed"),
+            Self::Failed => Some("Failed"),
+            Self::Active | Self::Interrupted => None,
+        }
+    }
+}
+
+struct NotificationTracker {
+    notifier: Arc<dyn NotificationSink>,
+    observed: HashMap<ConversationId, NotificationStatus>,
+}
+
+impl NotificationTracker {
+    fn new(notifier: Arc<dyn NotificationSink>) -> Self {
+        Self {
+            notifier,
+            observed: HashMap::new(),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        conversation_id: ConversationId,
+        status: NotificationStatus,
+        focused: bool,
+    ) {
+        let previous = self.observed.insert(conversation_id, status);
+        if focused || previous == Some(status) {
+            return;
+        }
+        if let Some(body) = status.body() {
+            self.notifier.notify(NotificationMessage {
+                title: "Prompting Time".to_owned(),
+                body: body.to_owned(),
+            });
+        }
+    }
+
+    fn forget(&mut self, conversation_id: ConversationId) {
+        self.observed.remove(&conversation_id);
+    }
 }
 
 impl AppState {
@@ -77,10 +186,19 @@ impl AppState {
             shutting_down: AtomicBool::new(false),
             event_shutdown,
             event_task: Mutex::new(None),
+            focused: AtomicBool::new(true),
+            notifications: Mutex::new(NotificationTracker::new(Arc::new(NoopNotifier))),
         })
     }
 
     pub async fn initialize(app_data_dir: PathBuf) -> Arc<Self> {
+        Self::initialize_with_notifier(app_data_dir, Arc::new(NoopNotifier)).await
+    }
+
+    pub(crate) async fn initialize_with_notifier(
+        app_data_dir: PathBuf,
+        notifier: Arc<dyn NotificationSink>,
+    ) -> Arc<Self> {
         match Self::try_initialize(&app_data_dir).await {
             Ok((service, providers)) => Arc::new(Self {
                 event_shutdown: watch::channel(false).0,
@@ -89,6 +207,8 @@ impl AppState {
                 startup_diagnostic: None,
                 shutting_down: AtomicBool::new(false),
                 event_task: Mutex::new(None),
+                focused: AtomicBool::new(true),
+                notifications: Mutex::new(NotificationTracker::new(notifier)),
             }),
             Err(diagnostic) => Self::failed(diagnostic),
         }
@@ -229,8 +349,15 @@ impl AppState {
         };
         let mut changes = service.subscribe_changes();
         let mut shutdown = self.event_shutdown.subscribe();
+        let state = Arc::clone(self);
         let task = tauri::async_runtime::spawn(async move {
             let mut events = AppEventSequencer::new();
+            let first_recovery = tokio::time::Instant::now() + STALE_RECOVERY_INTERVAL;
+            let mut recovery_ticks =
+                tokio::time::interval_at(first_recovery, STALE_RECOVERY_INTERVAL);
+            recovery_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut recoveries = JoinSet::new();
+            state.resync_notifications(&service, false).await;
             loop {
                 tokio::select! {
                     changed = shutdown.changed() => {
@@ -238,6 +365,17 @@ impl AppState {
                             break;
                         }
                     }
+                    _ = recovery_ticks.tick(), if recoveries.is_empty() => {
+                        let recovery_service = Arc::clone(&service);
+                        recoveries.spawn(async move {
+                            let _ = tokio::time::timeout(
+                                STARTUP_RECOVERY_TIMEOUT,
+                                recovery_service.reconcile_abandoned_dispatches(),
+                            )
+                            .await;
+                        });
+                    }
+                    _ = recoveries.join_next(), if !recoveries.is_empty() => {}
                     change = changes.recv() => match change {
                         Ok(change) => {
                             let invalidation = match change.run_id {
@@ -250,14 +388,23 @@ impl AppState {
                                 },
                             };
                             events.emit(&app, invalidation);
+                            if let Ok(overview) = service
+                                .load_conversation_overview(change.conversation_id)
+                                .await
+                            {
+                                state.observe_notification(&overview, true);
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             events.emit_reload(&app);
+                            state.resync_notifications(&service, true).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                 }
             }
+            recoveries.abort_all();
+            while recoveries.join_next().await.is_some() {}
         });
         let previous = self
             .event_task
@@ -267,11 +414,72 @@ impl AppState {
         debug_assert!(previous.is_none(), "event forwarding starts only once");
     }
 
+    fn observe_notification(&self, overview: &ConversationOverview, allow_notification: bool) {
+        let mut notifications = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if overview.conversation.archived {
+            notifications.forget(overview.conversation.id);
+            return;
+        }
+        let status = match overview.rollup_status {
+            Some(RollupStatus::NeedsAttention) => NotificationStatus::NeedsAttention,
+            Some(RollupStatus::Failed) => NotificationStatus::Failed,
+            Some(RollupStatus::Completed) => NotificationStatus::Completed,
+            Some(RollupStatus::Interrupted) => NotificationStatus::Interrupted,
+            Some(RollupStatus::Active) | None => NotificationStatus::Active,
+        };
+        notifications.observe(
+            overview.conversation.id,
+            status,
+            !allow_notification || self.focused.load(Ordering::Acquire),
+        );
+    }
+
+    async fn resync_notifications(&self, service: &PromptingTime, allow_notification: bool) {
+        let mut cursor = None;
+        let mut active_conversation_ids = HashSet::new();
+        loop {
+            let Ok(page) = service
+                .list_conversation_overviews(cursor, NOTIFICATION_RESYNC_PAGE_SIZE)
+                .await
+            else {
+                return;
+            };
+            for overview in page.items {
+                active_conversation_ids.insert(overview.conversation.id);
+                self.observe_notification(&overview, allow_notification);
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                self.notifications
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .observed
+                    .retain(|conversation_id, _| active_conversation_ids.contains(conversation_id));
+                return;
+            };
+            cursor = Some(next_cursor);
+        }
+    }
+
+    pub fn set_focused(&self, focused: bool) {
+        self.focused.store(focused, Ordering::Release);
+    }
+
     pub async fn shutdown(&self) {
         if self.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
         self.event_shutdown.send_replace(true);
+        let event_task = self
+            .event_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(event_task) = event_task {
+            let _ = finish_owned_task(event_task, SHUTDOWN_TIMEOUT).await;
+        }
         let service = self
             .service
             .lock()
@@ -284,14 +492,6 @@ impl AppState {
             if !matches!(finish_owned_task(task, SHUTDOWN_TIMEOUT).await, Ok(Ok(()))) {
                 let _ = service.force_shutdown().await;
             }
-        }
-        let event_task = self
-            .event_task
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(event_task) = event_task {
-            let _ = finish_owned_task(event_task, SHUTDOWN_TIMEOUT).await;
         }
     }
 }
@@ -563,10 +763,178 @@ mod tests {
 
     struct LiveTask(Arc<AtomicUsize>);
 
+    #[derive(Default)]
+    struct FakeNotifier(Mutex<Vec<NotificationMessage>>);
+
+    impl NotificationSink for FakeNotifier {
+        fn notify(&self, message: NotificationMessage) {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(message);
+        }
+    }
+
     impl Drop for LiveTask {
         fn drop(&mut self) {
             self.0.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn background_notifications_are_terminal_actionable_and_deduplicated() {
+        let notifier = Arc::new(FakeNotifier::default());
+        let mut tracker = NotificationTracker::new(notifier.clone());
+        let conversation_id = prompting_time_core::domain::ConversationId::new();
+
+        tracker.observe(conversation_id, NotificationStatus::Active, false);
+        tracker.observe(conversation_id, NotificationStatus::NeedsAttention, false);
+        tracker.observe(conversation_id, NotificationStatus::NeedsAttention, false);
+        tracker.observe(conversation_id, NotificationStatus::Completed, true);
+        tracker.observe(conversation_id, NotificationStatus::Failed, false);
+        tracker.observe(
+            prompting_time_core::domain::ConversationId::new(),
+            NotificationStatus::Completed,
+            false,
+        );
+
+        assert_eq!(
+            *notifier
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![
+                NotificationMessage {
+                    title: "Prompting Time".to_owned(),
+                    body: "Needs attention".to_owned(),
+                },
+                NotificationMessage {
+                    title: "Prompting Time".to_owned(),
+                    body: "Failed".to_owned(),
+                },
+                NotificationMessage {
+                    title: "Prompting Time".to_owned(),
+                    body: "Completed".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn notification_payload_is_limited_to_title_and_fixed_status() {
+        let notifier = Arc::new(FakeNotifier::default());
+        let mut tracker = NotificationTracker::new(notifier.clone());
+        let conversation_id = prompting_time_core::domain::ConversationId::new();
+
+        tracker.observe(conversation_id, NotificationStatus::Active, false);
+        tracker.observe(conversation_id, NotificationStatus::Completed, false);
+
+        let messages = notifier
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].title, "Prompting Time");
+        assert_eq!(messages[0].body, "Completed");
+    }
+
+    #[test]
+    fn notification_deduplication_survives_repeated_full_resyncs() {
+        let notifier = Arc::new(FakeNotifier::default());
+        let mut tracker = NotificationTracker::new(notifier.clone());
+        let conversation_ids = (0..513)
+            .map(|_| prompting_time_core::domain::ConversationId::new())
+            .collect::<Vec<_>>();
+
+        for conversation_id in &conversation_ids {
+            tracker.observe(*conversation_id, NotificationStatus::Completed, false);
+        }
+        for conversation_id in &conversation_ids {
+            tracker.observe(*conversation_id, NotificationStatus::Completed, false);
+        }
+
+        assert_eq!(
+            notifier
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            conversation_ids.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn notification_resync_pages_beyond_one_sidebar_batch() {
+        let temporary = tempdir().unwrap();
+        let service = PromptingTime::new(
+            Store::open_in_memory().await.unwrap(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut conversation_ids = Vec::new();
+        for index in 0..201 {
+            let conversation = service
+                .create_conversation(prompting_time_core::app::ConversationRequest::projectless(
+                    format!("notification resync {index}"),
+                ))
+                .await
+                .unwrap();
+            conversation_ids.push(conversation.id);
+        }
+        let notifier = Arc::new(FakeNotifier::default());
+        let (event_shutdown, _) = watch::channel(false);
+        let state = AppState {
+            service: Mutex::new(None),
+            providers: Vec::new(),
+            startup_diagnostic: None,
+            shutting_down: AtomicBool::new(false),
+            event_shutdown,
+            event_task: Mutex::new(None),
+            focused: AtomicBool::new(false),
+            notifications: Mutex::new(NotificationTracker::new(notifier.clone())),
+        };
+
+        state.resync_notifications(&service, false).await;
+
+        assert_eq!(
+            state
+                .notifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .observed
+                .len(),
+            201
+        );
+        assert!(
+            notifier
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        service.archive(conversation_ids[0]).await.unwrap();
+
+        state.resync_notifications(&service, true).await;
+        state.resync_notifications(&service, true).await;
+
+        {
+            let notifications = state
+                .notifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(notifications.observed.len(), 200);
+            assert!(!notifications.observed.contains_key(&conversation_ids[0]));
+        }
+        assert!(
+            notifier
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        service.shutdown().await.unwrap();
     }
 
     #[tokio::test]

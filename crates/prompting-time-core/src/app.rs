@@ -14,14 +14,18 @@ use crate::handoff::{
     HandoffError, HandoffInput, HandoffMessage, UnresolvedFailure,
 };
 use crate::providers::{
-    ApprovalResponse, ProviderAdapter, ProviderErrorCategory, ProviderHealth, ProviderId,
+    ApprovalResponse, DispatchCertainty, ProviderAdapter, ProviderErrorCategory, ProviderHealth,
+    ProviderId,
 };
 use crate::router::{
     ProviderRoutingState, ProviderUnavailability, RouteRequest, Router, RoutingCriterion,
     RoutingDecision, RoutingError, RoutingProfile, RoutingReason,
 };
+#[cfg(test)]
+use crate::runtime::DISPATCH_LEASE_STALE_GRACE;
 use crate::runtime::{
-    FallbackRequest, PreparedRunHandle, RunHandle, RunRequest, RunSupervisor, RuntimeError,
+    FallbackRequest, PreparedRunHandle, RecoveryClaim, RunHandle, RunRequest, RunSupervisor,
+    RuntimeError,
 };
 use crate::store::{
     AgentPage, ApprovalPage, ConversationSettings, EventDetail, MAX_CANONICAL_MESSAGE_BYTES,
@@ -712,29 +716,192 @@ impl PromptingTime {
         })
     }
 
-    /// Conservatively closes work that cannot still be owned after this process starts.
-    /// Provider-aware session resumption is added at the recovery boundary in Task 13.
+    /// Re-enters turns that are provably undispatched and closes every ambiguous turn bottom-up.
     pub async fn reconcile_startup(&self) -> Result<usize, AppError> {
+        self.reconcile_recoverable_runs(false).await
+    }
+
+    /// Rechecks claims after startup has given any live owner time to renew after a system stall.
+    pub async fn reconcile_abandoned_dispatches(&self) -> Result<usize, AppError> {
+        self.reconcile_recoverable_runs(true).await
+    }
+
+    async fn reconcile_recoverable_runs(&self, reap_stale_claims: bool) -> Result<usize, AppError> {
         let mut interrupted_runs = 0;
+
+        // Active or waiting work may already have caused provider side effects. The current
+        // durable model retains a session ID but not a provider-confirmed active-turn token, so
+        // replaying its prompt is never a safe resume even when the adapter can resume sessions.
+        let mut ambiguous_cursor = None;
         loop {
-            let batch = self.store.load_recovery_agent_batch(200).await?;
-            if batch.is_empty() {
+            let run_ids = self
+                .store
+                .load_ambiguous_recovery_run_ids(ambiguous_cursor, 200)
+                .await?;
+            if run_ids.is_empty() {
                 break;
             }
-            for recovery in batch {
-                self.store
-                    .append_run_event(
-                        recovery.run_id,
-                        recovery.agent_id,
-                        ProviderEventRecord::interrupted_with_mutation(recovery.mutation_state),
+            ambiguous_cursor = run_ids.last().copied();
+            for run_id in run_ids {
+                interrupted_runs += self
+                    .interrupt_stale_recovery(
+                        run_id,
+                        "Prompting Time restarted while this provider turn was active. Review its output and workspace before retrying.",
+                        reap_stale_claims,
                     )
                     .await?;
-                if recovery.is_root {
-                    interrupted_runs += 1;
+            }
+        }
+
+        let mut cursor = None;
+        loop {
+            let recoveries = self.store.load_queued_recovery_batch(cursor, 200).await?;
+            if recoveries.is_empty() {
+                break;
+            }
+            cursor = recoveries.last().map(|recovery| recovery.run.id);
+            for recovery in recoveries {
+                let root = (recovery.roots.len() == 1)
+                    .then(|| recovery.roots.first().cloned())
+                    .flatten();
+                let intent = recovery.attempt_intent;
+                let adapter = self.providers.get(&recovery.run.provider);
+                if recovery.run.dispatch_certainty == Some(DispatchCertainty::MayHaveDispatched) {
+                    interrupted_runs += self
+                        .interrupt_stale_recovery(
+                            recovery.run.id,
+                            "This queued turn may have reached its provider before Prompting Time stopped. Review provider output and the workspace before retrying.",
+                            reap_stale_claims,
+                        )
+                        .await?;
+                    continue;
+                }
+                let safe_dispatch = recovery.run.mutation_state
+                    == crate::domain::MutationState::NoneObserved
+                    && root.as_ref().is_some_and(|root| {
+                        root.status == AgentStatus::Queued && root.run_id == recovery.run.id
+                    })
+                    && intent.is_some()
+                    && recovery.run.native_session_id.is_none()
+                    && adapter.is_some();
+                if !safe_dispatch {
+                    interrupted_runs += self
+                        .interrupt_stale_recovery(
+                            recovery.run.id,
+                            "This queued turn lacked enough durable state to restart safely. Review the conversation and retry the message.",
+                            reap_stale_claims,
+                        )
+                        .await?;
+                    continue;
+                }
+
+                let Some(claim) = self
+                    .supervisor
+                    .claim_recovery_run(recovery.run.id, reap_stale_claims)
+                    .await?
+                else {
+                    continue;
+                };
+                let workspace = self
+                    .store
+                    .load_workspace(recovery.run.conversation_id)
+                    .await?;
+                let intent = intent.expect("safe recovery has a durable turn intent");
+                let request = RunRequest::new(
+                    recovery.run.conversation_id,
+                    workspace.execution_path,
+                    recovery.run.provider,
+                    crate::providers::TurnRequest::new(intent.turn_prompt),
+                );
+                match self
+                    .supervisor
+                    .recover_persisted(
+                        request,
+                        recovery.run.clone(),
+                        root.expect("safe recovery has a root agent"),
+                        &claim,
+                    )
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(
+                        RuntimeError::RunQueueFull { .. } | RuntimeError::CommandQueueFull { .. },
+                    ) => {
+                        interrupted_runs += self
+                            .interrupt_owned_recovery(
+                                recovery.run.id,
+                                &claim,
+                                "Startup recovery capacity was exhausted. Review the conversation and retry the message.",
+                            )
+                            .await?;
+                    }
+                    Err(RuntimeError::DispatchAlreadyClaimed(run_id)) => {
+                        debug_assert_eq!(run_id, recovery.run.id);
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
         Ok(interrupted_runs)
+    }
+
+    async fn interrupt_stale_recovery(
+        &self,
+        run_id: RunId,
+        diagnostic: &'static str,
+        reap_stale_claims: bool,
+    ) -> Result<usize, AppError> {
+        let Some(claim) = self
+            .supervisor
+            .claim_recovery_run(run_id, reap_stale_claims)
+            .await?
+        else {
+            return Ok(0);
+        };
+        self.interrupt_owned_recovery(run_id, &claim, diagnostic)
+            .await
+    }
+
+    async fn interrupt_owned_recovery(
+        &self,
+        run_id: RunId,
+        claim: &RecoveryClaim,
+        diagnostic: &'static str,
+    ) -> Result<usize, AppError> {
+        let mut interrupted_roots = 0;
+        let mut diagnostic_written = false;
+        loop {
+            let batch = self
+                .store
+                .load_recovery_agent_batch_for_run(run_id, 200)
+                .await?;
+            if batch.is_empty() {
+                break;
+            }
+            for recovery in batch {
+                if recovery.is_root && !diagnostic_written {
+                    self.store
+                        .append_owned_run_event(
+                            recovery.run_id,
+                            recovery.agent_id,
+                            claim.owner_id(),
+                            ProviderEventRecord::diagnostic(diagnostic),
+                        )
+                        .await?;
+                    diagnostic_written = true;
+                }
+                self.store
+                    .append_owned_run_event(
+                        recovery.run_id,
+                        recovery.agent_id,
+                        claim.owner_id(),
+                        ProviderEventRecord::interrupted_with_mutation(recovery.mutation_state),
+                    )
+                    .await?;
+                interrupted_roots += usize::from(recovery.is_root);
+            }
+        }
+        Ok(interrupted_roots)
     }
 
     pub async fn shutdown(&self) -> Result<(), AppError> {
@@ -991,13 +1158,199 @@ fn unavailable_error(category: ProviderErrorCategory) -> ProviderUnavailability 
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use async_trait::async_trait;
     use tempfile::tempdir;
+    use tokio::sync::{Barrier, Semaphore, mpsc};
 
-    use crate::domain::AgentId;
-    use crate::store::{MAX_OBJECTIVE_BYTES, install_conversation_persistence_barrier};
+    use crate::domain::{AgentId, RunStatus};
+    use crate::providers::{
+        ProviderCapabilities, ProviderCapability, ProviderEvent, ProviderSession, ProviderTurn,
+        ProviderTurnOwner, ResumeSession, StartSession, TurnRequest,
+    };
+    use crate::store::{
+        MAX_OBJECTIVE_BYTES, NewSubmission, PreparedSubmission,
+        install_conversation_persistence_barrier,
+    };
 
     use super::*;
+
+    struct RecoveryAdapter {
+        starts: AtomicUsize,
+        resumes: AtomicUsize,
+        turns: AtomicUsize,
+        start_gate: Option<Arc<Semaphore>>,
+    }
+
+    impl RecoveryAdapter {
+        fn new() -> Self {
+            Self {
+                starts: AtomicUsize::new(0),
+                resumes: AtomicUsize::new(0),
+                turns: AtomicUsize::new(0),
+                start_gate: None,
+            }
+        }
+
+        fn blocked() -> (Self, Arc<Semaphore>) {
+            let gate = Arc::new(Semaphore::new(0));
+            (
+                Self {
+                    starts: AtomicUsize::new(0),
+                    resumes: AtomicUsize::new(0),
+                    turns: AtomicUsize::new(0),
+                    start_gate: Some(Arc::clone(&gate)),
+                },
+                gate,
+            )
+        }
+    }
+
+    struct RecoveryTurnOwner;
+
+    #[async_trait]
+    impl ProviderTurnOwner for RecoveryTurnOwner {
+        async fn shutdown(self: Box<Self>) -> Result<(), crate::providers::ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for RecoveryAdapter {
+        fn id(&self) -> ProviderId {
+            ProviderId::Codex
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            [ProviderCapability::Streaming, ProviderCapability::Resume].into()
+        }
+
+        async fn health(&self) -> Result<ProviderHealth, crate::providers::ProviderError> {
+            Ok(ProviderHealth::Healthy {
+                version: "recovery-fixture".to_owned(),
+            })
+        }
+
+        async fn start_session(
+            &self,
+            request: StartSession,
+        ) -> Result<ProviderSession, crate::providers::ProviderError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.start_gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            Ok(ProviderSession {
+                provider: ProviderId::Codex,
+                native_id: format!("session-{}", request.conversation_id),
+                native_group_id: None,
+            })
+        }
+
+        async fn resume_session(
+            &self,
+            native_id: &str,
+            _request: ResumeSession,
+        ) -> Result<ProviderSession, crate::providers::ProviderError> {
+            self.resumes.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderSession {
+                provider: ProviderId::Codex,
+                native_id: native_id.to_owned(),
+                native_group_id: None,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            _session: &ProviderSession,
+            _request: TurnRequest,
+        ) -> Result<ProviderTurn, crate::providers::ProviderError> {
+            self.turns.fetch_add(1, Ordering::SeqCst);
+            let (sender, receiver) = mpsc::channel(4);
+            sender
+                .send(Ok(ProviderEvent::TurnStarted {
+                    native_turn_id: "recovered-turn".to_owned(),
+                }))
+                .await
+                .unwrap();
+            sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+            Ok(ProviderTurn::new(receiver, RecoveryTurnOwner))
+        }
+
+        async fn steer(
+            &self,
+            _session: &ProviderSession,
+            _active_turn: &str,
+            _text: &str,
+        ) -> Result<(), crate::providers::ProviderError> {
+            Ok(())
+        }
+
+        async fn respond(
+            &self,
+            _session: &ProviderSession,
+            _request_id: &str,
+            _response: ApprovalResponse,
+        ) -> Result<(), crate::providers::ProviderError> {
+            Ok(())
+        }
+
+        async fn interrupt(
+            &self,
+            _session: &ProviderSession,
+            _active_turn: &str,
+        ) -> Result<(), crate::providers::ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn recovery_submission(conversation_id: ConversationId) -> NewSubmission {
+        let decision = Router::default()
+            .route(
+                RouteRequest::builder("recover this turn")
+                    .eligible([ProviderRoutingState::available(
+                        ProviderId::Codex,
+                        [ProviderCapability::Streaming, ProviderCapability::Resume].into(),
+                    )])
+                    .override_provider(ProviderId::Codex)
+                    .build(),
+            )
+            .unwrap();
+        NewSubmission {
+            command_id: format!("recover-{conversation_id}"),
+            request_hash: "recovery-hash".to_owned(),
+            conversation_id,
+            provider: ProviderId::Codex,
+            content: "recover this turn".to_owned(),
+            routing_decision: decision,
+            handoff_rendered: None,
+            handoff_hash: None,
+            turn_prompt: "recover this turn".to_owned(),
+        }
+    }
+
+    async fn wait_for_run_status(store: &Store, run_id: RunId, status: RunStatus) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if store.load_run(run_id).await.unwrap().status == status {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn wait_for_provider_calls(calls: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while calls.load(Ordering::SeqCst) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn provider_health_categories_preserve_actionable_unavailability() {
@@ -1266,6 +1619,586 @@ mod tests {
                 assert!(interrupted_at[&agent.id] < interrupted_at[&parent_id]);
             }
         }
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_requeues_a_persisted_queued_root_without_creating_another_run() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("queued recovery"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 0);
+        wait_for_run_status(&store, run.id, RunStatus::Completed).await;
+
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.turns.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().dispatch_certainty,
+            Some(DispatchCertainty::MayHaveDispatched)
+        );
+        assert_eq!(store.pending_recovery().await.unwrap().len(), 0);
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn crash_after_provider_acceptance_never_dispatches_the_turn_twice() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let (adapter, gate) = RecoveryAdapter::blocked();
+        let adapter = Arc::new(adapter);
+        let first = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = first
+            .create_conversation(ConversationRequest::projectless("crash recovery"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+
+        assert_eq!(first.reconcile_startup().await.unwrap(), 0);
+        wait_for_provider_calls(&adapter.starts, 1).await;
+        first.supervisor.crash_for_test().await;
+
+        let second = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        assert_eq!(second.reconcile_startup().await.unwrap(), 0);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                wait_for_provider_calls(&adapter.starts, 2),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().dispatch_certainty,
+            Some(DispatchCertainty::MayHaveDispatched)
+        );
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Queued
+        );
+        store.expire_dispatch_lease_for_test(run.id).await.unwrap();
+        assert_eq!(second.reconcile_abandoned_dispatches().await.unwrap(), 1);
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Interrupted
+        );
+        gate.add_permits(1);
+        second.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_dispatch_claim_is_interrupted_without_provider_redispatch() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("stale claim"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        assert!(
+            store
+                .claim_provider_dispatch(
+                    run.id,
+                    "crashed-instance",
+                    std::time::Duration::from_secs(15),
+                )
+                .await
+                .unwrap()
+        );
+        store.expire_dispatch_lease_for_test(run.id).await.unwrap();
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 0);
+        assert_eq!(app.reconcile_abandoned_dispatches().await.unwrap(), 1);
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.turns.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Interrupted
+        );
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_stale_reconciliation_can_be_reclaimed_by_the_same_app() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("retry stale recovery"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        assert!(
+            store
+                .claim_provider_dispatch(
+                    run.id,
+                    "crashed-instance",
+                    std::time::Duration::from_secs(15),
+                )
+                .await
+                .unwrap()
+        );
+        store.expire_dispatch_lease_for_test(run.id).await.unwrap();
+        store.reject_recovery_events_for_test().await.unwrap();
+
+        assert!(app.reconcile_abandoned_dispatches().await.is_err());
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+
+        store.allow_recovery_events_for_test().await.unwrap();
+        store.expire_dispatch_lease_for_test(run.id).await.unwrap();
+        assert_eq!(app.reconcile_abandoned_dispatches().await.unwrap(), 1);
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_supervisor_renews_its_dispatch_lease() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let (adapter, gate) = RecoveryAdapter::blocked();
+        let adapter = Arc::new(adapter);
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("lease renewal"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 0);
+        wait_for_provider_calls(&adapter.starts, 1).await;
+        store.delay_dispatch_lease_for_test(run.id).await.unwrap();
+        let observer = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        assert_eq!(observer.reconcile_startup().await.unwrap(), 0);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        assert!(
+            store
+                .has_protected_provider_dispatch_lease(run.id, DISPATCH_LEASE_STALE_GRACE,)
+                .await
+                .unwrap()
+        );
+        gate.add_permits(1);
+        wait_for_run_status(&store, run.id, RunStatus::Completed).await;
+        observer.shutdown().await.unwrap();
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_startup_reconciliation_claims_one_provider_dispatch() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let (adapter, gate) = RecoveryAdapter::blocked();
+        let adapter = Arc::new(adapter);
+        let first = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let second = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = first
+            .create_conversation(ConversationRequest::projectless("concurrent recovery"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        let claim_barrier = Arc::new(Barrier::new(2));
+        first
+            .supervisor
+            .synchronize_recovery_claim_for_test(Arc::clone(&claim_barrier));
+        second
+            .supervisor
+            .synchronize_recovery_claim_for_test(claim_barrier);
+
+        let (first_recovery, second_recovery) =
+            tokio::join!(first.reconcile_startup(), second.reconcile_startup());
+        assert_eq!(first_recovery.unwrap(), 0);
+        assert_eq!(second_recovery.unwrap(), 0);
+        wait_for_provider_calls(&adapter.starts, 1).await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                wait_for_provider_calls(&adapter.starts, 2),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 1);
+
+        gate.add_permits(1);
+        wait_for_run_status(&store, run.id, RunStatus::Completed).await;
+        first.shutdown().await.unwrap();
+        second.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatch_claim_transaction_failure_makes_zero_provider_calls() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("claim failure"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        store.reject_dispatch_claims_for_test().await.unwrap();
+
+        assert!(app.reconcile_startup().await.is_err());
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn submission_and_dispatch_claim_roll_back_together_on_transaction_failure() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("atomic submission claim"))
+            .await
+            .unwrap();
+        let request = SubmitRequest {
+            command_id: "atomic-claim-command".to_owned(),
+            conversation_id: conversation.id,
+            content: "run after the transaction succeeds".to_owned(),
+            provider_override: Some(ProviderId::Codex),
+        };
+        store.reject_dispatch_claims_for_test().await.unwrap();
+
+        assert!(app.submit(request.clone()).await.is_err());
+        assert!(
+            store
+                .load_submission(&request.command_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+
+        store.allow_dispatch_claims_for_test().await.unwrap();
+        let submitted = app.submit(request).await.unwrap();
+        assert!(!submitted.duplicate);
+        wait_for_run_status(&store, submitted.handle.run_id(), RunStatus::Completed).await;
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 1);
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_claims_are_renewed_before_root_capacity_is_available() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let (adapter, gate) = RecoveryAdapter::blocked();
+        let adapter = Arc::new(adapter);
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let mut runs = Vec::new();
+        for index in 0..5 {
+            let conversation = app
+                .create_conversation(ConversationRequest::projectless(format!(
+                    "pending lease {index}"
+                )))
+                .await
+                .unwrap();
+            let PreparedSubmission::Created { run, .. } = store
+                .prepare_submission(recovery_submission(conversation.id))
+                .await
+                .unwrap()
+            else {
+                panic!("fixture must create a queued run");
+            };
+            runs.push(run.id);
+        }
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 0);
+        wait_for_provider_calls(&adapter.starts, 4).await;
+        let pending = *runs.last().unwrap();
+        store.delay_dispatch_lease_for_test(pending).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            store
+                .has_protected_provider_dispatch_lease(pending, DISPATCH_LEASE_STALE_GRACE,)
+                .await
+                .unwrap()
+        );
+
+        gate.add_permits(5);
+        for run_id in runs {
+            wait_for_run_status(&store, run_id, RunStatus::Completed).await;
+        }
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 5);
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_pending_claim_is_fenced_before_provider_dispatch() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let (adapter, gate) = RecoveryAdapter::blocked();
+        let adapter = Arc::new(adapter);
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let mut runs = Vec::new();
+        for index in 0..5 {
+            let conversation = app
+                .create_conversation(ConversationRequest::projectless(format!(
+                    "pending fence {index}"
+                )))
+                .await
+                .unwrap();
+            let PreparedSubmission::Created { run, root } = store
+                .prepare_submission(recovery_submission(conversation.id))
+                .await
+                .unwrap()
+            else {
+                panic!("fixture must create a queued run");
+            };
+            runs.push((run.id, root.id));
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 0);
+        wait_for_provider_calls(&adapter.starts, 4).await;
+        let (pending_run, pending_root) = *runs.last().unwrap();
+        store
+            .append_run_event(
+                pending_run,
+                pending_root,
+                ProviderEventRecord::interrupted(),
+            )
+            .await
+            .unwrap();
+
+        gate.add_permits(4);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            store.load_run(pending_run).await.unwrap().status,
+            RunStatus::Interrupted
+        );
+        let _ = app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn startup_does_not_replay_a_queued_turn_after_a_session_was_bound() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("queued session recovery"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, .. } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        store
+            .bind_native_session(run.id, "retained-session")
+            .await
+            .unwrap();
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 1);
+
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.turns.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Interrupted
+        );
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_does_not_replay_an_ambiguous_running_turn() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("ambiguous recovery"))
+            .await
+            .unwrap();
+        let PreparedSubmission::Created { run, root } = store
+            .prepare_submission(recovery_submission(conversation.id))
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must create a queued run");
+        };
+        store
+            .bind_native_session(run.id, "retained-session")
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+
+        assert_eq!(app.reconcile_startup().await.unwrap(), 1);
+        assert_eq!(
+            store.load_run(run.id).await.unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.turns.load(Ordering::SeqCst), 0);
+        assert!(
+            store
+                .load_timeline(conversation.id, None, 20)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|event| event.content.contains("Review its output and workspace"))
+        );
         app.shutdown().await.unwrap();
     }
 

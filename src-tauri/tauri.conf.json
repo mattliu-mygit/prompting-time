@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Prompting Time",
   "version": "0.1.0",
-  "identifier": "com.promptingtime.app",
+  "identifier": "com.promptingtime.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build",
@@ -14,8 +14,10 @@
       {
         "label": "main",
         "title": "Prompting Time",
-        "width": 720,
-        "height": 480
+        "width": 1280,
+        "height": 720,
+        "minWidth": 960,
+        "minHeight": 600
       }
     ],
     "security": {
@@ -25,6 +27,9 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

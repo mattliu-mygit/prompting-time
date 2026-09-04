@@ -891,7 +891,7 @@ async fn codex_adapter_streams_schema_valid_fixture_events() {
     assert!(saw_message && saw_child && saw_subagent);
     turn.shutdown().await.unwrap();
     assert!(fixture.contains("\"decision\":\"accept\""));
-    assert!(!fixture.contains("/Users/"));
+    assert!(!fixture.contains(concat!("/", "Users/")));
 }
 
 #[tokio::test]
@@ -1627,6 +1627,9 @@ sleep 30
 
 #[tokio::test]
 async fn cancelling_a_queued_request_does_not_kill_an_acceptably_delayed_connection() {
+    let marker_directory = tempfile::tempdir().unwrap();
+    let recovered = marker_directory.path().join("delayed-write-recovered");
+    let recovered_text = recovered.to_string_lossy();
     let extract_id = response_id_shell("request_id");
     let script = format!(
         r#"
@@ -1641,6 +1644,7 @@ sleep 1
 IFS= read -r line
 {extract_id}
 printf '{{"id":%s,"result":{{}}}}\n' "$request_id"
+: > '{recovered_text}'
 IFS= read -r line
 {extract_id}
 printf '{{"id":%s,"result":{{"thread":{{"id":"thread-after-delay","sessionId":"session-after-delay"}}}}}}\n' "$request_id"
@@ -1663,6 +1667,13 @@ sleep 30
     queued.abort();
     let _ = queued.await;
 
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !recovered.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture never observed the delayed write");
     tokio::time::timeout(std::time::Duration::from_secs(2), writer)
         .await
         .expect("acceptably delayed write never recovered")

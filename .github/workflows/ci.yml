@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy,rustfmt
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --workspace --all-features -- --test-threads=1
+
+      - name: Lint frontend
+        run: pnpm lint
+
+      - name: Test frontend
+        run: pnpm test
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Test privacy scanner
+        run: bash scripts/privacy-scan.test.sh
+
+      - name: Scan tracked files
+        run: bash scripts/privacy-scan.sh
+
+      - name: Build unsigned macOS app
+        run: pnpm tauri build --bundles app
