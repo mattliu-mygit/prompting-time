@@ -41,6 +41,11 @@ pub struct JsonLineSender {
     commands: mpsc::Sender<OwnerCommand>,
 }
 
+#[derive(Clone)]
+pub struct JsonLineShutdown {
+    shutdown: watch::Sender<bool>,
+}
+
 impl JsonLineProcess {
     pub fn spawn(mut command: Command) -> Result<Self, ProviderError> {
         command
@@ -109,6 +114,13 @@ impl JsonLineProcess {
         }
     }
 
+    /// A process-owner shutdown signal that remains usable while another task is blocked on I/O.
+    pub fn shutdown_handle(&self) -> JsonLineShutdown {
+        JsonLineShutdown {
+            shutdown: self.shutdown.clone(),
+        }
+    }
+
     pub fn id(&self) -> u32 {
         self.id
     }
@@ -132,6 +144,12 @@ impl JsonLineProcess {
             Some(owner) => owner.await.map_err(|_| owner_stopped())?,
             None => Ok(()),
         }
+    }
+}
+
+impl JsonLineShutdown {
+    pub fn request(&self) {
+        self.shutdown.send_replace(true);
     }
 }
 

@@ -1,8 +1,14 @@
+use std::collections::BTreeMap;
+
 use prompting_time_core::domain::{
-    ApprovalResolution, ApprovalResponseIntentStatus, ApprovalStatus, MutationState, RunStatus,
-    TimelineEventKind,
+    ApprovalRequestDetails, ApprovalResolution, ApprovalResponseIntentStatus, ApprovalStatus,
+    MutationState, RunStatus, TimelineEventKind,
 };
 use prompting_time_core::providers::{DispatchCertainty, ProviderErrorCategory, ProviderId};
+use prompting_time_core::providers::{
+    NativeAgentStatus, NativeChildStatus, NativeSubAgentActivityKind, UserInputOption,
+    UserInputQuestion,
+};
 use prompting_time_core::store::{
     MAX_STAGED_EVENT_BYTES, MAX_STAGED_EVENT_ROWS, NewConversation, ProviderEventRecord,
     StageWaitingEventOutcome, Store, StoreError,
@@ -53,6 +59,249 @@ async fn normalized_tool_event_updates_mutation_and_payload_atomically() {
         store.load_event_payload(started.id).await.unwrap().unwrap()["nativeTurnId"],
         "native-turn-2"
     );
+}
+
+#[tokio::test]
+async fn provider_session_retains_native_thread_and_session_tree_ids() {
+    let store = Store::open_in_memory().await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("native Codex identity"))
+        .await
+        .unwrap();
+    let (run, _) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+
+    store
+        .bind_native_session_with_group(run.id, "thread-invented", Some("session-invented"))
+        .await
+        .unwrap();
+
+    let session = store
+        .load_provider_session(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.native_id, "thread-invented");
+    assert_eq!(session.native_group_id.as_deref(), Some("session-invented"));
+}
+
+#[tokio::test]
+async fn native_item_and_child_relationship_ids_are_persisted_in_event_payloads() {
+    let store = Store::open_in_memory().await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("native Codex events"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+
+    let message = store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::native_message("READY", "message-item-1"),
+        )
+        .await
+        .unwrap();
+    let child = store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::child_agent(
+                "child-item-2",
+                "thread-parent",
+                vec!["thread-child".to_owned()],
+                vec![NativeChildStatus {
+                    native_thread_id: "thread-child".to_owned(),
+                    status: NativeAgentStatus::Running,
+                }],
+                "spawnAgent",
+                "inProgress",
+            ),
+        )
+        .await
+        .unwrap();
+    let subagent = store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::sub_agent(
+                "activity-item-3",
+                "thread-child",
+                "researcher",
+                NativeSubAgentActivityKind::Started,
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.load_event_payload(message.id).await.unwrap().unwrap()["nativeItemId"],
+        "message-item-1"
+    );
+    let child_payload = store.load_event_payload(child.id).await.unwrap().unwrap();
+    assert_eq!(child_payload["nativeItemId"], "child-item-2");
+    assert_eq!(child_payload["parentNativeThreadId"], "thread-parent");
+    assert_eq!(child_payload["childNativeThreadIds"][0], "thread-child");
+    let subagent_payload = store
+        .load_event_payload(subagent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(subagent_payload["agentThreadId"], "thread-child");
+    assert_eq!(subagent_payload["agentPath"], "researcher");
+    assert_eq!(subagent_payload["activity"], "started");
+}
+
+#[tokio::test]
+async fn structured_user_input_is_persisted_without_losing_question_metadata() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("structured-input.sqlite3");
+    let store = Store::open(&path).await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("structured input"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    let requested = store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::user_input_requested(
+                ProviderId::Codex,
+                "string:input-1",
+                vec![UserInputQuestion {
+                    id: "choice".to_owned(),
+                    header: "Choice".to_owned(),
+                    question: "Select one".to_owned(),
+                    options: Some(vec![UserInputOption {
+                        label: "Alpha".to_owned(),
+                        description: "Invented option".to_owned(),
+                    }]),
+                    is_other: true,
+                    is_secret: false,
+                }],
+                Some(5000),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let payload = store
+        .load_event_payload(requested.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload["requestId"], "string:input-1");
+    assert_eq!(payload["questions"][0]["header"], "Choice");
+    assert_eq!(payload["questions"][0]["options"][0]["label"], "Alpha");
+    assert_eq!(payload["questions"][0]["isOther"], true);
+    assert_eq!(payload["questions"][0]["isSecret"], false);
+    assert_eq!(payload["autoResolutionMs"], 5000);
+    store.close().await;
+    let store = Store::open(&path).await.unwrap();
+    let approval = store.load_approval(run.id, "string:input-1").await.unwrap();
+    assert_eq!(approval.operation, "user input");
+    let input = approval.input.unwrap();
+    assert_eq!(input.questions[0].id, "choice");
+    assert_eq!(
+        input.questions[0].options.as_ref().unwrap()[0].label,
+        "Alpha"
+    );
+    assert_eq!(input.auto_resolution_ms, Some(5000));
+    store
+        .record_response_intent(
+            run.id,
+            root.id,
+            "string:input-1",
+            ApprovalResolution::Answers(BTreeMap::from([(
+                "choice".to_owned(),
+                vec!["Alpha".to_owned()],
+            )])),
+        )
+        .await
+        .unwrap();
+    store
+        .acknowledge_response_intent(run.id, root.id, "string:input-1")
+        .await
+        .unwrap();
+    let answered = store.load_approval(run.id, "string:input-1").await.unwrap();
+    assert_eq!(answered.status, ApprovalStatus::Answered);
+    assert!(answered.input.is_some());
+}
+
+#[tokio::test]
+async fn waiting_child_relationship_payload_survives_recovery() {
+    let store = Store::open_in_memory().await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("staged child identity"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::approval_requested(
+                ProviderId::Codex,
+                "approval-child",
+                "spawn",
+                "invented child",
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .stage_waiting_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::child_agent(
+                "child-item-staged",
+                "thread-parent",
+                vec!["thread-child".to_owned()],
+                vec![NativeChildStatus {
+                    native_thread_id: "thread-child".to_owned(),
+                    status: NativeAgentStatus::Running,
+                }],
+                "spawnAgent",
+                "inProgress",
+            ),
+        )
+        .await
+        .unwrap();
+
+    let recovery = store.pending_recovery().await.unwrap();
+    let payload = recovery[0].staged_events[0]
+        .payload_json
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload["nativeItemId"], "child-item-staged");
+    assert_eq!(payload["childStatuses"][0]["status"]["kind"], "running");
 }
 
 #[tokio::test]
@@ -141,6 +390,94 @@ async fn waiting_events_stage_and_drain_once_in_receipt_order() {
             "buffered write",
         ]
     );
+}
+
+#[tokio::test]
+async fn native_message_deltas_aggregate_across_waiting_drain_and_restart() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("native-message-deltas.sqlite3");
+    let store = Store::open(&path).await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("delta aggregation"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    for delta in ["RE", "A"] {
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::native_message(delta, "assistant-item-1"),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::approval_requested(
+                ProviderId::Codex,
+                "approval-delta",
+                "command execution",
+                "invented command",
+            ),
+        )
+        .await
+        .unwrap();
+    for delta in ["D", "Y"] {
+        store
+            .stage_waiting_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::native_message(delta, "assistant-item-1"),
+            )
+            .await
+            .unwrap();
+    }
+    store.close().await;
+
+    let reopened = Store::open(&path).await.unwrap();
+    let recovery = reopened
+        .pending_recovery()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.run.id == run.id)
+        .unwrap();
+    assert_eq!(recovery.staged_events.len(), 1);
+    assert_eq!(recovery.staged_events[0].content, "DY");
+
+    reopened
+        .record_response_intent(
+            run.id,
+            root.id,
+            "approval-delta",
+            ApprovalResolution::Approved,
+        )
+        .await
+        .unwrap();
+    reopened
+        .acknowledge_response_intent(run.id, root.id, "approval-delta")
+        .await
+        .unwrap();
+    let messages = reopened
+        .load_timeline(conversation.id, None, 20)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|event| event.kind == TimelineEventKind::Message)
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "READY");
 }
 
 #[tokio::test]
@@ -784,6 +1121,53 @@ async fn restart_recovery_retains_pending_and_recorded_native_approval_ids() {
         recorded.response_intent.as_ref().unwrap().status,
         ApprovalResponseIntentStatus::Recorded
     );
+}
+
+#[tokio::test]
+async fn typed_approval_action_details_survive_restart_and_recovery() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("approval-details.sqlite3");
+    let store = Store::open(&path).await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("approval details"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    let details = ApprovalRequestDetails::CommandExecution {
+        command: Some("printf READY".to_owned()),
+        cwd: Some("/invented/project".to_owned()),
+    };
+    store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::approval_requested_with_details(
+                ProviderId::Codex,
+                "command-approval",
+                "command execution",
+                "Run an invented command",
+                Some(details.clone()),
+            ),
+        )
+        .await
+        .unwrap();
+    store.close().await;
+
+    let reopened = Store::open(&path).await.unwrap();
+    let loaded = reopened
+        .load_approval(run.id, "command-approval")
+        .await
+        .unwrap();
+    assert_eq!(loaded.details, Some(details.clone()));
+    let recovery = reopened.pending_recovery().await.unwrap();
+    assert_eq!(recovery[0].approvals[0].details, Some(details));
 }
 
 #[tokio::test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::process::Output;
@@ -10,8 +11,15 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+pub use crate::domain::{
+    ApprovalRequestDetails, FileChangeApprovalDetail, FileChangeKind, RequestedFileSystemAccess,
+    RequestedFileSystemEntry, RequestedFileSystemPath, RequestedFileSystemPermissions,
+    RequestedNetworkPermissions, RequestedPermissionProfile, RequestedSpecialPath, UserInputOption,
+    UserInputQuestion, UserInputRequest,
+};
 use crate::domain::{ConversationId, MutationState};
 
+pub mod codex;
 pub mod process;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -102,6 +110,8 @@ pub struct ResumeSession {
 pub struct ProviderSession {
     pub provider: ProviderId,
     pub native_id: String,
+    /// Provider-native identity shared by related sessions, when exposed by the provider.
+    pub native_group_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -124,6 +134,35 @@ pub enum ApprovalResponse {
     Approved,
     Denied,
     Answer(String),
+    Answers(BTreeMap<String, Vec<String>>),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeSubAgentActivityKind {
+    Started,
+    Interacted,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeChildStatus {
+    pub native_thread_id: String,
+    pub status: NativeAgentStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "value")]
+pub enum NativeAgentStatus {
+    PendingInit,
+    Running,
+    Interrupted,
+    Completed,
+    Errored,
+    Shutdown,
+    NotFound,
+    Unrecognized(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -135,6 +174,10 @@ pub enum ProviderEvent {
     AssistantMessage {
         content: String,
     },
+    AssistantMessageDelta {
+        native_item_id: String,
+        content: String,
+    },
     Progress {
         content: String,
     },
@@ -142,10 +185,39 @@ pub enum ProviderEvent {
         description: String,
         mutation: MutationState,
     },
+    NativeItemActivity {
+        native_item_id: String,
+        description: String,
+        mutation: MutationState,
+    },
+    ChildAgentActivity {
+        native_item_id: String,
+        parent_native_thread_id: String,
+        child_native_thread_ids: Vec<String>,
+        child_statuses: Vec<NativeChildStatus>,
+        operation: String,
+        status: String,
+    },
+    SubAgentActivity {
+        native_item_id: String,
+        agent_thread_id: String,
+        agent_path: String,
+        activity: NativeSubAgentActivityKind,
+    },
     ApprovalRequested {
         request_id: String,
         operation: String,
         scope: String,
+        details: Option<ApprovalRequestDetails>,
+    },
+    UserInputRequested {
+        request_id: String,
+        questions: Vec<UserInputQuestion>,
+        auto_resolution_ms: Option<u64>,
+    },
+    /// A forward-compatible notification retained without its potentially sensitive payload.
+    Unrecognized {
+        method: String,
     },
     TurnCompleted,
     Interrupted,

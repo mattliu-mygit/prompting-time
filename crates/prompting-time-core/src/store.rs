@@ -12,12 +12,15 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::domain::{
-    AgentId, AgentNode, AgentStatus, Approval, ApprovalId, ApprovalResolution,
-    ApprovalResponseIntent, ApprovalResponseIntentStatus, ApprovalStatus, Conversation,
-    ConversationId, DomainError, MutationState, ProviderRun, RunId, RunStatus, TimelineEvent,
-    TimelineEventId, TimelineEventKind,
+    AgentId, AgentNode, AgentStatus, Approval, ApprovalId, ApprovalRequestDetails,
+    ApprovalResolution, ApprovalResponseIntent, ApprovalResponseIntentStatus, ApprovalStatus,
+    Conversation, ConversationId, DomainError, MutationState, ProviderRun, RunId, RunStatus,
+    TimelineEvent, TimelineEventId, TimelineEventKind,
 };
-use crate::providers::{DispatchCertainty, ProviderErrorCategory, ProviderId};
+use crate::providers::{
+    DispatchCertainty, NativeChildStatus, NativeSubAgentActivityKind, ProviderErrorCategory,
+    ProviderId, ProviderSession, UserInputQuestion, UserInputRequest,
+};
 
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_POOL_CONNECTIONS: u32 = 8;
@@ -108,16 +111,49 @@ pub enum ProviderEventRecord {
         native_turn_id: Option<String>,
     },
     Message(String),
+    NativeMessage {
+        content: String,
+        native_item_id: String,
+    },
     Progress(String),
     Tool {
         content: String,
         mutation: MutationState,
+    },
+    NativeItem {
+        native_item_id: String,
+        content: String,
+        mutation: MutationState,
+    },
+    ChildAgent {
+        native_item_id: String,
+        parent_native_thread_id: String,
+        child_native_thread_ids: Vec<String>,
+        child_statuses: Vec<NativeChildStatus>,
+        operation: String,
+        status: String,
+    },
+    SubAgent {
+        native_item_id: String,
+        agent_thread_id: String,
+        agent_path: String,
+        activity: NativeSubAgentActivityKind,
+    },
+    Unrecognized {
+        method: String,
     },
     ApprovalRequested {
         provider: ProviderId,
         request_id: String,
         operation: String,
         scope: String,
+        details: Option<ApprovalRequestDetails>,
+    },
+    UserInputRequested {
+        provider: ProviderId,
+        request_id: String,
+        questions: Vec<UserInputQuestion>,
+        auto_resolution_ms: Option<u64>,
     },
     Waiting,
     Resumed,
@@ -157,10 +193,67 @@ impl ProviderEventRecord {
         Self::Message(content.into())
     }
 
+    pub fn native_message(content: impl Into<String>, native_item_id: impl Into<String>) -> Self {
+        Self::NativeMessage {
+            content: content.into(),
+            native_item_id: native_item_id.into(),
+        }
+    }
+
     pub fn tool(content: impl Into<String>, mutation: MutationState) -> Self {
         Self::Tool {
             content: content.into(),
             mutation,
+        }
+    }
+
+    pub fn native_item(
+        native_item_id: impl Into<String>,
+        content: impl Into<String>,
+        mutation: MutationState,
+    ) -> Self {
+        Self::NativeItem {
+            native_item_id: native_item_id.into(),
+            content: content.into(),
+            mutation,
+        }
+    }
+
+    pub fn child_agent(
+        native_item_id: impl Into<String>,
+        parent_native_thread_id: impl Into<String>,
+        child_native_thread_ids: Vec<String>,
+        child_statuses: Vec<NativeChildStatus>,
+        operation: impl Into<String>,
+        status: impl Into<String>,
+    ) -> Self {
+        Self::ChildAgent {
+            native_item_id: native_item_id.into(),
+            parent_native_thread_id: parent_native_thread_id.into(),
+            child_native_thread_ids,
+            child_statuses,
+            operation: operation.into(),
+            status: status.into(),
+        }
+    }
+
+    pub fn sub_agent(
+        native_item_id: impl Into<String>,
+        agent_thread_id: impl Into<String>,
+        agent_path: impl Into<String>,
+        activity: NativeSubAgentActivityKind,
+    ) -> Self {
+        Self::SubAgent {
+            native_item_id: native_item_id.into(),
+            agent_thread_id: agent_thread_id.into(),
+            agent_path: agent_path.into(),
+            activity,
+        }
+    }
+
+    pub fn unrecognized(method: impl Into<String>) -> Self {
+        Self::Unrecognized {
+            method: method.into(),
         }
     }
 
@@ -175,6 +268,37 @@ impl ProviderEventRecord {
             request_id: request_id.into(),
             operation: operation.into(),
             scope: scope.into(),
+            details: None,
+        }
+    }
+
+    pub fn approval_requested_with_details(
+        provider: ProviderId,
+        request_id: impl Into<String>,
+        operation: impl Into<String>,
+        scope: impl Into<String>,
+        details: Option<ApprovalRequestDetails>,
+    ) -> Self {
+        Self::ApprovalRequested {
+            provider,
+            request_id: request_id.into(),
+            operation: operation.into(),
+            scope: scope.into(),
+            details,
+        }
+    }
+
+    pub fn user_input_requested(
+        provider: ProviderId,
+        request_id: impl Into<String>,
+        questions: Vec<UserInputQuestion>,
+        auto_resolution_ms: Option<u64>,
+    ) -> Self {
+        Self::UserInputRequested {
+            provider,
+            request_id: request_id.into(),
+            questions,
+            auto_resolution_ms,
         }
     }
 
@@ -225,12 +349,20 @@ impl ProviderEventRecord {
         match (self, is_root) {
             (Self::Started { .. }, true) => (TimelineEventKind::Lifecycle, "Provider run started"),
             (Self::Started { .. }, false) => (TimelineEventKind::Lifecycle, "Agent started"),
-            (Self::Message(content), _) => (TimelineEventKind::Message, content),
+            (Self::Message(content) | Self::NativeMessage { content, .. }, _) => {
+                (TimelineEventKind::Message, content)
+            }
             (Self::Progress(content), _) => (TimelineEventKind::Progress, content),
-            (Self::Tool { content, .. }, _) => (TimelineEventKind::Tool, content),
+            (Self::Tool { content, .. } | Self::NativeItem { content, .. }, _) => {
+                (TimelineEventKind::Tool, content)
+            }
+            (Self::ChildAgent { operation, .. }, _) => (TimelineEventKind::Progress, operation),
+            (Self::SubAgent { agent_path, .. }, _) => (TimelineEventKind::Progress, agent_path),
+            (Self::Unrecognized { method }, _) => (TimelineEventKind::Diagnostic, method),
             (Self::ApprovalRequested { operation, .. }, _) => {
                 (TimelineEventKind::Lifecycle, operation)
             }
+            (Self::UserInputRequested { .. }, _) => (TimelineEventKind::Lifecycle, "user input"),
             (Self::Waiting, true) => (TimelineEventKind::Lifecycle, "Provider run is waiting"),
             (Self::Waiting, false) => (TimelineEventKind::Lifecycle, "Agent is waiting"),
             (Self::Resumed, true) => (TimelineEventKind::Lifecycle, "Provider run resumed"),
@@ -261,7 +393,7 @@ impl ProviderEventRecord {
             Self::Started { .. } | Self::Resumed => {
                 Some((RunStatus::Running, AgentStatus::Running))
             }
-            Self::Waiting | Self::ApprovalRequested { .. } => {
+            Self::Waiting | Self::ApprovalRequested { .. } | Self::UserInputRequested { .. } => {
                 Some((RunStatus::Waiting, AgentStatus::Waiting))
             }
             Self::Completed => Some((RunStatus::Completed, AgentStatus::Completed)),
@@ -271,7 +403,14 @@ impl ProviderEventRecord {
             Self::Failed(_) | Self::FailedWithMutation { .. } | Self::ProviderFailed { .. } => {
                 Some((RunStatus::Failed, AgentStatus::Failed))
             }
-            Self::Message(_) | Self::Progress(_) | Self::Tool { .. } => None,
+            Self::Message(_)
+            | Self::NativeMessage { .. }
+            | Self::Progress(_)
+            | Self::Tool { .. }
+            | Self::NativeItem { .. }
+            | Self::ChildAgent { .. }
+            | Self::SubAgent { .. }
+            | Self::Unrecognized { .. } => None,
         }
     }
 
@@ -283,9 +422,71 @@ impl ProviderEventRecord {
             Self::Tool { mutation, .. } => {
                 Some(serde_json::json!({ "mutation": mutation }).to_string())
             }
+            Self::NativeMessage { native_item_id, .. } => {
+                Some(serde_json::json!({ "nativeItemId": native_item_id }).to_string())
+            }
+            Self::NativeItem {
+                native_item_id,
+                mutation,
+                ..
+            } => Some(
+                serde_json::json!({
+                    "nativeItemId": native_item_id,
+                    "mutation": mutation,
+                })
+                .to_string(),
+            ),
+            Self::ChildAgent {
+                native_item_id,
+                parent_native_thread_id,
+                child_native_thread_ids,
+                child_statuses,
+                operation,
+                status,
+            } => Some(
+                serde_json::json!({
+                    "nativeItemId": native_item_id,
+                    "parentNativeThreadId": parent_native_thread_id,
+                    "childNativeThreadIds": child_native_thread_ids,
+                    "childStatuses": child_statuses,
+                    "operation": operation,
+                    "status": status,
+                })
+                .to_string(),
+            ),
+            Self::SubAgent {
+                native_item_id,
+                agent_thread_id,
+                agent_path,
+                activity,
+            } => Some(
+                serde_json::json!({
+                    "nativeItemId": native_item_id,
+                    "agentThreadId": agent_thread_id,
+                    "agentPath": agent_path,
+                    "activity": activity,
+                })
+                .to_string(),
+            ),
+            Self::Unrecognized { method } => {
+                Some(serde_json::json!({ "method": method }).to_string())
+            }
             Self::ApprovalRequested { request_id, .. } => {
                 Some(serde_json::json!({ "requestId": request_id }).to_string())
             }
+            Self::UserInputRequested {
+                request_id,
+                questions,
+                auto_resolution_ms,
+                ..
+            } => Some(
+                serde_json::json!({
+                    "requestId": request_id,
+                    "questions": questions,
+                    "autoResolutionMs": auto_resolution_ms,
+                })
+                .to_string(),
+            ),
             Self::InterruptedWithMutation(mutation) => {
                 Some(serde_json::json!({ "mutation": mutation }).to_string())
             }
@@ -333,6 +534,8 @@ pub struct StagedProviderEvent {
     pub sequence: u64,
     pub kind: TimelineEventKind,
     pub content: String,
+    pub native_item_id: Option<String>,
+    pub payload_json: Option<String>,
     pub mutation_state: Option<MutationState>,
     pub overflowed_kind: Option<TimelineEventKind>,
 }
@@ -563,6 +766,16 @@ impl Store {
         run_id: RunId,
         native_session_id: &str,
     ) -> Result<(), StoreError> {
+        self.bind_native_session_with_group(run_id, native_session_id, None)
+            .await
+    }
+
+    pub async fn bind_native_session_with_group(
+        &self,
+        run_id: RunId,
+        native_session_id: &str,
+        native_group_id: Option<&str>,
+    ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let run = sqlx::query_as::<_, ProviderRunRow>(
             "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at \
@@ -585,15 +798,17 @@ impl Store {
         let now = now_millis();
         sqlx::query(
             "INSERT INTO provider_sessions \
-             (id, conversation_id, provider, native_session_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?) \
+             (id, conversation_id, provider, native_session_id, native_group_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(conversation_id, provider) DO UPDATE SET \
-             native_session_id = excluded.native_session_id, updated_at = excluded.updated_at",
+             native_session_id = excluded.native_session_id, \
+             native_group_id = excluded.native_group_id, updated_at = excluded.updated_at",
         )
         .bind(Uuid::now_v7().to_string())
         .bind(run.conversation_id.to_string())
         .bind(provider_label(run.provider))
         .bind(native_session_id)
+        .bind(native_group_id)
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
@@ -617,6 +832,26 @@ impl Store {
         .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn load_provider_session(
+        &self,
+        conversation_id: ConversationId,
+        provider: ProviderId,
+    ) -> Result<Option<ProviderSession>, StoreError> {
+        let row = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT native_session_id, native_group_id FROM provider_sessions \
+             WHERE conversation_id = ? AND provider = ? AND native_session_id IS NOT NULL",
+        )
+        .bind(conversation_id.to_string())
+        .bind(provider_label(provider))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(native_id, native_group_id)| ProviderSession {
+            provider,
+            native_id,
+            native_group_id,
+        }))
     }
 
     pub async fn append_run_event(
@@ -706,17 +941,104 @@ impl Store {
         }
         let (kind, content) = record.event_fields(is_root);
         let payload_json = record.payload_json();
+        let native_item_id = match &record {
+            ProviderEventRecord::NativeMessage { native_item_id, .. } => {
+                Some(native_item_id.as_str())
+            }
+            _ => None,
+        };
         let event_id = TimelineEventId::new();
         let now = now_millis();
 
-        if let ProviderEventRecord::ApprovalRequested {
-            provider,
-            request_id,
-            operation,
-            scope,
-        } = &record
+        if let Some(native_item_id) = native_item_id
+            && let Some((existing_id, sequence, existing_content)) =
+                sqlx::query_as::<_, (String, i64, String)>(
+                    "SELECT id, sequence, content FROM events \
+                     WHERE run_id = ? AND agent_id = ? AND kind = 'message' \
+                     AND native_item_id = ?",
+                )
+                .bind(run_id.to_string())
+                .bind(agent_id.to_string())
+                .bind(native_item_id)
+                .fetch_optional(&mut *transaction)
+                .await?
         {
-            if *provider != run.provider {
+            sqlx::query("UPDATE events SET content = content || ? WHERE id = ?")
+                .bind(content)
+                .bind(&existing_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(run.conversation_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            return Ok(TimelineEvent {
+                id: parse_uuid("timeline event", &existing_id)?.into(),
+                conversation_id: run.conversation_id,
+                run_id,
+                agent_id,
+                sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidData {
+                    entity: "timeline event",
+                    detail: "negative sequence".to_owned(),
+                })?,
+                kind,
+                content: existing_content + content,
+            });
+        }
+
+        let approval_fields = match &record {
+            ProviderEventRecord::ApprovalRequested {
+                provider,
+                request_id,
+                operation,
+                scope,
+                details,
+            } => Some((
+                *provider,
+                request_id,
+                operation.as_str(),
+                scope.as_str(),
+                None,
+                details
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|error| StoreError::InvalidData {
+                        entity: "approval request details",
+                        detail: error.to_string(),
+                    })?,
+            )),
+            ProviderEventRecord::UserInputRequested {
+                provider,
+                request_id,
+                questions,
+                auto_resolution_ms,
+                ..
+            } => Some((
+                *provider,
+                request_id,
+                "user input",
+                "structured questions",
+                Some(
+                    serde_json::to_string(&UserInputRequest {
+                        questions: questions.clone(),
+                        auto_resolution_ms: *auto_resolution_ms,
+                    })
+                    .map_err(|error| StoreError::InvalidData {
+                        entity: "user input request",
+                        detail: error.to_string(),
+                    })?,
+                ),
+                None,
+            )),
+            _ => None,
+        };
+        if let Some((provider, request_id, operation, scope, request_json, details_json)) =
+            approval_fields
+        {
+            if provider != run.provider {
                 return Err(StoreError::InvalidData {
                     entity: "approval provider",
                     detail: "does not match provider run".to_owned(),
@@ -724,16 +1046,18 @@ impl Store {
             }
             sqlx::query(
                 "INSERT INTO approvals \
-                 (id, run_id, agent_id, provider, provider_request_id, operation, scope, status, resolution_json, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)",
+                 (id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, resolution_json, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)",
             )
             .bind(ApprovalId::new().to_string())
             .bind(run_id.to_string())
             .bind(agent_id.to_string())
-            .bind(provider_label(*provider))
+            .bind(provider_label(provider))
             .bind(request_id)
             .bind(operation)
             .bind(scope)
+            .bind(request_json)
+            .bind(details_json)
             .bind(now)
             .bind(now)
             .execute(&mut *transaction)
@@ -759,8 +1083,8 @@ impl Store {
 
         let result = sqlx::query(
             "INSERT INTO events \
-             (id, conversation_id, run_id, agent_id, kind, content, payload_json, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, conversation_id, run_id, agent_id, kind, content, payload_json, native_item_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event_id.to_string())
         .bind(run.conversation_id.to_string())
@@ -769,6 +1093,7 @@ impl Store {
         .bind(event_kind_label(kind))
         .bind(content)
         .bind(payload_json)
+        .bind(native_item_id)
         .bind(now)
         .execute(&mut *transaction)
         .await?;
@@ -797,6 +1122,7 @@ impl Store {
 
         let event_mutation = match &record {
             ProviderEventRecord::Tool { mutation, .. }
+            | ProviderEventRecord::NativeItem { mutation, .. }
             | ProviderEventRecord::FailedWithMutation { mutation, .. }
             | ProviderEventRecord::InterruptedWithMutation(mutation)
             | ProviderEventRecord::ProviderFailed { mutation, .. } => Some(*mutation),
@@ -854,11 +1180,33 @@ impl Store {
         agent_id: AgentId,
         record: ProviderEventRecord,
     ) -> Result<StageWaitingEventOutcome, StoreError> {
+        let native_item_id = match &record {
+            ProviderEventRecord::NativeMessage { native_item_id, .. } => {
+                Some(native_item_id.clone())
+            }
+            _ => None,
+        };
+        let payload_json = record.payload_json();
         let (kind, content, mutation_state) = match record {
             ProviderEventRecord::Message(content) => (TimelineEventKind::Message, content, None),
+            ProviderEventRecord::NativeMessage { content, .. } => {
+                (TimelineEventKind::Message, content, None)
+            }
             ProviderEventRecord::Progress(content) => (TimelineEventKind::Progress, content, None),
             ProviderEventRecord::Tool { content, mutation } => {
                 (TimelineEventKind::Tool, content, Some(mutation))
+            }
+            ProviderEventRecord::NativeItem {
+                content, mutation, ..
+            } => (TimelineEventKind::Tool, content, Some(mutation)),
+            ProviderEventRecord::ChildAgent { operation, .. } => {
+                (TimelineEventKind::Progress, operation, None)
+            }
+            ProviderEventRecord::SubAgent { agent_path, .. } => {
+                (TimelineEventKind::Progress, agent_path, None)
+            }
+            ProviderEventRecord::Unrecognized { method } => {
+                (TimelineEventKind::Diagnostic, method, None)
             }
             _ => return Err(StoreError::InvalidStagedEvent),
         };
@@ -899,10 +1247,25 @@ impl Store {
             });
         }
 
+        let existing_message = if let Some(native_item_id) = native_item_id.as_deref() {
+            sqlx::query_as::<_, (String, i64, String, Option<String>)>(
+                "SELECT id, sequence, content, payload_json FROM staged_provider_events \
+                 WHERE run_id = ? AND agent_id = ? AND kind = 'message' AND native_item_id = ?",
+            )
+            .bind(run_id.to_string())
+            .bind(agent_id.to_string())
+            .bind(native_item_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+        } else {
+            None
+        };
+
         let (staged_count, staged_bytes, overflowed): (i64, i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(content_bytes), 0), COALESCE(MAX(overflowed), 0) \
              FROM ( \
-                 SELECT length(CAST(content AS BLOB)) AS content_bytes, \
+                 SELECT length(CAST(content AS BLOB)) + \
+                        COALESCE(length(CAST(payload_json AS BLOB)), 0) AS content_bytes, \
                         CASE WHEN overflowed_kind IS NULL THEN 0 ELSE 1 END AS overflowed \
                  FROM staged_provider_events WHERE run_id = ? \
                  ORDER BY sequence, id LIMIT ? \
@@ -921,7 +1284,11 @@ impl Store {
             return Err(StoreError::StagedEventOverflowed);
         }
 
-        let incoming_bytes = content.len();
+        let incoming_bytes = content.len().saturating_add(if existing_message.is_some() {
+            0
+        } else {
+            payload_json.as_ref().map_or(0, String::len)
+        });
         let normal_row_limit = MAX_STAGED_EVENT_ROWS - 1;
         let normal_byte_limit = MAX_STAGED_EVENT_BYTES - STAGED_OVERFLOW_CONTENT.len();
         if usize::try_from(staged_count).unwrap() > normal_row_limit
@@ -929,29 +1296,65 @@ impl Store {
         {
             return Err(StoreError::CorruptStagedEventQueue);
         }
-        let exceeds_limit = usize::try_from(staged_count).unwrap() >= normal_row_limit
+        let exceeds_limit = (existing_message.is_none()
+            && usize::try_from(staged_count).unwrap() >= normal_row_limit)
             || usize::try_from(staged_bytes)
                 .unwrap()
                 .saturating_add(incoming_bytes)
                 > normal_byte_limit;
-        let (stored_kind, stored_content, stored_mutation, overflowed_kind) = if exceeds_limit {
-            (
-                TimelineEventKind::Diagnostic,
-                STAGED_OVERFLOW_CONTENT.to_owned(),
-                Some(MutationState::Unknown),
-                Some(kind),
-            )
-        } else {
-            (kind, content, mutation_state, None)
-        };
+        if !exceeds_limit
+            && let Some((existing_id, sequence, existing_content, existing_payload)) =
+                existing_message
+        {
+            sqlx::query("UPDATE staged_provider_events SET content = content || ? WHERE id = ?")
+                .bind(&content)
+                .bind(&existing_id)
+                .execute(&mut *transaction)
+                .await?;
+            let now = now_millis();
+            sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(run.conversation_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            return Ok(StageWaitingEventOutcome::Staged(StagedProviderEvent {
+                id: parse_uuid("staged provider event", &existing_id)?.into(),
+                conversation_id: run.conversation_id,
+                run_id,
+                agent_id,
+                sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidData {
+                    entity: "staged provider event",
+                    detail: "negative sequence".to_owned(),
+                })?,
+                kind,
+                content: existing_content + &content,
+                native_item_id,
+                payload_json: existing_payload,
+                mutation_state: None,
+                overflowed_kind: None,
+            }));
+        }
+        let (stored_kind, stored_content, stored_mutation, stored_payload, overflowed_kind) =
+            if exceeds_limit {
+                (
+                    TimelineEventKind::Diagnostic,
+                    STAGED_OVERFLOW_CONTENT.to_owned(),
+                    Some(MutationState::Unknown),
+                    None,
+                    Some(kind),
+                )
+            } else {
+                (kind, content, mutation_state, payload_json, None)
+            };
 
         let id = TimelineEventId::new();
         let now = now_millis();
         let inserted = sqlx::query(
             "INSERT INTO staged_provider_events \
-             (id, conversation_id, run_id, agent_id, kind, content, mutation_state, \
-              overflowed_kind, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, conversation_id, run_id, agent_id, kind, content, payload_json, native_item_id, \
+              mutation_state, overflowed_kind, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(run.conversation_id.to_string())
@@ -959,6 +1362,12 @@ impl Store {
         .bind(agent_id.to_string())
         .bind(event_kind_label(stored_kind))
         .bind(&stored_content)
+        .bind(&stored_payload)
+        .bind(
+            (overflowed_kind.is_none())
+                .then_some(native_item_id.as_deref())
+                .flatten(),
+        )
         .bind(stored_mutation.map(mutation_state_label))
         .bind(overflowed_kind.map(event_kind_label))
         .bind(now)
@@ -993,6 +1402,10 @@ impl Store {
             })?,
             kind: stored_kind,
             content: stored_content,
+            native_item_id: (overflowed_kind.is_none())
+                .then_some(native_item_id)
+                .flatten(),
+            payload_json: stored_payload,
             mutation_state: stored_mutation,
             overflowed_kind,
         };
@@ -1043,7 +1456,7 @@ impl Store {
             });
         }
         let mut approval = sqlx::query_as::<_, ApprovalRow>(
-            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, status, resolution_json, \
+            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, resolution_json, \
              response_intent_json, response_intent_status \
              FROM approvals WHERE run_id = ? AND agent_id = ? AND provider_request_id = ?",
         )
@@ -1104,7 +1517,7 @@ impl Store {
     ) -> Result<Approval, StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut approval = sqlx::query_as::<_, ApprovalRow>(
-            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, status, resolution_json, \
+            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, resolution_json, \
              response_intent_json, response_intent_status \
              FROM approvals WHERE run_id = ? AND agent_id = ? AND provider_request_id = ?",
         )
@@ -1183,7 +1596,7 @@ impl Store {
         })?;
         let agent = agent_row.into_domain()?;
         let approval = sqlx::query_as::<_, ApprovalRow>(
-            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, status, resolution_json, \
+            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, resolution_json, \
              response_intent_json, response_intent_status \
              FROM approvals WHERE run_id = ? AND agent_id = ? AND provider_request_id = ?",
         )
@@ -1301,7 +1714,7 @@ impl Store {
         provider_request_id: &str,
     ) -> Result<Approval, StoreError> {
         sqlx::query_as::<_, ApprovalRow>(
-            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, status, resolution_json, \
+            "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, resolution_json, \
              response_intent_json, response_intent_status \
              FROM approvals WHERE run_id = ? AND provider_request_id = ?",
         )
@@ -1655,7 +2068,7 @@ impl Store {
                 }
 
                 let approvals = sqlx::query_as::<_, ApprovalRow>(
-                    "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, status, \
+                    "SELECT id, run_id, agent_id, provider, provider_request_id, operation, scope, request_json, details_json, status, \
                      resolution_json, response_intent_json, response_intent_status \
                      FROM approvals WHERE run_id = ? AND status = 'pending' \
                      ORDER BY created_at, id",
@@ -1669,7 +2082,8 @@ impl Store {
 
                 let (staged_count, staged_bytes): (i64, i64) = sqlx::query_as(
                     "SELECT COUNT(*), COALESCE(SUM(content_bytes), 0) FROM ( \
-                         SELECT length(CAST(content AS BLOB)) AS content_bytes \
+                         SELECT length(CAST(content AS BLOB)) + \
+                                COALESCE(length(CAST(payload_json AS BLOB)), 0) AS content_bytes \
                          FROM staged_provider_events WHERE run_id = ? \
                          ORDER BY sequence, id LIMIT ? \
                      )",
@@ -1681,19 +2095,20 @@ impl Store {
                 let staged_rows = sqlx::query_as::<_, StagedProviderEventRow>(
                     "WITH prefix AS ( \
                          SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, \
-                                mutation_state, overflowed_kind \
+                                native_item_id, payload_json, mutation_state, overflowed_kind \
                          FROM staged_provider_events WHERE run_id = ? \
                          ORDER BY sequence, id LIMIT ? \
                      ), bounded AS ( \
                          SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, \
-                                mutation_state, overflowed_kind, \
-                                SUM(length(CAST(content AS BLOB))) OVER ( \
+                                native_item_id, payload_json, mutation_state, overflowed_kind, \
+                                SUM(length(CAST(content AS BLOB)) + \
+                                    COALESCE(length(CAST(payload_json AS BLOB)), 0)) OVER ( \
                                     ORDER BY sequence, id \
                                 ) AS cumulative_bytes \
                          FROM prefix \
                      ) \
                      SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, \
-                            mutation_state, overflowed_kind \
+                            native_item_id, payload_json, mutation_state, overflowed_kind \
                      FROM bounded WHERE cumulative_bytes <= ? ORDER BY sequence, id LIMIT ?",
                 )
                 .bind(run.id.to_string())
@@ -1758,7 +2173,8 @@ async fn drain_staged_events_in_transaction(
     let (staged_count, staged_bytes): (i64, i64) = if let Some(agent_id) = agent_id {
         sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(content_bytes), 0) FROM ( \
-                 SELECT length(CAST(content AS BLOB)) AS content_bytes \
+                 SELECT length(CAST(content AS BLOB)) + \
+                        COALESCE(length(CAST(payload_json AS BLOB)), 0) AS content_bytes \
                  FROM staged_provider_events WHERE run_id = ? AND agent_id = ? \
                  ORDER BY sequence, id LIMIT ? \
              )",
@@ -1771,7 +2187,8 @@ async fn drain_staged_events_in_transaction(
     } else {
         sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(content_bytes), 0) FROM ( \
-                 SELECT length(CAST(content AS BLOB)) AS content_bytes \
+                 SELECT length(CAST(content AS BLOB)) + \
+                        COALESCE(length(CAST(payload_json AS BLOB)), 0) AS content_bytes \
                  FROM staged_provider_events WHERE run_id = ? \
                  ORDER BY sequence, id LIMIT ? \
              )",
@@ -1788,8 +2205,8 @@ async fn drain_staged_events_in_transaction(
     }
     let rows = if let Some(agent_id) = agent_id {
         sqlx::query_as::<_, StagedProviderEventRow>(
-            "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, mutation_state, \
-                    overflowed_kind \
+            "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, native_item_id, payload_json, \
+                    mutation_state, overflowed_kind \
              FROM staged_provider_events WHERE run_id = ? AND agent_id = ? \
              ORDER BY sequence, id LIMIT ?",
         )
@@ -1800,8 +2217,8 @@ async fn drain_staged_events_in_transaction(
         .await?
     } else {
         sqlx::query_as::<_, StagedProviderEventRow>(
-            "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, mutation_state, \
-                    overflowed_kind \
+            "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, native_item_id, payload_json, \
+                    mutation_state, overflowed_kind \
              FROM staged_provider_events WHERE run_id = ? ORDER BY sequence, id LIMIT ?",
         )
         .bind(run_id.to_string())
@@ -1819,10 +2236,42 @@ async fn drain_staged_events_in_transaction(
     let now = now_millis();
     let mut drained = Vec::with_capacity(staged.len());
     for event in staged {
+        if let Some(native_item_id) = event.native_item_id.as_deref()
+            && let Some((existing_id, sequence, existing_content)) =
+                sqlx::query_as::<_, (String, i64, String)>(
+                    "SELECT id, sequence, content FROM events \
+                     WHERE run_id = ? AND agent_id = ? AND kind = 'message' \
+                     AND native_item_id = ?",
+                )
+                .bind(event.run_id.to_string())
+                .bind(event.agent_id.to_string())
+                .bind(native_item_id)
+                .fetch_optional(&mut **transaction)
+                .await?
+        {
+            sqlx::query("UPDATE events SET content = content || ? WHERE id = ?")
+                .bind(&event.content)
+                .bind(&existing_id)
+                .execute(&mut **transaction)
+                .await?;
+            drained.push(TimelineEvent {
+                id: parse_uuid("timeline event", &existing_id)?.into(),
+                conversation_id: event.conversation_id,
+                run_id: event.run_id,
+                agent_id: event.agent_id,
+                sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidData {
+                    entity: "timeline event",
+                    detail: "negative sequence".to_owned(),
+                })?,
+                kind: event.kind,
+                content: existing_content + &event.content,
+            });
+            continue;
+        }
         let inserted = sqlx::query(
             "INSERT INTO events \
-             (id, conversation_id, run_id, agent_id, kind, content, payload_json, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, conversation_id, run_id, agent_id, kind, content, payload_json, native_item_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event.id.to_string())
         .bind(event.conversation_id.to_string())
@@ -1830,17 +2279,22 @@ async fn drain_staged_events_in_transaction(
         .bind(event.agent_id.to_string())
         .bind(event_kind_label(event.kind))
         .bind(&event.content)
-        .bind(match (event.mutation_state, event.overflowed_kind) {
-            (Some(mutation), Some(overflowed_kind)) => Some(
-                serde_json::json!({
-                    "mutation": mutation,
-                    "overflowedKind": overflowed_kind,
-                })
-                .to_string(),
-            ),
-            (Some(mutation), None) => Some(serde_json::json!({ "mutation": mutation }).to_string()),
-            (None, _) => None,
-        })
+        .bind(event.payload_json.or_else(|| {
+            match (event.mutation_state, event.overflowed_kind) {
+                (Some(mutation), Some(overflowed_kind)) => Some(
+                    serde_json::json!({
+                        "mutation": mutation,
+                        "overflowedKind": overflowed_kind,
+                    })
+                    .to_string(),
+                ),
+                (Some(mutation), None) => {
+                    Some(serde_json::json!({ "mutation": mutation }).to_string())
+                }
+                (None, _) => None,
+            }
+        }))
+        .bind(event.native_item_id)
         .bind(now)
         .execute(&mut **transaction)
         .await?;
@@ -1975,7 +2429,12 @@ fn validate_event_state(
         }
         ProviderEventRecord::Progress(_)
         | ProviderEventRecord::Message(_)
+        | ProviderEventRecord::NativeMessage { .. }
         | ProviderEventRecord::Tool { .. }
+        | ProviderEventRecord::NativeItem { .. }
+        | ProviderEventRecord::ChildAgent { .. }
+        | ProviderEventRecord::SubAgent { .. }
+        | ProviderEventRecord::Unrecognized { .. }
             if agent.status != AgentStatus::Running
                 || (is_root && run.status != RunStatus::Running) =>
         {
@@ -1985,6 +2444,7 @@ fn validate_event_state(
             })
         }
         ProviderEventRecord::ApprovalRequested { .. }
+        | ProviderEventRecord::UserInputRequested { .. }
             if agent.status != AgentStatus::Running
                 || (is_root && run.status != RunStatus::Running) =>
         {
@@ -2053,7 +2513,7 @@ fn approval_resolution_label(resolution: &ApprovalResolution) -> &'static str {
     match resolution {
         ApprovalResolution::Approved => "approved",
         ApprovalResolution::Denied => "denied",
-        ApprovalResolution::Answer(_) => "answered",
+        ApprovalResolution::Answer(_) | ApprovalResolution::Answers(_) => "answered",
         ApprovalResolution::Cancelled => "cancelled",
         ApprovalResolution::Failed => "failed",
     }
@@ -2301,6 +2761,8 @@ struct ApprovalRow {
     provider_request_id: Option<String>,
     operation: String,
     scope: String,
+    request_json: Option<String>,
+    details_json: Option<String>,
     status: String,
     resolution_json: Option<String>,
     response_intent_json: Option<String>,
@@ -2309,6 +2771,24 @@ struct ApprovalRow {
 
 impl ApprovalRow {
     fn into_domain(self) -> Result<Approval, StoreError> {
+        let input = self
+            .request_json
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| StoreError::InvalidData {
+                    entity: "user input request",
+                    detail: error.to_string(),
+                })
+            })
+            .transpose()?;
+        let details = self
+            .details_json
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| StoreError::InvalidData {
+                    entity: "approval request details",
+                    detail: error.to_string(),
+                })
+            })
+            .transpose()?;
         let status = parse_approval_status(&self.status)?;
         let resolution: Option<ApprovalResolution> = self
             .resolution_json
@@ -2364,6 +2844,8 @@ impl ApprovalRow {
             provider_request_id: self.provider_request_id,
             operation: self.operation,
             scope: self.scope,
+            input,
+            details,
             status,
             resolution,
             response_intent,
@@ -2418,6 +2900,8 @@ struct StagedProviderEventRow {
     sequence: i64,
     kind: String,
     content: String,
+    native_item_id: Option<String>,
+    payload_json: Option<String>,
     mutation_state: Option<String>,
     overflowed_kind: Option<String>,
 }
@@ -2435,6 +2919,8 @@ impl StagedProviderEventRow {
             })?,
             kind: parse_event_kind(&self.kind)?,
             content: self.content,
+            native_item_id: self.native_item_id,
+            payload_json: self.payload_json,
             mutation_state: self
                 .mutation_state
                 .map(|mutation| parse_mutation_state(&mutation))

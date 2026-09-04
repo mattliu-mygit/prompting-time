@@ -49,7 +49,6 @@ enum HangPoint {
     StartTurn,
     Steer,
     Respond,
-    Interrupt,
 }
 
 struct ScriptedAdapter {
@@ -203,6 +202,7 @@ impl ProviderAdapter for ScriptedAdapter {
         Ok(ProviderSession {
             provider: self.id,
             native_id: format!("{:?}-session", self.id).to_lowercase(),
+            native_group_id: None,
         })
     }
 
@@ -217,6 +217,7 @@ impl ProviderAdapter for ScriptedAdapter {
         Ok(ProviderSession {
             provider: self.id,
             native_id: native_id.to_owned(),
+            native_group_id: None,
         })
     }
 
@@ -253,6 +254,7 @@ impl ProviderAdapter for ScriptedAdapter {
                         request_id: "approval-1".to_owned(),
                         operation: "write".to_owned(),
                         scope: "fixture.txt".to_owned(),
+                        details: None,
                     }))
                     .unwrap();
                 self.open_turns.lock().unwrap().push(sender);
@@ -313,6 +315,7 @@ impl ProviderAdapter for ScriptedAdapter {
                         request_id: "approval-1".to_owned(),
                         operation: "write".to_owned(),
                         scope: "fixture.txt".to_owned(),
+                        details: None,
                     }))
                     .unwrap();
                 sender.try_send(Err(ProviderError::ProcessExited)).unwrap();
@@ -323,6 +326,7 @@ impl ProviderAdapter for ScriptedAdapter {
                         request_id: "approval-1".to_owned(),
                         operation: "write".to_owned(),
                         scope: "fixture.txt".to_owned(),
+                        details: None,
                     }))
                     .unwrap();
             }
@@ -332,6 +336,7 @@ impl ProviderAdapter for ScriptedAdapter {
                         request_id: "approval-1".to_owned(),
                         operation: "write".to_owned(),
                         scope: "fixture.txt".to_owned(),
+                        details: None,
                     }))
                     .unwrap();
                 sender
@@ -450,9 +455,6 @@ impl ProviderAdapter for ScriptedAdapter {
         _session: &ProviderSession,
         active_turn: &str,
     ) -> Result<(), ProviderError> {
-        if self.hang == Some(HangPoint::Interrupt) {
-            std::future::pending().await
-        }
         self.interrupted
             .lock()
             .unwrap()
@@ -650,11 +652,11 @@ async fn interrupt_flood_is_coalesced_and_cannot_delay_shutdown() {
 }
 
 #[tokio::test]
-async fn supervisor_interrupts_only_the_requested_native_turn() {
+async fn supervisor_uses_the_owned_turn_as_the_single_interrupt_authority() {
     let (store, conversation_id) = fixture().await;
     let adapter = Arc::new(ScriptedAdapter::new(
         ProviderId::Codex,
-        [Plan::Blocking, Plan::Blocking],
+        [Plan::TrackedOwner, Plan::Blocking],
     ));
     let supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
     let first = supervisor
@@ -668,9 +670,9 @@ async fn supervisor_interrupts_only_the_requested_native_turn() {
     eventually(|| adapter.started.load(Ordering::SeqCst) == 2).await;
 
     supervisor.interrupt(first.run_id()).await.unwrap();
-    eventually(|| adapter.interrupted.lock().unwrap().len() == 1).await;
-    assert_eq!(&*adapter.interrupted.lock().unwrap(), &["turn-1"]);
     first.wait_for(RunStatus::Interrupted).await.unwrap();
+    assert!(adapter.interrupted.lock().unwrap().is_empty());
+    assert_eq!(adapter.owner_shutdowns.load(Ordering::SeqCst), 1);
     adapter.complete_all();
     supervisor.shutdown().await.unwrap();
 }
@@ -1096,7 +1098,6 @@ async fn shutdown_cancels_every_blocking_adapter_operation() {
     for (plan, point) in [
         (Plan::Blocking, HangPoint::StartSession),
         (Plan::Blocking, HangPoint::StartTurn),
-        (Plan::Blocking, HangPoint::Interrupt),
     ] {
         let (store, conversation_id) = fixture().await;
         let adapter = Arc::new(ScriptedAdapter::hanging(ProviderId::Codex, plan, point));
@@ -1105,10 +1106,6 @@ async fn shutdown_cancels_every_blocking_adapter_operation() {
             .submit(request(conversation_id, ProviderId::Codex))
             .await
             .unwrap();
-        if point == HangPoint::Interrupt {
-            handle.wait_for(RunStatus::Running).await.unwrap();
-            supervisor.interrupt(handle.run_id()).await.unwrap();
-        }
         tokio::time::timeout(Duration::from_secs(2), supervisor.shutdown())
             .await
             .unwrap_or_else(|_| panic!("shutdown must preempt blocked {point:?}"))
@@ -1575,13 +1572,9 @@ async fn approval_event_buffer_overflow_fails_with_unknown_mutation() {
 }
 
 #[tokio::test]
-async fn interrupt_timeout_forces_owned_process_shutdown_without_app_shutdown() {
+async fn interrupt_uses_owned_process_shutdown_without_app_shutdown() {
     let (store, conversation_id) = fixture().await;
-    let adapter = Arc::new(ScriptedAdapter::hanging(
-        ProviderId::Codex,
-        Plan::OwnedChild,
-        HangPoint::Interrupt,
-    ));
+    let adapter = Arc::new(ScriptedAdapter::new(ProviderId::Codex, [Plan::OwnedChild]));
     let supervisor = RunSupervisor::new(store, vec![adapter.clone()]).unwrap();
     let handle = supervisor
         .submit(request(conversation_id, ProviderId::Codex))
@@ -1595,7 +1588,7 @@ async fn interrupt_timeout_forces_owned_process_shutdown_without_app_shutdown() 
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), handle.wait())
             .await
-            .expect("normal interrupt must have its own timeout")
+            .expect("owned turn shutdown must remain bounded")
             .unwrap()
             .status,
         RunStatus::Interrupted

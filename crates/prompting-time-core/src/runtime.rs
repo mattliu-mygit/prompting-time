@@ -26,7 +26,6 @@ pub const MAX_APPROVAL_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_ADMITTED_ROOT_RUNS: usize = MAX_CONCURRENT_ROOT_RUNS + MAX_QUEUED_ROOT_RUNS;
 const SUPERVISOR_COMMAND_CAPACITY: usize =
     MAX_ADMITTED_ROOT_RUNS + MAX_CONCURRENT_APPROVAL_RESPONSES;
-const INTERRUPT_TIMEOUT: Duration = Duration::from_millis(250);
 const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const RESPONSE_ACK_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
 const TURN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -532,9 +531,20 @@ impl RunSupervisor {
         request_id: &str,
         response: ApprovalResponse,
     ) -> Result<(), RuntimeError> {
-        if let ApprovalResponse::Answer(answer) = &response
-            && answer.len() > MAX_APPROVAL_RESPONSE_BYTES
-        {
+        let response_bytes = match &response {
+            ApprovalResponse::Answer(answer) => answer.len(),
+            ApprovalResponse::Answers(answers) => {
+                answers.iter().fold(0usize, |total, (id, values)| {
+                    values
+                        .iter()
+                        .fold(total.saturating_add(id.len()), |total, value| {
+                            total.saturating_add(value.len())
+                        })
+                })
+            }
+            ApprovalResponse::Approved | ApprovalResponse::Denied => 0,
+        };
+        if response_bytes > MAX_APPROVAL_RESPONSE_BYTES {
             return Err(RuntimeError::ApprovalResponseTooLarge {
                 limit: MAX_APPROVAL_RESPONSE_BYTES,
             });
@@ -972,6 +982,7 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
         ApprovalResponse::Approved => ApprovalResolution::Approved,
         ApprovalResponse::Denied => ApprovalResolution::Denied,
         ApprovalResponse::Answer(answer) => ApprovalResolution::Answer(answer.clone()),
+        ApprovalResponse::Answers(answers) => ApprovalResolution::Answers(answers.clone()),
     };
     store
         .record_response_intent(attempt_run_id, root_id, &job.request_id, resolution)
@@ -1445,7 +1456,11 @@ async fn execute_attempt(
         Err(error) => return Err(error),
     };
     store
-        .bind_native_session(attempt.run_id, &session.native_id)
+        .bind_native_session_with_group(
+            attempt.run_id,
+            &session.native_id,
+            session.native_group_id.as_deref(),
+        )
         .await?;
     let (done, _) = watch::channel(false);
     *job.active
@@ -1586,6 +1601,13 @@ async fn execute_attempt(
                             ProviderEvent::AssistantMessage { content } => {
                                 ProviderEventRecord::message(content.clone())
                             }
+                            ProviderEvent::AssistantMessageDelta {
+                                native_item_id,
+                                content,
+                            } => ProviderEventRecord::native_message(
+                                content.clone(),
+                                native_item_id.clone(),
+                            ),
                             ProviderEvent::Progress { content } => {
                                 ProviderEventRecord::progress(content.clone())
                             }
@@ -1593,6 +1615,44 @@ async fn execute_attempt(
                                 description,
                                 mutation: observed,
                             } => ProviderEventRecord::tool(description.clone(), *observed),
+                            ProviderEvent::NativeItemActivity {
+                                native_item_id,
+                                description,
+                                mutation: observed,
+                            } => ProviderEventRecord::native_item(
+                                native_item_id.clone(),
+                                description.clone(),
+                                *observed,
+                            ),
+                            ProviderEvent::ChildAgentActivity {
+                                native_item_id,
+                                parent_native_thread_id,
+                                child_native_thread_ids,
+                                child_statuses,
+                                operation,
+                                status,
+                            } => ProviderEventRecord::child_agent(
+                                native_item_id.clone(),
+                                parent_native_thread_id.clone(),
+                                child_native_thread_ids.clone(),
+                                child_statuses.clone(),
+                                operation.clone(),
+                                status.clone(),
+                            ),
+                            ProviderEvent::SubAgentActivity {
+                                native_item_id,
+                                agent_thread_id,
+                                agent_path,
+                                activity,
+                            } => ProviderEventRecord::sub_agent(
+                                native_item_id.clone(),
+                                agent_thread_id.clone(),
+                                agent_path.clone(),
+                                *activity,
+                            ),
+                            ProviderEvent::Unrecognized { method } => {
+                                ProviderEventRecord::unrecognized(method.clone())
+                            }
                             _ => {
                                 drop(gate);
                                 return finalize_attempt(
@@ -1636,7 +1696,9 @@ async fn execute_attempt(
                             }
                             Ok(StageWaitingEventOutcome::Staged(_)) => {}
                         }
-                        if let ProviderEvent::ToolActivity { mutation: observed, .. } = &event {
+                        if let ProviderEvent::ToolActivity { mutation: observed, .. }
+                        | ProviderEvent::NativeItemActivity { mutation: observed, .. } = &event
+                        {
                             mutation = merge_mutation(mutation, *observed);
                         }
                         buffered.push_back(event);
@@ -1753,6 +1815,29 @@ async fn execute_attempt(
                     .await;
                 }
             }
+            ProviderEvent::AssistantMessageDelta {
+                native_item_id,
+                content,
+            } if started => {
+                if let Err(error) = store
+                    .append_run_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        ProviderEventRecord::native_message(content, native_item_id),
+                    )
+                    .await
+                {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
+            }
             ProviderEvent::Progress { content } if started => {
                 if let Err(error) = store
                     .append_run_event(
@@ -1797,20 +1882,170 @@ async fn execute_attempt(
                     .await;
                 }
             }
+            ProviderEvent::NativeItemActivity {
+                native_item_id,
+                description,
+                mutation: observed,
+            } if started => {
+                mutation = merge_mutation(mutation, observed);
+                if let Err(error) = store
+                    .append_run_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        ProviderEventRecord::native_item(native_item_id, description, observed),
+                    )
+                    .await
+                {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
+            }
+            ProviderEvent::ChildAgentActivity {
+                native_item_id,
+                parent_native_thread_id,
+                child_native_thread_ids,
+                child_statuses,
+                operation,
+                status,
+            } if started => {
+                if let Err(error) = store
+                    .append_run_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        ProviderEventRecord::child_agent(
+                            native_item_id,
+                            parent_native_thread_id,
+                            child_native_thread_ids,
+                            child_statuses,
+                            operation,
+                            status,
+                        ),
+                    )
+                    .await
+                {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
+            }
+            ProviderEvent::SubAgentActivity {
+                native_item_id,
+                agent_thread_id,
+                agent_path,
+                activity,
+            } if started => {
+                if let Err(error) = store
+                    .append_run_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        ProviderEventRecord::sub_agent(
+                            native_item_id,
+                            agent_thread_id,
+                            agent_path,
+                            activity,
+                        ),
+                    )
+                    .await
+                {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
+            }
+            ProviderEvent::Unrecognized { method } if started => {
+                if let Err(error) = store
+                    .append_run_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        ProviderEventRecord::unrecognized(method),
+                    )
+                    .await
+                {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
+            }
             ProviderEvent::ApprovalRequested {
                 request_id,
                 operation,
                 scope,
+                details,
             } if started && !approval_pending(&job.active) => {
                 if let Err(error) = store
                     .append_run_event(
                         attempt.run_id,
                         attempt.root_id,
-                        ProviderEventRecord::approval_requested(
+                        ProviderEventRecord::approval_requested_with_details(
                             attempt.adapter.id(),
                             request_id.clone(),
                             operation,
                             scope,
+                            details,
+                        ),
+                    )
+                    .await
+                {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
+                if let Some(active) = job
+                    .active
+                    .attempt
+                    .lock()
+                    .expect("active attempt mutex must not be poisoned")
+                    .as_mut()
+                {
+                    active.pending_request_id = Some(request_id);
+                }
+                set_status(&job.active, attempt.run_id, RunStatus::Waiting);
+            }
+            ProviderEvent::UserInputRequested {
+                request_id,
+                questions,
+                auto_resolution_ms,
+            } if started && !approval_pending(&job.active) => {
+                if let Err(error) = store
+                    .append_run_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        ProviderEventRecord::user_input_requested(
+                            attempt.adapter.id(),
+                            request_id.clone(),
+                            questions,
+                            auto_resolution_ms,
                         ),
                     )
                     .await
@@ -1900,48 +2135,6 @@ async fn interrupt_attempt(
     buffered: &mut VecDeque<ProviderEvent>,
     mutation: MutationState,
 ) -> Result<AttemptResult, RuntimeError> {
-    let call = {
-        let state = active
-            .attempt
-            .lock()
-            .expect("active attempt mutex must not be poisoned");
-        state.as_ref().and_then(|state| {
-            state.native_turn_id.as_ref().map(|turn| {
-                (
-                    Arc::clone(&state.adapter),
-                    state.session.clone(),
-                    turn.clone(),
-                )
-            })
-        })
-    };
-    if let Some((adapter, session, turn)) = call {
-        let mut shutdown = active.shutdown.subscribe();
-        let interrupt = tokio::time::timeout(INTERRUPT_TIMEOUT, adapter.interrupt(&session, &turn));
-        let result = if *shutdown.borrow() {
-            None
-        } else {
-            tokio::select! {
-                result = interrupt => Some(result),
-                _ = shutdown.changed() => None,
-            }
-        };
-        if let Some(Ok(Err(error))) = result {
-            return finalize_attempt(
-                store,
-                active,
-                attempt,
-                turn_owner,
-                buffered,
-                AttemptFinish::Failed {
-                    category: error.category(),
-                    mutation: MutationState::Unknown,
-                    dispatch_certainty: DispatchCertainty::MayHaveDispatched,
-                },
-            )
-            .await;
-        }
-    }
     finalize_attempt(
         store,
         active,
@@ -2272,6 +2465,7 @@ mod tests {
             Ok(ProviderSession {
                 provider: ProviderId::Codex,
                 native_id: "fixture-session".to_owned(),
+                native_group_id: None,
             })
         }
 
@@ -2300,6 +2494,7 @@ mod tests {
                     request_id: "fixture-approval".to_owned(),
                     operation: "write".to_owned(),
                     scope: "fixture.txt".to_owned(),
+                    details: None,
                 }))
                 .await
                 .unwrap();

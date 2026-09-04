@@ -1,0 +1,1 @@
+{"direction":"server","message":{"method":"future/inventedNotification","params":{"threadId":"thread-invented-1","turnId":"turn-invented-1","detail":"invented"}}}

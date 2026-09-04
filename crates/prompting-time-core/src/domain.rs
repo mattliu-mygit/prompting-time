@@ -171,6 +171,7 @@ mod tests {
         ));
     }
 }
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
@@ -461,8 +462,137 @@ pub enum ApprovalResolution {
     Approved,
     Denied,
     Answer(String),
+    Answers(BTreeMap<String, Vec<String>>),
     Cancelled,
     Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Option<Vec<UserInputOption>>,
+    pub is_other: bool,
+    pub is_secret: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputRequest {
+    pub questions: Vec<UserInputQuestion>,
+    pub auto_resolution_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ApprovalRequestDetails {
+    CommandExecution {
+        command: Option<String>,
+        cwd: Option<String>,
+    },
+    FileChange {
+        changes: Vec<FileChangeApprovalDetail>,
+        grant_root: Option<String>,
+        reason: Option<String>,
+    },
+    PermissionProfile {
+        cwd: String,
+        profile: RequestedPermissionProfile,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangeApprovalDetail {
+    pub path: String,
+    pub change: FileChangeKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum FileChangeKind {
+    Add,
+    Delete,
+    Update { move_path: Option<String> },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestedPermissionProfile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_system: Option<RequestedFileSystemPermissions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<RequestedNetworkPermissions>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestedFileSystemPermissions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<RequestedFileSystemEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glob_scan_max_depth: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestedFileSystemEntry {
+    pub access: RequestedFileSystemAccess,
+    pub path: RequestedFileSystemPath,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RequestedFileSystemAccess {
+    Read,
+    Write,
+    Deny,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+pub enum RequestedFileSystemPath {
+    Path { path: String },
+    GlobPattern { pattern: String },
+    Special { value: RequestedSpecialPath },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum RequestedSpecialPath {
+    Root,
+    Minimal,
+    ProjectRoots {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subpath: Option<String>,
+    },
+    Tmpdir,
+    SlashTmp,
+    Unknown {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subpath: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestedNetworkPermissions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -486,7 +616,7 @@ impl ApprovalResolution {
         match self {
             Self::Approved => ApprovalStatus::Approved,
             Self::Denied => ApprovalStatus::Denied,
-            Self::Answer(_) => ApprovalStatus::Answered,
+            Self::Answer(_) | Self::Answers(_) => ApprovalStatus::Answered,
             Self::Cancelled => ApprovalStatus::Cancelled,
             Self::Failed => ApprovalStatus::Failed,
         }
@@ -496,7 +626,7 @@ impl ApprovalResolution {
         match self {
             Self::Approved => "approved",
             Self::Denied => "denied",
-            Self::Answer(_) => "answered",
+            Self::Answer(_) | Self::Answers(_) => "answered",
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
         }
@@ -513,6 +643,8 @@ pub struct Approval {
     pub provider_request_id: Option<String>,
     pub operation: String,
     pub scope: String,
+    pub input: Option<UserInputRequest>,
+    pub details: Option<ApprovalRequestDetails>,
     pub status: ApprovalStatus,
     pub resolution: Option<ApprovalResolution>,
     pub response_intent: Option<ApprovalResponseIntent>,
@@ -535,6 +667,8 @@ impl Approval {
             provider_request_id: Some(provider_request_id.into()),
             operation: operation.into(),
             scope: scope.into(),
+            input: None,
+            details: None,
             status: ApprovalStatus::Pending,
             resolution: None,
             response_intent: None,
