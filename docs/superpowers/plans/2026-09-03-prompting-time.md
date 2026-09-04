@@ -571,7 +571,7 @@ git commit -m "feat: route work with explainable decisions"
 
 **Interfaces:**
 - Produces: object-safe `ProviderAdapter`
-- Produces: `ProviderEvent`, `ProviderSession`, `TurnRequest`, `ApprovalResponse`, `ProviderCapabilities`
+- Produces: `ProviderEvent`, owned `ProviderTurn`, `ProviderSession`, `TurnRequest`, `ApprovalResponse`, `ProviderCapabilities`
 - Produces: `RunSupervisor::submit(RunRequest) -> Result<RunHandle, RuntimeError>` and `shutdown()`
 - Consumes: `Store` and canonical domain types
 
@@ -585,14 +585,14 @@ pub trait ProviderAdapter: Send + Sync {
     async fn health(&self) -> Result<ProviderHealth, ProviderError>;
     async fn start_session(&self, request: StartSession) -> Result<ProviderSession, ProviderError>;
     async fn resume_session(&self, native_id: &str, request: ResumeSession) -> Result<ProviderSession, ProviderError>;
-    async fn start_turn(&self, session: &ProviderSession, request: TurnRequest) -> Result<ProviderEventStream, ProviderError>;
+    async fn start_turn(&self, session: &ProviderSession, request: TurnRequest) -> Result<ProviderTurn, ProviderError>;
     async fn steer(&self, session: &ProviderSession, active_turn: &str, text: &str) -> Result<(), ProviderError>;
     async fn respond(&self, session: &ProviderSession, request_id: &str, response: ApprovalResponse) -> Result<(), ProviderError>;
     async fn interrupt(&self, session: &ProviderSession, active_turn: &str) -> Result<(), ProviderError>;
 }
 ```
 
-The contract suite verifies ordered events, exactly one terminal event, approval pause/resume, interruption, provider-native ID retention, and stream-error propagation. Run it first and expect failure because the fake adapter and supervisor are absent.
+`ProviderTurn` couples the bounded event receiver to an object-safe owner whose async shutdown stops and awaits every process or request owned by the turn. The contract suite verifies ordered events, actual stream closure after exactly one terminal event, approval pause/resume, interruption, provider-native ID retention, stream-error propagation, and owned resource shutdown. Run it first and expect failure because the fake adapter and supervisor are absent.
 
 - [ ] **Step 2: Implement a bounded JSON-lines subprocess transport**
 
@@ -604,7 +604,7 @@ Test with a helper process that emits valid, delayed, malformed, and oversized l
 
 Use a `Semaphore` initialized to four and an owned `JoinSet`. `submit` persists the queued run before spawning. The task acquires a permit, starts/resumes the provider session, persists each normalized event transactionally, and records a terminal state exactly once. Cancellation tokens are indexed by run ID and removed when the owned task joins.
 
-Implement mutation tracking from normalized tool events. Automatic fallback is permitted once only when `MutationState::NoneObserved`; `Observed` and `Unknown` both require user action.
+Implement mutation tracking from normalized tool events. Automatic fallback is permitted once only when both `MutationState::NoneObserved` and durable `DispatchCertainty::NotDispatched` prove it safe; `Observed`, `Unknown`, and ambiguous dispatch all require user action. Approval responses persist exact intent before provider dispatch and acknowledge that intent transactionally before buffered provider events resume.
 
 - [ ] **Step 4: Test queueing, cancellation, crash, and fallback**
 

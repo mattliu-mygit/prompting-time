@@ -48,16 +48,22 @@ mod tests {
             RunId::new(),
             AgentId::new(),
             ProviderId::Claude,
+            "native-request-42",
             "write a file",
             "this operation",
         );
 
-        approval.resolve(ApprovalDecision::Approved).unwrap();
+        approval
+            .resolve(ApprovalResolution::Answer("only this directory".to_owned()))
+            .unwrap();
 
-        assert_eq!(approval.status, ApprovalStatus::Approved);
-        assert_eq!(approval.decision, Some(ApprovalDecision::Approved));
+        assert_eq!(approval.status, ApprovalStatus::Answered);
+        assert_eq!(
+            approval.resolution,
+            Some(ApprovalResolution::Answer("only this directory".to_owned()))
+        );
         assert!(matches!(
-            approval.resolve(ApprovalDecision::Denied),
+            approval.resolve(ApprovalResolution::Denied),
             Err(DomainError::InvalidTransition { .. })
         ));
     }
@@ -85,6 +91,18 @@ mod tests {
             serde_json::from_str::<ProviderId>("\"claude\"").unwrap(),
             ProviderId::Claude
         );
+
+        let approval = Approval::new(
+            RunId::new(),
+            AgentId::new(),
+            ProviderId::Codex,
+            "native-request-42",
+            "write",
+            "fixture.txt",
+        );
+        let approval_value = serde_json::to_value(approval).unwrap();
+        assert_eq!(approval_value["providerRequestId"], "native-request-42");
+        assert!(approval_value.get("provider_request_id").is_none());
     }
 
     #[test]
@@ -160,7 +178,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::providers::ProviderId;
+use crate::providers::{DispatchCertainty, ProviderId};
 
 pub use crate::error::DomainError;
 
@@ -312,9 +330,11 @@ pub struct ProviderRun {
     pub id: RunId,
     pub conversation_id: ConversationId,
     pub provider: ProviderId,
+    pub fallback_from_run_id: Option<RunId>,
     pub native_session_id: Option<String>,
     pub status: RunStatus,
     pub mutation_state: MutationState,
+    pub dispatch_certainty: Option<DispatchCertainty>,
 }
 
 impl ProviderRun {
@@ -323,9 +343,11 @@ impl ProviderRun {
             id: RunId::new(),
             conversation_id,
             provider,
+            fallback_from_run_id: None,
             native_session_id: None,
             status: RunStatus::Queued,
             mutation_state: MutationState::NoneObserved,
+            dispatch_certainty: None,
         }
     }
 
@@ -428,27 +450,55 @@ pub enum ApprovalStatus {
     Pending,
     Approved,
     Denied,
+    Answered,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "value")]
+pub enum ApprovalResolution {
+    Approved,
+    Denied,
+    Answer(String),
+    Cancelled,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ApprovalDecision {
-    Approved,
-    Denied,
+pub enum ApprovalResponseIntentStatus {
+    Recorded,
+    Acknowledged,
+    Rejected,
+    DispatchUnknown,
 }
 
-impl ApprovalDecision {
-    fn status(self) -> ApprovalStatus {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalResponseIntent {
+    pub resolution: ApprovalResolution,
+    pub status: ApprovalResponseIntentStatus,
+}
+
+impl ApprovalResolution {
+    pub(crate) fn status(&self) -> ApprovalStatus {
         match self {
             Self::Approved => ApprovalStatus::Approved,
             Self::Denied => ApprovalStatus::Denied,
+            Self::Answer(_) => ApprovalStatus::Answered,
+            Self::Cancelled => ApprovalStatus::Cancelled,
+            Self::Failed => ApprovalStatus::Failed,
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::Approved => "approved",
             Self::Denied => "denied",
+            Self::Answer(_) => "answered",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
         }
     }
 }
@@ -460,10 +510,12 @@ pub struct Approval {
     pub run_id: RunId,
     pub agent_id: AgentId,
     pub provider: ProviderId,
+    pub provider_request_id: Option<String>,
     pub operation: String,
     pub scope: String,
     pub status: ApprovalStatus,
-    pub decision: Option<ApprovalDecision>,
+    pub resolution: Option<ApprovalResolution>,
+    pub response_intent: Option<ApprovalResponseIntent>,
 }
 
 impl Approval {
@@ -471,6 +523,7 @@ impl Approval {
         run_id: RunId,
         agent_id: AgentId,
         provider: ProviderId,
+        provider_request_id: impl Into<String>,
         operation: impl Into<String>,
         scope: impl Into<String>,
     ) -> Self {
@@ -479,24 +532,26 @@ impl Approval {
             run_id,
             agent_id,
             provider,
+            provider_request_id: Some(provider_request_id.into()),
             operation: operation.into(),
             scope: scope.into(),
             status: ApprovalStatus::Pending,
-            decision: None,
+            resolution: None,
+            response_intent: None,
         }
     }
 
-    pub fn resolve(&mut self, decision: ApprovalDecision) -> Result<(), DomainError> {
-        match (self.status, decision) {
-            (ApprovalStatus::Pending, decision) => {
-                self.status = decision.status();
-                self.decision = Some(decision);
+    pub fn resolve(&mut self, resolution: ApprovalResolution) -> Result<(), DomainError> {
+        match self.status {
+            ApprovalStatus::Pending => {
+                self.status = resolution.status();
+                self.resolution = Some(resolution);
                 Ok(())
             }
-            (from, to) => Err(DomainError::InvalidTransition {
+            from => Err(DomainError::InvalidTransition {
                 entity: "approval",
                 from: approval_status_label(from),
-                to: to.label(),
+                to: resolution.label(),
             }),
         }
     }
@@ -507,6 +562,9 @@ fn approval_status_label(status: ApprovalStatus) -> &'static str {
         ApprovalStatus::Pending => "pending",
         ApprovalStatus::Approved => "approved",
         ApprovalStatus::Denied => "denied",
+        ApprovalStatus::Answered => "answered",
+        ApprovalStatus::Cancelled => "cancelled",
+        ApprovalStatus::Failed => "failed",
     }
 }
 

@@ -1,6 +1,8 @@
 use std::collections::{BTreeSet, HashSet};
 
-use prompting_time_core::domain::{AgentId, AgentStatus, RunId, RunStatus, TimelineEventKind};
+use prompting_time_core::domain::{
+    AgentId, AgentStatus, MutationState, RunId, RunStatus, TimelineEventKind,
+};
 use prompting_time_core::providers::ProviderId;
 use prompting_time_core::store::{NewConversation, ProviderEventRecord, Store, StoreError};
 use tempfile::TempDir;
@@ -25,6 +27,95 @@ async fn event_and_run_state_commit_atomically() {
     assert_eq!(recovered[0].run.status, RunStatus::Running);
     assert_eq!(recovered[0].agents[0].status, AgentStatus::Running);
     assert_eq!(recovered[0].events.len(), 1);
+}
+
+#[tokio::test]
+async fn restart_recovers_staged_waiting_events_without_publishing_them() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("staged-recovery.sqlite3");
+    let store = Store::open(&path).await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("staged recovery"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Claude)
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::approval_requested(
+                ProviderId::Claude,
+                "native-question",
+                "question",
+                "deployment target",
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .stage_waiting_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::progress("still considering"),
+        )
+        .await
+        .unwrap();
+    store
+        .stage_waiting_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::tool("possibly wrote state", MutationState::Unknown),
+        )
+        .await
+        .unwrap();
+    store.close().await;
+
+    let reopened = Store::open(&path).await.unwrap();
+    let recovery = reopened
+        .pending_recovery()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.run.id == run.id)
+        .unwrap();
+    assert_eq!(recovery.run.status, RunStatus::Waiting);
+    assert_eq!(recovery.run.mutation_state, MutationState::Unknown);
+    assert!(!recovery.staged_events_overflowed);
+    assert!(!recovery.staged_events_truncated);
+    assert_eq!(
+        recovery
+            .staged_events
+            .iter()
+            .map(|event| (event.kind, event.content.as_str(), event.mutation_state))
+            .collect::<Vec<_>>(),
+        [
+            (TimelineEventKind::Progress, "still considering", None,),
+            (
+                TimelineEventKind::Tool,
+                "possibly wrote state",
+                Some(MutationState::Unknown),
+            ),
+        ]
+    );
+    let timeline = reopened
+        .load_timeline(conversation.id, None, 20)
+        .await
+        .unwrap();
+    assert_eq!(timeline.items.len(), 2);
+    assert!(
+        timeline
+            .items
+            .iter()
+            .all(|event| !event.content.starts_with("still")
+                && !event.content.starts_with("possibly"))
+    );
 }
 
 #[tokio::test]

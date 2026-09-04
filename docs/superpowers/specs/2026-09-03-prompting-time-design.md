@@ -53,7 +53,9 @@ Before the first message, the user may choose automatic routing or pin Codex or 
 
 ### Concurrent work
 
-Conversations execute independently. The initial default limit is four active root runs across the application; the user may configure it. Additional work is queued visibly. A single conversation serializes normal turns, while child agents may run concurrently when the provider supports them.
+Conversations execute independently. The runtime executes at most four root runs and retains at most 64 additional root runs in its FIFO admission queue. A 69th root submission is rejected before any run is persisted; completing or interrupting an admitted run releases one slot. The active-run limit may become user-configurable without weakening the fixed admission bound. A single conversation serializes normal turns, while child agents may run concurrently when the provider supports them.
+
+Approval responses are also bounded: at most one response operation may be owned for an active approval, at most four response operations may run application-wide, and an `Answer` payload may contain at most 64 KiB of UTF-8 text. Excess or duplicate work is rejected before it creates another task or retains another response payload. The work channel holds at most 72 commands, enough for all 68 admitted roots and four admitted response operations. Interrupt notifications are coalesced, and shutdown uses a dedicated single-slot control channel so neither can be starved by work admission.
 
 The sidebar distinguishes queued, running, waiting for approval or input, completed, interrupted, and failed work. macOS notifications fire only when background work completes, fails, or needs the user.
 
@@ -105,6 +107,8 @@ Prompting Time stores one canonical representation of:
 Provider-native identifiers and raw protocol payloads are retained alongside normalized records where needed for resumption and diagnosis. They never replace the canonical model.
 
 SQLite is the local source of truth. It uses WAL mode, versioned migrations, foreign-key enforcement, bounded queries, and indexes that support status/project filtering and timeline pagination. Durable state transitions are transactional. Large transcripts and event streams are paginated; application startup does not hydrate every conversation.
+
+Provider output received while an approval is pending is durably staged in receipt order without changing the Waiting lifecycle. Each run's staged queue accepts up to 256 complete provider events, with one additional physical row reserved for an overflow marker; the full queue, including that marker reserve, is limited to 8 MiB of content. Events within that capacity retain their full content. The first event that would exceed either limit is replaced by one compact diagnostic marker that records the omitted event kind and makes mutation certainty Unknown; later staged ingress is rejected. Recovery returns at most the 257-row physical limit together with explicit overflow and truncation flags. Once an approval response is accepted by the supervisor, the supervisor owns its complete intent, provider-dispatch, acknowledgement, publication, and cleanup lifecycle independently of the requesting UI future; interruption and shutdown cancel and join that operation. Approval acknowledgement atomically publishes Resumed followed by each staged event once and clears the queue; interruption, failure, or crash performs the same bounded publish before the terminal diagnostic, so restart recovery retains bounded evidence of already-observed activity.
 
 Runtime data is stored under the user's macOS Application Support directory. Conversations, prompts, tool output, provider payloads, machine paths, imported resources, and local configuration never enter the public repository.
 

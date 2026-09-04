@@ -1,54 +1,8 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::providers::ProviderId;
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ProviderCapability {
-    Streaming,
-    Steering,
-    DeferredApproval,
-    Interruption,
-    Resume,
-    ChildAgents,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct ProviderCapabilities(Vec<ProviderCapability>);
-
-impl ProviderCapabilities {
-    pub fn supports(&self, capability: ProviderCapability) -> bool {
-        self.0.contains(&capability)
-    }
-}
-
-impl<const N: usize> From<[ProviderCapability; N]> for ProviderCapabilities {
-    fn from(capabilities: [ProviderCapability; N]) -> Self {
-        Self::from_iter(capabilities)
-    }
-}
-
-impl FromIterator<ProviderCapability> for ProviderCapabilities {
-    fn from_iter<T: IntoIterator<Item = ProviderCapability>>(capabilities: T) -> Self {
-        let mut capabilities = capabilities.into_iter().collect::<Vec<_>>();
-        capabilities.sort_unstable();
-        capabilities.dedup();
-        Self(capabilities)
-    }
-}
-
-impl<'de> Deserialize<'de> for ProviderCapabilities {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(Vec::<ProviderCapability>::deserialize(deserializer)?
-            .into_iter()
-            .collect())
-    }
-}
+pub use crate::providers::{ProviderCapabilities, ProviderCapability};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -352,9 +306,7 @@ fn evaluate(
         .collect::<Vec<_>>();
     blockers.extend(
         required
-            .0
             .iter()
-            .copied()
             .filter(|capability| !candidate.capabilities.supports(*capability))
             .map(RoutingBlocker::MissingCapability),
     );
@@ -471,7 +423,7 @@ fn rationale(
     rationale.push(RoutingCriterion::EligibleProviders {
         providers: eligible_providers.to_vec(),
     });
-    if !request.required_capabilities.0.is_empty() {
+    if !request.required_capabilities.is_empty() {
         rationale.push(RoutingCriterion::RequiredCapabilities {
             capabilities: request.required_capabilities.clone(),
         });
