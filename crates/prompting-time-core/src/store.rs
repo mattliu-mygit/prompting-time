@@ -1035,6 +1035,13 @@ mod tests {
         assert_eq!(busy_timeout, 5_000);
         assert_eq!(table_count, 9);
         assert_eq!(index_count, 6);
+
+        let workspace_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('workspaces') ORDER BY cid")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert!(workspace_columns.contains(&"worktree_base_commit".to_owned()));
     }
 
     #[tokio::test]
@@ -1084,6 +1091,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(workspace_count, 0);
+    }
+
+    #[tokio::test]
+    async fn owned_workspace_requires_a_durable_base_commit() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("Owner"))
+            .await
+            .unwrap();
+
+        let result = sqlx::query(
+            "INSERT INTO workspaces \
+             (id, conversation_id, project_root, execution_path, owned_worktree, worktree_base_commit, created_at, updated_at) \
+             VALUES (?, ?, '/tmp/project', '/tmp/worktree', 1, NULL, 1, 1)",
+        )
+        .bind(WorkspaceId::new().to_string())
+        .bind(conversation.id.to_string())
+        .execute(&store.pool)
+        .await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

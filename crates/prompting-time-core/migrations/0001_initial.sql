@@ -14,8 +14,13 @@ CREATE TABLE workspaces (
     project_root TEXT,
     execution_path TEXT NOT NULL,
     owned_worktree INTEGER NOT NULL CHECK (owned_worktree IN (0, 1)),
+    worktree_base_commit TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    CHECK (
+        (owned_worktree = 1 AND project_root IS NOT NULL AND worktree_base_commit IS NOT NULL)
+        OR (owned_worktree = 0 AND worktree_base_commit IS NULL)
+    ),
     UNIQUE (id, conversation_id)
 );
 

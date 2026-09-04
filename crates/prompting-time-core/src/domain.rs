@@ -88,6 +88,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_serializes_durable_worktree_base_commit() {
+        let workspace = Workspace {
+            id: WorkspaceId::new(),
+            conversation_id: ConversationId::new(),
+            project_root: Some(std::path::PathBuf::from("/project")),
+            execution_path: std::path::PathBuf::from("/worktree"),
+            owned_worktree: true,
+            worktree_base_commit: Some("0123456789abcdef".to_owned()),
+        };
+
+        let value = serde_json::to_value(workspace).unwrap();
+
+        assert_eq!(value["worktreeBaseCommit"], "0123456789abcdef");
+        assert!(value.get("worktree_base_commit").is_none());
+    }
+
+    #[test]
     fn missing_parent_is_rejected() {
         let run = RunId::new();
         let root = AgentNode::root(run, ProviderId::Codex, "orchestrator");
@@ -501,6 +518,7 @@ pub struct Workspace {
     pub project_root: Option<PathBuf>,
     pub execution_path: PathBuf,
     pub owned_worktree: bool,
+    pub worktree_base_commit: Option<String>,
 }
 
 pub fn roll_up_status(root: AgentId, agents: &[AgentNode]) -> Result<RollupStatus, DomainError> {
