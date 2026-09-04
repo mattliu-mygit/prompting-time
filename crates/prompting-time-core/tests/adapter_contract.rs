@@ -1184,9 +1184,13 @@ sleep 30
 #[tokio::test]
 async fn cancelling_turn_start_before_announcement_interrupts_when_id_arrives() {
     let marker_directory = tempfile::tempdir().unwrap();
+    let request_read = marker_directory.path().join("turn-start-read");
+    let release_announcement = marker_directory.path().join("release-turn-announcement");
     let marker = marker_directory
         .path()
         .join("interrupted-after-announcement");
+    let request_read_text = request_read.to_string_lossy();
+    let release_announcement_text = release_announcement.to_string_lossy();
     let marker_text = marker.to_string_lossy();
     let extract_id = response_id_shell("request_id");
     let script = format!(
@@ -1199,7 +1203,13 @@ IFS= read -r line
 {extract_id}
 printf '{{"id":%s,"result":{{"thread":{{"id":"thread-late-id","sessionId":"session-late-id"}}}}}}\n' "$request_id"
 IFS= read -r line
-sleep 1
+printf '%s' "$line" | grep -q '"method":"turn/start"'
+: > '{request_read_text}'
+IFS= read -r line
+printf '%s' "$line" | grep -q '"method":"thread/start"'
+{extract_id}
+printf '{{"id":%s,"result":{{"thread":{{"id":"thread-barrier","sessionId":"session-barrier"}}}}}}\n' "$request_id"
+while [ ! -e '{release_announcement_text}' ]; do sleep 0.01; done
 printf '{{"method":"turn/started","params":{{"threadId":"thread-late-id","turn":{{"id":"turn-late-id","items":[],"status":"inProgress"}}}}}}\n'
 IFS= read -r line
 printf '%s' "$line" | grep -q '"method":"turn/interrupt"'
@@ -1214,14 +1224,26 @@ sleep 30
     let adapter = CodexAdapter::connect(binary).await.unwrap();
     let session = adapter.start_session(start_request()).await.unwrap();
     let turn_adapter = adapter.clone();
-    let start = tokio::spawn(async move {
+    let mut start = tokio::spawn(async move {
         turn_adapter
             .start_turn(&session, TurnRequest::new("cancel before ID"))
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !request_read.exists() {
+            tokio::select! {
+                result = &mut start => panic!("turn completed before cancellation gate: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+        }
+    })
+    .await
+    .expect("fixture never observed turn/start");
+    // Completing a later request proves the dispatcher advanced turn/start to awaiting-response.
+    let _barrier_session = adapter.start_session(start_request()).await.unwrap();
     start.abort();
     let _ = start.await;
+    fs::write(release_announcement, b"release").unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !marker.exists() {
