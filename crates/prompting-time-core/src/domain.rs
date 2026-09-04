@@ -1,0 +1,572 @@
+#[cfg(test)]
+mod tests {
+    use crate::providers::ProviderId;
+
+    use super::*;
+
+    #[test]
+    fn waiting_descendant_rolls_attention_to_root() {
+        let run = RunId::new();
+        let root = AgentNode::root(run, ProviderId::Codex, "orchestrator");
+        let child = AgentNode::child(
+            run,
+            root.id,
+            ProviderId::Claude,
+            "reviewer",
+            AgentStatus::Waiting,
+        );
+        let grandchild = AgentNode::child(
+            run,
+            child.id,
+            ProviderId::Claude,
+            "researcher",
+            AgentStatus::Running,
+        );
+
+        assert_eq!(
+            roll_up_status(root.id, &[root, child, grandchild]).unwrap(),
+            RollupStatus::NeedsAttention
+        );
+    }
+
+    #[test]
+    fn completed_run_cannot_return_to_running() {
+        let mut run = ProviderRun::new(ConversationId::new(), ProviderId::Codex);
+
+        run.transition(RunStatus::Running).unwrap();
+        run.transition(RunStatus::Completed).unwrap();
+
+        assert!(matches!(
+            run.transition(RunStatus::Running),
+            Err(DomainError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn approval_can_be_resolved_once() {
+        let mut approval = Approval::new(
+            RunId::new(),
+            AgentId::new(),
+            ProviderId::Claude,
+            "write a file",
+            "this operation",
+        );
+
+        approval.resolve(ApprovalDecision::Approved).unwrap();
+
+        assert_eq!(approval.status, ApprovalStatus::Approved);
+        assert_eq!(approval.decision, Some(ApprovalDecision::Approved));
+        assert!(matches!(
+            approval.resolve(ApprovalDecision::Denied),
+            Err(DomainError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn domain_serializes_fields_as_camel_case() {
+        let agent = AgentNode::child(
+            RunId::new(),
+            AgentId::new(),
+            ProviderId::Codex,
+            "worker",
+            AgentStatus::Running,
+        );
+
+        let value = serde_json::to_value(agent).unwrap();
+
+        assert!(value.get("runId").is_some());
+        assert!(value.get("parentId").is_some());
+        assert!(value.get("run_id").is_none());
+        assert_eq!(
+            serde_json::to_string(&ProviderId::Codex).unwrap(),
+            "\"codex\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderId>("\"claude\"").unwrap(),
+            ProviderId::Claude
+        );
+    }
+
+    #[test]
+    fn missing_parent_is_rejected() {
+        let run = RunId::new();
+        let root = AgentNode::root(run, ProviderId::Codex, "orchestrator");
+        let child = AgentNode::child(
+            run,
+            AgentId::new(),
+            ProviderId::Claude,
+            "reviewer",
+            AgentStatus::Queued,
+        );
+
+        assert!(matches!(
+            roll_up_status(root.id, &[root, child]),
+            Err(DomainError::MissingParent { .. })
+        ));
+    }
+
+    #[test]
+    fn two_node_cycle_is_rejected() {
+        let run = RunId::new();
+        let mut first = AgentNode::root(run, ProviderId::Codex, "first");
+        let mut second = AgentNode::root(run, ProviderId::Claude, "second");
+        first.parent_id = Some(second.id);
+        second.parent_id = Some(first.id);
+
+        assert!(matches!(
+            roll_up_status(first.id, &[first, second]),
+            Err(DomainError::AgentCycle { .. })
+        ));
+    }
+
+    #[test]
+    fn child_from_another_run_is_rejected() {
+        let root = AgentNode::root(RunId::new(), ProviderId::Codex, "orchestrator");
+        let child = AgentNode::child(
+            RunId::new(),
+            root.id,
+            ProviderId::Claude,
+            "reviewer",
+            AgentStatus::Running,
+        );
+
+        assert!(matches!(
+            roll_up_status(root.id, &[root, child]),
+            Err(DomainError::ParentRunMismatch { .. })
+        ));
+    }
+}
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::providers::ProviderId;
+
+pub use crate::error::DomainError;
+
+macro_rules! define_id {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $name {
+            pub fn new() -> Self {
+                Self(Uuid::now_v7())
+            }
+
+            pub fn as_uuid(self) -> Uuid {
+                self.0
+            }
+        }
+
+        impl From<Uuid> for $name {
+            fn from(value: Uuid) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for Uuid {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+    };
+}
+
+define_id!(ConversationId);
+define_id!(MessageId);
+define_id!(RunId);
+define_id!(AgentId);
+define_id!(TimelineEventId);
+define_id!(ApprovalId);
+define_id!(WorkspaceId);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunStatus {
+    Queued,
+    Running,
+    Waiting,
+    Completed,
+    Interrupted,
+    Failed,
+}
+
+impl RunStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
+            Self::Interrupted => "interrupted",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentStatus {
+    Queued,
+    Running,
+    Waiting,
+    Completed,
+    Interrupted,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MutationState {
+    NoneObserved,
+    Observed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RollupStatus {
+    NeedsAttention,
+    Active,
+    Failed,
+    Interrupted,
+    Completed,
+}
+
+impl RollupStatus {
+    fn precedence(self) -> u8 {
+        match self {
+            Self::NeedsAttention => 5,
+            Self::Active => 4,
+            Self::Failed => 3,
+            Self::Interrupted => 2,
+            Self::Completed => 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub id: ConversationId,
+    pub title: String,
+    pub workspace_id: Option<WorkspaceId>,
+    pub archived: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MessageRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub id: MessageId,
+    pub conversation_id: ConversationId,
+    pub run_id: Option<RunId>,
+    pub sequence: u64,
+    pub role: MessageRole,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRun {
+    pub id: RunId,
+    pub conversation_id: ConversationId,
+    pub provider: ProviderId,
+    pub native_session_id: Option<String>,
+    pub status: RunStatus,
+    pub mutation_state: MutationState,
+}
+
+impl ProviderRun {
+    pub fn new(conversation_id: ConversationId, provider: ProviderId) -> Self {
+        Self {
+            id: RunId::new(),
+            conversation_id,
+            provider,
+            native_session_id: None,
+            status: RunStatus::Queued,
+            mutation_state: MutationState::NoneObserved,
+        }
+    }
+
+    pub fn transition(&mut self, to: RunStatus) -> Result<(), DomainError> {
+        let from = self.status;
+        match (from, to) {
+            (
+                RunStatus::Queued,
+                RunStatus::Running | RunStatus::Interrupted | RunStatus::Failed,
+            )
+            | (
+                RunStatus::Running,
+                RunStatus::Waiting
+                | RunStatus::Completed
+                | RunStatus::Interrupted
+                | RunStatus::Failed,
+            )
+            | (
+                RunStatus::Waiting,
+                RunStatus::Running | RunStatus::Interrupted | RunStatus::Failed,
+            ) => {
+                self.status = to;
+                Ok(())
+            }
+            _ => Err(DomainError::InvalidTransition {
+                entity: "provider run",
+                from: from.label(),
+                to: to.label(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentNode {
+    pub id: AgentId,
+    pub run_id: RunId,
+    pub parent_id: Option<AgentId>,
+    pub provider: ProviderId,
+    pub label: String,
+    pub status: AgentStatus,
+}
+
+impl AgentNode {
+    pub fn root(run_id: RunId, provider: ProviderId, label: impl Into<String>) -> Self {
+        Self {
+            id: AgentId::new(),
+            run_id,
+            parent_id: None,
+            provider,
+            label: label.into(),
+            status: AgentStatus::Queued,
+        }
+    }
+
+    pub fn child(
+        run_id: RunId,
+        parent_id: AgentId,
+        provider: ProviderId,
+        label: impl Into<String>,
+        status: AgentStatus,
+    ) -> Self {
+        Self {
+            id: AgentId::new(),
+            run_id,
+            parent_id: Some(parent_id),
+            provider,
+            label: label.into(),
+            status,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimelineEventKind {
+    Message,
+    Tool,
+    Progress,
+    Diagnostic,
+    Lifecycle,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineEvent {
+    pub id: TimelineEventId,
+    pub conversation_id: ConversationId,
+    pub run_id: RunId,
+    pub agent_id: AgentId,
+    pub sequence: u64,
+    pub kind: TimelineEventKind,
+    pub content: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalDecision {
+    Approved,
+    Denied,
+}
+
+impl ApprovalDecision {
+    fn status(self) -> ApprovalStatus {
+        match self {
+            Self::Approved => ApprovalStatus::Approved,
+            Self::Denied => ApprovalStatus::Denied,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    pub id: ApprovalId,
+    pub run_id: RunId,
+    pub agent_id: AgentId,
+    pub provider: ProviderId,
+    pub operation: String,
+    pub scope: String,
+    pub status: ApprovalStatus,
+    pub decision: Option<ApprovalDecision>,
+}
+
+impl Approval {
+    pub fn new(
+        run_id: RunId,
+        agent_id: AgentId,
+        provider: ProviderId,
+        operation: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: ApprovalId::new(),
+            run_id,
+            agent_id,
+            provider,
+            operation: operation.into(),
+            scope: scope.into(),
+            status: ApprovalStatus::Pending,
+            decision: None,
+        }
+    }
+
+    pub fn resolve(&mut self, decision: ApprovalDecision) -> Result<(), DomainError> {
+        match (self.status, decision) {
+            (ApprovalStatus::Pending, decision) => {
+                self.status = decision.status();
+                self.decision = Some(decision);
+                Ok(())
+            }
+            (from, to) => Err(DomainError::InvalidTransition {
+                entity: "approval",
+                from: approval_status_label(from),
+                to: to.label(),
+            }),
+        }
+    }
+}
+
+fn approval_status_label(status: ApprovalStatus) -> &'static str {
+    match status {
+        ApprovalStatus::Pending => "pending",
+        ApprovalStatus::Approved => "approved",
+        ApprovalStatus::Denied => "denied",
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    pub id: WorkspaceId,
+    pub conversation_id: ConversationId,
+    pub project_root: Option<PathBuf>,
+    pub execution_path: PathBuf,
+    pub owned_worktree: bool,
+}
+
+pub fn roll_up_status(root: AgentId, agents: &[AgentNode]) -> Result<RollupStatus, DomainError> {
+    let mut nodes = HashMap::with_capacity(agents.len());
+    for agent in agents {
+        if nodes.insert(agent.id, agent).is_some() {
+            return Err(DomainError::DuplicateAgent { agent: agent.id });
+        }
+    }
+
+    if !nodes.contains_key(&root) {
+        return Err(DomainError::RootNotFound { root });
+    }
+
+    let mut children: HashMap<AgentId, Vec<AgentId>> = HashMap::new();
+    for agent in agents {
+        if let Some(parent_id) = agent.parent_id {
+            let parent = nodes.get(&parent_id).ok_or(DomainError::MissingParent {
+                agent: agent.id,
+                parent: parent_id,
+            })?;
+            if parent.run_id != agent.run_id {
+                return Err(DomainError::ParentRunMismatch {
+                    agent: agent.id,
+                    parent: parent_id,
+                    run: agent.run_id,
+                    parent_run: parent.run_id,
+                });
+            }
+            children.entry(parent_id).or_default().push(agent.id);
+        }
+    }
+
+    for agent in agents {
+        let mut visited = HashSet::new();
+        let mut current = agent;
+        while let Some(parent_id) = current.parent_id {
+            if !visited.insert(current.id) {
+                return Err(DomainError::AgentCycle { agent: current.id });
+            }
+            current = nodes
+                .get(&parent_id)
+                .expect("parents are validated before cycle detection");
+        }
+    }
+
+    let mut result = RollupStatus::Completed;
+    let mut pending = vec![root];
+    while let Some(agent_id) = pending.pop() {
+        let agent = nodes
+            .get(&agent_id)
+            .expect("root and children are validated before traversal");
+        let status = match agent.status {
+            AgentStatus::Waiting => RollupStatus::NeedsAttention,
+            AgentStatus::Queued | AgentStatus::Running => RollupStatus::Active,
+            AgentStatus::Failed => RollupStatus::Failed,
+            AgentStatus::Interrupted => RollupStatus::Interrupted,
+            AgentStatus::Completed => RollupStatus::Completed,
+        };
+        if status.precedence() > result.precedence() {
+            result = status;
+        }
+        if let Some(descendants) = children.get(&agent_id) {
+            pending.extend(descendants);
+        }
+    }
+
+    Ok(result)
+}
