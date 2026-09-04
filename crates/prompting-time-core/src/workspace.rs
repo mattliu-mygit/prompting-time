@@ -10,9 +10,10 @@ use std::{
 use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{RwLock, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::domain::{ConversationId, Workspace, WorkspaceId};
 
@@ -21,9 +22,15 @@ mod owned_fs;
 use owned_fs::{
     IndexedWorktreeEntry, IndexedWorktreeState, ValidatedOwnedDirectory, WorktreeMetadataTarget,
     create_scratch_workspace_nofollow, create_worktree_parent_nofollow,
-    open_directory_path_nofollow, open_owned_worktree_target, quarantine_owned_tree,
-    remove_worktree_metadata_nofollow, rustix_io_error,
+    list_workspace_files_from_directory, open_directory_path_nofollow, open_owned_worktree_target,
+    quarantine_owned_tree, remove_scratch_workspace_nofollow, remove_worktree_metadata_nofollow,
+    rustix_io_error,
 };
+
+const MAX_SNAPSHOT_ENTRIES: usize = 512;
+const MAX_SNAPSHOT_PATH_BYTES: usize = 12 * 1024;
+const MAX_SNAPSHOT_DEPTH: usize = 32;
+const MAX_GIT_STATUS_BYTES: usize = 24 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum WorkspaceRequest {
@@ -78,6 +85,145 @@ pub struct WorkspaceLease {
     pub path: PathBuf,
     pub owned_worktree: bool,
     ownership: Option<OwnedWorktree>,
+}
+
+pub(crate) struct PreparedWorkspace {
+    manager: WorkspaceManager,
+    lease: Option<WorkspaceLease>,
+    acknowledgment: Option<oneshot::Sender<()>>,
+    delivery: Option<JoinHandle<Result<(), WorkspaceError>>>,
+}
+
+impl PreparedWorkspace {
+    pub(crate) fn workspace(&self, id: WorkspaceId) -> Workspace {
+        self.lease
+            .as_ref()
+            .expect("prepared workspace remains owned until commit or rollback")
+            .workspace(id)
+    }
+
+    pub(crate) fn commit(mut self) -> WorkspaceLease {
+        if let Some(acknowledgment) = self.acknowledgment.take() {
+            let _ = acknowledgment.send(());
+        }
+        self.lease
+            .take()
+            .expect("prepared workspace commits exactly once")
+    }
+
+    pub(crate) async fn rollback(mut self) -> Result<(), WorkspaceError> {
+        if let Some(lease) = self.lease.as_ref()
+            && lease.project_root.is_none()
+            && !lease.owned_worktree
+        {
+            let conversation_id = lease.conversation_id.to_string();
+            self.lease.take();
+            drop(self.acknowledgment.take());
+            return remove_scratch_workspace_nofollow(&self.manager.app_data_dir, &conversation_id);
+        }
+        let lease = self
+            .lease
+            .take()
+            .expect("prepared workspace rolls back exactly once");
+        drop(self.acknowledgment.take());
+        if let Some(delivery) = self.delivery.take() {
+            return delivery
+                .await
+                .map_err(|_| WorkspaceError::PreparationTaskFailed)?;
+        }
+        self.manager.rollback_prepared(&lease).await
+    }
+}
+
+impl Drop for PreparedWorkspace {
+    fn drop(&mut self) {
+        drop(self.acknowledgment.take());
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        if self.delivery.is_some() {
+            return;
+        }
+        if lease.project_root.is_none() && !lease.owned_worktree {
+            let _ = remove_scratch_workspace_nofollow(
+                &self.manager.app_data_dir,
+                &lease.conversation_id.to_string(),
+            );
+        } else if lease.owned_worktree {
+            let manager = self.manager.clone();
+            tokio::spawn(async move {
+                let _ = manager.rollback_prepared(&lease).await;
+            });
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSnapshot {
+    pub mode: WorkspaceMode,
+    pub changes: Vec<WorkspaceChange>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceMode {
+    Projectless,
+    Direct,
+    Isolated,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceChange {
+    pub kind: WorkspaceChangeKind,
+    pub relative_path: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceChangeKind {
+    Present,
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    Untracked,
+    Conflicted,
+}
+
+impl WorkspaceSnapshot {
+    pub(crate) fn safe_lines(&self) -> Vec<String> {
+        let mut lines = vec![match self.mode {
+            WorkspaceMode::Projectless => "Projectless workspace.".to_owned(),
+            WorkspaceMode::Direct => "Direct workspace.".to_owned(),
+            WorkspaceMode::Isolated => "Prompting Time isolated worktree.".to_owned(),
+        }];
+        if self.changes.is_empty() {
+            lines.push("No changed files detected.".to_owned());
+        } else {
+            lines.extend(self.changes.iter().map(|change| {
+                let kind = match change.kind {
+                    WorkspaceChangeKind::Present => "present",
+                    WorkspaceChangeKind::Added => "added",
+                    WorkspaceChangeKind::Modified => "modified",
+                    WorkspaceChangeKind::Deleted => "deleted",
+                    WorkspaceChangeKind::Renamed => "renamed",
+                    WorkspaceChangeKind::Copied => "copied",
+                    WorkspaceChangeKind::Untracked => "untracked",
+                    WorkspaceChangeKind::Conflicted => "conflicted",
+                };
+                let path = serde_json::to_string(&change.relative_path)
+                    .expect("a Rust string always serializes to JSON");
+                format!("{kind}: {path}")
+            }));
+        }
+        if self.truncated {
+            lines.push(
+                "Additional changed paths were omitted to stay within the handoff budget."
+                    .to_owned(),
+            );
+        }
+        lines
+    }
 }
 
 impl WorkspaceLease {
@@ -374,6 +520,13 @@ impl WorkspaceManager {
         &self,
         request: WorkspaceRequest,
     ) -> Result<WorkspaceLease, WorkspaceError> {
+        Ok(self.prepare_for_persistence(request).await?.commit())
+    }
+
+    pub(crate) async fn prepare_for_persistence(
+        &self,
+        request: WorkspaceRequest,
+    ) -> Result<PreparedWorkspace, WorkspaceError> {
         let lifecycle_reservation = Arc::clone(&self.owned_processes.state.removal_gate)
             .write_owned()
             .await;
@@ -385,12 +538,17 @@ impl WorkspaceManager {
                     &conversation_id.to_string(),
                 )?;
 
-                Ok(WorkspaceLease {
-                    conversation_id,
-                    project_root: None,
-                    path,
-                    owned_worktree: false,
-                    ownership: None,
+                Ok(PreparedWorkspace {
+                    manager: self.clone(),
+                    lease: Some(WorkspaceLease {
+                        conversation_id,
+                        project_root: None,
+                        path,
+                        owned_worktree: false,
+                        ownership: None,
+                    }),
+                    acknowledgment: None,
+                    delivery: None,
                 })
             }
             WorkspaceRequest::Isolated {
@@ -439,14 +597,35 @@ impl WorkspaceManager {
                                 &path,
                                 "recover isolated worktree",
                             )?;
-                            return Ok(owned_lease(
+                            let lease = owned_lease(
                                 conversation_id,
                                 project_root,
                                 path,
                                 recorded_base,
                                 base_revision,
                                 branch,
-                            ));
+                            );
+                            let ownership = lease
+                                .ownership
+                                .clone()
+                                .expect("owned lease includes rollback identity");
+                            let (acknowledgment_sender, acknowledgment_receiver) =
+                                oneshot::channel();
+                            let task_app_data_dir = app_data_dir.clone();
+                            let delivery = tokio::spawn(async move {
+                                let _lifecycle_reservation = lifecycle_reservation;
+                                if acknowledgment_receiver.await.is_err() {
+                                    rollback_cancelled_worktree(&task_app_data_dir, &ownership)
+                                        .await?;
+                                }
+                                Ok(())
+                            });
+                            return Ok(PreparedWorkspace {
+                                manager: self.clone(),
+                                lease: Some(lease),
+                                acknowledgment: Some(acknowledgment_sender),
+                                delivery: Some(delivery),
+                            });
                         }
                         WorktreeRegistration::Missing
                             if !worktree_path_is_listed(&worktrees, &path)
@@ -476,7 +655,7 @@ impl WorkspaceManager {
                 let (result_sender, result_receiver) = oneshot::channel();
                 let (acknowledgment_sender, acknowledgment_receiver) = oneshot::channel();
                 let task_app_data_dir = app_data_dir.clone();
-                tokio::spawn(async move {
+                let delivery = tokio::spawn(async move {
                     let _lifecycle_reservation = lifecycle_reservation;
                     let result = create_owned_worktree(
                         task_app_data_dir.clone(),
@@ -490,31 +669,36 @@ impl WorkspaceManager {
                     .await;
                     match result {
                         Ok(ownership) => {
-                            let _ = deliver_prepared_worktree(
+                            deliver_prepared_worktree(
                                 task_app_data_dir,
                                 ownership,
                                 result_sender,
                                 acknowledgment_receiver,
                             )
-                            .await;
+                            .await
                         }
                         Err(error) => {
                             let _ = result_sender.send(Err(error));
+                            Ok(())
                         }
                     }
                 });
                 let ownership = result_receiver
                     .await
                     .map_err(|_| WorkspaceError::PreparationTaskFailed)??;
-                let _ = acknowledgment_sender.send(());
-                Ok(owned_lease(
-                    conversation_id,
-                    ownership.project_root,
-                    ownership.path,
-                    ownership.base_commit,
-                    ownership.base_revision,
-                    ownership.branch,
-                ))
+                Ok(PreparedWorkspace {
+                    manager: self.clone(),
+                    lease: Some(owned_lease(
+                        conversation_id,
+                        ownership.project_root,
+                        ownership.path,
+                        ownership.base_commit,
+                        ownership.base_revision,
+                        ownership.branch,
+                    )),
+                    acknowledgment: Some(acknowledgment_sender),
+                    delivery: Some(delivery),
+                })
             }
             WorkspaceRequest::Direct {
                 conversation_id,
@@ -526,12 +710,17 @@ impl WorkspaceManager {
                     None => selected_path.clone(),
                 };
 
-                Ok(WorkspaceLease {
-                    conversation_id,
-                    project_root: Some(project_root),
-                    path: selected_path,
-                    owned_worktree: false,
-                    ownership: None,
+                Ok(PreparedWorkspace {
+                    manager: self.clone(),
+                    lease: Some(WorkspaceLease {
+                        conversation_id,
+                        project_root: Some(project_root),
+                        path: selected_path,
+                        owned_worktree: false,
+                        ownership: None,
+                    }),
+                    acknowledgment: None,
+                    delivery: None,
                 })
             }
         }
@@ -601,6 +790,82 @@ impl WorkspaceManager {
             self.owned_processes.has_active_process(&resolved_path),
         )
         .await
+    }
+
+    /// Rolls back a workspace lease that was prepared for a conversation which was never
+    /// persisted. Direct workspaces are user-owned and therefore require no cleanup.
+    pub async fn rollback_prepared(&self, lease: &WorkspaceLease) -> Result<(), WorkspaceError> {
+        let _lifecycle_reservation = Arc::clone(&self.owned_processes.state.removal_gate)
+            .write_owned()
+            .await;
+        if let Some(ownership) = &lease.ownership {
+            return rollback_cancelled_worktree(&self.app_data_dir, ownership).await;
+        }
+        if lease.project_root.is_none() && !lease.owned_worktree {
+            return remove_scratch_workspace_nofollow(
+                &self.app_data_dir,
+                &lease.conversation_id.to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn wait_for_pending_preparations(&self) {
+        drop(
+            Arc::clone(&self.owned_processes.state.removal_gate)
+                .write_owned()
+                .await,
+        );
+    }
+
+    pub async fn snapshot(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        let mode = if workspace.owned_worktree {
+            WorkspaceMode::Isolated
+        } else if workspace.project_root.is_none() {
+            WorkspaceMode::Projectless
+        } else {
+            WorkspaceMode::Direct
+        };
+        let execution_directory = open_directory_path_nofollow(
+            &workspace.execution_path,
+            "open workspace for handoff inspection",
+        )?;
+        let (changes, truncated) = if detect_git_root_descriptor(&execution_directory).await? {
+            let (output, truncated) = git_output_bounded_descriptor(
+                &execution_directory,
+                &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                "inspect workspace changes for handoff",
+                MAX_GIT_STATUS_BYTES,
+            )
+            .await?;
+            (parse_git_status(&output), truncated)
+        } else {
+            let inventory = list_workspace_files_from_directory(
+                &execution_directory,
+                MAX_SNAPSHOT_ENTRIES,
+                MAX_SNAPSHOT_PATH_BYTES,
+                MAX_SNAPSHOT_DEPTH,
+            )?;
+            (
+                inventory
+                    .files
+                    .into_iter()
+                    .map(|relative_path| WorkspaceChange {
+                        kind: WorkspaceChangeKind::Present,
+                        relative_path,
+                    })
+                    .collect(),
+                inventory.truncated,
+            )
+        };
+        Ok(WorkspaceSnapshot {
+            mode,
+            changes,
+            truncated,
+        })
     }
 
     pub async fn remove_owned(&self, lease: &WorkspaceLease) -> Result<(), WorkspaceError> {
@@ -749,6 +1014,45 @@ fn owned_lease(
             branch,
         }),
     }
+}
+
+fn parse_git_status(output: &[u8]) -> Vec<WorkspaceChange> {
+    let mut records = output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty());
+    let mut changes = Vec::new();
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+        let status = &record[..2];
+        let kind = if status == b"??" {
+            WorkspaceChangeKind::Untracked
+        } else if status.contains(&b'U') || status == b"AA" || status == b"DD" {
+            WorkspaceChangeKind::Conflicted
+        } else if status.contains(&b'R') {
+            WorkspaceChangeKind::Renamed
+        } else if status.contains(&b'C') {
+            WorkspaceChangeKind::Copied
+        } else if status.contains(&b'D') {
+            WorkspaceChangeKind::Deleted
+        } else if status.contains(&b'A') {
+            WorkspaceChangeKind::Added
+        } else {
+            WorkspaceChangeKind::Modified
+        };
+        changes.push(WorkspaceChange {
+            kind,
+            relative_path: String::from_utf8_lossy(&record[3..]).into_owned(),
+        });
+        if matches!(
+            kind,
+            WorkspaceChangeKind::Renamed | WorkspaceChangeKind::Copied
+        ) {
+            let _ = records.next();
+        }
+    }
+    changes
 }
 
 async fn mutable_cleanup_eligibility(
@@ -1573,6 +1877,47 @@ async fn detect_git_root(directory: &Path) -> Result<Option<PathBuf>, WorkspaceE
     Ok(Some(PathBuf::from(stdout.trim())))
 }
 
+async fn detect_git_root_descriptor(
+    directory: &std::os::fd::OwnedFd,
+) -> Result<bool, WorkspaceError> {
+    let operation = "detect Git project from workspace descriptor";
+    let output =
+        git_worktree_descriptor_output(directory, &["rev-parse", "--show-toplevel"], operation)
+            .await?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("not a git repository") {
+        Ok(false)
+    } else {
+        Err(WorkspaceError::GitCommandFailed {
+            operation,
+            status: output.status.code(),
+        })
+    }
+}
+
+async fn git_worktree_descriptor_output(
+    directory: &std::os::fd::OwnedFd,
+    args: &[&str],
+    operation: &'static str,
+) -> Result<std::process::Output, WorkspaceError> {
+    let directory = directory
+        .try_clone()
+        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    let mut command = Command::new("git");
+    command.args(args);
+    command.kill_on_drop(true);
+    unsafe {
+        command.pre_exec(move || rustix::process::fchdir(&directory).map_err(std::io::Error::from));
+    }
+    command
+        .output()
+        .await
+        .map_err(|source| WorkspaceError::Io { operation, source })
+}
+
 async fn git_text(
     directory: &Path,
     args: &[&str],
@@ -1783,6 +2128,68 @@ async fn git_output(
     Ok(output)
 }
 
+async fn git_output_bounded_descriptor(
+    directory: &std::os::fd::OwnedFd,
+    args: &[&str],
+    operation: &'static str,
+    max_stdout_bytes: usize,
+) -> Result<(Vec<u8>, bool), WorkspaceError> {
+    let directory = directory
+        .try_clone()
+        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command.kill_on_drop(true);
+    unsafe {
+        command.pre_exec(move || rustix::process::fchdir(&directory).map_err(std::io::Error::from));
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(WorkspaceError::InvalidGitOutput { operation })?;
+    let mut bytes = Vec::with_capacity(max_stdout_bytes.saturating_add(1));
+    stdout
+        .take(u64::try_from(max_stdout_bytes).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    let truncated = bytes.len() > max_stdout_bytes;
+    if truncated
+        && let Err(source) = child.kill().await
+        && child
+            .try_wait()
+            .map_err(|source| WorkspaceError::Io { operation, source })?
+            .is_none()
+    {
+        return Err(WorkspaceError::Io { operation, source });
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|source| WorkspaceError::Io { operation, source })?;
+    if !truncated && !status.success() {
+        return Err(WorkspaceError::GitCommandFailed {
+            operation,
+            status: status.code(),
+        });
+    }
+    bytes.truncate(max_stdout_bytes);
+    if truncated {
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == 0)
+            .map_or(0, |position| position + 1);
+        bytes.truncate(complete);
+    }
+    Ok((bytes, truncated))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1798,7 +2205,10 @@ mod tests {
 
     use crate::domain::{ConversationId, WorkspaceId};
 
-    use super::owned_fs::{removal_device_matches, remove_directory_contents_nofollow};
+    use super::owned_fs::{
+        install_inventory_open_coordination, list_workspace_files_nofollow, removal_device_matches,
+        remove_directory_contents_nofollow,
+    };
     use super::*;
 
     struct TestRepository {
@@ -2148,6 +2558,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_git_snapshot_bounds_entries_and_never_follows_symlinks() {
+        let temp = tempdir().unwrap();
+        let manager = WorkspaceManager::new(temp.path().join("app-data"));
+        let lease = manager
+            .prepare(WorkspaceRequest::projectless(ConversationId::new()))
+            .await
+            .unwrap();
+        for index in 0..600 {
+            std::fs::write(lease.path.join(format!("file-{index:04}.txt")), "fixture").unwrap();
+        }
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("private.txt"), "outside").unwrap();
+        symlink(&outside, lease.path.join("linked-outside")).unwrap();
+
+        let snapshot = manager
+            .snapshot(&lease.workspace(WorkspaceId::new()))
+            .await
+            .unwrap();
+
+        assert!(snapshot.truncated);
+        assert!(snapshot.changes.len() <= MAX_SNAPSHOT_ENTRIES);
+        assert!(
+            snapshot
+                .changes
+                .iter()
+                .all(|change| !change.relative_path.contains("private.txt"))
+        );
+    }
+
+    #[test]
+    fn non_git_snapshot_rejects_a_directory_replaced_by_a_symlink_before_open() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let nested = root.join("nested");
+        let displaced = root.join("nested-displaced");
+        std::fs::write(nested.join("inside.txt"), "inside").unwrap();
+        std::fs::write(outside.join("private.txt"), "outside").unwrap();
+        let coordination = install_inventory_open_coordination(Path::new("nested"));
+        let scan_root = root.clone();
+        let scan =
+            std::thread::spawn(move || list_workspace_files_nofollow(&scan_root, 32, 4_096, 8));
+
+        if coordination
+            .after_stat
+            .recv_timeout(Duration::from_secs(5))
+            .is_err()
+        {
+            drop(coordination.continue_open);
+            let result = scan
+                .join()
+                .map(|result| result.map(|inventory| (inventory.files, inventory.truncated)));
+            panic!("inventory never reached the directory-open boundary: {result:?}");
+        }
+        std::fs::rename(&nested, &displaced).unwrap();
+        symlink(&outside, &nested).unwrap();
+        coordination.continue_open.send(()).unwrap();
+        let result = scan.join().unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("private.txt")).unwrap(),
+            "outside"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_snapshot_reaps_output_after_the_fixed_source_byte_bound() {
+        let repo = TestRepository::new().await;
+        for index in 0..350 {
+            std::fs::write(
+                repo.path()
+                    .join(format!("untracked-{index:04}-{}.txt", "x".repeat(80))),
+                "fixture",
+            )
+            .unwrap();
+        }
+        let workspace = Workspace {
+            id: WorkspaceId::new(),
+            conversation_id: ConversationId::new(),
+            project_root: Some(std::fs::canonicalize(repo.path()).unwrap()),
+            execution_path: std::fs::canonicalize(repo.path()).unwrap(),
+            owned_worktree: false,
+            worktree_base_commit: None,
+        };
+
+        let snapshot = WorkspaceManager::new(repo.app_data_dir())
+            .snapshot(&workspace)
+            .await
+            .unwrap();
+
+        assert!(snapshot.truncated);
+        assert!(
+            snapshot
+                .changes
+                .iter()
+                .map(|change| change.relative_path.len())
+                .sum::<usize>()
+                <= MAX_GIT_STATUS_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn git_snapshot_commands_remain_bound_to_the_open_workspace_after_a_path_swap() {
+        let original = TestRepository::new().await;
+        let outside = TestRepository::new().await;
+        std::fs::write(original.path().join("original-only.txt"), "original").unwrap();
+        std::fs::write(outside.path().join("outside-only.txt"), "outside").unwrap();
+        let original_path = std::fs::canonicalize(original.path()).unwrap();
+        let outside_path = std::fs::canonicalize(outside.path()).unwrap();
+        let directory =
+            open_directory_path_nofollow(&original_path, "open Git workspace path-swap fixture")
+                .unwrap();
+        let displaced = original_path.parent().unwrap().join("project-displaced");
+        std::fs::rename(&original_path, &displaced).unwrap();
+        symlink(outside_path, &original_path).unwrap();
+
+        let (output, truncated) = git_output_bounded_descriptor(
+            &directory,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            "inspect swapped Git workspace fixture",
+            MAX_GIT_STATUS_BYTES,
+        )
+        .await
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(!truncated);
+        assert!(output.contains("original-only.txt"));
+        assert!(!output.contains("outside-only.txt"));
+    }
+
+    #[tokio::test]
+    async fn projectless_rollback_does_not_wait_on_the_async_lifecycle_gate() {
+        let temp = tempdir().unwrap();
+        let manager = WorkspaceManager::new(temp.path().join("app-data"));
+        let prepared = manager
+            .prepare_for_persistence(WorkspaceRequest::projectless(ConversationId::new()))
+            .await
+            .unwrap();
+        let path = prepared
+            .lease
+            .as_ref()
+            .expect("prepared lease")
+            .path
+            .clone();
+        let gate = Arc::clone(&manager.owned_processes.state.removal_gate)
+            .write_owned()
+            .await;
+
+        tokio::time::timeout(Duration::from_millis(100), prepared.rollback())
+            .await
+            .expect("projectless rollback must be synchronous")
+            .unwrap();
+        drop(gate);
+
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
     async fn projectless_workspace_refuses_a_symlinked_scratch_parent() {
         let temp = tempdir().unwrap();
         let app_data = temp.path().join("app-data");
@@ -2481,6 +3055,34 @@ mod tests {
         assert_eq!(
             manager.cleanup_eligibility(&recovered).await.unwrap(),
             CleanupEligibility::Eligible
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_recovered_preparation_is_drained_before_shutdown_continues() {
+        let repo = TestRepository::new().await;
+        let conversation_id = ConversationId::new();
+        let manager = WorkspaceManager::new(repo.app_data_dir());
+        let first = manager
+            .prepare(WorkspaceRequest::isolated_for(conversation_id, repo.path()))
+            .await
+            .unwrap();
+        let prepared = manager
+            .prepare_for_persistence(WorkspaceRequest::isolated_for(conversation_id, repo.path()))
+            .await
+            .unwrap();
+        drop(prepared);
+
+        manager.wait_for_pending_preparations().await;
+
+        assert!(!first.path.exists());
+        let worktrees = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]).await;
+        assert!(!worktrees.contains(&first.path.to_string_lossy().into_owned()));
+        assert!(
+            git_reference_value(repo.path(), &base_reference(conversation_id))
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

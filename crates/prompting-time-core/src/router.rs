@@ -71,6 +71,7 @@ pub enum RoutingReason {
     OnlyEligibleProvider,
     LeastUsed,
     DeterministicTieBreak,
+    SafeFallback,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -105,6 +106,7 @@ pub enum RoutingCriterion {
     RequiredCapabilities { capabilities: ProviderCapabilities },
     Continuity { provider: ProviderId },
     RankedCandidates { candidates: Vec<ProviderRank> },
+    SafeFallback { from: ProviderId, to: ProviderId },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -439,7 +441,8 @@ fn rationale(
         }
         RoutingReason::ManualOverride
         | RoutingReason::RequiredCapabilities
-        | RoutingReason::OnlyEligibleProvider => {}
+        | RoutingReason::OnlyEligibleProvider
+        | RoutingReason::SafeFallback => {}
     }
     rationale
 }
@@ -471,6 +474,9 @@ fn explanation(provider: ProviderId, reason: RoutingReason) -> String {
         RoutingReason::OnlyEligibleProvider => "it is the only eligible provider",
         RoutingReason::LeastUsed => "it has the lowest recent root-run count",
         RoutingReason::DeterministicTieBreak => "it won the stable provider-order tie-break",
+        RoutingReason::SafeFallback => {
+            "the first provider rejected the request before any mutation"
+        }
     };
     format!("Selected {provider} because {reason}.")
 }

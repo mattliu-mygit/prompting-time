@@ -17,7 +17,11 @@ use crate::providers::{
     ProviderEvent, ProviderId, ProviderSession, ProviderTurn, ResumeSession, StartSession,
     TurnRequest,
 };
-use crate::store::{ProviderEventRecord, StageWaitingEventOutcome, Store, StoreError};
+use crate::router::RoutingDecision;
+use crate::store::{
+    NewFallbackAttempt, NewSubmission, PreparedSubmission, ProviderEventRecord,
+    StageWaitingEventOutcome, Store, StoreError,
+};
 
 pub const MAX_CONCURRENT_ROOT_RUNS: usize = 4;
 pub const MAX_QUEUED_ROOT_RUNS: usize = 64;
@@ -101,6 +105,22 @@ struct OwnedTaskCompletionBarrier {
 }
 
 #[cfg(test)]
+struct FallbackCreationBarrier {
+    created: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl FallbackCreationBarrier {
+    fn new() -> Self {
+        Self {
+            created: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+#[cfg(test)]
 impl OwnedTaskCompletionBarrier {
     fn new() -> Self {
         Self {
@@ -125,9 +145,19 @@ pub struct RunRequest {
     conversation_id: ConversationId,
     working_directory: PathBuf,
     provider: ProviderId,
-    fallback_provider: Option<ProviderId>,
+    fallback: Option<FallbackRequest>,
     native_session_id: Option<String>,
     turn: TurnRequest,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FallbackRequest {
+    pub provider: ProviderId,
+    pub native_session_id: Option<String>,
+    pub turn: TurnRequest,
+    pub handoff_rendered: Option<String>,
+    pub handoff_hash: Option<String>,
+    pub routing_decision: Option<Box<RoutingDecision>>,
 }
 
 impl RunRequest {
@@ -141,14 +171,26 @@ impl RunRequest {
             conversation_id,
             working_directory,
             provider,
-            fallback_provider: None,
+            fallback: None,
             native_session_id: None,
             turn,
         }
     }
 
     pub fn with_fallback(mut self, provider: ProviderId) -> Self {
-        self.fallback_provider = Some(provider);
+        self.fallback = Some(FallbackRequest {
+            provider,
+            native_session_id: None,
+            turn: self.turn.clone(),
+            handoff_rendered: None,
+            handoff_hash: None,
+            routing_decision: None,
+        });
+        self
+    }
+
+    pub(crate) fn with_fallback_request(mut self, fallback: FallbackRequest) -> Self {
+        self.fallback = Some(fallback);
         self
     }
 
@@ -177,6 +219,11 @@ struct OperationState {
 pub struct RunHandle {
     primary_run_id: RunId,
     state: watch::Receiver<OperationState>,
+}
+
+pub(crate) struct PreparedRunHandle {
+    pub handle: RunHandle,
+    pub duplicate: bool,
 }
 
 impl RunHandle {
@@ -309,6 +356,8 @@ struct ActiveRun {
     root_task_completion_barrier: Option<Arc<OwnedTaskCompletionBarrier>>,
     #[cfg(test)]
     response_task_completion_barrier: Option<Arc<OwnedTaskCompletionBarrier>>,
+    #[cfg(test)]
+    fallback_creation_barrier: Option<Arc<FallbackCreationBarrier>>,
 }
 
 struct Job {
@@ -389,6 +438,8 @@ pub struct RunSupervisor {
     root_task_completion_barrier: Option<Arc<OwnedTaskCompletionBarrier>>,
     #[cfg(test)]
     response_task_completion_barrier: Option<Arc<OwnedTaskCompletionBarrier>>,
+    #[cfg(test)]
+    fallback_creation_barrier: Option<Arc<FallbackCreationBarrier>>,
 }
 
 impl RunSupervisor {
@@ -441,6 +492,8 @@ impl RunSupervisor {
             root_task_completion_barrier: None,
             #[cfg(test)]
             response_task_completion_barrier: None,
+            #[cfg(test)]
+            fallback_creation_barrier: None,
         })
     }
 
@@ -450,11 +503,11 @@ impl RunSupervisor {
             return Err(RuntimeError::SupervisorClosed);
         }
         self.adapter(request.provider)?;
-        if let Some(fallback) = request.fallback_provider {
-            if fallback == request.provider {
-                return Err(RuntimeError::InvalidFallbackProvider(fallback));
+        if let Some(fallback) = &request.fallback {
+            if fallback.provider == request.provider {
+                return Err(RuntimeError::InvalidFallbackProvider(fallback.provider));
             }
-            self.adapter(fallback)?;
+            self.adapter(fallback.provider)?;
         }
         let admission = Arc::clone(&self.root_admission)
             .try_acquire_owned()
@@ -478,6 +531,75 @@ impl RunSupervisor {
             .store
             .create_run(request.conversation_id, request.provider)
             .await?;
+        let handle = self.enqueue_prepared(request, run, root, admission, command);
+        drop(lifecycle);
+        Ok(handle)
+    }
+
+    pub(crate) async fn submit_persisted(
+        &self,
+        request: RunRequest,
+        submission: NewSubmission,
+    ) -> Result<PreparedRunHandle, RuntimeError> {
+        let lifecycle = self.lifecycle.lock().await;
+        if *lifecycle != Lifecycle::Open {
+            return Err(RuntimeError::SupervisorClosed);
+        }
+        self.adapter(request.provider)?;
+        if let Some(fallback) = &request.fallback {
+            if fallback.provider == request.provider {
+                return Err(RuntimeError::InvalidFallbackProvider(fallback.provider));
+            }
+            self.adapter(fallback.provider)?;
+        }
+        let admission = Arc::clone(&self.root_admission)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::NoPermits => RuntimeError::RunQueueFull {
+                    limit: MAX_QUEUED_ROOT_RUNS,
+                },
+                tokio::sync::TryAcquireError::Closed => RuntimeError::SupervisorClosed,
+            })?;
+        let command = self
+            .commands
+            .clone()
+            .try_reserve_owned()
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RuntimeError::CommandQueueFull {
+                    limit: SUPERVISOR_COMMAND_CAPACITY,
+                },
+                mpsc::error::TrySendError::Closed(_) => RuntimeError::SupervisorClosed,
+            })?;
+        match self.store.prepare_submission(submission).await? {
+            PreparedSubmission::Created { run, root } => {
+                let handle = self.enqueue_prepared(request, run, root, admission, command);
+                drop(lifecycle);
+                Ok(PreparedRunHandle {
+                    handle,
+                    duplicate: false,
+                })
+            }
+            PreparedSubmission::Duplicate(run) => {
+                drop(command);
+                drop(admission);
+                let handle = self.handle_for_run(run);
+                drop(lifecycle);
+                Ok(PreparedRunHandle {
+                    handle,
+                    duplicate: true,
+                })
+            }
+        }
+    }
+
+    fn enqueue_prepared(
+        &self,
+        request: RunRequest,
+        run: crate::domain::ProviderRun,
+        root: crate::domain::AgentNode,
+        admission: OwnedSemaphorePermit,
+        command: mpsc::OwnedPermit<ManagerCommand>,
+    ) -> RunHandle {
         let (cancellation, _) = watch::channel(false);
         let (shutdown, _) = watch::channel(false);
         let initial = OperationState {
@@ -504,6 +626,8 @@ impl RunSupervisor {
             root_task_completion_barrier: self.root_task_completion_barrier.clone(),
             #[cfg(test)]
             response_task_completion_barrier: self.response_task_completion_barrier.clone(),
+            #[cfg(test)]
+            fallback_creation_barrier: self.fallback_creation_barrier.clone(),
         });
         self.active
             .lock()
@@ -518,11 +642,62 @@ impl RunSupervisor {
             },
             admission,
         }));
-        drop(lifecycle);
-        Ok(RunHandle {
+        RunHandle {
             primary_run_id: run.id,
             state: receiver,
-        })
+        }
+    }
+
+    fn handle_for_run(&self, run: crate::domain::ProviderRun) -> RunHandle {
+        if let Some(active) = self
+            .active
+            .lock()
+            .expect("active run mutex must not be poisoned")
+            .get(&run.id)
+        {
+            return RunHandle {
+                primary_run_id: run.id,
+                state: active.state.subscribe(),
+            };
+        }
+        let initial = OperationState {
+            current_run_id: run.id,
+            fallback_run_id: run.fallback_from_run_id,
+            status: run.status,
+            reconciliation_failed: false,
+        };
+        let (_, state) = watch::channel(initial);
+        RunHandle {
+            primary_run_id: run.id,
+            state,
+        }
+    }
+
+    pub(crate) fn existing_handle(
+        &self,
+        run: crate::domain::ProviderRun,
+        fallback: Option<crate::domain::ProviderRun>,
+    ) -> RunHandle {
+        if self
+            .active
+            .lock()
+            .expect("active run mutex must not be poisoned")
+            .contains_key(&run.id)
+        {
+            return self.handle_for_run(run);
+        }
+        let terminal = fallback.as_ref().unwrap_or(&run);
+        let initial = OperationState {
+            current_run_id: terminal.id,
+            fallback_run_id: fallback.as_ref().map(|fallback| fallback.id),
+            status: terminal.status,
+            reconciliation_failed: false,
+        };
+        let (_, state) = watch::channel(initial);
+        RunHandle {
+            primary_run_id: run.id,
+            state,
+        }
     }
 
     pub async fn respond(
@@ -727,6 +902,11 @@ impl RunSupervisor {
     #[cfg(test)]
     fn set_response_task_completion_barrier(&mut self, barrier: Arc<OwnedTaskCompletionBarrier>) {
         self.response_task_completion_barrier = Some(barrier);
+    }
+
+    #[cfg(test)]
+    fn set_fallback_creation_barrier(&mut self, barrier: Arc<FallbackCreationBarrier>) {
+        self.fallback_creation_barrier = Some(barrier);
     }
 }
 
@@ -1298,17 +1478,25 @@ async fn execute_job(
         root_id: job.primary_root_id,
         adapter: primary,
         resume_native_id: job.request.native_session_id.clone(),
+        fallback: job.request.fallback.clone(),
     };
     let first_result = execute_attempt(&store, &job, first).await?;
-    if first_result == AttemptResult::FailedFallbackEligible {
-        if let Some(provider) = job.request.fallback_provider {
+    match first_result {
+        AttemptResult::FallbackCreated { run, root } => {
+            let fallback_request = job
+                .request
+                .fallback
+                .as_ref()
+                .expect("a created fallback has its provider-specific request");
+            #[cfg(test)]
+            if let Some(barrier) = &job.active.fallback_creation_barrier {
+                barrier.created.notify_one();
+                barrier.release.notified().await;
+            }
             let adapter = adapters
-                .get(&provider)
+                .get(&fallback_request.provider)
                 .cloned()
-                .ok_or(RuntimeError::MissingAdapter(provider))?;
-            let (run, root) = store
-                .create_fallback_run(job.primary_run_id, provider)
-                .await?;
+                .ok_or(RuntimeError::MissingAdapter(fallback_request.provider))?;
             *job.active
                 .attempt_identity
                 .lock()
@@ -1326,15 +1514,23 @@ async fn execute_job(
                 run_id: run.id,
                 root_id: root.id,
                 adapter,
-                resume_native_id: None,
+                resume_native_id: fallback_request.native_session_id.clone(),
+                fallback: None,
             };
-            let result = execute_attempt(&store, &job, fallback).await?;
+            let fallback_job = Job {
+                request: RunRequest {
+                    turn: fallback_request.turn.clone(),
+                    fallback: None,
+                    ..job.request.clone()
+                },
+                primary_run_id: job.primary_run_id,
+                primary_root_id: job.primary_root_id,
+                active: Arc::clone(&job.active),
+            };
+            let result = execute_attempt(&store, &fallback_job, fallback).await?;
             set_status(&job.active, run.id, result.status());
-        } else {
-            set_status(&job.active, job.primary_run_id, first_result.status());
         }
-    } else {
-        set_status(&job.active, job.primary_run_id, first_result.status());
+        result => set_status(&job.active, job.primary_run_id, result.status()),
     }
     Ok(())
 }
@@ -1363,13 +1559,17 @@ struct AttemptSpec {
     root_id: AgentId,
     adapter: Arc<dyn ProviderAdapter>,
     resume_native_id: Option<String>,
+    fallback: Option<FallbackRequest>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum AttemptResult {
     Completed,
     Interrupted,
-    FailedFallbackEligible,
+    FallbackCreated {
+        run: crate::domain::ProviderRun,
+        root: Box<crate::domain::AgentNode>,
+    },
     Failed,
 }
 
@@ -1385,11 +1585,11 @@ enum AttemptFinish {
 }
 
 impl AttemptResult {
-    fn status(self) -> RunStatus {
+    fn status(&self) -> RunStatus {
         match self {
             Self::Completed => RunStatus::Completed,
             Self::Interrupted => RunStatus::Interrupted,
-            Self::FailedFallbackEligible | Self::Failed => RunStatus::Failed,
+            Self::FallbackCreated { .. } | Self::Failed => RunStatus::Failed,
         }
     }
 }
@@ -1787,6 +1987,17 @@ async fn execute_attempt(
                     )
                     .await;
                 }
+                if let Err(error) = store.advance_provider_context(attempt.run_id).await {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
                 set_status(&job.active, attempt.run_id, RunStatus::Running);
                 #[cfg(test)]
                 if let Some(barrier) = &job.active.active_turn_panic_barrier {
@@ -2153,6 +2364,30 @@ async fn fail_attempt(
     mutation: MutationState,
     dispatch_certainty: DispatchCertainty,
 ) -> Result<AttemptResult, RuntimeError> {
+    if mutation == MutationState::NoneObserved
+        && dispatch_certainty == DispatchCertainty::NotDispatched
+        && let Some(fallback) = &attempt.fallback
+    {
+        let (run, root) = store
+            .fail_and_create_fallback(
+                attempt.run_id,
+                attempt.root_id,
+                category,
+                NewFallbackAttempt {
+                    provider: fallback.provider,
+                    native_session_id: fallback.native_session_id.clone(),
+                    turn_prompt: fallback.turn.prompt.clone(),
+                    handoff_rendered: fallback.handoff_rendered.clone(),
+                    handoff_hash: fallback.handoff_hash.clone(),
+                    routing_decision: fallback.routing_decision.clone(),
+                },
+            )
+            .await?;
+        return Ok(AttemptResult::FallbackCreated {
+            run,
+            root: Box::new(root),
+        });
+    }
     store
         .append_run_event(
             attempt.run_id,
@@ -2160,15 +2395,7 @@ async fn fail_attempt(
             ProviderEventRecord::provider_failed(category, mutation, dispatch_certainty),
         )
         .await?;
-    Ok(
-        if mutation == MutationState::NoneObserved
-            && dispatch_certainty == DispatchCertainty::NotDispatched
-        {
-            AttemptResult::FailedFallbackEligible
-        } else {
-            AttemptResult::Failed
-        },
-    )
+    Ok(AttemptResult::Failed)
 }
 
 fn active_failure(category: ProviderErrorCategory, mutation: MutationState) -> AttemptFinish {
@@ -2383,6 +2610,202 @@ mod tests {
     use crate::providers::process::JsonLineProcess;
     use crate::providers::{ProviderCapabilities, ProviderHealth, ProviderTurnOwner};
     use crate::store::{NewConversation, StoreError};
+
+    struct ImmediateAdapter {
+        provider: ProviderId,
+        reject_before_dispatch: bool,
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for ImmediateAdapter {
+        fn id(&self) -> ProviderId {
+            self.provider
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+
+        async fn health(&self) -> Result<ProviderHealth, ProviderError> {
+            Ok(ProviderHealth::Healthy {
+                version: "fixture".to_owned(),
+            })
+        }
+
+        async fn start_session(
+            &self,
+            _request: StartSession,
+        ) -> Result<ProviderSession, ProviderError> {
+            Ok(ProviderSession {
+                provider: self.provider,
+                native_id: format!("{:?}-session", self.provider),
+                native_group_id: None,
+            })
+        }
+
+        async fn resume_session(
+            &self,
+            _native_id: &str,
+            request: ResumeSession,
+        ) -> Result<ProviderSession, ProviderError> {
+            self.start_session(StartSession {
+                conversation_id: request.conversation_id,
+                working_directory: request.working_directory,
+            })
+            .await
+        }
+
+        async fn start_turn(
+            &self,
+            _session: &ProviderSession,
+            _request: TurnRequest,
+        ) -> Result<ProviderTurn, ProviderError> {
+            if self.reject_before_dispatch {
+                return Err(ProviderError::NotDispatched {
+                    category: ProviderErrorCategory::Rejected,
+                });
+            }
+            let (sender, receiver) = mpsc::channel(2);
+            sender
+                .send(Ok(ProviderEvent::TurnStarted {
+                    native_turn_id: "fixture-turn".to_owned(),
+                }))
+                .await
+                .unwrap();
+            sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+            drop(sender);
+            Ok(ProviderTurn::new(
+                receiver,
+                CountingOwner(Arc::new(AtomicUsize::new(0))),
+            ))
+        }
+
+        async fn steer(
+            &self,
+            _session: &ProviderSession,
+            _active_turn: &str,
+            _text: &str,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        async fn respond(
+            &self,
+            _session: &ProviderSession,
+            _request_id: &str,
+            _response: ApprovalResponse,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        async fn interrupt(
+            &self,
+            _session: &ProviderSession,
+            _active_turn: &str,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn test_submission(
+        command_id: &str,
+        conversation_id: ConversationId,
+        provider: ProviderId,
+    ) -> NewSubmission {
+        let decision = crate::router::Router::default()
+            .route(
+                crate::router::RouteRequest::builder("fixture")
+                    .eligible([crate::router::ProviderRoutingState::available(
+                        provider,
+                        ProviderCapabilities::default(),
+                    )])
+                    .override_provider(provider)
+                    .build(),
+            )
+            .unwrap();
+        NewSubmission {
+            command_id: command_id.to_owned(),
+            request_hash: format!("hash-{command_id}"),
+            conversation_id,
+            provider,
+            content: "fixture".to_owned(),
+            routing_decision: decision,
+            handoff_rendered: None,
+            handoff_hash: None,
+            turn_prompt: "fixture turn".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_fallback_creation_blocks_concurrent_submit_and_archive() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("fallback reservation"))
+            .await
+            .unwrap();
+        let mut supervisor = RunSupervisor::new(
+            store.clone(),
+            vec![
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Codex,
+                    reject_before_dispatch: true,
+                }),
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Claude,
+                    reject_before_dispatch: false,
+                }),
+            ],
+        )
+        .unwrap();
+        let barrier = Arc::new(FallbackCreationBarrier::new());
+        supervisor.set_fallback_creation_barrier(Arc::clone(&barrier));
+        let first = RunRequest::new(
+            conversation.id,
+            std::path::PathBuf::from("."),
+            ProviderId::Codex,
+            TurnRequest::new("fixture"),
+        )
+        .with_fallback(ProviderId::Claude);
+        let handle = supervisor
+            .submit_persisted(
+                first,
+                test_submission("first", conversation.id, ProviderId::Codex),
+            )
+            .await
+            .unwrap()
+            .handle;
+
+        barrier.created.notified().await;
+        let second = supervisor.submit_persisted(
+            RunRequest::new(
+                conversation.id,
+                std::path::PathBuf::from("."),
+                ProviderId::Codex,
+                TurnRequest::new("second"),
+            ),
+            test_submission("second", conversation.id, ProviderId::Codex),
+        );
+        let archive = store.archive_conversation(conversation.id);
+        let (second, archive) = tokio::join!(second, archive);
+        let second_error = match second {
+            Ok(_) => panic!("queued fallback must reject a concurrent submission"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            second_error,
+            RuntimeError::Store(StoreError::ConversationBusy(id)) if id == conversation.id
+        ));
+        assert!(matches!(
+            archive.unwrap_err(),
+            StoreError::ConversationBusy(id) if id == conversation.id
+        ));
+
+        barrier.release.notify_one();
+        let outcome = handle.wait().await.unwrap();
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert!(outcome.fallback_run_id.is_some());
+        supervisor.shutdown().await.unwrap();
+    }
 
     struct CountingOwner(Arc<AtomicUsize>);
 

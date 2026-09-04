@@ -389,7 +389,10 @@ pub struct AgentNode {
     pub run_id: RunId,
     pub parent_id: Option<AgentId>,
     pub provider: ProviderId,
+    pub provider_native_id: Option<String>,
+    pub provider_native_path: Option<String>,
     pub label: String,
+    pub summary: Option<String>,
     pub status: AgentStatus,
 }
 
@@ -400,7 +403,10 @@ impl AgentNode {
             run_id,
             parent_id: None,
             provider,
+            provider_native_id: None,
+            provider_native_path: None,
             label: label.into(),
+            summary: None,
             status: AgentStatus::Queued,
         }
     }
@@ -417,7 +423,10 @@ impl AgentNode {
             run_id,
             parent_id: Some(parent_id),
             provider,
+            provider_native_id: None,
+            provider_native_path: None,
             label: label.into(),
+            summary: None,
             status,
         }
     }

@@ -15,6 +15,70 @@ use rustix::fs::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
+#[cfg(test)]
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+
+#[cfg(test)]
+pub(super) struct InventoryOpenCoordination {
+    after_stat: Mutex<Option<mpsc::Sender<()>>>,
+    continue_open: Mutex<mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+pub(super) struct InventoryOpenTest {
+    pub(super) after_stat: mpsc::Receiver<()>,
+    pub(super) continue_open: mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+fn inventory_open_coordinations() -> &'static Mutex<HashMap<PathBuf, Arc<InventoryOpenCoordination>>>
+{
+    static COORDINATIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<InventoryOpenCoordination>>>> =
+        OnceLock::new();
+    COORDINATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn install_inventory_open_coordination(relative_path: &Path) -> InventoryOpenTest {
+    let (after_stat_sender, after_stat) = mpsc::channel();
+    let (continue_open, continue_open_receiver) = mpsc::channel();
+    let coordination = Arc::new(InventoryOpenCoordination {
+        after_stat: Mutex::new(Some(after_stat_sender)),
+        continue_open: Mutex::new(continue_open_receiver),
+    });
+    inventory_open_coordinations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(relative_path.to_owned(), Arc::clone(&coordination));
+    InventoryOpenTest {
+        after_stat,
+        continue_open,
+    }
+}
+
+#[cfg(test)]
+fn coordinate_inventory_open(relative_path: &Path) {
+    let coordination = inventory_open_coordinations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(relative_path);
+    if let Some(coordination) = coordination {
+        if let Some(after_stat) = coordination
+            .after_stat
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = after_stat.send(());
+        }
+        let _ = coordination
+            .continue_open
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recv();
+    }
+}
+
 pub(super) struct WorktreeMetadataTarget {
     pub(super) parent: OwnedFd,
     pub(super) directory: OwnedFd,
@@ -55,6 +119,138 @@ pub(super) enum IndexedWorktreeState {
     Clean,
     ModifiedTracked,
     Untracked,
+}
+
+pub(super) struct BoundedFileInventory {
+    pub(super) files: Vec<String>,
+    pub(super) truncated: bool,
+}
+
+#[cfg(test)]
+pub(super) fn list_workspace_files_nofollow(
+    root: &Path,
+    max_entries: usize,
+    max_path_bytes: usize,
+    max_depth: usize,
+) -> Result<BoundedFileInventory, WorkspaceError> {
+    const OPERATION: &str = "inspect non-Git workspace files without following links";
+    let directory = open_directory_path_nofollow(root, OPERATION)?;
+    list_workspace_files_from_directory(&directory, max_entries, max_path_bytes, max_depth)
+}
+
+pub(super) fn list_workspace_files_from_directory(
+    directory: &OwnedFd,
+    max_entries: usize,
+    max_path_bytes: usize,
+    max_depth: usize,
+) -> Result<BoundedFileInventory, WorkspaceError> {
+    const OPERATION: &str = "inspect non-Git workspace files without following links";
+    let root_device = fstat(directory)
+        .map_err(|source| rustix_io_error(OPERATION, source))?
+        .st_dev as u64;
+    let mut inventory = BoundedFileInventory {
+        files: Vec::new(),
+        truncated: false,
+    };
+    let mut visited = 0_usize;
+    let mut used_path_bytes = 0_usize;
+    collect_workspace_files_nofollow(
+        directory,
+        Path::new(""),
+        root_device,
+        0,
+        max_depth,
+        max_entries,
+        max_path_bytes,
+        &mut visited,
+        &mut used_path_bytes,
+        &mut inventory,
+        OPERATION,
+    )?;
+    Ok(inventory)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_workspace_files_nofollow(
+    directory: &OwnedFd,
+    relative: &Path,
+    root_device: u64,
+    depth: usize,
+    max_depth: usize,
+    max_entries: usize,
+    max_path_bytes: usize,
+    visited: &mut usize,
+    used_path_bytes: &mut usize,
+    inventory: &mut BoundedFileInventory,
+    operation: &'static str,
+) -> Result<(), WorkspaceError> {
+    if inventory.truncated {
+        return Ok(());
+    }
+    let entries = Dir::read_from(directory).map_err(|source| rustix_io_error(operation, source))?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| rustix_io_error(operation, source))?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        if names.len() >= max_entries.saturating_sub(*visited).saturating_add(1) {
+            inventory.truncated = true;
+            break;
+        }
+        names.push(OsString::from(std::ffi::OsStr::from_bytes(name.to_bytes())));
+    }
+    names.sort();
+    for name in names {
+        if *visited >= max_entries {
+            inventory.truncated = true;
+            break;
+        }
+        *visited += 1;
+        let path = relative.join(&name);
+        let stat = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| rustix_io_error(operation, source))?;
+        if stat.st_dev as u64 != root_device {
+            return Err(WorkspaceError::OwnershipConflict { operation });
+        }
+        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+            if depth >= max_depth {
+                inventory.truncated = true;
+                continue;
+            }
+            #[cfg(test)]
+            coordinate_inventory_open(&path);
+            let child = openat(directory, &name, directory_flags(), Mode::empty())
+                .map_err(|source| rustix_io_error(operation, source))?;
+            let opened = fstat(&child).map_err(|source| rustix_io_error(operation, source))?;
+            if opened.st_dev != stat.st_dev || opened.st_ino != stat.st_ino {
+                return Err(WorkspaceError::OwnershipConflict { operation });
+            }
+            collect_workspace_files_nofollow(
+                &child,
+                &path,
+                root_device,
+                depth + 1,
+                max_depth,
+                max_entries,
+                max_path_bytes,
+                visited,
+                used_path_bytes,
+                inventory,
+                operation,
+            )?;
+            continue;
+        }
+        let path = path.to_string_lossy().into_owned();
+        if used_path_bytes.saturating_add(path.len()) > max_path_bytes {
+            inventory.truncated = true;
+            break;
+        }
+        *used_path_bytes += path.len();
+        inventory.files.push(path);
+    }
+    Ok(())
 }
 
 impl ValidatedOwnedDirectory {
@@ -130,6 +326,40 @@ pub(super) fn create_scratch_workspace_nofollow(
         });
     }
     Ok(path)
+}
+
+pub(super) fn remove_scratch_workspace_nofollow(
+    app_data_dir: &Path,
+    conversation_id: &str,
+) -> Result<(), WorkspaceError> {
+    const OPERATION: &str = "remove unpersisted projectless workspace without following links";
+    let app_data_path = canonicalize(app_data_dir, "resolve application data directory")?;
+    let flags = directory_flags();
+    let app_data = open(&app_data_path, flags, Mode::empty())
+        .map_err(|source| rustix_io_error(OPERATION, source))?;
+    let scratch = openat(&app_data, "scratch", flags, Mode::empty())
+        .map_err(|source| rustix_io_error(OPERATION, source))?;
+    let directory = openat(&scratch, conversation_id, flags, Mode::empty())
+        .map_err(|source| rustix_io_error(OPERATION, source))?;
+    let expected = app_data_path.join("scratch").join(conversation_id);
+    if canonicalize(&expected, "resolve unpersisted projectless workspace")? != expected {
+        return Err(WorkspaceError::OwnershipConflict {
+            operation: OPERATION,
+        });
+    }
+    let root_device = fstat(&directory)
+        .map_err(|source| rustix_io_error(OPERATION, source))?
+        .st_dev as u64;
+    remove_directory_contents_nofollow(&directory, root_device, OPERATION)?;
+    let current = openat(&scratch, conversation_id, flags, Mode::empty())
+        .map_err(|source| rustix_io_error(OPERATION, source))?;
+    if !same_directory_identity(&directory, &current, OPERATION)? {
+        return Err(WorkspaceError::OwnershipConflict {
+            operation: OPERATION,
+        });
+    }
+    unlinkat(&scratch, conversation_id, AtFlags::REMOVEDIR)
+        .map_err(|source| rustix_io_error(OPERATION, source))
 }
 
 pub(super) fn open_owned_worktree_target(

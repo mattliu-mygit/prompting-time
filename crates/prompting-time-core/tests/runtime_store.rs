@@ -99,6 +99,10 @@ async fn native_item_and_child_relationship_ids_are_persisted_in_event_payloads(
         .await
         .unwrap();
     store
+        .bind_native_session(run.id, "thread-parent")
+        .await
+        .unwrap();
+    store
         .append_run_event(run.id, root.id, ProviderEventRecord::started())
         .await
         .unwrap();
@@ -254,6 +258,10 @@ async fn waiting_child_relationship_payload_survives_recovery() {
         .unwrap();
     let (run, root) = store
         .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .bind_native_session(run.id, "thread-parent")
         .await
         .unwrap();
     store
