@@ -1,73 +1,83 @@
 # Provider protocol evidence
 
 This document records version-specific observations that gate provider adapters. It contains no
-credentials, transcript content from existing conversations, private paths, or machine-specific
-configuration.
+credentials, existing conversation content, private paths, or account identity.
 
-## Claude Code
+## Claude Code 2.1.205 (2026-09-04)
 
-### 2.1.205 protocol gate (2026-09-03)
+Authenticated probes establish the direct CLI boundaries below. The previous unauthenticated run
+was inconclusive; it did not demonstrate unsupported behavior. Production adapter implementation
+and application acceptance are separate from this protocol evidence.
 
-The installed CLI reports `2.1.205 (Claude Code)`. Its help exposes the intended non-interactive
-surface: stream-JSON input and output, partial messages, explicit session IDs, resume, permission
-modes, and agent tools. Source inspection of Anthropic's public Agent SDK also confirms that the CLI
-has a bidirectional JSON-lines control protocol for initialization, interruption, and permission
-responses. Those static observations do not demonstrate the runtime behaviors Prompting Time needs,
-so the live gate remains mandatory.
+| Behavior | Result | Sanitized evidence |
+| --- | --- | --- |
+| Two turns on one long-lived session | Pass | One session returned the requested ONE and TWO responses. |
+| Completed-turn process restart and context recall | Pass | A resumed process returned an invented marker supplied only before restart, with the same session ID. |
+| Interrupt and resume | Pass | Interruption produced terminal evidence, then the same session resumed successfully. |
+| Stdio mutation denial and approval | Pass | Write was held before mutation; denial left no file. A separate approved request wrote exactly PROBE to the validated owned target. |
+| Stdio single-select user question | Pass | AskUserQuestion accepted a selected option through updatedInput and returned BLUE. |
+| Two Write calls in one assistant batch | Pass, serialized callbacks | Distinct tool/request IDs shared an assistant message ID. Denying the first released the second; approving the second created only its file. |
+| Interrupt with permission pending | Pass | The held mutation did not run; shutdown invalidated the probe's response path. |
+| One-level child output and lifecycle | Pass | Agent invocation, child-origin output, matching task start and successful termination were observed. |
+| Depth-two identity and lifecycle | Pass | A nested Agent invocation attributed to the child linked to a distinct grandchild task; both tasks emitted successful termination. |
+| Grandchild text forwarding | Not observed | The nested invocation and lifecycle arrived, but no output carried the grandchild invocation's parent_tool_use_id. |
+| Legacy deferred denial and resume | Failed probe | A valid deferred Write was captured, but the restarted stream did not produce a result before its 120-second deadline. |
 
-The ignored `claude_protocol` tests launched only Prompting Time-owned processes in fresh temporary
-directories with mode `0700`, disabled filesystem setting sources, an empty strict MCP
-configuration, restrictive `dontAsk` or `manual` permissions, and invented prompts. Prompts were
-written as structured JSON to stdin. No-tool probes pass an empty tool allowlist, the mutation probe
-allows only `Write`, and the child probe allows only the installed version's `Agent` tool. Every
-process disables Chrome and has a USD 0.50 maximum budget. The approval probe uses a temporary
-startup-loaded `PreToolUse` hook whose `deny` state survives process restart; it does not bypass
-permissions. Normal and panic cleanup request shutdown and wait for the owned process for up to ten
-seconds. The observed post-gate process inventory contained no live-probe child.
+### Probe boundaries
 
-Each full control request or turn uses one absolute 120-second deadline rather than restarting a
-timeout after every event. Result validation requires a non-error `success` subtype. The approval
-probe additionally requires `stop_reason: tool_deferred`, a nonempty deferred `Write` ID, and the
-exact temporary path and `PROBE` content before resuming. The denial resume must finish successfully
-without another deferred call or filesystem mutation. The child probe requires a top-level
-`Agent` tool call, child-origin output correlated through `parent_tool_use_id`, and explicit
-successful child lifecycle termination. A matching tool result can acknowledge a background spawn
-and is not completion evidence. The child-specific collector continues after a root success until
-the child evidence passes or the original operation deadline expires.
+The ignored `claude_protocol` tests use only owned processes and fresh mode-0700 directories,
+invented prompts, disabled filesystem setting sources, and an empty strict MCP configuration.
+Workspace paths are canonical at creation: the CLI canonicalized a temporary-directory symlink,
+which originally caused a false path mismatch despite matching canonical parents. Exact target and
+content validation remains mandatory; an unrelated file with the same basename is rejected.
 
-The synthetic gate correlates `system/task_started` by session and `tool_use_id`, preserves its
-native `task_id`, and requires a `system/task_notification` with the same session/task, status
-`completed`, and matching `tool_use_id` when present. Missing evidence, wrong identities, and
-failed/stopped termination cannot pass. These are candidate wire shapes from the
-[public SDK types](https://raw.githubusercontent.com/anthropics/claude-agent-sdk-python/main/src/claude_agent_sdk/types.py),
-not authenticated observations of installed 2.1.205. The current public types also describe
-`task_updated` alternatives; this narrow probe requires `task_notification` and may remain
-inconclusive on a runtime emitting only that alternative. Synthetic regressions cover spawn-only
-acknowledgements and termination before/after the root result; they do not establish live support.
+No-tool probes allow no tools; child probes expose only Agent. Stdio probes expose Write and
+AskUserQuestion, use `--permission-mode default --permission-prompt-tool stdio`, and add no allow
+rules or permission updates. Each process disables Chrome and has a USD 0.50 budget. Each operation
+retains one absolute 120-second deadline. Normal and panic cleanup stop and await only the owned
+process, bounded to ten seconds.
 
-Command:
+### Validated control and lifecycle semantics
+
+The [public SDK transport](https://raw.githubusercontent.com/anthropics/claude-agent-sdk-python/main/src/claude_agent_sdk/_internal/transport/subprocess_cli.py)
+and [control implementation](https://raw.githubusercontent.com/anthropics/claude-agent-sdk-python/main/src/claude_agent_sdk/_internal/query.py)
+describe the stdio mechanism verified here. Initialize completes before the user message. An
+incoming `control_request` carries `request_id` and `request` with `subtype: can_use_tool`,
+`tool_name`, `input`, and `tool_use_id`. A matching `control_response` returns a success envelope
+whose inner response is either `behavior: deny` with a message, or `behavior: allow` with the
+validated `updatedInput`. No globally relaxed permission mode is needed.
+
+The question response preserves the received questions and adds an answers map keyed by question
+text. Only single-select was tested; multi-select and duplicate question text remain unverified.
+See the [user-input documentation](https://code.claude.com/docs/en/agent-sdk/user-input).
+
+Holding the first callback while waiting for a second timed out. The follow-up verified that both
+Writes belonged to one assistant message and that answering the first released the second. This
+establishes serialized permission checks for the observed batch, not concurrent outstanding
+callbacks. Application request arbitration and cancellation handling still require integration
+tests; probe shutdown rejection is not proof of application stale-response protection.
+
+Child correlation uses `system/task_started` task/session/tool IDs and
+`system/task_notification` with matching identity and status `completed`. A spawn acknowledgement
+is not termination. Root success is held until required child evidence arrives under the original
+deadline. The nested Agent block's `parent_tool_use_id` identifies its owning child invocation;
+its own tool ID links to the grandchild lifecycle. Task IDs are native task identity, not proof of
+independently resumable sessions. Top-level output remains required, while recursive hierarchy and
+status do not depend on grandchild text forwarding. The current
+[SDK types](https://raw.githubusercontent.com/anthropics/claude-agent-sdk-python/main/src/claude_agent_sdk/types.py)
+also describe task_updated alternatives; those were not needed or validated in this gate.
+
+The legacy defer/deny/resume probe remains as an explicitly unverified path. The
+[hooks documentation](https://code.claude.com/docs/en/hooks#defer-a-tool-call-for-later) also limits
+defer to a single tool call; it cannot replace general permission callbacks for a batch. The
+demonstrated stdio flow is the selected approval boundary.
+
+Run supported live acceptance separately from the known legacy failure:
 
 ```text
-PROMPTING_TIME_LIVE_CLAUDE=1 cargo test -p prompting-time-core --test claude_protocol -- --ignored --nocapture --test-threads=1
+PROMPTING_TIME_LIVE_CLAUDE=1 cargo test -p prompting-time-core --test claude_protocol -- --ignored --nocapture --test-threads=1 --skip live_deferred_approval_can_resume
 ```
 
-Observed result:
-
-| Required behavior | Result | Sanitized evidence |
-| --- | --- | --- |
-| Two turns on one long-lived session | Inconclusive | The first turn returned `Not logged in - Please run /login` instead of model output. |
-| Deferred denial and same-session resume | Inconclusive | No `deferred_tool_use` was emitted because the unauthenticated run never proposed a tool call. |
-| Interrupt and resume | Inconclusive | No assistant delta arrived before the bounded probe timeout because the run was unauthenticated. |
-| One-level child lifecycle and identity | Inconclusive | No child-agent start or stop event was emitted because the unauthenticated run never started an agent. |
-
-A separate read-only `claude auth status --json` check returned `loggedIn: false`, `authMethod:
-none`, and `apiProvider: firstParty`. This is an environment blocker, not evidence that any protocol
-behavior is unsupported. The direct CLI adapter decision therefore remains pending and the Agent SDK
-sidecar fallback is not selected.
-
-To unblock the gate, authenticate the installed CLI interactively with `claude` followed by
-`/login`, then rerun the command above. Adapter implementation, protocol fixtures, and any Claude
-feature commit must remain blocked until all four behaviors are demonstrated. These four probes
-are necessary but do not establish full adapter readiness: recursive parent/child correlation and
-affirmative approval still need live acceptance coverage. The existing defer/deny/resume mechanism
-is retained; its planned scope is denial and continuation, not an affirmative authorization path.
+Synthetic regressions validate the probe's rejection and correlation logic; they are not live
+evidence. The protocol gate does not establish production adapter availability, UI approval
+correctness, or application child hierarchy projection.

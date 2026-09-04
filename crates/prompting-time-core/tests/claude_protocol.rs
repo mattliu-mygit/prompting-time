@@ -20,6 +20,7 @@ type ProbeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 enum PermissionMode {
     DontAsk,
     Manual,
+    Stdio,
 }
 
 impl PermissionMode {
@@ -27,6 +28,7 @@ impl PermissionMode {
         match self {
             Self::DontAsk => "dontAsk",
             Self::Manual => "manual",
+            Self::Stdio => "default",
         }
     }
 }
@@ -36,6 +38,7 @@ enum ToolProfile {
     None,
     Mutation,
     ChildAgent,
+    UserInput,
 }
 
 impl ToolProfile {
@@ -44,6 +47,7 @@ impl ToolProfile {
             Self::None => "",
             Self::Mutation => "Write",
             Self::ChildAgent => "Agent",
+            Self::UserInput => "Write,AskUserQuestion",
         }
     }
 }
@@ -211,6 +215,10 @@ impl ProbeTurn {
     }
 
     fn child_agents(&self) -> ProbeResult<Vec<ChildAgentEvidence>> {
+        self.child_agents_under(None)
+    }
+
+    fn child_agents_under(&self, parent: Option<&str>) -> ProbeResult<Vec<ChildAgentEvidence>> {
         self.require_success()?;
         let starts = self
             .events
@@ -219,7 +227,7 @@ impl ProbeTurn {
             .filter(|event| {
                 event.get("session_id").and_then(Value::as_str) == Some(self.session_id.as_str())
             })
-            .filter(|event| event.get("parent_tool_use_id").is_none_or(Value::is_null))
+            .filter(|event| event.get("parent_tool_use_id").and_then(Value::as_str) == parent)
             .filter_map(|event| event.pointer("/message/content").and_then(Value::as_array))
             .flat_map(|content| content.iter())
             .filter(|block| {
@@ -242,7 +250,9 @@ impl ProbeTurn {
                         == Some(parent_tool_use_id)
                 })
                 .collect::<Vec<_>>();
-            if origin_events.is_empty() {
+            // The installed CLI forwards first-level output but only lifecycle
+            // and invoking-tool evidence for grandchildren.
+            if origin_events.is_empty() && parent.is_none() {
                 return Err(format!(
                     "Agent tool {parent_tool_use_id} emitted no child-origin event"
                 )
@@ -331,6 +341,7 @@ impl LiveClaudeProbe {
         let tool_profile = match permission_mode {
             PermissionMode::DontAsk => ToolProfile::None,
             PermissionMode::Manual => ToolProfile::Mutation,
+            PermissionMode::Stdio => ToolProfile::UserInput,
         };
         Self::spawn_with_tools(permission_mode, tool_profile).await
     }
@@ -343,7 +354,7 @@ impl LiveClaudeProbe {
             return Err("set PROMPTING_TIME_LIVE_CLAUDE=1 to run live Claude probes".into());
         }
 
-        let workspace = tempfile::tempdir()?;
+        let workspace = probe_workspace()?;
         fs::set_permissions(workspace.path(), fs::Permissions::from_mode(0o700))?;
         let runtime = tempfile::tempdir()?;
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
@@ -598,6 +609,40 @@ impl LiveClaudeProbe {
         Ok(turn)
     }
 
+    async fn permission_request(&mut self, deadline: Instant) -> ProbeResult<Value> {
+        loop {
+            let event = self.next_event(deadline).await?;
+            if event["type"] == "control_request" && event["request"]["subtype"] == "can_use_tool" {
+                required_string(&event, "request_id")?;
+                return Ok(event);
+            }
+            if event["type"] == "result" {
+                return Err("turn ended without a permission callback".into());
+            }
+        }
+    }
+
+    async fn answer_permission(
+        &self,
+        request: &Value,
+        response: Value,
+        deadline: Instant,
+    ) -> ProbeResult<()> {
+        let request_id = required_string(request, "request_id")?;
+        let process = self
+            .process
+            .as_ref()
+            .ok_or("probe process is not running")?;
+        timeout_at(
+            deadline,
+            process.send(&json!({"type":"control_response", "response":{
+                "subtype":"success", "request_id":request_id, "response":response
+            }})),
+        )
+        .await??;
+        Ok(())
+    }
+
     async fn control(&mut self, request: Value, deadline: Instant) -> ProbeResult<Value> {
         self.request_sequence += 1;
         let request_id = format!("probe-{}", self.request_sequence);
@@ -686,6 +731,16 @@ fn operation_deadline() -> Instant {
     Instant::now() + OPERATION_TIMEOUT
 }
 
+fn probe_workspace() -> std::io::Result<TempDir> {
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
+}
+
+#[test]
+fn probe_workspace_has_a_canonical_path() {
+    let workspace = probe_workspace().unwrap();
+    assert!(workspace.path() == workspace.path().canonicalize().unwrap());
+}
+
 fn process_args(
     tool_profile: ToolProfile,
     permission_mode: PermissionMode,
@@ -717,6 +772,9 @@ fn process_args(
     .collect::<Vec<_>>();
     if let Some(session_id) = resume {
         args.push(format!("--resume={session_id}"));
+    }
+    if permission_mode == PermissionMode::Stdio {
+        args.extend(["--permission-prompt-tool".to_owned(), "stdio".to_owned()]);
     }
     args
 }
@@ -823,6 +881,239 @@ async fn live_deferred_approval_can_resume() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "uses the installed Claude account"]
+async fn live_stdio_write_can_be_denied_and_allowed() {
+    for allow in [false, true] {
+        let mut probe = LiveClaudeProbe::spawn(PermissionMode::Stdio).await.unwrap();
+        let deadline = operation_deadline();
+        probe.send_prompt("Use Write exactly once to create approval-probe.txt containing exactly PROBE. Do not use other tools. If denied, do not retry.", deadline).await.unwrap();
+        let request = probe.permission_request(deadline).await.unwrap();
+        assert_eq!(request["request"]["tool_name"], "Write");
+        assert!(
+            request["request"]["tool_use_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        let input = &request["request"]["input"];
+        assert!(
+            input["file_path"].as_str().map(Path::new)
+                == Some(probe.cwd().join("approval-probe.txt").as_path())
+        );
+        assert_eq!(input["content"], "PROBE");
+        assert!(!probe.cwd().join("approval-probe.txt").exists());
+        let response = if allow {
+            json!({"behavior":"allow", "updatedInput":input})
+        } else {
+            json!({"behavior":"deny", "message":"User denied; do not retry"})
+        };
+        probe
+            .answer_permission(&request, response, deadline)
+            .await
+            .unwrap();
+        let turn = probe.receive_turn(deadline).await.unwrap();
+        turn.require_success().unwrap();
+        if allow {
+            assert_eq!(
+                fs::read_to_string(probe.cwd().join("approval-probe.txt")).unwrap(),
+                "PROBE"
+            );
+        } else {
+            assert!(!probe.cwd().join("approval-probe.txt").exists());
+        }
+        probe.finish().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account"]
+async fn live_completed_turn_resume_recalls_prior_context() {
+    let mut probe = LiveClaudeProbe::spawn(PermissionMode::DontAsk)
+        .await
+        .unwrap();
+    let marker = format!("PROBE-{}", Uuid::now_v7());
+    let first = probe
+        .send(&format!(
+            "Remember this invented marker: {marker}. Reply only STORED. Do not use tools."
+        ))
+        .await
+        .unwrap();
+    first.require_success().unwrap();
+    let resumed = probe
+        .resume(
+            &first.session_id,
+            "Reply with only the invented marker I gave you previously. Do not use tools.",
+        )
+        .await
+        .unwrap();
+    resumed.require_success().unwrap();
+    assert_eq!(resumed.session_id, first.session_id);
+    assert!(resumed.final_text.trim() == marker);
+    probe.finish().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account"]
+async fn live_stdio_question_accepts_selected_answer() {
+    let mut probe = LiveClaudeProbe::spawn(PermissionMode::Stdio).await.unwrap();
+    let deadline = operation_deadline();
+    probe.send_prompt("Use AskUserQuestion exactly once to ask 'Which probe color?' with single-select options BLUE and GREEN. Then reply with only the selected option. Do not use other tools.", deadline).await.unwrap();
+    let request = probe.permission_request(deadline).await.unwrap();
+    assert_eq!(request["request"]["tool_name"], "AskUserQuestion");
+    let mut input = request["request"]["input"].clone();
+    let questions = input["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0]["multiSelect"], false);
+    let question = required_string(&questions[0], "question")
+        .unwrap()
+        .to_owned();
+    assert!(
+        questions[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["label"] == "BLUE")
+    );
+    input["answers"] = json!({question:"BLUE"});
+    probe
+        .answer_permission(
+            &request,
+            json!({"behavior":"allow", "updatedInput":input}),
+            deadline,
+        )
+        .await
+        .unwrap();
+    let turn = probe.receive_turn(deadline).await.unwrap();
+    turn.require_success().unwrap();
+    assert_eq!(turn.final_text.trim(), "BLUE");
+    probe.finish().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account"]
+async fn live_stdio_batch_callbacks_can_be_answered_sequentially() {
+    let mut probe = LiveClaudeProbe::spawn(PermissionMode::Stdio).await.unwrap();
+    let deadline = operation_deadline();
+    probe.send_prompt("Make exactly two parallel Write calls in ONE assistant message: create parallel-a.txt with exactly PROBE and parallel-b.txt with exactly PROBE. Do not use other tools. Do not retry denied calls.", deadline).await.unwrap();
+    let first = probe.permission_request(deadline).await.unwrap();
+    probe
+        .answer_permission(
+            &first,
+            json!({"behavior":"deny", "message":"User denied; do not retry"}),
+            deadline,
+        )
+        .await
+        .unwrap();
+    let second = probe.permission_request(deadline).await.unwrap();
+    assert_ne!(first["request_id"], second["request_id"]);
+    let ids = [
+        &first["request"]["tool_use_id"],
+        &second["request"]["tool_use_id"],
+    ];
+    let message_ids = ids
+        .iter()
+        .map(|id| {
+            probe
+                .events
+                .iter()
+                .find(|event| {
+                    event["type"] == "assistant"
+                        && event["message"]["content"]
+                            .as_array()
+                            .is_some_and(|blocks| {
+                                blocks
+                                    .iter()
+                                    .any(|block| block["type"] == "tool_use" && &block["id"] == *id)
+                            })
+                })
+                .and_then(|event| event["message"]["id"].as_str())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        message_ids[0], message_ids[1],
+        "two callbacks must belong to one assistant batch"
+    );
+    let mut paths = Vec::new();
+    for request in [&first, &second] {
+        assert_eq!(request["request"]["tool_name"], "Write");
+        let input = &request["request"]["input"];
+        let path = PathBuf::from(input["file_path"].as_str().unwrap());
+        assert!(
+            path == probe.cwd().join("parallel-a.txt")
+                || path == probe.cwd().join("parallel-b.txt")
+        );
+        assert_eq!(input["content"], "PROBE");
+        assert!(!path.exists());
+        paths.push(path);
+    }
+    assert_ne!(paths[0], paths[1]);
+    probe
+        .answer_permission(
+            &second,
+            json!({"behavior":"allow", "updatedInput":second["request"]["input"]}),
+            deadline,
+        )
+        .await
+        .unwrap();
+    probe
+        .receive_turn(deadline)
+        .await
+        .unwrap()
+        .require_success()
+        .unwrap();
+    assert!(!paths[0].exists());
+    assert_eq!(fs::read_to_string(&paths[1]).unwrap(), "PROBE");
+    probe.finish().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account"]
+async fn live_stdio_interrupt_invalidates_held_callback() {
+    let mut probe = LiveClaudeProbe::spawn(PermissionMode::Stdio).await.unwrap();
+    let active = probe.begin("Use Write exactly once to create approval-probe.txt containing exactly PROBE. Do not use other tools.").await.unwrap();
+    let request = probe.permission_request(active.deadline).await.unwrap();
+    assert_eq!(request["request"]["tool_name"], "Write");
+    assert!(!probe.cwd().join("approval-probe.txt").exists());
+    probe.interrupt(active).await.unwrap();
+    assert!(!probe.cwd().join("approval-probe.txt").exists());
+    assert!(
+        probe
+            .answer_permission(
+                &request,
+                json!({"behavior":"allow", "updatedInput":request["request"]["input"]}),
+                operation_deadline()
+            )
+            .await
+            .is_err()
+    );
+    probe.finish().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account"]
+async fn live_recursive_child_lifecycle_preserves_parentage() {
+    let mut probe =
+        LiveClaudeProbe::spawn_with_tools(PermissionMode::DontAsk, ToolProfile::ChildAgent)
+            .await
+            .unwrap();
+    let deadline = operation_deadline();
+    probe.send_prompt("Use Agent exactly once to launch an orchestrating child. Tell that child to use Agent exactly once to launch a grandchild which replies GRANDCHILD, then report its reply. This must be a depth-two delegation: root -> child -> grandchild. Do not launch the grandchild yourself. Use no tools other than Agent.", deadline).await.unwrap();
+    let turn = probe.receive_child_turn(deadline).await.unwrap();
+    let children = turn.child_agents().unwrap();
+    assert_eq!(children.len(), 1);
+    let grandchildren = turn
+        .child_agents_under(Some(&children[0].parent_tool_use_id))
+        .unwrap();
+    assert_eq!(grandchildren.len(), 1);
+    assert_ne!(children[0].native_task_id, grandchildren[0].native_task_id);
+    assert_ne!(
+        children[0].parent_tool_use_id,
+        grandchildren[0].parent_tool_use_id
+    );
+    probe.finish().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account"]
 async fn live_interrupt_preserves_resumable_session() {
     let mut probe = LiveClaudeProbe::spawn(PermissionMode::DontAsk)
         .await
@@ -902,6 +1193,25 @@ fn deferred_write_requires_a_non_error_tool_deferred_result() {
     let turn = ProbeTurn::from_result(result.clone(), vec![]).unwrap();
     assert!(turn.deferred_write(workspace.path()).is_ok());
 
+    let other_workspace = tempfile::tempdir().unwrap();
+    let mut wrong_path = result.clone();
+    wrong_path["deferred_tool_use"]["input"]["file_path"] =
+        json!(other_workspace.path().join("approval-probe.txt"));
+    assert!(
+        ProbeTurn::from_result(wrong_path, vec![])
+            .unwrap()
+            .deferred_write(workspace.path())
+            .is_err()
+    );
+    let mut wrong_content = result.clone();
+    wrong_content["deferred_tool_use"]["input"]["content"] = json!("OTHER");
+    assert!(
+        ProbeTurn::from_result(wrong_content, vec![])
+            .unwrap()
+            .deferred_write(workspace.path())
+            .is_err()
+    );
+
     result["is_error"] = json!(true);
     let turn = ProbeTurn::from_result(result, vec![]).unwrap();
     assert!(turn.deferred_write(workspace.path()).is_err());
@@ -947,6 +1257,13 @@ fn child_evidence_requires_child_origin_events() {
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].parent_tool_use_id, parent);
     assert_eq!(agents[0].native_task_id, "task-1");
+    let mut nested = ProbeTurn::synthetic(with_child.events.clone());
+    nested.events[0]["parent_tool_use_id"] = json!("outer-tool");
+    assert!(nested.child_agents().is_err());
+    assert_eq!(
+        nested.child_agents_under(Some("outer-tool")).unwrap()[0].native_task_id,
+        "task-1"
+    );
     for (key, value) in [
         ("status", "failed"),
         ("status", "stopped"),
