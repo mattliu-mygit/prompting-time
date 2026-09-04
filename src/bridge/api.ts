@@ -16,6 +16,7 @@ import type {
   InspectorSnapshot,
   InterruptRunRequest,
   ListConversationsRequest,
+  LoadConversationRequest,
   LoadAgentTreeRequest,
   LoadApprovalDetailRequest,
   LoadApprovalQuestionsRequest,
@@ -79,6 +80,10 @@ export function getBootstrap(): Promise<BootstrapSnapshot> {
 
 export function listConversations(request: ListConversationsRequest): Promise<ConversationPage> {
   return call("list_conversations", { request });
+}
+
+export function loadConversation(request: LoadConversationRequest): Promise<ConversationSummary> {
+  return call("load_conversation", { request });
 }
 
 export function loadTimeline(request: LoadTimelineRequest): Promise<TimelinePage> {

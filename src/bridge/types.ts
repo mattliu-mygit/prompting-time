@@ -7,6 +7,7 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	bootstrap: () => typedError<BootstrapSnapshot_Serialize, CommandError>(__TAURI_INVOKE("bootstrap")),
 	listConversations: (request: ListConversationsRequest) => typedError<ConversationPage, CommandError>(__TAURI_INVOKE("list_conversations", { request })),
+	loadConversation: (request: LoadConversationRequest) => typedError<ConversationSummary, CommandError>(__TAURI_INVOKE("load_conversation", { request })),
 	loadTimeline: (request: LoadTimelineRequest) => typedError<TimelinePage, CommandError>(__TAURI_INVOKE("load_timeline", { request })),
 	loadAgentTree: (request: LoadAgentTreeRequest) => typedError<AgentTreePage, CommandError>(__TAURI_INVOKE("load_agent_tree", { request })),
 	loadEventDetail: (request: LoadEventDetailRequest) => typedError<EventDetailSnapshot, CommandError>(__TAURI_INVOKE("load_event_detail", { request })),
@@ -223,6 +224,10 @@ export type LoadApprovalsRequest = {
 	cursor: string | null,
 	limit: number,
 	kind: ApprovalListKind,
+};
+
+export type LoadConversationRequest = {
+	conversationId: string,
 };
 
 export type LoadEventDetailRequest = {

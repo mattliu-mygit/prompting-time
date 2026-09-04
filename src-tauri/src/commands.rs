@@ -79,6 +79,19 @@ pub async fn list_conversations(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn load_conversation(
+    state: State<'_, Arc<AppState>>,
+    request: LoadConversationRequest,
+) -> Result<ConversationSummary, CommandError> {
+    Ok(state
+        .service()?
+        .load_conversation_overview(parse_conversation_id(&request.conversation_id)?)
+        .await?
+        .into())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn load_timeline(
     state: State<'_, Arc<AppState>>,
     request: LoadTimelineRequest,
@@ -282,6 +295,7 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
         .commands(tauri_specta::collect_commands![
             bootstrap,
             list_conversations,
+            load_conversation,
             load_timeline,
             load_agent_tree,
             load_event_detail,

@@ -1,0 +1,62 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-size: 100%;
+  font-synthesis: none;
+  --color-canvas: #0d0f12;
+  --color-panel: #12151a;
+  --color-panel-raised: #191d23;
+  --color-line: #2a3039;
+  --color-line-strong: #3a424e;
+  --color-text: #f0f2f5;
+  --color-text-muted: #9ba5b4;
+  --color-accent: #8fb8ff;
+  --color-accent-soft: #1d3151;
+  --color-success: #74c69d;
+  --color-warning: #f2c46d;
+  --color-danger: #ff8585;
+  --color-interrupted: #b6a6db;
+  --left-pane-width: 15.9375rem;
+  --right-pane-width: 17.8125rem;
+  --toolbar-height: 3rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --radius-sm: 0.35rem;
+  --radius-md: 0.65rem;
+  --focus-ring: 0 0 0 0.125rem var(--color-accent);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 20rem;
+  min-height: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  color: var(--color-text);
+  background: var(--color-canvas);
+  line-height: 1.45;
+}
+
+button,
+select {
+  color: inherit;
+  font: inherit;
+}
+
+button:focus-visible,
+select:focus-visible,
+[role="treeitem"]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}

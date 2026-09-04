@@ -9,6 +9,7 @@ import {
   inspectWorkspace,
   interruptRun,
   listConversations,
+  loadConversation,
   loadAgentTree,
   loadApprovalDetail,
   loadApprovalQuestions,
@@ -56,6 +57,7 @@ describe("desktop bridge", () => {
     invokeMock.mockResolvedValue(undefined);
     await getBootstrap();
     await listConversations({ cursor: null, limit: 25 });
+    await loadConversation({ conversationId: "c-1" });
     await loadTimeline({ conversationId: "c-1", cursor: null, limit: 50 });
     await loadAgentTree({ conversationId: "c-1", cursor: null, limit: 100 });
     await loadEventDetail({ eventId: "event-1" });
@@ -81,6 +83,7 @@ describe("desktop bridge", () => {
     expect(invokeMock.mock.calls).toEqual([
       ["bootstrap"],
       ["list_conversations", { request: { cursor: null, limit: 25 } }],
+      ["load_conversation", { request: { conversationId: "c-1" } }],
       [
         "load_timeline",
         { request: { conversationId: "c-1", cursor: null, limit: 50 } },

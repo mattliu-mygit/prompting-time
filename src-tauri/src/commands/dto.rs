@@ -41,6 +41,12 @@ pub struct ListConversationsRequest {
     pub limit: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadConversationRequest {
+    pub conversation_id: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSummary {

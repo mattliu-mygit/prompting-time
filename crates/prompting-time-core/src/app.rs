@@ -516,6 +516,24 @@ impl PromptingTime {
         })
     }
 
+    pub async fn load_conversation_overview(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ConversationOverview, AppError> {
+        let conversation = self.store.load_conversation(conversation_id).await?;
+        let details = self
+            .store
+            .load_sidebar_details(&[conversation_id])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::InvalidData {
+                entity: "conversation overview",
+                detail: "requested conversation details were omitted".to_owned(),
+            })?;
+        Ok(overview(conversation, details))
+    }
+
     pub async fn load_timeline_snapshot(
         &self,
         conversation_id: ConversationId,
@@ -1039,6 +1057,29 @@ mod tests {
             AppError::Store(StoreError::InvalidData { .. })
         ));
         assert!(!app_data.exists());
+    }
+
+    #[tokio::test]
+    async fn one_conversation_overview_is_addressable_by_canonical_id() {
+        let temporary = tempdir().unwrap();
+        let app = PromptingTime::new(
+            Store::open_in_memory().await.unwrap(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            Vec::<Arc<dyn ProviderAdapter>>::new(),
+        )
+        .unwrap();
+        let created = app
+            .create_conversation_overview(ConversationRequest::projectless("Targeted refresh"))
+            .await
+            .unwrap();
+
+        let loaded = app
+            .load_conversation_overview(created.conversation.id)
+            .await
+            .unwrap();
+
+        assert_eq!(loaded, created);
     }
 
     #[tokio::test]
