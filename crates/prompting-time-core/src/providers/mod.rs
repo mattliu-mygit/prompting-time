@@ -7,7 +7,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -21,7 +20,10 @@ use crate::domain::{ConversationId, MutationState};
 
 pub mod claude;
 pub mod codex;
+mod command;
 pub mod process;
+
+pub use command::provider_command;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -427,7 +429,7 @@ pub async fn discover_provider(
     binary: &str,
     id: ProviderId,
 ) -> Result<ProviderInstallation, ProviderError> {
-    let mut command = Command::new(binary);
+    let mut command = provider_command(binary);
     command.arg("--version").kill_on_drop(true);
 
     let output = timeout(Duration::from_secs(5), command.output())

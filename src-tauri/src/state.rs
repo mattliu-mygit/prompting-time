@@ -12,7 +12,7 @@ use prompting_time_core::providers::codex::CodexAdapter;
 use prompting_time_core::providers::{
     ApprovalResponse, ProviderAdapter, ProviderCapabilities, ProviderError, ProviderErrorCategory,
     ProviderHealth, ProviderId, ProviderInstallation, ProviderSession, ProviderTurn, ResumeSession,
-    StartSession, TurnRequest, discover_provider,
+    StartSession, TurnRequest, discover_provider, provider_command,
 };
 use prompting_time_core::router::Router;
 use prompting_time_core::store::Store;
@@ -566,7 +566,7 @@ impl AppEventSequencer {
 }
 
 async fn codex_login_status() -> Result<bool, ()> {
-    let mut command = tokio::process::Command::new("codex");
+    let mut command = provider_command("codex");
     command.args(["login", "status"]).kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(5), command.output())
         .await

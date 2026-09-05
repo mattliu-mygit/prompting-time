@@ -28,6 +28,14 @@ The React/TypeScript interface talks to a typed Tauri command boundary. Rust own
 - Rust 1.98.1 through rustup; `rust-toolchain.toml` selects the required components.
 - At least one supported local provider CLI.
 
+Provider discovery, authentication checks, and launches preserve the order of absolute inherited
+`PATH` entries, then append `$HOME/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and the standard
+system binary directories. Duplicate, empty, and relative entries are excluded; the home fallback
+requires an absolute home directory that can be represented in `PATH`. This child-only environment
+also lets an explicitly located CLI find its shebang runtime, such as Node.js. Custom installations
+already in `PATH` take precedence. Prompting Time does not load shell startup files or modify the
+parent process environment.
+
 ### Codex
 
 Install Codex, authenticate it with `codex login`, and confirm `codex login status` succeeds before starting Prompting Time. Prompting Time launches and owns `codex app-server`; it does not copy Codex credentials. The integration follows the official [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).

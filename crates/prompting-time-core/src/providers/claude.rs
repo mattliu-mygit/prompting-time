@@ -17,7 +17,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
@@ -26,6 +25,7 @@ use uuid::Uuid;
 use super::process::{
     EVENT_CHANNEL_CAPACITY, JsonLineProcess, JsonLineSender, JsonLineShutdown, MAX_LINE_BYTES,
 };
+use super::provider_command;
 use super::{
     ApprovalResponse, ProviderAdapter, ProviderCapabilities, ProviderCapability, ProviderError,
     ProviderErrorCategory, ProviderEvent, ProviderHealth, ProviderId, ProviderSession,
@@ -329,7 +329,7 @@ impl ProviderAdapter for ClaudeAdapter {
             {
                 return Err(rejected());
             }
-            let mut command = Command::new(&self.inner.binary);
+            let mut command = provider_command(&self.inner.binary);
             command
                 .args([
                     "--print",
@@ -492,7 +492,7 @@ impl ProviderAdapter for ClaudeAdapter {
 }
 
 async fn inspect(binary: &PathBuf, args: &[&str]) -> Result<(Vec<u8>, bool), ProviderError> {
-    let mut child = Command::new(binary)
+    let mut child = provider_command(binary)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

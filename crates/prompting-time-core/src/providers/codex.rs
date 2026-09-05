@@ -7,13 +7,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::domain::MutationState;
 
 use super::process::{EVENT_CHANNEL_CAPACITY, JsonLineProcess, JsonLineSender, JsonLineShutdown};
+use super::provider_command;
 use super::{
     ApprovalRequestDetails, ApprovalResponse, FileChangeApprovalDetail, FileChangeKind,
     NativeAgentStatus, NativeChildStatus, NativeSubAgentActivityKind, ProviderAdapter,
@@ -223,7 +223,7 @@ impl CodexAdapter {
         binary: PathBuf,
         initialization_timeout: Duration,
     ) -> Result<Self, ProviderError> {
-        let mut command = Command::new(&binary);
+        let mut command = provider_command(&binary);
         command.arg("app-server");
         let process = JsonLineProcess::spawn(command)?;
         let process_shutdown = process.shutdown_handle();
