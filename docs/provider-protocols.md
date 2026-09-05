@@ -22,6 +22,42 @@ and application acceptance are separate from this protocol evidence.
 | Depth-two identity and lifecycle | Pass | A nested Agent invocation attributed to the child linked to a distinct grandchild task; both tasks emitted successful termination. |
 | Grandchild text forwarding | Not observed | The nested invocation and lifecycle arrived, but no output carried the grandchild invocation's parent_tool_use_id. |
 | Legacy deferred denial and resume | Failed probe | A valid deferred Write was captured, but the restarted stream did not produce a result before its 120-second deadline. |
+| Restart after initialize, before any prompt | Unsupported | A focused probe exited with native session not found in 0.85 seconds. Initialization alone did not create a resumable transcript; the temporary positive assertion was removed. |
+
+### Adapter and desktop integration evidence
+
+The Rust `ClaudeAdapter` now implements the selected stdio transport and is registered by the
+desktop app when its health check succeeds. Health accepts major 2 at or above 2.1.205, checks
+`claude auth status --json` under bounded process and output limits, and parses only `loggedIn`.
+Account identifiers and the complete auth response are neither logged nor persisted. The version
+policy permits compatibility checks on newer major-2 releases; live verification is specifically
+2.1.205, and unknown or malformed runtime protocol data still fails closed.
+
+The actual adapter passed two focused account-backed tests: streamed output with same-session
+process restart/context recall, and denied/allowed exact temporary Write. These tests exposed
+advisory `rate_limit_event` and `thinking_tokens` estimates; neither payload is persisted. The
+adapter uses one process per active turn, default stdio permissions, empty settings sources, an
+empty strict MCP config, and no model override. The legacy hook-defer/restart path is not used.
+
+Hermetic application composition tests exercise projectless automatic selection and explicit
+Claude override, persisted native-session resume after app reconstruction, canonical approval IDs
+and question answers, stale response rejection, and completed depth-two sidebar ancestry. Existing
+provider-switch tests cover handoff and fallback policy. Desktop tests verify that availability and
+registered capabilities agree across authenticated, missing, unsupported, and malformed states.
+
+Separate opt-in `live_app_` tests exercise canonical application APIs for repeated projectless
+turns and Claude → Claude → Codex → Claude continuity, exact-file denial/approval, and recursive
+child/grandchild completion. Those application tests are not claimed as passed here until run and
+recorded by the release coordinator. They do not constitute native UI or notification evidence.
+
+Claude advertises streaming, permission/question responses, interruption, resume, and child
+hierarchy, but not steering. Multi-select questions are safely declined; duplicate question text
+fails closed. Native task IDs establish ancestry and status, not independently resumable child
+sessions. Grandchild text remains absent from the observed depth-two protocol stream. Cancellation
+before the first prompt is kept fresh in-process, but restarting the app in that narrow state can
+leave a missing native transcript and require a new conversation. Completed and interrupted prompt
+sessions have resumed in the focused live probes. No replay/fallback policy is added for missing
+native sessions, and private resource import remains outside this milestone.
 
 ### Probe boundaries
 
@@ -48,14 +84,15 @@ whose inner response is either `behavior: deny` with a message, or `behavior: al
 validated `updatedInput`. No globally relaxed permission mode is needed.
 
 The question response preserves the received questions and adds an answers map keyed by question
-text. Only single-select was tested; multi-select and duplicate question text remain unverified.
+text. Only single-select was exercised live; the adapter safely declines multi-select and rejects
+duplicate question text in hermetic tests.
 See the [user-input documentation](https://code.claude.com/docs/en/agent-sdk/user-input).
 
 Holding the first callback while waiting for a second timed out. The follow-up verified that both
 Writes belonged to one assistant message and that answering the first released the second. This
 establishes serialized permission checks for the observed batch, not concurrent outstanding
-callbacks. Application request arbitration and cancellation handling still require integration
-tests; probe shutdown rejection is not proof of application stale-response protection.
+callbacks. Separate hermetic runtime tests cover application request arbitration and cancellation;
+application composition tests cover stale-response protection through canonical approval IDs.
 
 Child correlation uses `system/task_started` task/session/tool IDs and
 `system/task_notification` with matching identity and status `completed`. A spawn acknowledgement
@@ -79,5 +116,4 @@ PROMPTING_TIME_LIVE_CLAUDE=1 cargo test -p prompting-time-core --test claude_pro
 ```
 
 Synthetic regressions validate the probe's rejection and correlation logic; they are not live
-evidence. The protocol gate does not establish production adapter availability, UI approval
-correctness, or application child hierarchy projection.
+evidence. Adapter, application, and native UI checks remain distinct evidence boundaries.

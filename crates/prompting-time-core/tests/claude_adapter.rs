@@ -2,15 +2,20 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use prompting_time_core::domain::{ConversationId, MutationState};
+use prompting_time_core::app::{ConversationRequest, PromptingTime, SubmitRequest};
+use prompting_time_core::domain::{AgentStatus, ConversationId, MutationState, RunStatus};
 use prompting_time_core::providers::claude::ClaudeAdapter;
 use prompting_time_core::providers::{
     ApprovalResponse, NativeAgentStatus, ProviderAdapter, ProviderCapability, ProviderError,
-    ProviderEvent, ProviderHealth, ProviderSession, ProviderTurn, ResumeSession, StartSession,
-    TurnRequest,
+    ProviderEvent, ProviderHealth, ProviderId, ProviderSession, ProviderTurn, ResumeSession,
+    StartSession, TurnRequest,
 };
+use prompting_time_core::router::Router;
+use prompting_time_core::store::Store;
+use prompting_time_core::workspace::WorkspaceManager;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -61,6 +66,289 @@ impl Fixture {
     fn read(&self, name: &str) -> Value {
         serde_json::from_slice(&fs::read(self.directory.path().join(name)).unwrap()).unwrap()
     }
+
+    fn app(&self, store: Store) -> PromptingTime {
+        PromptingTime::new(
+            store,
+            Router::default(),
+            WorkspaceManager::new(self.directory.path()),
+            vec![Arc::new(ClaudeAdapter::new(
+                self.directory.path().join("claude-fixture"),
+            ))],
+        )
+        .unwrap()
+    }
+}
+
+fn app_request(
+    conversation_id: ConversationId,
+    content: &str,
+    provider: Option<ProviderId>,
+) -> SubmitRequest {
+    SubmitRequest {
+        command_id: uuid::Uuid::now_v7().to_string(),
+        conversation_id,
+        content: content.into(),
+        provider_override: provider,
+    }
+}
+
+#[tokio::test]
+async fn app_projectless_auto_routing_and_restart_resume_keep_canonical_session() {
+    let fixture = Fixture::new(
+        r#"
+record('cwd', os.getcwd())
+if any(arg.startswith('--resume=') for arg in sys.argv):
+    assistant([{'type':'text','text':(root / 'context').read_text()}])
+else:
+    (root / 'context').write_text('INVENTED-CONTINUITY')
+    assistant([{'type':'text','text':'STORED'}])
+result()
+"#,
+    );
+    let database = fixture.directory.path().join("app.sqlite");
+    let store = Store::open(&database).await.unwrap();
+    let app = fixture.app(store.clone());
+    let conversation = app
+        .create_conversation(ConversationRequest::projectless("Invented continuity"))
+        .await
+        .unwrap();
+    let first = app
+        .submit(app_request(
+            conversation.id,
+            "Remember INVENTED-CONTINUITY",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.decision.provider, ProviderId::Claude);
+    assert_eq!(
+        timeout(Duration::from_secs(10), first.handle.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Completed
+    );
+    let native = store
+        .load_provider_session(conversation.id, ProviderId::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    let workspace = store.load_workspace(conversation.id).await.unwrap();
+    assert!(workspace.project_root.is_none());
+    assert_eq!(
+        Path::new(fixture.read("cwd").as_str().unwrap()),
+        workspace.execution_path.canonicalize().unwrap()
+    );
+    app.shutdown().await.unwrap();
+    drop(app);
+    drop(store);
+
+    let store = Store::open(&database).await.unwrap();
+    let app = fixture.app(store.clone());
+    assert_eq!(app.reconcile_startup().await.unwrap(), 0);
+    let second = app
+        .submit(app_request(
+            conversation.id,
+            "Recall",
+            Some(ProviderId::Claude),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(10), second.handle.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Completed
+    );
+    assert_eq!(
+        store
+            .load_provider_session(conversation.id, ProviderId::Claude)
+            .await
+            .unwrap()
+            .unwrap(),
+        native
+    );
+    assert!(
+        fixture
+            .read("args")
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!("--resume={}", native.native_id)))
+    );
+    let timeline = app
+        .load_timeline_snapshot(conversation.id, None, 80)
+        .await
+        .unwrap();
+    assert!(
+        timeline
+            .events
+            .items
+            .iter()
+            .any(|record| record.event.content == "INVENTED-CONTINUITY")
+    );
+    assert_eq!(
+        app.load_run_audits(conversation.id, None, 10)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn app_approval_and_question_responses_use_canonical_ids_and_reject_stale_actions() {
+    let fixture = Fixture::new(
+        r#"
+permission()
+record('permission-response', receive())
+permission(rid='question-request',tool='AskUserQuestion',data={'questions':[{'question':'Exact question?', 'header':'Choice','multiSelect':False,'options':[{'label':'BLUE','description':'Blue choice'}]}]})
+record('question-response', receive())
+result()
+"#,
+    );
+    let app = fixture.app(Store::open_in_memory().await.unwrap());
+    let conversation = app
+        .create_conversation(ConversationRequest::projectless("Invented approval"))
+        .await
+        .unwrap();
+    let submission = app
+        .submit(app_request(
+            conversation.id,
+            "Request permission and a choice",
+            Some(ProviderId::Claude),
+        ))
+        .await
+        .unwrap();
+    let work = async {
+        let mut changes = app.subscribe_changes();
+        let mut previous = None;
+        for is_question in [false, true] {
+            let approval = loop {
+                let approvals = app
+                    .load_approvals(conversation.id, None, true, 30)
+                    .await
+                    .unwrap();
+                if let Some(approval) = approvals
+                    .items
+                    .into_iter()
+                    .find(|item| Some(item.id) != previous)
+                {
+                    break approval;
+                }
+                changes.recv().await.unwrap();
+            };
+            assert_eq!(approval.provider, ProviderId::Claude);
+            let response = if is_question {
+                let questions = app
+                    .load_approval_questions(approval.id, None, 30)
+                    .await
+                    .unwrap();
+                assert_eq!(questions.items[0].question, "Exact question?");
+                ApprovalResponse::Answers(BTreeMap::from([(
+                    questions.items[0].id.clone(),
+                    vec!["BLUE".into()],
+                )]))
+            } else {
+                assert_eq!(approval.operation, "Write");
+                ApprovalResponse::Denied
+            };
+            app.respond_to_approval_id(approval.id, response)
+                .await
+                .unwrap();
+            assert!(
+                app.respond_to_approval_id(approval.id, ApprovalResponse::Approved)
+                    .await
+                    .is_err()
+            );
+            previous = Some(approval.id);
+        }
+        assert_eq!(
+            submission.handle.wait().await.unwrap().status,
+            RunStatus::Completed
+        );
+    };
+    timeout(Duration::from_secs(10), work).await.unwrap();
+    assert_eq!(
+        fixture.read("permission-response")["response"]["response"]["behavior"],
+        "deny"
+    );
+    assert_eq!(
+        fixture.read("question-response")["response"]["response"]["updatedInput"]["answers"],
+        json!({"Exact question?":"BLUE"})
+    );
+    assert!(
+        app.load_approvals(conversation.id, None, true, 30)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn app_recursive_claude_tasks_project_into_canonical_sidebar_hierarchy() {
+    let fixture = Fixture::new(
+        r#"
+assistant([{'type':'tool_use','id':'agent-a','name':'Agent','input':{}}])
+task('task_started','task-a','agent-a')
+assistant([{'type':'tool_use','id':'agent-b','name':'Agent','input':{}}], parent='agent-a',mid='child')
+task('task_started','task-b','agent-b')
+task('task_notification','task-b','agent-b',status='completed')
+task('task_notification','task-a','agent-a',status='completed')
+result()
+"#,
+    );
+    let app = fixture.app(Store::open_in_memory().await.unwrap());
+    let conversation = app
+        .create_conversation(ConversationRequest::projectless("Invented tree"))
+        .await
+        .unwrap();
+    let submission = app
+        .submit(app_request(conversation.id, "Delegate recursively", None))
+        .await
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(10), submission.handle.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Completed
+    );
+    let tree = app
+        .load_agent_page(conversation.id, None, 20)
+        .await
+        .unwrap();
+    assert_eq!(tree.items.len(), 3);
+    let child = tree.items.iter().find(|item| item.depth == 1).unwrap();
+    let grandchild = tree.items.iter().find(|item| item.depth == 2).unwrap();
+    assert_eq!(grandchild.agent.parent_id, Some(child.agent.id));
+    assert_eq!((child.depth, grandchild.depth), (1, 2));
+    assert!(
+        tree.items
+            .iter()
+            .all(|item| item.agent.status == AgentStatus::Completed)
+    );
+    assert!(
+        tree.items
+            .iter()
+            .all(|item| item.agent.provider_native_id.is_none())
+    );
+    assert_eq!(
+        app.load_conversation_overview(conversation.id)
+            .await
+            .unwrap()
+            .rollup_status,
+        Some(prompting_time_core::domain::RollupStatus::Completed)
+    );
+    app.shutdown().await.unwrap();
 }
 
 const PRELUDE: &str = r#"#!/usr/bin/env python3
@@ -506,6 +794,243 @@ async fn live_adapter_denies_and_allows_invented_write() {
         adapter.shutdown().await.unwrap();
         result.expect("live smoke deadline").unwrap();
     }
+}
+
+// Exercises the same canonical APIs used by Tauri, without launching or controlling a native UI.
+async fn live_app_turn(
+    app: &PromptingTime,
+    conversation_id: ConversationId,
+    provider: ProviderId,
+    prompt: &str,
+    write: Option<(&Path, bool)>,
+    allow_agents: bool,
+) -> Result<(String, usize), Box<dyn std::error::Error>> {
+    let mut changes = app.subscribe_changes();
+    let submission = app
+        .submit(app_request(conversation_id, prompt, Some(provider)))
+        .await?;
+    if submission.decision.provider != provider {
+        return Err("explicit provider override was not honored".into());
+    }
+    let mut answered = std::collections::HashSet::new();
+    let mut exact_writes = 0;
+    let mut agent_approvals = 0;
+    let outcome = loop {
+        for approval in app
+            .load_approvals(conversation_id, None, true, 30)
+            .await?
+            .items
+        {
+            if !answered.insert(approval.id) {
+                continue;
+            }
+            let exact = if let Some((target, _)) = write {
+                let detail = app.load_approval_detail(approval.id).await?;
+                approval.provider == ProviderId::Claude
+                    && approval.operation == "Write"
+                    && Path::new(&approval.scope) == target
+                    && !detail.truncated
+                    && matches!(detail.details, Some(prompting_time_core::domain::ApprovalRequestDetails::FileChange { changes, .. }) if changes.len() == 1 && Path::new(&changes[0].path) == target)
+            } else {
+                false
+            };
+            let agent = allow_agents
+                && approval.provider == ProviderId::Claude
+                && approval.operation == "Agent"
+                && agent_approvals < 2;
+            agent_approvals += usize::from(agent);
+            let allow =
+                agent || (exact && exact_writes == 0 && write.is_some_and(|(_, allow)| allow));
+            exact_writes += usize::from(exact);
+            app.respond_to_approval_id(
+                approval.id,
+                if allow {
+                    ApprovalResponse::Approved
+                } else {
+                    ApprovalResponse::Denied
+                },
+            )
+            .await?;
+        }
+        tokio::select! {
+            outcome = submission.handle.wait() => break outcome?,
+            changed = changes.recv() => { changed?; },
+        }
+    };
+    if outcome.status != RunStatus::Completed {
+        let diagnostics = app
+            .load_timeline_snapshot(conversation_id, None, 80)
+            .await?
+            .events
+            .items
+            .into_iter()
+            .filter(|record| {
+                record.event.kind == prompting_time_core::domain::TimelineEventKind::Diagnostic
+            })
+            .map(|record| record.event.content)
+            .collect::<Vec<_>>();
+        return Err(format!("app turn ended {:?}: {diagnostics:?}", outcome.status).into());
+    }
+    let text = app
+        .load_timeline_snapshot(conversation_id, None, 80)
+        .await?
+        .events
+        .items
+        .into_iter()
+        .filter(|record| {
+            record.event.run_id == submission.handle.run_id()
+                && record.event.role == Some(prompting_time_core::domain::MessageRole::Assistant)
+        })
+        .map(|record| record.event.content)
+        .collect::<Vec<_>>()
+        .join("");
+    Ok((text, exact_writes))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses both installed provider accounts; coordinator runs explicitly"]
+async fn live_app_projectless_repeated_turns_and_provider_switching() {
+    assert_eq!(
+        std::env::var("PROMPTING_TIME_LIVE_CLAUDE").as_deref(),
+        Ok("1")
+    );
+    assert_eq!(
+        std::env::var("PROMPTING_TIME_LIVE_CODEX").as_deref(),
+        Ok("1")
+    );
+    let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let store = Store::open(&directory.path().join("app.sqlite"))
+        .await
+        .unwrap();
+    let codex =
+        prompting_time_core::providers::codex::CodexAdapter::connect_with_initialization_timeout(
+            "codex".into(),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    let app = PromptingTime::new(
+        store.clone(),
+        Router::default(),
+        WorkspaceManager::new(directory.path()),
+        vec![
+            Arc::new(ClaudeAdapter::new("claude".into())),
+            Arc::new(codex),
+        ],
+    )
+    .unwrap();
+    let marker = format!("INVENTED-{}", uuid::Uuid::now_v7());
+    let result = timeout(Duration::from_secs(300), async {
+        let conversation = app.create_conversation(ConversationRequest::projectless("Invented provider continuity")).await?;
+        let mut outputs = Vec::new();
+        outputs.push(live_app_turn(&app, conversation.id, ProviderId::Claude, &format!("Remember this invented marker: {marker}. Reply only STORED. Do not use tools."), None, false).await?.0);
+        let original = store.load_provider_session(conversation.id, ProviderId::Claude).await?;
+        for provider in [ProviderId::Claude, ProviderId::Codex, ProviderId::Claude] {
+            outputs.push(live_app_turn(&app, conversation.id, provider, "What was the invented marker? Reply with only that exact marker. Use no tools.", None, false).await?.0);
+        }
+        let resumed = store.load_provider_session(conversation.id, ProviderId::Claude).await?;
+        let audits = app.load_run_audits(conversation.id, None, 10).await?;
+        Ok::<_, Box<dyn std::error::Error>>((outputs, original, resumed, audits))
+    }).await;
+    app.shutdown_with_grace(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let (outputs, original, resumed, audits) =
+        result.expect("bounded app switching smoke").unwrap();
+    assert_eq!(
+        outputs.iter().map(|text| text.trim()).collect::<Vec<_>>(),
+        ["STORED", &marker, &marker, &marker]
+    );
+    assert!(original.is_some());
+    assert_eq!(original, resumed);
+    assert_eq!(audits.items.len(), 4);
+    assert_eq!(
+        audits
+            .items
+            .iter()
+            .filter(|run| run.provider == ProviderId::Codex)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account; coordinator runs explicitly"]
+async fn live_app_canonical_approval_denies_and_allows_invented_write() {
+    assert_eq!(
+        std::env::var("PROMPTING_TIME_LIVE_CLAUDE").as_deref(),
+        Ok("1")
+    );
+    for allow in [false, true] {
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let store = Store::open(&directory.path().join("app.sqlite"))
+            .await
+            .unwrap();
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(directory.path()),
+            vec![Arc::new(ClaudeAdapter::new("claude".into()))],
+        )
+        .unwrap();
+        let result = timeout(Duration::from_secs(120), async {
+            let conversation = app.create_conversation(ConversationRequest::projectless("Invented approval boundary")).await?;
+            let target = store.load_workspace(conversation.id).await?.execution_path.canonicalize()?.join("app-probe.txt");
+            let (_, requests) = live_app_turn(&app, conversation.id, ProviderId::Claude, &format!("Use the Write tool exactly once to write the exact text APP-PROBE to {}. Use no other tools. If permission is denied, do not retry. Then reply DONE.", target.display()), Some((&target, allow)), false).await?;
+            Ok::<_, Box<dyn std::error::Error>>((target, requests))
+        }).await;
+        app.shutdown_with_grace(Duration::from_secs(5))
+            .await
+            .unwrap();
+        let (target, requests) = result.expect("bounded app approval smoke").unwrap();
+        assert_eq!(requests, 1);
+        if allow {
+            assert_eq!(fs::read_to_string(target).unwrap().trim(), "APP-PROBE");
+        } else {
+            assert!(!target.exists());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "uses the installed Claude account; coordinator runs explicitly"]
+async fn live_app_recursive_claude_tasks_have_completed_canonical_ancestry() {
+    assert_eq!(
+        std::env::var("PROMPTING_TIME_LIVE_CLAUDE").as_deref(),
+        Ok("1")
+    );
+    let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let app = PromptingTime::new(
+        Store::open(&directory.path().join("app.sqlite"))
+            .await
+            .unwrap(),
+        Router::default(),
+        WorkspaceManager::new(directory.path()),
+        vec![Arc::new(ClaudeAdapter::new("claude".into()))],
+    )
+    .unwrap();
+    let result = timeout(Duration::from_secs(180), async {
+        let conversation = app.create_conversation(ConversationRequest::projectless("Invented recursive delegation")).await?;
+        live_app_turn(&app, conversation.id, ProviderId::Claude,
+            "Use Agent exactly once to launch an orchestrating child. Tell that child to use Agent exactly once to launch a grandchild which replies GRANDCHILD, then report its reply. This must be a depth-two delegation: root -> child -> grandchild. Do not launch the grandchild yourself. Use no tools other than Agent. Do not read or write files.",
+            None, true).await?;
+        Ok::<_, Box<dyn std::error::Error>>(app.load_agent_page(conversation.id, None, 20).await?)
+    }).await;
+    app.shutdown_with_grace(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let tree = result.expect("bounded recursive app smoke").unwrap();
+    assert_eq!(tree.items.len(), 3);
+    let root = tree.items.iter().find(|item| item.depth == 0).unwrap();
+    let child = tree.items.iter().find(|item| item.depth == 1).unwrap();
+    let grandchild = tree.items.iter().find(|item| item.depth == 2).unwrap();
+    assert_eq!(child.agent.parent_id, Some(root.agent.id));
+    assert_eq!(grandchild.agent.parent_id, Some(child.agent.id));
+    assert!(
+        tree.items
+            .iter()
+            .all(|item| item.agent.status == AgentStatus::Completed)
+    );
 }
 
 #[tokio::test]

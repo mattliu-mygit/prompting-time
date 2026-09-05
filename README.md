@@ -2,15 +2,15 @@
 
 Prompting Time is a work-in-progress local macOS desktop app for managing coding-agent conversations across installed CLI harnesses. It owns the shared conversation, routing, execution tree, approvals, and workspace state while each provider keeps ownership of its native authentication and sessions.
 
-The current release candidate has a Codex App Server adapter. It has no Claude adapter: Claude Code is discovered and shown with a diagnostic, but remains unavailable for execution because the only protocol probes run so far were blocked by an unauthenticated CLI and are inconclusive.
+The current release candidate integrates Codex App Server and Claude Code. Supported, authenticated CLIs are available for automatic routing or explicit provider selection. Claude's actual adapter has passed focused authenticated streaming/resume and approval smoke tests; application orchestration and native UI evidence are reported separately.
 
 ## What is implemented
 
 - Multiple concurrent projectless and project-backed conversations.
 - Recursive agent trees: any child may act as an orchestrator and create descendants.
 - Deterministic automatic routing with a visible reason and per-turn provider override.
-- Provider-neutral switching and bounded context-handoff machinery at turn boundaries, covered hermetically with fake adapters and Codex protocol boundaries. Live Codex-to-Claude switching is unavailable and unverified.
-- Streamed timeline activity, approval and question handling, steering, interruption, and safe archival.
+- Provider switching and bounded context handoff at turn boundaries, with hermetic switching coverage and an opt-in live application smoke. Live switching is not implied by adapter-only tests.
+- Streamed timeline activity, approval and question handling, steering where supported, interruption, and safe archival.
 - SQLite-backed conversation state with bounded queries, stable pagination, and startup recovery.
 - A narrow Tauri macOS notification integration for background completion, failure, and needs-attention transitions, with hermetic policy and deduplication tests. Native delivery has not been exercised by an automated Tauri E2E or visual smoke test.
 
@@ -34,7 +34,11 @@ Install Codex, authenticate it with `codex login`, and confirm `codex login stat
 
 ### Claude Code
 
-Claude Code can be discovered, but there is no Claude adapter and it is not currently eligible for routing or selectable for execution in the UI. The protocol probes are inconclusive: the observed CLI was unauthenticated, so they did not establish long-lived streaming, deferred approvals, interruption/resume, or child-agent identity. Authenticate interactively with `claude` and `/login`, then run the opt-in probe described below. The relevant official interfaces are documented under [headless mode](https://code.claude.com/docs/en/headless), [user input](https://code.claude.com/docs/en/agent-sdk/user-input), and [hooks](https://code.claude.com/docs/en/hooks).
+Install Claude Code and run `claude auth login`; verify `claude auth status --json` before starting Prompting Time. Desktop registration uses the adapter's bounded health check and reads only the authentication boolean. Missing, unsupported, unauthenticated, or uninspectable installations remain visible with actionable diagnostics and are excluded from routing.
+
+The compatibility gate accepts major version 2 at or above 2.1.205. Live evidence is specifically for 2.1.205; newer allowed releases still undergo fail-closed protocol validation. The adapter starts one owned process per active turn and resumes its native session on subsequent turns. It supports streaming, in-app permission and single-select question responses, interruption, resume, and recursive child hierarchy; it does not support steering. The CLI selects its default model.
+
+Claude runs with default permissions through stdio, empty filesystem settings sources, and an empty strict MCP configuration. Imported hooks, skills, memories, and other private resources are outside this milestone. The relevant official interfaces are documented under [headless mode](https://code.claude.com/docs/en/headless) and [user input](https://code.claude.com/docs/en/agent-sdk/user-input).
 
 ## Workspaces
 
@@ -73,11 +77,15 @@ Public CI uses hermetic fixtures and does not consume provider accounts. Live pr
 PROMPTING_TIME_LIVE_CODEX=1 cargo test -p prompting-time-core --test adapter_contract \
   live_codex_smoke_uses_an_empty_temporary_git_repository -- --ignored --nocapture --test-threads=1
 
-PROMPTING_TIME_LIVE_CLAUDE=1 cargo test -p prompting-time-core --test claude_protocol \
+PROMPTING_TIME_LIVE_CLAUDE=1 cargo test -p prompting-time-core --test claude_adapter \
+  live_adapter -- --ignored --nocapture --test-threads=1
+
+PROMPTING_TIME_LIVE_CLAUDE=1 PROMPTING_TIME_LIVE_CODEX=1 \
+  cargo test -p prompting-time-core --test claude_adapter live_app_ \
   -- --ignored --nocapture --test-threads=1
 ```
 
-No live provider result is implied by a normal test or build. The recorded Claude gate remains inconclusive because its observed CLI session was unauthenticated; see [provider protocol evidence](docs/provider-protocols.md).
+No live provider result is implied by a normal test or build. The application smokes use fresh projectless state, an invented marker across Claude → Claude → Codex → Claude turns, exact-file denial/approval, and depth-two delegation through canonical application APIs. They do not drive the native UI. The older hook-defer probe remains a known failure and is excluded from these commands; see [provider protocol evidence](docs/provider-protocols.md).
 
 ## Privacy boundary
 
@@ -104,8 +112,10 @@ Shutdown asks owned run tasks and provider adapters to stop, waits up to five se
 
 ## Known limitations
 
-- Claude execution is gated and unavailable.
-- Live Codex-to-Claude provider switching is unavailable; only the provider-neutral machinery has hermetic coverage.
+- Live application switching and native visual verification are separate acceptance gates; current recorded live adapter success alone does not establish either.
+- Claude multi-select questions are safely declined; the current UI supports single-select responses.
+- Claude task identities drive recursive hierarchy and status, but do not imply direct child-session resume. Grandchild text forwarding was not observed in the depth-two live protocol probe.
+- If Claude is cancelled before its first prompt and the app then restarts, initialization alone may have left no resumable native transcript. The next attempt fails closed and may require a new conversation. Completed and interrupted prompt sessions have resumed successfully in focused live probes.
 - The app is unsigned and not notarized.
 - There is no updater or packaged installer yet.
 - Active or approval-waiting provider turns are conservatively interrupted on app restart.

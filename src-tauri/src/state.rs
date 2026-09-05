@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use prompting_time_core::app::{ConversationOverview, PromptingTime};
 use prompting_time_core::domain::{ConversationId, RollupStatus};
+use prompting_time_core::providers::claude::ClaudeAdapter;
 use prompting_time_core::providers::codex::CodexAdapter;
 use prompting_time_core::providers::{
     ApprovalResponse, ProviderAdapter, ProviderCapabilities, ProviderError, ProviderErrorCategory,
@@ -230,7 +231,6 @@ impl AppState {
             })?;
 
         let codex_installation = installation("codex", ProviderId::Codex).await;
-        let claude_installation = installation("claude", ProviderId::Claude).await;
         let mut adapters: Vec<Arc<dyn ProviderAdapter>> = Vec::new();
         let codex = match &codex_installation {
             Ok(installation) => match codex_login_status().await {
@@ -264,24 +264,8 @@ impl AppState {
             },
             Err(diagnostic) => diagnostic.clone(),
         };
-        let claude = match &claude_installation {
-            Ok(installation) => ProviderDiagnostic {
-                id: ProviderId::Claude,
-                installed: true,
-                available: false,
-                version: installation.version.clone(),
-                diagnostic: Some(
-                    "Claude Code integration is unavailable until its authenticated protocol gate passes."
-                        .to_owned(),
-                ),
-                action: Some(
-                    "Run `claude` interactively, use `/login`, then rerun the protocol gate."
-                        .to_owned(),
-                ),
-                capabilities: ProviderCapabilities::default(),
-            },
-            Err(diagnostic) => diagnostic.clone(),
-        };
+        let (claude_adapter, claude) = claude_provider(PathBuf::from("claude")).await;
+        adapters.push(claude_adapter);
 
         if !adapters
             .iter()
@@ -292,10 +276,6 @@ impl AppState {
                 codex.diagnostic.as_deref().unwrap_or("codex-unavailable"),
             )));
         }
-        adapters.push(Arc::new(UnavailableAdapter::new(
-            ProviderId::Claude,
-            claude.diagnostic.as_deref().unwrap_or("claude-unavailable"),
-        )));
 
         let app = PromptingTime::new(
             store,
@@ -693,6 +673,63 @@ async fn installation(
         })
 }
 
+async fn claude_provider(binary: PathBuf) -> (Arc<dyn ProviderAdapter>, ProviderDiagnostic) {
+    let adapter = ClaudeAdapter::new(binary);
+    let health = adapter.health().await;
+    if let Ok(ProviderHealth::Healthy { version }) = &health {
+        let diagnostic = available_diagnostic(
+            &ProviderInstallation {
+                id: ProviderId::Claude,
+                installed: true,
+                version: Some(version.clone()),
+                diagnostic: None,
+            },
+            adapter.capabilities(),
+        );
+        return (Arc::new(adapter), diagnostic);
+    }
+    let category = match &health {
+        Ok(ProviderHealth::Unavailable { category }) => category.as_str(),
+        _ => "claude-inspection-failed",
+    };
+    let (installed, message, action) = match category {
+        "claude-requires-major-2-version-2.1.205-or-newer" => (
+            true,
+            "Claude Code requires major 2, version 2.1.205 or newer.",
+            "Update to a supported Claude Code version, then restart Prompting Time.",
+        ),
+        "claude-login-required-run-claude-auth-login" => (
+            true,
+            "Claude Code is installed but is not authenticated.",
+            "Run `claude auth login`, then restart Prompting Time.",
+        ),
+        "claude-auth-status-unavailable-run-claude-auth-login" => (
+            true,
+            "Claude Code authentication status could not be verified.",
+            "Run `claude auth status --json` and `claude auth login`, then restart Prompting Time.",
+        ),
+        _ => (
+            false,
+            "Claude Code is not installed or could not be inspected.",
+            "Install Claude Code and verify `claude --version`, then restart Prompting Time.",
+        ),
+    };
+    let diagnostic = unavailable_installed_diagnostic(
+        &ProviderInstallation {
+            id: ProviderId::Claude,
+            installed,
+            version: None,
+            diagnostic: None,
+        },
+        message,
+        action.into(),
+    );
+    (
+        Arc::new(UnavailableAdapter::new(ProviderId::Claude, category)),
+        diagnostic,
+    )
+}
+
 fn available_diagnostic(
     installation: &ProviderInstallation,
     capabilities: ProviderCapabilities,
@@ -755,11 +792,106 @@ fn unavailable_provider_diagnostics() -> Vec<ProviderDiagnostic> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicUsize;
 
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn claude_registration_uses_adapter_health_and_exposes_supported_capabilities() {
+        let directory = tempdir().unwrap();
+        let binary = directory.path().join("claude-fixture");
+        fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.205 (Claude Code)'; else echo '{\"loggedIn\":true,\"account\":\"PRIVATE\"}'; fi\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (adapter, diagnostic) = claude_provider(binary).await;
+        assert!(diagnostic.available);
+        assert!(diagnostic.installed);
+        assert_eq!(diagnostic.version.as_deref(), Some("2.1.205"));
+        assert_eq!(diagnostic.capabilities, adapter.capabilities());
+        for capability in [
+            prompting_time_core::providers::ProviderCapability::Streaming,
+            prompting_time_core::providers::ProviderCapability::DeferredApproval,
+            prompting_time_core::providers::ProviderCapability::Interruption,
+            prompting_time_core::providers::ProviderCapability::Resume,
+            prompting_time_core::providers::ProviderCapability::ChildAgents,
+        ] {
+            assert!(diagnostic.capabilities.supports(capability));
+        }
+        assert!(
+            !diagnostic
+                .capabilities
+                .supports(prompting_time_core::providers::ProviderCapability::Steering)
+        );
+        assert!(matches!(
+            adapter.health().await.unwrap(),
+            ProviderHealth::Healthy { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn claude_registration_unavailable_diagnostics_are_actionable_and_private() {
+        let directory = tempdir().unwrap();
+        let binary = directory.path().join("claude-fixture");
+        for (version, auth, installed, expected, action) in [
+            (None, "", false, "could not be inspected", "--version"),
+            (
+                Some("2.1.204"),
+                r#"{"loggedIn":true}"#,
+                true,
+                "2.1.205",
+                "Update",
+            ),
+            (
+                Some("3.0.0"),
+                r#"{"loggedIn":true}"#,
+                true,
+                "major 2",
+                "Update",
+            ),
+            (
+                Some("2.1.205"),
+                r#"{"loggedIn":false,"account":"PRIVATE"}"#,
+                true,
+                "not authenticated",
+                "auth login",
+            ),
+            (
+                Some("2.1.205"),
+                r#"{"account":"PRIVATE"}"#,
+                true,
+                "could not be verified",
+                "auth status",
+            ),
+            (
+                Some("2.1.205"),
+                "PRIVATE malformed",
+                true,
+                "could not be verified",
+                "auth status",
+            ),
+        ] {
+            if let Some(version) = version {
+                fs::write(&binary, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version}'; else echo '{auth}'; fi\n")).unwrap();
+                fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let (adapter, diagnostic) = claude_provider(binary.clone()).await;
+            assert!(!diagnostic.available);
+            assert_eq!(diagnostic.installed, installed);
+            assert!(
+                diagnostic.diagnostic.as_deref().unwrap().contains(expected),
+                "{diagnostic:?}"
+            );
+            assert!(diagnostic.action.as_deref().unwrap().contains(action));
+            assert!(!format!("{diagnostic:?}").contains("PRIVATE"));
+            assert_eq!(adapter.capabilities(), ProviderCapabilities::default());
+            assert!(matches!(
+                adapter.health().await.unwrap(),
+                ProviderHealth::Unavailable { .. }
+            ));
+        }
+    }
 
     struct LiveTask(Arc<AtomicUsize>);
 
