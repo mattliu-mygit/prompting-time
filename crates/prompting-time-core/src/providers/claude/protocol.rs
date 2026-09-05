@@ -51,9 +51,17 @@ struct Task {
     emitted: Option<NativeAgentStatus>,
 }
 
+struct TextFrame {
+    message: String,
+    block_count: usize,
+    native_block: Option<usize>,
+}
+
 pub(super) struct Protocol {
     session: String,
     stream_message: Option<String>,
+    stream_text_blocks: HashMap<String, Option<usize>>,
+    text_frames: HashMap<String, TextFrame>,
     texts: HashMap<String, String>,
     text_bytes: usize,
     tools: HashMap<String, Tool>,
@@ -66,6 +74,8 @@ impl Protocol {
         Self {
             session,
             stream_message: None,
+            stream_text_blocks: HashMap::new(),
+            text_frames: HashMap::new(),
             texts: HashMap::new(),
             text_bytes: 0,
             tools: HashMap::new(),
@@ -95,11 +105,26 @@ impl Protocol {
                 let content = message["content"]
                     .as_array()
                     .ok_or_else(|| protocol_error("assistant-content"))?;
+                let frame_id = value
+                    .get("uuid")
+                    .map(|_| required_id(&value, "uuid"))
+                    .transpose()?;
+                let native_block =
+                    if parent.is_none() && content.iter().any(|block| block["type"] == "text") {
+                        self.text_frame(message_id, frame_id, content.len())?
+                    } else {
+                        None
+                    };
                 for (index, block) in content.iter().enumerate() {
                     match block["type"].as_str() {
                         Some("text") if parent.is_none() => self.text(
-                            message_id,
-                            index,
+                            match (native_block, frame_id) {
+                                (Some(index), _) => format!("{message_id}:{index}"),
+                                (None, Some(frame)) => {
+                                    format!("{message_id}:frame:{frame}:{index}")
+                                }
+                                (None, None) => format!("{message_id}:{index}"),
+                            },
                             block["text"]
                                 .as_str()
                                 .ok_or_else(|| protocol_error("text-block"))?,
@@ -205,15 +230,48 @@ impl Protocol {
         Ok(events)
     }
 
-    fn text(
+    fn text_frame(
         &mut self,
         message: &str,
-        index: usize,
+        frame: Option<&str>,
+        block_count: usize,
+    ) -> Result<Option<usize>, ProviderError> {
+        if let Some(seen) = frame.and_then(|frame| self.text_frames.get(frame)) {
+            if seen.message != message || seen.block_count != block_count {
+                return Err(protocol_error("text-frame-identity-conflict"));
+            }
+            return Ok(seen.native_block);
+        }
+        // CLI 2.1.205 yields a one-block assistant frame before its raw block-stop
+        // event. Its array index is local to that fragment, not the native index.
+        let native_block = match self.stream_text_blocks.get(message) {
+            Some(Some(index)) if block_count == 1 => Some(*index),
+            Some(_) => return Err(protocol_error("unmapped-streamed-text-frame")),
+            None => None,
+        };
+        if let Some(frame) = frame {
+            if self.text_frames.len() >= MAX_IDENTITIES {
+                return Err(protocol_error("text-frame-capacity"));
+            }
+            self.text_frames.insert(
+                frame.into(),
+                TextFrame {
+                    message: message.into(),
+                    block_count,
+                    native_block,
+                },
+            );
+        }
+        Ok(native_block)
+    }
+
+    fn text(
+        &mut self,
+        id: String,
         text: &str,
         delta: bool,
         events: &mut Vec<ProviderEvent>,
     ) -> Result<(), ProviderError> {
-        let id = format!("{message}:{index}");
         if !self.texts.contains_key(&id) && self.texts.len() >= MAX_IDENTITIES {
             return Err(protocol_error("text-identity-capacity"));
         }
@@ -245,7 +303,14 @@ impl Protocol {
     ) -> Result<(), ProviderError> {
         match event["type"].as_str() {
             Some("message_start") => {
-                self.stream_message = Some(required_id(&event["message"], "id")?.into())
+                let message = required_id(&event["message"], "id")?;
+                if !self.stream_text_blocks.contains_key(message)
+                    && self.stream_text_blocks.len() >= MAX_IDENTITIES
+                {
+                    return Err(protocol_error("stream-message-capacity"));
+                }
+                self.stream_text_blocks.insert(message.into(), None);
+                self.stream_message = Some(message.into());
             }
             Some("content_block_start" | "content_block_delta") => {
                 let index: usize = event["index"]
@@ -259,10 +324,11 @@ impl Protocol {
                     .ok_or_else(|| protocol_error("delta-without-message"))?;
                 if event["type"] == "content_block_start" {
                     let block = &event["content_block"];
+                    self.stream_text_blocks
+                        .insert(message.clone(), (block["type"] == "text").then_some(index));
                     match block["type"].as_str() {
                         Some("text") => self.text(
-                            &message,
-                            index,
+                            format!("{message}:{index}"),
                             block["text"]
                                 .as_str()
                                 .ok_or_else(|| protocol_error("text-block"))?,
@@ -276,8 +342,7 @@ impl Protocol {
                 } else {
                     match event["delta"]["type"].as_str() {
                         Some("text_delta") => self.text(
-                            &message,
-                            index,
+                            format!("{message}:{index}"),
                             event["delta"]["text"]
                                 .as_str()
                                 .ok_or_else(|| protocol_error("text-delta"))?,
@@ -289,8 +354,15 @@ impl Protocol {
                     }
                 }
             }
-            Some("message_delta" | "content_block_stop") => {}
-            Some("message_stop") => self.stream_message = None,
+            Some("message_delta") => {}
+            Some("content_block_stop" | "message_stop") => {
+                if let Some(message) = &self.stream_message {
+                    self.stream_text_blocks.insert(message.clone(), None);
+                }
+                if event["type"] == "message_stop" {
+                    self.stream_message = None;
+                }
+            }
             _ => return Err(protocol_error("unsupported-stream-event")),
         }
         Ok(())

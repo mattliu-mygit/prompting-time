@@ -475,6 +475,162 @@ result(result='HELLO')
 }
 
 #[tokio::test]
+async fn fragmented_assistant_frames_keep_native_text_block_identity() {
+    let fixture = Fixture::new(
+        r#"
+def stream(event):
+    emit(dict(type='stream_event', session_id=session, parent_tool_use_id=None, event=event))
+def full(fid, text):
+    emit(dict(type='assistant', uuid=fid, session_id=session, parent_tool_use_id=None,
+              message=dict(id='message-1', content=[dict(type='text', text=text)])))
+stream({'type':'message_start','message':{'id':'message-1'}})
+stream({'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':''}})
+assistant([{'type':'thinking','thinking':'INVENTED'}])
+stream({'type':'content_block_stop','index':0})
+stream({'type':'content_block_start','index':1,'content_block':{'type':'text','text':''}})
+stream({'type':'content_block_delta','index':1,'delta':{'type':'text_delta','text':'HEL'}})
+# Installed CLI emits the completed one-block assistant before the raw stop event.
+full('frame-1', 'HELLO')
+stream({'type':'content_block_stop','index':1})
+stream({'type':'content_block_start','index':2,'content_block':{'type':'text','text':''}})
+stream({'type':'content_block_delta','index':2,'delta':{'type':'text_delta','text':'WOR'}})
+# A repeated earlier frame must not attach to the currently active block.
+full('frame-1', 'HELLO')
+full('frame-2', 'WORLD')
+stream({'type':'content_block_stop','index':2})
+stream({'type':'content_block_start','index':3,'content_block':{'type':'text','text':''}})
+stream({'type':'content_block_delta','index':3,'delta':{'type':'text_delta','text':'HELLO'}})
+full('frame-3', 'HELLO')
+stream({'type':'content_block_stop','index':3})
+stream({'type':'message_stop'})
+full('frame-1', 'HELLO')
+full('frame-2', 'WORLD')
+full('frame-3', 'HELLO')
+result()
+"#,
+    );
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&session, TurnRequest::new("fragmented stream"))
+        .await
+        .unwrap();
+    let events = collect(&mut turn).await;
+    assert!(events.iter().all(Result::is_ok), "{events:?}");
+    let text: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Ok(ProviderEvent::AssistantMessageDelta {
+                native_item_id,
+                content,
+            }) => Some((native_item_id.as_str(), content.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        [
+            ("message-1:1", "HEL"),
+            ("message-1:1", "LO"),
+            ("message-1:2", "WOR"),
+            ("message-1:2", "LD"),
+            ("message-1:3", "HELLO"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn full_only_assistant_fragments_preserve_distinct_identical_blocks() {
+    let fixture = Fixture::new(
+        r#"
+def full(fid, blocks):
+    emit(dict(type='assistant', uuid=fid, session_id=session, parent_tool_use_id=None,
+              message=dict(id='message-1', content=blocks)))
+full('frame-1', [dict(type='text', text='HELLO')])
+full('frame-2', [dict(type='text', text='HELLO')])
+full('frame-3', [dict(type='text', text='A'), dict(type='text', text='B')])
+full('frame-1', [dict(type='text', text='HELLO')])
+full('frame-3', [dict(type='text', text='A'), dict(type='text', text='B')])
+result()
+"#,
+    );
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&session, TurnRequest::new("full fragments"))
+        .await
+        .unwrap();
+    let events = collect(&mut turn).await;
+    assert!(events.iter().all(Result::is_ok), "{events:?}");
+    let mut text = BTreeMap::new();
+    for event in events {
+        if let Ok(ProviderEvent::AssistantMessageDelta {
+            native_item_id,
+            content,
+        }) = event
+        {
+            text.entry(native_item_id)
+                .or_insert_with(String::new)
+                .push_str(&content);
+        }
+    }
+    assert_eq!(text.len(), 4);
+    assert_eq!(
+        text.values().map(String::as_str).collect::<Vec<_>>(),
+        ["HELLO", "HELLO", "A", "B"]
+    );
+}
+
+#[tokio::test]
+async fn assistant_frame_identity_conflicts_and_unmapped_stream_frames_fail_closed() {
+    for body in [
+        r#"
+for mid in ['message-1', 'message-2']:
+    emit(dict(type='assistant', uuid='frame-1', session_id=session,
+              message=dict(id=mid, content=[dict(type='text', text='A')])))
+result()
+"#,
+        r#"
+for blocks in [[dict(type='text', text='A')], [dict(type='text', text='A'), dict(type='text', text='B')]]:
+    emit(dict(type='assistant', uuid='frame-1', session_id=session,
+              message=dict(id='message-1', content=blocks)))
+result()
+"#,
+        r#"
+for ev in [dict(type='message_start', message=dict(id='message-1')),
+           dict(type='content_block_start', index=1, content_block=dict(type='text', text='A')),
+           dict(type='content_block_stop', index=1), dict(type='message_stop')]:
+    emit(dict(type='stream_event', session_id=session, event=ev))
+assistant([dict(type='text', text='A')])
+result()
+"#,
+        r#"
+emit(dict(type='stream_event', session_id=session, event=dict(type='message_start', message=dict(id='message-1'))))
+emit(dict(type='stream_event', session_id=session, event=dict(type='content_block_start', index=0, content_block=dict(type='text', text=''))))
+for index in range(1025):
+    emit(dict(type='assistant', uuid='frame-' + str(index), session_id=session,
+              message=dict(id='message-1', content=[dict(type='text', text='')])))
+result()
+"#,
+    ] {
+        let fixture = Fixture::new(body);
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invalid frame identity"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        assert!(events.iter().any(Result::is_err), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::TurnCompleted)))
+        );
+    }
+}
+
+#[tokio::test]
 async fn recursive_lifecycle_waits_for_late_identity_and_actual_terminals() {
     let fixture = Fixture::new(
         r#"
