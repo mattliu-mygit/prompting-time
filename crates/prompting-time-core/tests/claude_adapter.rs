@@ -333,6 +333,106 @@ async fn malformed_questions_and_conflicting_native_identity_fail_closed() {
     }
 }
 
+#[tokio::test]
+async fn rate_limit_events_are_advisory_until_terminal_result() {
+    for status in ["allowed", "allowed_warning", "rejected"] {
+        let fixture = Fixture::new(&format!(
+            "emit(dict(type='rate_limit_event',session_id=session,uuid='quota-1',rate_limit_info={{'status':'{status}','overageStatus':'rejected'}}))\nassistant([{{'type':'text','text':'READY'}}])\nbarrier('before-result')\nresult()"
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event(&mut turn).await.unwrap(),
+            ProviderEvent::TurnStarted { .. }
+        ));
+        assert!(
+            matches!(event(&mut turn).await.unwrap(), ProviderEvent::AssistantMessageDelta { content, .. } if content == "READY")
+        );
+        wait_file(&fixture.directory.path().join("before-result.ready")).await;
+        fs::write(fixture.directory.path().join("before-result.release"), "").unwrap();
+        let events = collect(&mut turn).await;
+        assert!(matches!(
+            events.as_slice(),
+            [Ok(ProviderEvent::TurnCompleted)]
+        ));
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
+#[tokio::test]
+async fn rate_limit_events_do_not_hide_failure_or_invalid_envelopes() {
+    for body in [
+        "emit(dict(type='rate_limit_event',session_id=session,uuid='quota-1',rate_limit_info={'status':'rejected'}))",
+        "emit(dict(type='rate_limit_event',session_id=session,uuid='quota-1',rate_limit_info={'status':'rejected'})); emit(dict(type='result',session_id=session,subtype='error_during_execution',is_error=True))",
+        "emit(dict(type='rate_limit_event',session_id='wrong-session',uuid='quota-1',rate_limit_info={'status':'allowed'})); result()",
+        "emit(dict(type='rate_limit_event',session_id=session,uuid='quota-1',rate_limit_info={'status':'unknown'})); result()",
+        "emit(dict(type='rate_limit_event',session_id=session,uuid='quota-1')); result()",
+        "emit(dict(type='rate_limit_event',uuid='quota-1',rate_limit_info={'status':'allowed'})); result()",
+        "emit(dict(type='rate_limit_event',session_id=session,rate_limit_info={'status':'allowed'})); result()",
+        "emit(dict(type='unknown_event',session_id=session)); result()",
+    ] {
+        let fixture = Fixture::new(body);
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        assert!(events.iter().any(Result::is_err), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::TurnCompleted))),
+            "{events:?}"
+        );
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
+#[tokio::test]
+async fn thinking_token_estimates_do_not_become_text_or_terminal_evidence() {
+    for terminal in [false, true] {
+        let fixture = Fixture::new(&format!(
+            "emit(dict(type='system',subtype='thinking_tokens',session_id=session,uuid='estimate-1',estimated_tokens=12,estimated_tokens_delta=12))\n{}",
+            if terminal {
+                "assistant([{'type':'text','text':'DONE'}]); result()"
+            } else {
+                ""
+            }
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        if terminal {
+            assert!(
+                matches!(events.as_slice(), [Ok(ProviderEvent::TurnStarted { .. }), Ok(ProviderEvent::AssistantMessageDelta { content, .. }), Ok(ProviderEvent::TurnCompleted)] if content == "DONE"),
+                "{events:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Ok(ProviderEvent::TurnStarted { .. }),
+                        Err(ProviderError::StreamClosed)
+                    ]
+                ),
+                "{events:?}"
+            );
+        }
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "uses the installed Claude account; coordinator runs explicitly"]
 async fn live_adapter_streams_and_resumes_context() {

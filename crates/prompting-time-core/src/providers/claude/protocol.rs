@@ -167,6 +167,20 @@ impl Protocol {
                     }
                 }
             }
+            Some("rate_limit_event") => {
+                if required_id(&value, "session_id")? != self.session {
+                    return Err(protocol_error("session-mismatch"));
+                }
+                required_id(&value, "uuid")?;
+                if !matches!(
+                    value["rate_limit_info"]["status"].as_str(),
+                    Some("allowed" | "allowed_warning" | "rejected")
+                ) {
+                    return Err(protocol_error("invalid-rate-limit-event"));
+                }
+                // Quota state does not establish the turn's terminal outcome.
+                // Only the result/lifecycle boundary can complete or fail the turn.
+            }
             Some("system") => match value["subtype"].as_str() {
                 Some("task_started" | "task_notification") => self.lifecycle(&value)?,
                 Some("task_updated") => {
@@ -177,6 +191,7 @@ impl Protocol {
                 Some(
                     "init"
                     | "status"
+                    | "thinking_tokens"
                     | "task_progress"
                     | "compact_boundary"
                     | "hook_started"
