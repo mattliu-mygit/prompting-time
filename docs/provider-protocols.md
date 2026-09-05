@@ -47,8 +47,12 @@ registered capabilities agree across authenticated, missing, unsupported, and ma
 
 Separate opt-in `live_app_` tests exercise canonical application APIs for repeated projectless
 turns and Claude → Claude → Codex → Claude continuity, exact-file denial/approval, and recursive
-child/grandchild completion. Those application tests are not claimed as passed here until run and
-recorded by the release coordinator. They do not constitute native UI or notification evidence.
+child/grandchild completion. Exact-file denial/approval and recursive completion passed against
+Claude 2.1.205. Recursive execution exposed `system/task_updated` terminal patches before their
+`task_notification` bookends; the adapter now validates these patches without treating them as
+completion. Switching reached Codex and failed with native HTTP 400: the configured Astra model
+requires a newer Codex CLI. This is an external CLI compatibility limitation; switching is not
+claimed as passed. These tests do not constitute native UI or notification evidence.
 
 Claude advertises streaming, permission/question responses, interruption, resume, and child
 hierarchy, but not steering. Multi-select questions are safely declined; duplicate question text
@@ -100,9 +104,14 @@ is not termination. Root success is held until required child evidence arrives u
 deadline. The nested Agent block's `parent_tool_use_id` identifies its owning child invocation;
 its own tool ID links to the grandchild lifecycle. Task IDs are native task identity, not proof of
 independently resumable sessions. Top-level output remains required, while recursive hierarchy and
-status do not depend on grandchild text forwarding. The current
-[SDK types](https://raw.githubusercontent.com/anthropics/claude-agent-sdk-python/main/src/claude_agent_sdk/types.py)
-also describe task_updated alternatives; those were not needed or validated in this gate.
+status do not depend on grandchild text forwarding. Observed `task_updated` patches carry
+`status=completed` and `end_time`. The installed 2.1.205 source registers tasks and emits
+`task_started` before updates, then emits the terminal notification after its update. Updates
+require a declared task but may precede tool/parent materialization. Only terminal consistency
+evidence is retained; patch descriptions/errors are discarded, and a patch cannot replace a
+missing notification. Unknown fields/statuses, undeclared identities, and conflicting terminals
+fail closed. Top-level `tool_progress` exists in the SDK schema but was not observed in these
+recursive app runs and remains outside the verified adapter envelope set.
 
 The legacy defer/deny/resume probe remains as an explicitly unverified path. The
 [hooks documentation](https://code.claude.com/docs/en/hooks#defer-a-tool-call-for-later) also limits

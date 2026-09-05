@@ -1310,6 +1310,131 @@ task('task_notification','task-a','agent-a',status='completed')
 }
 
 #[tokio::test]
+async fn task_updates_wait_for_declared_identity_and_notification_terminals() {
+    for tool_first in [false, true] {
+        let started = "task('task_started','task-a','agent-a')";
+        let patch = "emit(dict(type='system',subtype='task_updated',session_id=session,uuid='update-1',task_id='task-a',patch={'status':'completed','end_time':123}))";
+        let tool = "assistant([{'type':'tool_use','id':'agent-a','name':'Agent','input':{}}])";
+        let fixture = Fixture::new(&format!(
+            "{started}\n{first}\n{second}\nresult()\nbarrier('before-notification')\ntask('task_notification','task-a','agent-a',status='completed')",
+            first = if tool_first { tool } else { patch },
+            second = if tool_first { patch } else { tool },
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented updates"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event(&mut turn).await.unwrap(),
+            ProviderEvent::TurnStarted { .. }
+        ));
+        assert!(matches!(
+            event(&mut turn).await.unwrap(),
+            ProviderEvent::NativeItemActivity { .. }
+        ));
+        assert!(
+            matches!(event(&mut turn).await.unwrap(), ProviderEvent::ChildAgentActivity { child_statuses, .. } if child_statuses[0].status == NativeAgentStatus::Running)
+        );
+        wait_file(&fixture.directory.path().join("before-notification.ready")).await;
+        assert!(
+            timeout(Duration::from_millis(100), turn.recv())
+                .await
+                .is_err(),
+            "patch and root result must not complete the child"
+        );
+        fs::write(
+            fixture.directory.path().join("before-notification.release"),
+            "",
+        )
+        .unwrap();
+        let events = collect(&mut turn).await;
+        assert!(
+            matches!(events.as_slice(), [Ok(ProviderEvent::ChildAgentActivity { child_statuses, .. }), Ok(ProviderEvent::TurnCompleted)] if child_statuses[0].status == NativeAgentStatus::Completed),
+            "{events:?}"
+        );
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
+#[tokio::test]
+async fn task_updates_validate_patches_and_never_supply_missing_terminal_evidence() {
+    for (patch, finish, succeeds) in [
+        (
+            "{'description':'HIDDEN','error':'HIDDEN','is_backgrounded':False,'total_paused_ms':1}",
+            "task('task_notification','task-a','agent-a',status='completed'); result()",
+            true,
+        ),
+        (
+            "{'status':'pending'}",
+            "task('task_notification','task-a','agent-a',status='completed'); result()",
+            true,
+        ),
+        (
+            "{'status':'running'}",
+            "task('task_notification','task-a','agent-a',status='completed'); result()",
+            true,
+        ),
+        (
+            "{'status':'paused'}",
+            "task('task_notification','task-a','agent-a',status='completed'); result()",
+            true,
+        ),
+        (
+            "{'status':'failed'}",
+            "task('task_notification','task-a','agent-a',status='failed'); result()",
+            true,
+        ),
+        (
+            "{'status':'killed'}",
+            "task('task_notification','task-a','agent-a',status='stopped'); result()",
+            true,
+        ),
+        ("{'status':'completed'}", "result()", false),
+        (
+            "{'status':'completed'}",
+            "task('task_notification','task-a','agent-a',status='failed'); result()",
+            false,
+        ),
+        ("{'status':'unknown'}", "result()", false),
+        ("{'status':None}", "result()", false),
+        ("{'new_lifecycle_field':True}", "result()", false),
+        ("{'end_time':'invalid'}", "result()", false),
+        ("{'description':False}", "result()", false),
+        ("{'is_backgrounded':'invalid'}", "result()", false),
+        ("[]", "result()", false),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "assistant([{{'type':'tool_use','id':'agent-a','name':'Agent','input':{{}}}}])\ntask('task_started','task-a','agent-a')\nemit(dict(type='system',subtype='task_updated',session_id=session,uuid='update-1',task_id='task-a',patch={patch}))\n{finish}"
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented updates"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        assert_eq!(
+            events.iter().all(Result::is_ok),
+            succeeds,
+            "{patch}: {events:?}"
+        );
+        assert_eq!(
+            matches!(events.last(), Some(Ok(ProviderEvent::TurnCompleted))),
+            succeeds,
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::AssistantMessageDelta { .. })))
+        );
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
+#[tokio::test]
 async fn invalid_results_and_unresolved_lifecycle_fail_closed() {
     for body in [
         "emit({'type':'result','session_id':session,'subtype':'success'})",
@@ -1319,6 +1444,11 @@ async fn invalid_results_and_unresolved_lifecycle_fail_closed() {
         "result(stop_reason='tool_deferred')",
         "task('task_started','task-b','agent-b'); result()",
         "emit({'type':'system','subtype':'task_updated','session_id':session,'task_id':'task-a','patch':{'status':'killed'}})",
+        "emit(dict(type='system',subtype='task_updated',session_id=session,uuid='update-1',task_id='unknown-task',patch={'status':'completed'})); result()",
+        "task('task_started','task-a','agent-a'); emit(dict(type='system',subtype='task_updated',session_id='wrong',uuid='update-1',task_id='task-a',patch={}))",
+        "task('task_started','task-a','agent-a'); emit(dict(type='system',subtype='task_updated',session_id=session,task_id='task-a',patch={}))",
+        "task('task_started','task-a','agent-a'); task('task_notification','task-a','agent-a',status='completed'); emit(dict(type='system',subtype='task_updated',session_id=session,uuid='update-1',task_id='task-a',patch={'status':'failed'}))",
+        "task('task_started','task-a','agent-a'); [emit(dict(type='system',subtype='task_updated',session_id=session,uuid='update-'+status,task_id='task-a',patch={'status':status})) for status in ['completed','failed']]",
         "print('not-json', flush=True)",
         "sys.exit(0)",
     ] {

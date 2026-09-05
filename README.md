@@ -112,7 +112,7 @@ Shutdown asks owned run tasks and provider adapters to stop, waits up to five se
 
 ## Known limitations
 
-- Live application switching and native visual verification are separate acceptance gates; current recorded live adapter success alone does not establish either.
+- Live Claude application approval and recursive ancestry tests passed. Application switching remains blocked by the installed Codex CLI rejecting Astra with a newer-version requirement; native visual verification is a separate acceptance gate.
 - Claude multi-select questions are safely declined; the current UI supports single-select responses.
 - Claude task identities drive recursive hierarchy and status, but do not imply direct child-session resume. Grandchild text forwarding was not observed in the depth-two live protocol probe.
 - If Claude is cancelled before its first prompt and the app then restarts, initialization alone may have left no resumable native transcript. The next attempt fails closed and may require a new conversation. Completed and interrupted prompt sessions have resumed successfully in focused live probes.

@@ -49,6 +49,7 @@ struct Task {
     tool: String,
     status: NativeAgentStatus,
     emitted: Option<NativeAgentStatus>,
+    update_terminal: Option<NativeAgentStatus>,
 }
 
 struct TextFrame {
@@ -183,11 +184,7 @@ impl Protocol {
             }
             Some("system") => match value["subtype"].as_str() {
                 Some("task_started" | "task_notification") => self.lifecycle(&value)?,
-                Some("task_updated") => {
-                    return Err(protocol_error(
-                        "unsupported-task-updated-lifecycle-update-adapter",
-                    ));
-                }
+                Some("task_updated") => self.task_update(&value)?,
                 Some(
                     "init"
                     | "status"
@@ -428,6 +425,54 @@ impl Protocol {
         Ok(())
     }
 
+    fn task_update(&mut self, value: &Value) -> Result<(), ProviderError> {
+        required_id(value, "uuid")?;
+        let task_id = required_id(value, "task_id")?;
+        let task = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| protocol_error("unknown-task-update"))?;
+        let patch = value["patch"]
+            .as_object()
+            .ok_or_else(|| protocol_error("invalid-task-patch"))?;
+        for (key, field) in patch {
+            let valid = match key.as_str() {
+                "status" => matches!(
+                    field.as_str(),
+                    Some("pending" | "running" | "completed" | "failed" | "killed" | "paused")
+                ),
+                "description" | "error" => field.is_string(),
+                "end_time" | "total_paused_ms" => field.is_number(),
+                "is_backgrounded" => field.is_boolean(),
+                _ => false,
+            };
+            if !valid {
+                return Err(protocol_error("invalid-task-patch"));
+            }
+        }
+        let status = match patch.get("status").and_then(Value::as_str) {
+            Some("completed") => Some(NativeAgentStatus::Completed),
+            Some("failed") => Some(NativeAgentStatus::Errored),
+            Some("killed") => Some(NativeAgentStatus::Interrupted),
+            _ => None,
+        };
+        if let Some(status) = status {
+            if task
+                .update_terminal
+                .as_ref()
+                .is_some_and(|prior| prior != &status)
+                || (terminal(&task.status) && task.status != status)
+            {
+                return Err(protocol_error("conflicting-task-terminal"));
+            }
+            task.update_terminal = Some(status);
+        }
+        // Updates precede the notification bookend in CLI 2.1.205. Retain only
+        // terminal consistency evidence; descriptions/errors never leave this frame.
+        // The notification still owns child completion, including after root result.
+        Ok(())
+    }
+
     fn lifecycle(&mut self, value: &Value) -> Result<(), ProviderError> {
         let task_id = required_id(value, "task_id")?;
         let tool_id = required_id(value, "tool_use_id")?;
@@ -456,6 +501,14 @@ impl Protocol {
             if task.tool != tool_id {
                 return Err(protocol_error("task-tool-identity-conflict"));
             }
+            if terminal(&status)
+                && task
+                    .update_terminal
+                    .as_ref()
+                    .is_some_and(|prior| prior != &status)
+            {
+                return Err(protocol_error("conflicting-task-terminal"));
+            }
             if terminal(&task.status) {
                 if terminal(&status) && status != task.status {
                     return Err(protocol_error("conflicting-task-terminal"));
@@ -473,6 +526,7 @@ impl Protocol {
                     tool: tool_id.into(),
                     status,
                     emitted: None,
+                    update_terminal: None,
                 },
             );
         }
