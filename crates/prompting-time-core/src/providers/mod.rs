@@ -19,6 +19,7 @@ pub use crate::domain::{
 };
 use crate::domain::{ConversationId, MutationState};
 
+pub mod claude;
 pub mod codex;
 pub mod process;
 
