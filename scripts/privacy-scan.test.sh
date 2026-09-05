@@ -17,7 +17,35 @@ git -C "$repo" commit -qm "safe"
 
 bash "$repo/scripts/privacy-scan.sh"
 
+printf '%s\n' 'task-session-identity-conflict' 'task-session-identity-missing' > "$repo/diagnostics.txt"
+git -C "$repo" add diagnostics.txt
+if ! output="$(bash "$repo/scripts/privacy-scan.sh" 2>&1)"; then
+  echo "privacy scanner rejected ordinary task diagnostic names" >&2
+  exit 1
+fi
+git -C "$repo" rm -qf diagnostics.txt
+
 scanner_secret="s""k-abcdefghijklmnopqrstuvwxyz"
+for credential_value in \
+  "$scanner_secret" \
+  "\"$scanner_secret\"" \
+  "{\"api_key\":\"$scanner_secret\"}" \
+  "Authorization: Bearer $scanner_secret" \
+  "API_KEY=$scanner_secret" \
+  "_$scanner_secret"; do
+  printf '%s\n' "$credential_value" > "$repo/credential.txt"
+  git -C "$repo" add credential.txt
+  if output="$(bash "$repo/scripts/privacy-scan.sh" 2>&1)"; then
+    echo "privacy scanner accepted a tracked credential" >&2
+    exit 1
+  fi
+  if printf '%s' "$output" | grep -Fq "$scanner_secret"; then
+    echo "privacy scanner printed credential content" >&2
+    exit 1
+  fi
+done
+git -C "$repo" rm -qf credential.txt
+
 printf '\n# %s\n' "$scanner_secret" >> "$repo/scripts/privacy-scan.sh"
 git -C "$repo" add scripts/privacy-scan.sh
 if output="$(bash "$repo/scripts/privacy-scan.sh" 2>&1)"; then

@@ -30,7 +30,7 @@ scan_regex "private absolute home path" "$users_home_regex"
 scan_regex "private absolute home path" "$unix_home_regex"
 scan_regex "AWS access key" 'AKIA[0-9A-Z]{16}'
 scan_regex "GitHub credential" 'gh[pousr]_[A-Za-z0-9]{20,}'
-scan_regex "OpenAI credential" 'sk-[A-Za-z0-9_-]{20,}'
+scan_regex "OpenAI credential" '(^|[^[:alnum:]])sk-[A-Za-z0-9_-]{20,}'
 scan_regex "Anthropic credential" 'sk-ant-[A-Za-z0-9_-]{20,}'
 scan_regex "private key material" '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'
 scan_regex "provider authentication state" '(^|/)[.]codex/(auth[.]json|sessions?/|state/)'
