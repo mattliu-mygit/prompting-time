@@ -23,12 +23,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-async function openChooser(overrides: Partial<AppApi> = {}, strict = false) {
+async function openChooser(overrides: Partial<AppApi> = {}, strict = false, inspectorOpen = false) {
   const api = createApi(overrides);
   const store = createAppStore(api);
   const app = <App store={store} />;
   const rendered = render(strict ? <StrictMode>{app}</StrictMode> : app);
   const trigger = await screen.findByRole("button", { name: "New conversation" });
+  if (inspectorOpen) fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
   fireEvent.click(trigger);
   const dialog = screen.getByRole("dialog", { name: "New conversation" });
   return { ...rendered, api, store, trigger, dialog, choose: within(dialog).getByRole("button", { name: "Choose folder" }) };
@@ -322,7 +323,7 @@ describe("App", () => {
       if (!this.closest("[inert]")) focus.call(this);
     });
     try {
-      const { dialog } = await openChooser();
+      const { dialog } = await openChooser({}, false, true);
       fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
       await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
       expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
@@ -350,7 +351,7 @@ describe("App", () => {
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue(media));
     const creation = deferred<ConversationSummary>();
     try {
-      const { dialog } = await openChooser({ createConversation: vi.fn().mockReturnValue(creation.promise) });
+      const { dialog } = await openChooser({ createConversation: vi.fn().mockReturnValue(creation.promise) }, false, true);
       fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
       act(() => {
         media.matches = true;
@@ -439,11 +440,12 @@ describe("App", () => {
     render(<App store={store} />);
 
     expect(await screen.findByRole("treeitem", { name: /Auth refactor/ })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
     expect(screen.getByRole("complementary", { name: "Conversations" })).toBeVisible();
     expect(screen.getByRole("main", { name: "Conversation workspace" })).toBeVisible();
     expect(screen.getByRole("complementary", { name: "Inspector" })).toBeVisible();
     expect(screen.getByText("1 queued")).toBeVisible();
-    expect(screen.getByText("Codex 0.144.1")).toBeVisible();
+    expect(await screen.findByText("Codex 0.144.1")).toBeVisible();
     expect(screen.getByText(/Claude unavailable/)).toBeVisible();
     expect(screen.getByRole("option", { name: "Auto · Best fit" })).toBeVisible();
   });
@@ -466,11 +468,25 @@ describe("App", () => {
     );
   });
 
-  it("collapses and restores the inspector", async () => {
-    const store = createAppStore(createApi());
+  it("starts with the inspector closed and preserves explicit toggles across conversation changes", async () => {
+    const api = createApi();
+    const other = createdConversation({ id: "c2", title: "Other conversation" });
+    const initial = await api.listConversations({ cursor: null, limit: 40 });
+    api.listConversations = vi.fn().mockResolvedValue({ items: [...initial.items, other], nextCursor: null });
+    const store = createAppStore(api);
     render(<App store={store} />);
     await screen.findByRole("treeitem", { name: /Auth refactor/ });
 
+    expect(screen.getByRole("button", { name: "Show inspector" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
+    expect(api.loadDiagnostics).not.toHaveBeenCalled();
+    act(() => store.selectConversation("c2"));
+    expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
+    expect(screen.getByRole("complementary", { name: "Inspector" })).toBeVisible();
+    act(() => store.selectConversation("c1"));
+    expect(screen.getByRole("button", { name: "Hide inspector" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("complementary", { name: "Inspector" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Hide inspector" }));
     expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
@@ -517,6 +533,7 @@ describe("App", () => {
     const store = createAppStore(createApi());
     const { container } = render(<App store={store} />);
     await screen.findByRole("heading", { name: "Timeline" });
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
 
     const result = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(result.violations.map(({ id }) => id)).toEqual([]);
@@ -526,6 +543,7 @@ describe("App", () => {
     const store = createAppStore(createApi());
     render(<App store={store} />);
     await screen.findByRole("heading", { name: "Timeline" });
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Close inspector" }));
     const trigger = screen.getByRole("button", { name: "Show inspector" });
@@ -534,12 +552,14 @@ describe("App", () => {
 
   it("moves focus into the narrow inspector overlay, contains Tab, and restores the trigger", async () => {
     vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
-      matches: query === "(max-width: 56rem)", media: query, onchange: null,
+      matches: query === "(max-width: 72rem)", media: query, onchange: null,
       addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
     })));
     const store = createAppStore(createApi());
     render(<App store={store} />);
     await screen.findByRole("heading", { name: "Timeline" });
+    expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Close inspector" })).toHaveFocus());
     fireEvent.click(screen.getByRole("button", { name: "Close inspector" }));
     const trigger = screen.getByRole("button", { name: "Show inspector" });

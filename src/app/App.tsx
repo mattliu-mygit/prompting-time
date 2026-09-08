@@ -43,9 +43,9 @@ export function App({ store }: AppProps) {
 function CommandCenter({ store }: { store: AppStore }) {
   const snapshot = useAppStore((state) => state);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [narrowInspector, setNarrowInspector] = useState(() => (
-    typeof window.matchMedia === "function" && window.matchMedia("(max-width: 56rem)").matches
+    typeof window.matchMedia === "function" && window.matchMedia("(max-width: 72rem)").matches
   ));
   const [creatingConversation, setCreatingConversation] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState<string | null>(null);
@@ -66,7 +66,7 @@ function CommandCenter({ store }: { store: AppStore }) {
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia("(max-width: 56rem)");
+    const query = window.matchMedia("(max-width: 72rem)");
     const updateNarrow = () => setNarrowInspector(query.matches);
     query.addEventListener("change", updateNarrow);
     return () => query.removeEventListener("change", updateNarrow);

@@ -16,8 +16,13 @@
   --color-warning: #f2c46d;
   --color-danger: #ff8585;
   --color-interrupted: #b6a6db;
-  --left-pane-width: 15.9375rem;
-  --right-pane-width: 17.8125rem;
+  --font-size-chat: 1.0625rem;
+  --font-size-ui: 0.875rem;
+  --font-size-secondary: 0.8125rem;
+  --font-size-code: 0.875rem;
+  --control-target: 2rem;
+  --left-pane-width: 17rem;
+  --right-pane-width: 20rem;
   --toolbar-height: 3rem;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -54,6 +59,17 @@ textarea,
 input {
   color: inherit;
   font: inherit;
+  font-size: var(--font-size-ui);
+  min-height: var(--control-target);
+}
+
+small {
+  font-size: var(--font-size-secondary);
+}
+
+code,
+pre {
+  font-size: var(--font-size-code);
 }
 
 button:focus-visible,
