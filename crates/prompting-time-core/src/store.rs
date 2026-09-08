@@ -3177,6 +3177,15 @@ impl Store {
         {
             return Err(StoreError::ApprovalResponseIntentExists);
         }
+        if let ApprovalResolution::Answers(answers) = &resolution
+            && approval.input.as_ref().is_none_or(|input| {
+                answers
+                    .keys()
+                    .any(|id| !input.questions.iter().any(|question| question.id == *id))
+            })
+        {
+            return Err(StoreError::InvalidApprovalResolution);
+        }
         let now = now_millis();
         let result = sqlx::query(
             "UPDATE approvals SET response_intent_json = ?, response_intent_status = 'recorded', \
@@ -3303,13 +3312,49 @@ impl Store {
         Ok(approval)
     }
 
+    pub(crate) async fn persist_owned_steering(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        expected_owner_id: &str,
+        content: &str,
+    ) -> Result<(), StoreError> {
+        validate_message_size(content)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        let run = sqlx::query_as::<_, ProviderRunRow>(
+            "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, status, mutation_state, dispatch_certainty, created_at FROM provider_runs WHERE id = ?",
+        ).bind(run_id.to_string()).fetch_one(&mut *transaction).await?.into_domain()?;
+        if !matches!(run.status, RunStatus::Running | RunStatus::Waiting) {
+            return Err(StoreError::InvalidEventState {
+                event: "accepted steering",
+                status: run_status_label(run.status),
+            });
+        }
+        let root_matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id = ? AND run_id = ? AND parent_id IS NULL)")
+            .bind(agent_id.to_string()).bind(run_id.to_string()).fetch_one(&mut *transaction).await?;
+        if !root_matches {
+            return Err(StoreError::NativeAgentIdentityConflict);
+        }
+        let now = now_millis();
+        persist_user_control_message(&mut transaction, &run, agent_id, content, now).await?;
+        sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(run.conversation_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        self.notify_change(run.conversation_id, run_id);
+        Ok(())
+    }
+
     pub async fn acknowledge_response_intent(
         &self,
         run_id: RunId,
         agent_id: AgentId,
         provider_request_id: &str,
     ) -> Result<TimelineEvent, StoreError> {
-        self.acknowledge_response_intent_inner(run_id, agent_id, provider_request_id, None)
+        self.acknowledge_response_intent_inner(run_id, agent_id, provider_request_id, None, None)
             .await
     }
 
@@ -3319,12 +3364,14 @@ impl Store {
         agent_id: AgentId,
         provider_request_id: &str,
         expected_owner_id: &str,
+        prepared_history: Option<&str>,
     ) -> Result<TimelineEvent, StoreError> {
         self.acknowledge_response_intent_inner(
             run_id,
             agent_id,
             provider_request_id,
             Some(expected_owner_id),
+            prepared_history,
         )
         .await
     }
@@ -3335,6 +3382,7 @@ impl Store {
         agent_id: AgentId,
         provider_request_id: &str,
         expected_owner_id: Option<&str>,
+        prepared_history: Option<&str>,
     ) -> Result<TimelineEvent, StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(expected_owner_id) = expected_owner_id {
@@ -3387,6 +3435,11 @@ impl Store {
         {
             return Err(StoreError::ApprovalResponseAlreadyAcknowledged);
         }
+        let history = prepared_history.map(str::to_owned).or_else(|| {
+            approval.response_intent.as_ref().and_then(|intent| {
+                question_response_history(&approval, &intent.resolution, agent.parent_id.is_some())
+            })
+        });
         let resolution = match approval.response_intent {
             Some(ApprovalResponseIntent {
                 resolution,
@@ -3472,6 +3525,9 @@ impl Store {
             .bind(agent_id.to_string())
             .execute(&mut *transaction)
             .await?;
+        if let Some(history) = history {
+            persist_user_control_message(&mut transaction, &run, agent_id, &history, now).await?;
+        }
         drain_staged_events_in_transaction(&mut transaction, run_id, Some(agent_id)).await?;
         sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
             .bind(now)
@@ -5679,6 +5735,112 @@ async fn persist_approval_questions(
     Ok(())
 }
 
+/// Filter before formatting or truncating. Approval resolution retains the full answer.
+pub(crate) fn question_response_history(
+    approval: &Approval,
+    resolution: &ApprovalResolution,
+    child: bool,
+) -> Option<String> {
+    let input = approval.input.as_ref()?;
+    let mut history = String::new();
+    let mut truncated = false;
+    let mut append = |text: &str| {
+        let remaining = MAX_CANONICAL_MESSAGE_BYTES - history.len();
+        let mut end = text.len().min(remaining);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        history.push_str(&text[..end]);
+        truncated |= end != text.len();
+    };
+    append(&format!(
+        "Response to {} {} questions{}:\n",
+        provider_label(approval.provider),
+        if child { "child agent" } else { "root agent" },
+        if child {
+            format!(" {} (delivered to this child)", approval.agent_id)
+        } else {
+            String::new()
+        }
+    ));
+    let mut answered = false;
+    match resolution {
+        ApprovalResolution::Answers(answers) => {
+            for question in &input.questions {
+                if question.is_secret
+                    || input
+                        .questions
+                        .iter()
+                        .any(|other| other.is_secret && other.id == question.id)
+                {
+                    continue;
+                }
+                let Some(values) = answers
+                    .get(&question.id)
+                    .filter(|values| !values.is_empty())
+                else {
+                    continue;
+                };
+                answered = true;
+                append("Question: ");
+                append(&question.question);
+                append("\nAnswers:\n");
+                for value in values {
+                    append("- ");
+                    append(value);
+                    append("\n");
+                }
+            }
+        }
+        ApprovalResolution::Answer(answer)
+            if !input.questions.is_empty()
+                && input.questions.iter().all(|question| !question.is_secret) =>
+        {
+            answered = true;
+            for question in &input.questions {
+                append("Question: ");
+                append(&question.question);
+                append("\n");
+            }
+            append(if input.questions.len() == 1 {
+                "Answer: "
+            } else {
+                "Combined answer to these questions: "
+            });
+            append(answer);
+        }
+        _ => {}
+    }
+    if !answered {
+        return None;
+    }
+    if truncated {
+        const MARKER: &str = "\n[Response history truncated]";
+        history = truncate_utf8(history, MAX_CANONICAL_MESSAGE_BYTES - MARKER.len());
+        history.push_str(MARKER);
+    }
+    Some(history)
+}
+
+async fn persist_user_control_message(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run: &ProviderRun,
+    agent_id: AgentId,
+    content: &str,
+    now: i64,
+) -> Result<(), StoreError> {
+    validate_message_size(content)?;
+    let id = MessageId::new().to_string();
+    let sequence = sqlx::query("INSERT INTO messages (id, conversation_id, run_id, role, content, created_at) VALUES (?, ?, ?, 'user', ?, ?)")
+        .bind(&id).bind(run.conversation_id.to_string()).bind(run.id.to_string()).bind(content).bind(now).execute(&mut **transaction).await?.last_insert_rowid();
+    sqlx::query("INSERT INTO events (id, conversation_id, run_id, agent_id, kind, role, content, created_at) VALUES (?, ?, ?, ?, 'message', 'user', ?, ?)")
+        .bind(id).bind(run.conversation_id.to_string()).bind(run.id.to_string()).bind(agent_id.to_string()).bind(content).bind(now).execute(&mut **transaction).await?;
+    // This boundary belongs to the native session tree; child delivery does not imply root delivery.
+    sqlx::query("UPDATE provider_sessions SET context_through_sequence = max(context_through_sequence, ?), updated_at = ? WHERE conversation_id = ? AND provider = ?")
+        .bind(sequence).bind(now).bind(run.conversation_id.to_string()).bind(provider_label(run.provider)).execute(&mut **transaction).await?;
+    Ok(())
+}
+
 async fn persist_assistant_message_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: RunId,
@@ -7327,6 +7489,363 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn question_history_is_atomic_private_bounded_and_child_owned() {
+        for child_owned in [false, true] {
+            let (store, run, root, child) = native_child_fixture().await;
+            let agent = if child_owned { child } else { root };
+            let native = NativeChildTurn {
+                native_thread_id: "native-child".into(),
+                native_turn_id: "answer-turn".into(),
+            };
+            if child_owned {
+                store
+                    .append_owned_native_child_event(
+                        run,
+                        &native,
+                        "owner",
+                        ProviderEventRecord::started_with_native_id("answer-turn"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let questions = [
+                ("z-native", "First public question?", false),
+                ("secret", "SECRET_QUESTION", true),
+                ("a-native", "Second public question?", false),
+            ]
+            .into_iter()
+            .map(|(id, question, secret)| UserInputQuestion {
+                id: id.into(),
+                header: "Choice".into(),
+                question: question.into(),
+                options: None,
+                is_other: false,
+                is_secret: secret,
+            })
+            .collect();
+            let event = ProviderEventRecord::user_input_requested(
+                ProviderId::Codex,
+                "history-request",
+                questions,
+                None,
+            );
+            if child_owned {
+                store
+                    .append_owned_native_child_event(run, &native, "owner", event)
+                    .await
+                    .unwrap();
+            } else {
+                store.append_run_event(run, root, event).await.unwrap();
+            }
+            let answer = ApprovalResolution::Answers(std::collections::BTreeMap::from([
+                (
+                    "z-native".into(),
+                    vec!["first choice".into(), "second choice".into()],
+                ),
+                ("secret".into(), vec!["SECRET_ANSWER".into()]),
+                (
+                    "a-native".into(),
+                    vec!["界".repeat(MAX_CANONICAL_MESSAGE_BYTES / 3)],
+                ),
+            ]));
+            store
+                .record_response_intent(run, agent, "history-request", answer.clone())
+                .await
+                .unwrap();
+            let conversation = store.load_run(run).await.unwrap().conversation_id;
+            assert!(
+                store
+                    .load_messages_after(conversation, 0, 100_000)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            // Fail after projection insertion, at the acknowledgement's staged-output drain.
+            sqlx::query("INSERT INTO staged_provider_events (id, conversation_id, run_id, agent_id, kind, content, created_at) VALUES (?, ?, ?, ?, 'progress', ?, 1)")
+                .bind(TimelineEventId::new().to_string()).bind(conversation.to_string()).bind(run.to_string()).bind(agent.to_string()).bind("x".repeat(MAX_STAGED_EVENT_BYTES + 1)).execute(&store.pool).await.unwrap();
+            assert!(
+                store
+                    .acknowledge_response_intent(run, agent, "history-request")
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .load_messages_after(conversation, 0, 100_000)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            sqlx::query("DELETE FROM staged_provider_events WHERE run_id = ?")
+                .bind(run.to_string())
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            store
+                .acknowledge_response_intent(run, agent, "history-request")
+                .await
+                .unwrap();
+            let messages = store
+                .load_messages_after(conversation, 0, 100_000)
+                .await
+                .unwrap();
+            assert_eq!(messages.len(), 1);
+            let content = &messages[0].content;
+            assert!(content.contains("First public question?"));
+            assert!(content.contains("first choice"));
+            assert!(content.contains("second choice"));
+            assert!(content.find("First public").unwrap() < content.find("Second public").unwrap());
+            assert!(!content.contains("SECRET"));
+            assert!(content.ends_with("[Response history truncated]"));
+            assert!(content.len() <= MAX_CANONICAL_MESSAGE_BYTES);
+            assert_eq!(content.contains("child agent"), child_owned);
+            let events = store
+                .load_timeline(conversation, None, 100)
+                .await
+                .unwrap()
+                .items;
+            let event = events
+                .iter()
+                .find(|event| event.content == *content)
+                .unwrap();
+            assert_eq!(event.agent_id, agent);
+            assert!(events.iter().all(|event| !event.content.contains("SECRET")));
+            assert_eq!(
+                store
+                    .load_approval(run, "history-request")
+                    .await
+                    .unwrap()
+                    .resolution,
+                Some(answer)
+            );
+            assert!(
+                store
+                    .acknowledge_response_intent(run, agent, "history-request")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .load_messages_after(conversation, 0, 100_000)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_control_watermark_uses_message_sequence_and_preserves_native_item_aggregation()
+     {
+        let (store, run, root, _) = native_child_fixture().await;
+        let conversation = store.load_run(run).await.unwrap().conversation_id;
+        let cut: i64 =
+            sqlx::query_scalar("SELECT context_through_sequence FROM provider_runs WHERE id = ?")
+                .bind(run.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        store
+            .append_owned_run_event(
+                run,
+                root,
+                "owner",
+                ProviderEventRecord::native_message("prefix ", "same-item"),
+            )
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            store
+                .append_owned_run_event(
+                    run,
+                    root,
+                    "owner",
+                    ProviderEventRecord::progress("event only"),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .persist_owned_steering(run, root, "owner", "accepted constraint")
+            .await
+            .unwrap();
+        let messages = store
+            .load_messages_after(conversation, 0, 100_000)
+            .await
+            .unwrap();
+        let steering = messages
+            .iter()
+            .find(|message| message.content == "accepted constraint")
+            .unwrap();
+        assert_eq!(
+            store
+                .provider_context_boundary(conversation, ProviderId::Codex)
+                .await
+                .unwrap(),
+            steering.sequence
+        );
+        let event = store
+            .load_timeline(conversation, None, 100)
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|event| event.content == "accepted constraint")
+            .unwrap();
+        assert!(event.sequence > steering.sequence);
+        store
+            .append_owned_run_event(
+                run,
+                root,
+                "owner",
+                ProviderEventRecord::native_message("suffix", "same-item"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .provider_context_boundary(conversation, ProviderId::Codex)
+                .await
+                .unwrap(),
+            steering.sequence
+        );
+        assert_eq!(
+            store
+                .provider_context_boundary(conversation, ProviderId::Claude)
+                .await
+                .unwrap(),
+            0
+        );
+        let messages = store
+            .load_messages_after(conversation, 0, 100_000)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "prefix suffix");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT context_through_sequence FROM provider_runs WHERE id = ?"
+            )
+            .bind(run.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            cut
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_or_secret_answers_never_become_canonical_history() {
+        for scenario in [
+            "pending",
+            "rejected",
+            "unknown",
+            "denied",
+            "approved",
+            "secret",
+            "mixed-plain",
+            "invalid-id",
+            "duplicate-secret-id",
+        ] {
+            let (store, run, root, _) = native_child_fixture().await;
+            let questions = [("public", scenario == "secret"), ("secret", true)]
+                .into_iter()
+                .map(|(id, secret)| UserInputQuestion {
+                    id: if scenario == "duplicate-secret-id" {
+                        "public"
+                    } else {
+                        id
+                    }
+                    .into(),
+                    header: "Choice".into(),
+                    question: format!("{id} question"),
+                    options: None,
+                    is_other: false,
+                    is_secret: secret,
+                })
+                .collect();
+            store
+                .append_run_event(
+                    run,
+                    root,
+                    ProviderEventRecord::user_input_requested(
+                        ProviderId::Codex,
+                        "history",
+                        questions,
+                        None,
+                    ),
+                )
+                .await
+                .unwrap();
+            let answer = match scenario {
+                "denied" => ApprovalResolution::Denied,
+                "approved" => ApprovalResolution::Approved,
+                "mixed-plain" => ApprovalResolution::Answer(
+                    "public and SECRET_ANSWER cannot be separated".into(),
+                ),
+                _ => ApprovalResolution::Answers(std::collections::BTreeMap::from([(
+                    if scenario == "invalid-id" {
+                        "unknown"
+                    } else {
+                        "public"
+                    }
+                    .into(),
+                    vec!["answer".into()],
+                )])),
+            };
+            if scenario != "pending" {
+                let recorded = store
+                    .record_response_intent(run, root, "history", answer)
+                    .await;
+                if scenario == "invalid-id" {
+                    assert!(matches!(
+                        recorded,
+                        Err(StoreError::InvalidApprovalResolution)
+                    ));
+                } else {
+                    recorded.unwrap();
+                    if scenario == "rejected" || scenario == "unknown" {
+                        store
+                            .reject_response_intent(
+                                run,
+                                root,
+                                "history",
+                                if scenario == "rejected" {
+                                    DispatchCertainty::NotDispatched
+                                } else {
+                                    DispatchCertainty::MayHaveDispatched
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        assert!(
+                            store
+                                .acknowledge_response_intent(run, root, "history")
+                                .await
+                                .is_err()
+                        );
+                    } else {
+                        store
+                            .acknowledge_response_intent(run, root, "history")
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            let conversation = store.load_run(run).await.unwrap().conversation_id;
+            assert!(
+                store
+                    .load_messages_after(conversation, 0, 100_000)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{scenario}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn stale_recovery_claim_atomically_fences_the_previous_owner() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -7438,6 +7957,12 @@ mod tests {
             "former-owner",
         ));
         assert_fenced!(store.advance_owned_provider_context(run.id, "former-owner"));
+        assert_fenced!(store.persist_owned_steering(
+            run.id,
+            root.id,
+            "former-owner",
+            "late steering"
+        ));
         assert_fenced!(store.append_owned_run_event(
             run.id,
             root.id,
@@ -7469,6 +7994,7 @@ mod tests {
             root.id,
             "missing-request",
             "former-owner",
+            None
         ));
         assert_fenced!(store.fail_owned_run_if_active(
             run.id,
@@ -10627,7 +11153,7 @@ mod tests {
         );
         assert!(
             store
-                .acknowledge_owned_response_intent(run, child, "question-a", "owner")
+                .acknowledge_owned_response_intent(run, child, "question-a", "owner", None)
                 .await
                 .is_err()
         );
@@ -10690,7 +11216,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .acknowledge_owned_response_intent(run, child, "question-b", "owner")
+            .acknowledge_owned_response_intent(run, child, "question-b", "owner", None)
             .await
             .unwrap();
         assert_eq!(
@@ -10703,7 +11229,7 @@ mod tests {
         );
         assert!(matches!(
             store
-                .acknowledge_owned_response_intent(run, child, "question-b", "owner")
+                .acknowledge_owned_response_intent(run, child, "question-b", "owner", None)
                 .await,
             Err(StoreError::ApprovalResponseAlreadyAcknowledged)
         ));
@@ -10874,10 +11400,10 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(store.acknowledge_owned_response_intent(run, child, "permission", "owner").await, Err(StoreError::DispatchOwnerMismatch(id)) if id == run)
+            matches!(store.acknowledge_owned_response_intent(run, child, "permission", "owner", None).await, Err(StoreError::DispatchOwnerMismatch(id)) if id == run)
         );
         store
-            .acknowledge_owned_response_intent(run, child, "permission", "replacement")
+            .acknowledge_owned_response_intent(run, child, "permission", "replacement", None)
             .await
             .unwrap();
         assert_eq!(
@@ -10935,7 +11461,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .acknowledge_owned_response_intent(run, child, "permission", "owner")
+            .acknowledge_owned_response_intent(run, child, "permission", "owner", None)
             .await
             .unwrap();
         assert_eq!(
@@ -11040,7 +11566,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .acknowledge_owned_response_intent(run, grandchild, "second", "owner")
+            .acknowledge_owned_response_intent(run, grandchild, "second", "owner", None)
             .await
             .unwrap();
         assert_eq!(
@@ -11295,7 +11821,7 @@ mod tests {
         );
         assert!(
             store
-                .acknowledge_owned_response_intent(run, child, "permission", "owner")
+                .acknowledge_owned_response_intent(run, child, "permission", "owner", None)
                 .await
                 .is_err()
         );

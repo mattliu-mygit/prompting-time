@@ -36,11 +36,10 @@ mod finalization_tests;
 
 pub const MAX_CONCURRENT_ROOT_RUNS: usize = 4;
 pub const MAX_QUEUED_ROOT_RUNS: usize = 64;
-pub const MAX_CONCURRENT_APPROVAL_RESPONSES: usize = 4;
+pub const MAX_CONCURRENT_CONTROLS: usize = 4;
 pub const MAX_APPROVAL_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_ADMITTED_ROOT_RUNS: usize = MAX_CONCURRENT_ROOT_RUNS + MAX_QUEUED_ROOT_RUNS;
-const SUPERVISOR_COMMAND_CAPACITY: usize =
-    MAX_ADMITTED_ROOT_RUNS + MAX_CONCURRENT_APPROVAL_RESPONSES;
+const SUPERVISOR_COMMAND_CAPACITY: usize = MAX_ADMITTED_ROOT_RUNS + MAX_CONCURRENT_CONTROLS;
 const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const RESPONSE_ACK_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_PENDING_CONTROLS: usize = 16;
@@ -439,6 +438,16 @@ pub enum RuntimeError {
     ApprovalResponseBusy { run_id: RunId, request_id: String },
     #[error("provider control operation was cancelled")]
     OperationCancelled,
+    #[error("steering must not be empty")]
+    EmptySteering,
+    #[error("steering is already in flight for run {0}")]
+    SteeringBusy(RunId),
+    #[error("steering outcome is unconfirmed; inspect history before retrying")]
+    SteeringAcceptanceUnknown,
+    #[error("provider accepted steering but its history could not be persisted: {0}")]
+    SteeringHistory(StoreError),
+    #[error("provider control operation queue is full (limit {limit})")]
+    ControlQueueFull { limit: usize },
     #[error("run reached {actual:?} while waiting for {expected:?}")]
     UnexpectedTerminal {
         expected: RunStatus,
@@ -464,6 +473,9 @@ struct ActiveAttempt {
     pending_child: Option<(AgentId, crate::providers::NativeChildTurn)>,
     response_in_flight: bool,
     response_operation_id: Option<u64>,
+    response_execution: Option<watch::Sender<ControlExecution>>,
+    steering_operation_id: Option<u64>,
+    steering_execution: Option<watch::Sender<ControlExecution>>,
     done: watch::Sender<bool>,
 }
 
@@ -473,7 +485,41 @@ struct PendingControl {
     bytes: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlExecution {
+    Pending,
+    Executing,
+    Finished,
+}
+
+/// Execution completion must not require the manager to reconcile its JoinSet.
+struct ControlCompletion(watch::Sender<ControlExecution>);
+
+impl ControlCompletion {
+    fn new() -> Self {
+        Self(watch::channel(ControlExecution::Pending).0)
+    }
+
+    fn begin(&self) -> bool {
+        self.0.send_if_modified(|state| {
+            if *state != ControlExecution::Pending {
+                return false;
+            }
+            *state = ControlExecution::Executing;
+            true
+        })
+    }
+}
+
+impl Drop for ControlCompletion {
+    fn drop(&mut self) {
+        self.0.send_replace(ControlExecution::Finished);
+    }
+}
+
 struct ActiveRun {
+    #[cfg(test)]
+    root_panic_reconciliation_barrier: Mutex<Option<Arc<OwnedTaskCompletionBarrier>>>,
     cancellation: watch::Sender<bool>,
     shutdown: watch::Sender<bool>,
     state: watch::Sender<OperationState>,
@@ -513,6 +559,12 @@ struct AdmittedJob {
 }
 
 enum TaskOwner {
+    Steering {
+        active: Arc<ActiveRun>,
+        operation_id: u64,
+        admission: OwnedSemaphorePermit,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
     Run {
         active: Arc<ActiveRun>,
         dispatch_owner_id: String,
@@ -529,6 +581,7 @@ enum TaskOwner {
 }
 
 struct ResponseJob {
+    completion: ControlCompletion,
     requested_run_id: RunId,
     request_id: String,
     response: ApprovalResponse,
@@ -543,7 +596,21 @@ struct ResponseJob {
     pre_acknowledgement_barrier: Option<Arc<ResponsePreAcknowledgementBarrier>>,
 }
 
+struct SteeringJob {
+    run_id: RunId,
+    text: String,
+    operation_id: u64,
+    dispatch_owner_id: String,
+    active: Arc<ActiveRun>,
+    completion: ControlCompletion,
+}
+
 enum ManagerCommand {
+    Steer {
+        job: SteeringJob,
+        admission: OwnedSemaphorePermit,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
     Spawn(AdmittedJob),
     Respond {
         job: ResponseJob,
@@ -574,8 +641,8 @@ pub struct RunSupervisor {
     force_shutdown: watch::Sender<bool>,
     interrupts: Arc<Notify>,
     root_admission: Arc<Semaphore>,
-    response_admission: Arc<Semaphore>,
-    next_response_operation: AtomicU64,
+    control_admission: Arc<Semaphore>,
+    next_control_operation: AtomicU64,
     lifecycle: tokio::sync::Mutex<Lifecycle>,
     manager: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
@@ -648,8 +715,8 @@ impl RunSupervisor {
             force_shutdown,
             interrupts,
             root_admission,
-            response_admission: Arc::new(Semaphore::new(MAX_CONCURRENT_APPROVAL_RESPONSES)),
-            next_response_operation: AtomicU64::new(1),
+            control_admission: Arc::new(Semaphore::new(MAX_CONCURRENT_CONTROLS)),
+            next_control_operation: AtomicU64::new(1),
             lifecycle: tokio::sync::Mutex::new(Lifecycle::Open),
             manager: tokio::sync::Mutex::new(Some(manager)),
             #[cfg(test)]
@@ -962,6 +1029,8 @@ impl RunSupervisor {
         };
         let (state, receiver) = watch::channel(initial);
         let active = Arc::new(ActiveRun {
+            #[cfg(test)]
+            root_panic_reconciliation_barrier: Mutex::new(None),
             cancellation,
             shutdown,
             state,
@@ -1087,8 +1156,9 @@ impl RunSupervisor {
             return Err(RuntimeError::SupervisorClosed);
         }
         let active = self.active_run(run_id)?;
-        let operation_id = self.next_response_operation.fetch_add(1, Ordering::Relaxed);
-        let response_admission = {
+        let operation_id = self.next_control_operation.fetch_add(1, Ordering::Relaxed);
+        let completion = ControlCompletion::new();
+        let control_admission = {
             let mut attempt = active
                 .attempt
                 .lock()
@@ -1102,17 +1172,18 @@ impl RunSupervisor {
                     request_id: request_id.to_owned(),
                 });
             }
-            let admission = Arc::clone(&self.response_admission)
+            let admission = Arc::clone(&self.control_admission)
                 .try_acquire_owned()
                 .map_err(|error| match error {
                     tokio::sync::TryAcquireError::NoPermits => {
                         RuntimeError::ApprovalResponseQueueFull {
-                            limit: MAX_CONCURRENT_APPROVAL_RESPONSES,
+                            limit: MAX_CONCURRENT_CONTROLS,
                         }
                     }
                     tokio::sync::TryAcquireError::Closed => RuntimeError::SupervisorClosed,
                 })?;
             attempt.response_operation_id = Some(operation_id);
+            attempt.response_execution = Some(completion.0.clone());
             admission
         };
         let command = match self.commands.clone().try_reserve_owned() {
@@ -1130,6 +1201,7 @@ impl RunSupervisor {
         let (reply, result) = oneshot::channel();
         command.send(ManagerCommand::Respond {
             job: ResponseJob {
+                completion,
                 requested_run_id: run_id,
                 request_id: request_id.to_owned(),
                 response,
@@ -1143,7 +1215,7 @@ impl RunSupervisor {
                 #[cfg(test)]
                 pre_acknowledgement_barrier: self.response_pre_acknowledgement_barrier.clone(),
             },
-            admission: response_admission,
+            admission: control_admission,
             reply,
         });
         drop(lifecycle);
@@ -1151,48 +1223,79 @@ impl RunSupervisor {
     }
 
     pub async fn steer(&self, run_id: RunId, text: &str) -> Result<(), RuntimeError> {
+        if text.trim().is_empty() {
+            return Err(RuntimeError::EmptySteering);
+        }
+        if text.len() > crate::store::MAX_CANONICAL_MESSAGE_BYTES {
+            return Err(StoreError::MessageTooLarge {
+                limit: crate::store::MAX_CANONICAL_MESSAGE_BYTES,
+            }
+            .into());
+        }
+        let lifecycle = self.lifecycle.lock().await;
+        if *lifecycle != Lifecycle::Open {
+            return Err(RuntimeError::SupervisorClosed);
+        }
         let active = self.active_run(run_id)?;
-        let (attempt_run_id, adapter, session, native_turn_id, mut done) = {
-            let attempt = active
+        let operation_id = self.next_control_operation.fetch_add(1, Ordering::Relaxed);
+        let completion = ControlCompletion::new();
+        let (attempt_run_id, admission) = {
+            let mut attempt = active
                 .attempt
                 .lock()
                 .expect("active attempt mutex must not be poisoned");
             let attempt = attempt
-                .as_ref()
+                .as_mut()
                 .ok_or(RuntimeError::SessionNotReady(run_id))?;
-            (
-                attempt.run_id,
-                Arc::clone(&attempt.adapter),
-                attempt.session.clone(),
-                attempt
-                    .native_turn_id
-                    .clone()
-                    .ok_or(RuntimeError::SessionNotReady(run_id))?,
-                attempt.done.subscribe(),
-            )
+            if *attempt.done.borrow() || *active.cancellation.borrow() || *active.shutdown.borrow()
+            {
+                return Err(RuntimeError::OperationCancelled);
+            }
+            if attempt.native_turn_id.is_none() {
+                return Err(RuntimeError::SessionNotReady(run_id));
+            }
+            if attempt.steering_operation_id.is_some() {
+                return Err(RuntimeError::SteeringBusy(run_id));
+            }
+            let admission = Arc::clone(&self.control_admission)
+                .try_acquire_owned()
+                .map_err(|error| match error {
+                    tokio::sync::TryAcquireError::NoPermits => RuntimeError::ControlQueueFull {
+                        limit: MAX_CONCURRENT_CONTROLS,
+                    },
+                    tokio::sync::TryAcquireError::Closed => RuntimeError::SupervisorClosed,
+                })?;
+            attempt.steering_operation_id = Some(operation_id);
+            attempt.steering_execution = Some(completion.0.clone());
+            (attempt.run_id, admission)
         };
-        let mut cancelled = active.cancellation.subscribe();
-        let mut shutdown = active.shutdown.subscribe();
-        if !self
-            .store
-            .refresh_provider_dispatch_lease(
-                attempt_run_id,
-                &self.instance_id,
-                DISPATCH_LEASE_DURATION,
-                DISPATCH_LEASE_STALE_GRACE,
-            )
-            .await?
-        {
-            return Err(RuntimeError::DispatchLeaseLost(attempt_run_id));
-        }
-        race_attempt_control(
-            adapter.steer(&session, &native_turn_id, text),
-            &mut cancelled,
-            &mut shutdown,
-            &mut done,
-        )
-        .await??;
-        Ok(())
+        let command = match self.commands.clone().try_reserve_owned() {
+            Ok(command) => command,
+            Err(error) => {
+                clear_steering_operation(&active, operation_id);
+                return Err(match error {
+                    mpsc::error::TrySendError::Full(_) => RuntimeError::CommandQueueFull {
+                        limit: SUPERVISOR_COMMAND_CAPACITY,
+                    },
+                    mpsc::error::TrySendError::Closed(_) => RuntimeError::SupervisorClosed,
+                });
+            }
+        };
+        let (reply, result) = oneshot::channel();
+        command.send(ManagerCommand::Steer {
+            job: SteeringJob {
+                run_id: attempt_run_id,
+                text: text.to_owned(),
+                operation_id,
+                dispatch_owner_id: self.instance_id.clone(),
+                active,
+                completion,
+            },
+            admission,
+            reply,
+        });
+        drop(lifecycle);
+        result.await.map_err(|_| RuntimeError::SupervisorClosed)?
     }
 
     pub async fn interrupt(&self, run_id: RunId) -> Result<(), RuntimeError> {
@@ -1463,6 +1566,12 @@ async fn run_manager(
                 }
             }
             command = commands.recv() => match command {
+                Some(ManagerCommand::Steer { job, admission, reply }) => {
+                    let owner = TaskOwner::Steering { active: Arc::clone(&job.active), operation_id: job.operation_id, admission, reply };
+                    let store = store.clone();
+                    let task = tasks.spawn(async move { execute_steering(store, job).await });
+                    owners.insert(task.id(), owner);
+                }
                 Some(ManagerCommand::Spawn(job)) => {
                     if active_root_tasks < MAX_CONCURRENT_ROOT_RUNS {
                         spawn_root_task(
@@ -1526,6 +1635,14 @@ async fn run_manager(
     commands.close();
     while let Some(command) = commands.recv().await {
         match command {
+            ManagerCommand::Steer {
+                job,
+                admission: _,
+                reply,
+            } => {
+                clear_steering_operation(&job.active, job.operation_id);
+                let _ = reply.send(Err(RuntimeError::OperationCancelled));
+            }
             ManagerCommand::Spawn(job) => pending.push_back(job),
             ManagerCommand::Respond {
                 job,
@@ -1662,7 +1779,9 @@ fn unique_manager_runs(
 ) -> Vec<Arc<ActiveRun>> {
     let mut unique = unique_active_runs(active);
     for run in owners.values().map(|owner| match owner {
-        TaskOwner::Run { active, .. } | TaskOwner::Response { active, .. } => active,
+        TaskOwner::Run { active, .. }
+        | TaskOwner::Response { active, .. }
+        | TaskOwner::Steering { active, .. } => active,
     }) {
         if !unique.iter().any(|candidate| Arc::ptr_eq(candidate, run)) {
             unique.push(Arc::clone(run));
@@ -1680,7 +1799,132 @@ fn unique_manager_runs(
     unique
 }
 
+async fn execute_steering(store: Store, job: SteeringJob) -> Result<(), RuntimeError> {
+    if !job.completion.begin() {
+        return Err(RuntimeError::OperationCancelled);
+    }
+    let gate = job.active.attempt_gate.lock().await;
+    let (root_id, adapter, session, native_turn_id, mut done) = {
+        let state = job
+            .active
+            .attempt
+            .lock()
+            .expect("active attempt mutex must not be poisoned");
+        let attempt = state
+            .as_ref()
+            .filter(|attempt| {
+                attempt.run_id == job.run_id
+                    && attempt.steering_operation_id == Some(job.operation_id)
+            })
+            .ok_or(RuntimeError::OperationCancelled)?;
+        (
+            attempt.root_id,
+            Arc::clone(&attempt.adapter),
+            attempt.session.clone(),
+            attempt
+                .native_turn_id
+                .clone()
+                .ok_or(RuntimeError::SessionNotReady(job.run_id))?,
+            attempt.done.subscribe(),
+        )
+    };
+    let mut cancelled = job.active.cancellation.subscribe();
+    let mut shutdown = job.active.shutdown.subscribe();
+    if *cancelled.borrow() || *shutdown.borrow() || *done.borrow() {
+        return Err(RuntimeError::OperationCancelled);
+    }
+    if !store
+        .refresh_provider_dispatch_lease(
+            job.run_id,
+            &job.dispatch_owner_id,
+            DISPATCH_LEASE_DURATION,
+            DISPATCH_LEASE_STALE_GRACE,
+        )
+        .await?
+    {
+        return Err(RuntimeError::DispatchLeaseLost(job.run_id));
+    }
+    if *cancelled.borrow() || *shutdown.borrow() || *done.borrow() {
+        return Err(RuntimeError::OperationCancelled);
+    }
+    drop(gate);
+    let result = tokio::select! {
+        // An already-ready acknowledgement wins over simultaneous terminal/cancellation.
+        biased;
+        result = adapter.steer(&session, &native_turn_id, &job.text) => result,
+        _ = cancelled.changed() => return Err(RuntimeError::SteeringAcceptanceUnknown),
+        _ = shutdown.changed() => return Err(RuntimeError::SteeringAcceptanceUnknown),
+        _ = done.changed() => return Err(RuntimeError::SteeringAcceptanceUnknown),
+    };
+    if let Err(error) = result {
+        return Err(
+            if error.dispatch_certainty() == DispatchCertainty::NotDispatched {
+                error.into()
+            } else {
+                RuntimeError::SteeringAcceptanceUnknown
+            },
+        );
+    }
+    // Terminal publication waits for this execution; never downgrade observed success.
+    let _gate = job.active.attempt_gate.lock().await;
+    store
+        .persist_owned_steering(job.run_id, root_id, &job.dispatch_owner_id, &job.text)
+        .await
+        .map_err(RuntimeError::SteeringHistory)
+}
+
+fn clear_steering_operation(active: &ActiveRun, operation_id: u64) {
+    let mut attempt = active
+        .attempt
+        .lock()
+        .expect("active attempt mutex must not be poisoned");
+    if let Some(attempt) = attempt.as_mut()
+        && attempt.steering_operation_id == Some(operation_id)
+    {
+        attempt.steering_operation_id = None;
+        attempt.steering_execution = None;
+    }
+}
+
+async fn finish_control_executions(active: &ActiveRun) {
+    let controls = {
+        let state = active
+            .attempt
+            .lock()
+            .expect("active attempt mutex must not be poisoned");
+        state
+            .as_ref()
+            .map(|attempt| {
+                [
+                    attempt.response_execution.clone(),
+                    attempt.steering_execution.clone(),
+                ]
+            })
+            .unwrap_or([None, None])
+    };
+    for control in controls.into_iter().flatten() {
+        // The manager may be finalizing a failed root while this command is still queued.
+        // Atomically cancel that pending execution so it cannot dispatch later.
+        control.send_if_modified(|state| {
+            if *state != ControlExecution::Pending {
+                return false;
+            }
+            *state = ControlExecution::Finished;
+            true
+        });
+        let mut state = control.subscribe();
+        while *state.borrow_and_update() != ControlExecution::Finished {
+            if state.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
 async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeError> {
+    if !job.completion.begin() {
+        return Err(RuntimeError::OperationCancelled);
+    }
     let gate = job.active.attempt_gate.lock().await;
     let (attempt_run_id, root_id, adapter, mut session, mut done, request_is_pending) = {
         let state = job
@@ -1716,6 +1960,7 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
             Err(error) => Err(error.into()),
         };
     }
+    let root_agent_id = root_id;
     let root_id = if let Some((agent_id, native)) = store
         .load_native_child_control_owner(attempt_run_id, &job.request_id)
         .await?
@@ -1748,7 +1993,7 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
         ApprovalResponse::Answer(answer) => ApprovalResolution::Answer(answer.clone()),
         ApprovalResponse::Answers(answers) => ApprovalResolution::Answers(answers.clone()),
     };
-    store
+    let approval = store
         .record_owned_response_intent(
             attempt_run_id,
             root_id,
@@ -1757,6 +2002,15 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
             &job.dispatch_owner_id,
         )
         .await?;
+    let response_history = crate::store::question_response_history(
+        &approval,
+        &approval
+            .response_intent
+            .as_ref()
+            .expect("intent just recorded")
+            .resolution,
+        root_id != root_agent_id,
+    );
     if *cancelled.borrow() || *shutdown.borrow() || *done.borrow() {
         let rejection = store
             .reject_owned_response_intent(
@@ -1900,6 +2154,7 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
                     root_id,
                     &job.request_id,
                     &job.dispatch_owner_id,
+                    response_history.as_deref(),
                 )
                 .await;
             #[cfg(test)]
@@ -1957,6 +2212,7 @@ fn clear_response_operation(active: &ActiveRun, operation_id: u64) {
         && attempt.response_operation_id == Some(operation_id)
     {
         attempt.response_operation_id = None;
+        attempt.response_execution = None;
     }
 }
 
@@ -2018,6 +2274,22 @@ async fn reconcile_task(
         return true;
     };
     match owner {
+        TaskOwner::Steering {
+            active,
+            operation_id,
+            admission,
+            reply,
+        } => {
+            clear_steering_operation(&active, operation_id);
+            let failed = result.is_err();
+            let result = match result {
+                Ok((_, result)) => result,
+                Err(_) => Err(RuntimeError::SteeringAcceptanceUnknown),
+            };
+            let _ = reply.send(result);
+            drop(admission);
+            failed
+        }
         TaskOwner::Run {
             active,
             dispatch_owner_id,
@@ -2028,7 +2300,20 @@ async fn reconcile_task(
                 Err(_) => true,
             };
             if failed {
+                #[cfg(test)]
+                {
+                    let barrier = active
+                        .root_panic_reconciliation_barrier
+                        .lock()
+                        .unwrap()
+                        .clone();
+                    if let Some(barrier) = barrier {
+                        barrier.completed.notify_one();
+                        barrier.release.notified().await;
+                    }
+                }
                 signal_attempt_done(&active);
+                finish_control_executions(&active).await;
                 let _ = shutdown_active_turn(&active).await;
                 let (run_id, root_id) = *active
                     .attempt_identity
@@ -2389,6 +2674,9 @@ async fn execute_attempt(
         pending_child: None,
         response_in_flight: false,
         response_operation_id: None,
+        response_execution: None,
+        steering_operation_id: None,
+        steering_execution: None,
         done,
     });
     if !store
@@ -3510,6 +3798,7 @@ async fn finalize_attempt(
     mut finish: AttemptFinish,
 ) -> Result<AttemptResult, RuntimeError> {
     signal_attempt_done(active);
+    finish_control_executions(active).await;
     let gate = active.attempt_gate.lock().await;
 
     if matches!(finish, AttemptFinish::ProviderTerminal(_)) {
@@ -4521,8 +4810,25 @@ mod tests {
             _active_turn: &str,
             _text: &str,
         ) -> Result<(), ProviderError> {
+            if _text == "accepted-at-terminal" {
+                let sender = self.sender.lock().unwrap().take().unwrap();
+                sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+            }
+            self.control_started.fetch_add(1, Ordering::SeqCst);
+            if _text.starts_with("held-steer")
+                && let Some(barrier) = &self.response_barrier
+            {
+                let _guard = ResponseDropGuard(Arc::clone(&self.response_drops));
+                barrier.started.notify_one();
+                barrier.release.notified().await;
+            }
+            if _text == "rejected-steer" {
+                return Err(ProviderError::NotDispatched {
+                    category: ProviderErrorCategory::Rejected,
+                });
+            }
+            assert!(_text != "panic-steer", "injected steering panic");
             if self.block_steer {
-                self.control_started.fetch_add(1, Ordering::SeqCst);
                 std::future::pending().await
             }
             Ok(())
@@ -4554,8 +4860,421 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn steering_success_at_terminal_is_durable_before_terminal_publication() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("steering terminal"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let supervisor = RunSupervisor::new(store.clone(), vec![adapter]).unwrap();
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/steering-terminal"),
+                ProviderId::Codex,
+                TurnRequest::new("fixture"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        supervisor
+            .respond(
+                handle.run_id(),
+                "fixture-approval",
+                ApprovalResponse::Denied,
+            )
+            .await
+            .unwrap();
+        supervisor
+            .steer(handle.run_id(), "accepted-at-terminal")
+            .await
+            .unwrap();
+        assert_eq!(handle.wait().await.unwrap().status, RunStatus::Completed);
+        assert_eq!(
+            store
+                .load_timeline(conversation.id, None, 100)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .filter(|event| event.content == "accepted-at-terminal")
+                .count(),
+            1
+        );
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn native_child_answer_write_precedes_child_and_root_terminal_before_ack() {
         native_child_answer_ordering(false, true).await;
+    }
+
+    async fn steering_fixture(
+        barrier: Option<Arc<ResponseControlBarrier>>,
+        block: bool,
+    ) -> (
+        Store,
+        Arc<RunSupervisor>,
+        Arc<ApprovalAdapter>,
+        RunHandle,
+        ConversationId,
+    ) {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("owned steering"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: block,
+            response_barrier: barrier,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let supervisor =
+            Arc::new(RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap());
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/owned-steering"),
+                ProviderId::Codex,
+                TurnRequest::new("fixture"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        (store, supervisor, adapter, handle, conversation.id)
+    }
+
+    #[tokio::test]
+    async fn owned_steering_survives_caller_drop_and_fences_owner_transfer_before_history() {
+        for transfer in [false, true] {
+            let barrier = Arc::new(ResponseControlBarrier::new());
+            let (store, supervisor, adapter, handle, conversation) =
+                steering_fixture(Some(barrier.clone()), false).await;
+            let control = {
+                let supervisor = supervisor.clone();
+                let run = handle.run_id();
+                tokio::spawn(async move { supervisor.steer(run, "held-steer accepted").await })
+            };
+            barrier.started.notified().await;
+            let active = supervisor.active_run(handle.run_id()).unwrap();
+            let gate = active.attempt_gate.lock().await;
+            barrier.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while adapter.response_drops.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if transfer {
+                store
+                    .replace_dispatch_owner_for_test(handle.run_id(), "new-owner")
+                    .await
+                    .unwrap();
+            } else {
+                control.abort();
+            }
+            let sender = adapter.sender.lock().unwrap().take().unwrap();
+            sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+            drop(sender);
+            assert_eq!(
+                store.load_run(handle.run_id()).await.unwrap().status,
+                RunStatus::Waiting
+            );
+            drop(gate);
+            let outcome = tokio::time::timeout(Duration::from_secs(3), handle.wait())
+                .await
+                .unwrap();
+            if transfer {
+                assert!(matches!(
+                    control.await.unwrap(),
+                    Err(RuntimeError::SteeringHistory(
+                        StoreError::DispatchOwnerMismatch(_)
+                    ))
+                ));
+                assert!(matches!(outcome, Err(RuntimeError::ReconciliationFailed)));
+            } else {
+                assert!(control.await.unwrap_err().is_cancelled());
+                assert_eq!(outcome.unwrap().status, RunStatus::Failed); // Root permission was unanswered.
+            }
+            assert_eq!(
+                store
+                    .load_timeline(conversation, None, 100)
+                    .await
+                    .unwrap()
+                    .items
+                    .iter()
+                    .filter(|event| event.content == "held-steer accepted")
+                    .count(),
+                usize::from(!transfer)
+            );
+            let _ = supervisor.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn response_and_steering_coexist_with_shared_bounded_admission() {
+        let barrier = Arc::new(ResponseControlBarrier::new());
+        let (store, supervisor, adapter, handle, conversation) =
+            steering_fixture(Some(barrier.clone()), false).await;
+        let steer = {
+            let supervisor = supervisor.clone();
+            let run = handle.run_id();
+            tokio::spawn(async move { supervisor.steer(run, "held-steer simultaneous").await })
+        };
+        barrier.started.notified().await;
+        let response = {
+            let supervisor = supervisor.clone();
+            let run = handle.run_id();
+            tokio::spawn(async move {
+                supervisor
+                    .respond(run, "fixture-approval", ApprovalResponse::Approved)
+                    .await
+            })
+        };
+        barrier.started.notified().await;
+        assert_eq!(
+            supervisor.control_admission.available_permits(),
+            MAX_CONCURRENT_CONTROLS - 2
+        );
+        assert!(matches!(
+            supervisor.steer(handle.run_id(), "duplicate").await,
+            Err(RuntimeError::SteeringBusy(_))
+        ));
+        barrier.release.notify_one();
+        barrier.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            steer.await.unwrap().unwrap();
+            response.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            supervisor.control_admission.available_permits(),
+            MAX_CONCURRENT_CONTROLS
+        );
+        let sender = adapter.sender.lock().unwrap().take().unwrap();
+        sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+        drop(sender);
+        assert_eq!(handle.wait().await.unwrap().status, RunStatus::Completed);
+        assert!(
+            store
+                .load_timeline(conversation, None, 100)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|event| event.content == "held-steer simultaneous")
+        );
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn steering_rejection_panic_and_cancelled_dispatch_never_project_history() {
+        for text in ["rejected-steer", "panic-steer", "blocked-steer"] {
+            let (store, supervisor, adapter, handle, conversation) =
+                steering_fixture(None, text == "blocked-steer").await;
+            let control = {
+                let supervisor = supervisor.clone();
+                let run = handle.run_id();
+                tokio::spawn(async move { supervisor.steer(run, text).await })
+            };
+            if text == "blocked-steer" {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while adapter.control_started.load(Ordering::SeqCst) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                supervisor.interrupt(handle.run_id()).await.unwrap();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(2), control)
+                .await
+                .unwrap()
+                .unwrap();
+            if text == "rejected-steer" {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeError::Provider(ProviderError::NotDispatched { .. }))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeError::SteeringAcceptanceUnknown)
+                ));
+            }
+            assert_eq!(
+                supervisor.control_admission.available_permits(),
+                MAX_CONCURRENT_CONTROLS
+            );
+            assert!(
+                store
+                    .load_timeline(conversation, None, 100)
+                    .await
+                    .unwrap()
+                    .items
+                    .iter()
+                    .all(|event| event.content != text)
+            );
+            if text != "blocked-steer" {
+                supervisor.interrupt(handle.run_id()).await.unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(2), handle.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            let _ = supervisor.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_bounds_are_checked_before_native_dispatch() {
+        let (_store, supervisor, adapter, handle, _) = steering_fixture(None, false).await;
+        assert!(matches!(
+            supervisor.steer(handle.run_id(), " ").await,
+            Err(RuntimeError::EmptySteering)
+        ));
+        assert!(matches!(
+            supervisor
+                .steer(
+                    handle.run_id(),
+                    &"x".repeat(crate::store::MAX_CANONICAL_MESSAGE_BYTES + 1)
+                )
+                .await,
+            Err(RuntimeError::Store(StoreError::MessageTooLarge { .. }))
+        ));
+        assert_eq!(adapter.control_started.load(Ordering::SeqCst), 0);
+        supervisor
+            .steer(
+                handle.run_id(),
+                &"x".repeat(crate::store::MAX_CANONICAL_MESSAGE_BYTES),
+            )
+            .await
+            .unwrap();
+        assert_eq!(adapter.control_started.load(Ordering::SeqCst), 1);
+        supervisor.interrupt(handle.run_id()).await.unwrap();
+        handle.wait().await.unwrap();
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_controls_cannot_deadlock_manager_root_panic_or_shutdown() {
+        for shutdown_queued in [false, true] {
+            let store = Store::open_in_memory().await.unwrap();
+            let conversation = store
+                .create_conversation(NewConversation::projectless("queued panic controls"))
+                .await
+                .unwrap();
+            let adapter = Arc::new(ApprovalAdapter {
+                sender: Mutex::new(None),
+                responses: AtomicUsize::new(0),
+                owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+                control_started: AtomicUsize::new(0),
+                block_steer: false,
+                response_barrier: None,
+                response_drops: Arc::new(AtomicUsize::new(0)),
+                owned_pid: None,
+                panic_response: false,
+            });
+            let panic = Arc::new(ActiveTurnPanicBarrier::new());
+            let reconciliation = Arc::new(OwnedTaskCompletionBarrier::new());
+            let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+            supervisor.set_active_turn_panic_barrier(panic.clone());
+            let supervisor = Arc::new(supervisor);
+            let handle = supervisor
+                .submit(RunRequest::new(
+                    conversation.id,
+                    PathBuf::from("/tmp/queued-panic-controls"),
+                    ProviderId::Codex,
+                    TurnRequest::new("fixture"),
+                ))
+                .await
+                .unwrap();
+            panic.started.notified().await;
+            let active = supervisor.active_run(handle.run_id()).unwrap();
+            *active.root_panic_reconciliation_barrier.lock().unwrap() =
+                Some(reconciliation.clone());
+            panic.release.notify_one();
+            reconciliation.completed.notified().await;
+            let steer = {
+                let supervisor = supervisor.clone();
+                let run = handle.run_id();
+                tokio::spawn(async move { supervisor.steer(run, "queued-steer").await })
+            };
+            let response = {
+                let supervisor = supervisor.clone();
+                let run = handle.run_id();
+                tokio::spawn(async move {
+                    supervisor
+                        .respond(run, "fixture-approval", ApprovalResponse::Denied)
+                        .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while supervisor.commands.capacity() != SUPERVISOR_COMMAND_CAPACITY - 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let shutdown = if shutdown_queued {
+                let supervisor = supervisor.clone();
+                Some(tokio::spawn(async move { supervisor.shutdown().await }))
+            } else {
+                None
+            };
+            if shutdown_queued {
+                tokio::task::yield_now().await;
+            }
+            reconciliation.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                assert_eq!(handle.wait().await.unwrap().status, RunStatus::Failed);
+                assert!(matches!(
+                    steer.await.unwrap(),
+                    Err(RuntimeError::OperationCancelled)
+                ));
+                assert!(matches!(
+                    response.await.unwrap(),
+                    Err(RuntimeError::OperationCancelled)
+                ));
+                if let Some(shutdown) = shutdown {
+                    let _ = shutdown.await.unwrap();
+                } else {
+                    let _ = supervisor.shutdown().await;
+                }
+            })
+            .await
+            .expect(
+                "manager must finalize without needing to dequeue its own pending controls first",
+            );
+            assert_eq!(adapter.control_started.load(Ordering::SeqCst), 0);
+            assert_eq!(adapter.responses.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                supervisor.control_admission.available_permits(),
+                MAX_CONCURRENT_CONTROLS
+            );
+            let state = active.attempt.lock().unwrap();
+            assert!(state.as_ref().unwrap().steering_operation_id.is_none());
+            assert!(state.as_ref().unwrap().response_operation_id.is_none());
+        }
     }
 
     #[tokio::test]
@@ -6305,7 +7024,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_admission_is_released_only_after_manager_reconciliation() {
+    async fn control_admission_is_released_only_after_manager_reconciliation() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
             .create_conversation(NewConversation::projectless("response permit ordering"))
@@ -6325,8 +7044,8 @@ mod tests {
         let completion = Arc::new(OwnedTaskCompletionBarrier::new());
         let mut supervisor = RunSupervisor::new(store, vec![adapter.clone()]).unwrap();
         supervisor.set_response_task_completion_barrier(Arc::clone(&completion));
-        let admission = Arc::clone(&supervisor.response_admission);
-        let held = (0..MAX_CONCURRENT_APPROVAL_RESPONSES - 1)
+        let admission = Arc::clone(&supervisor.control_admission);
+        let held = (0..MAX_CONCURRENT_CONTROLS - 1)
             .map(|_| Arc::clone(&admission).try_acquire_owned().unwrap())
             .collect::<Vec<_>>();
         let supervisor = Arc::new(supervisor);

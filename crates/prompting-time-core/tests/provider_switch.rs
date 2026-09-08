@@ -205,6 +205,252 @@ fn workspace_paths_cannot_inject_handoff_sections() {
 }
 
 #[tokio::test]
+async fn accepted_steering_survives_timeline_and_provider_switches() {
+    let fixture = TestApp::scripted([Plan::Wait]).await;
+    let conversation = fixture
+        .app
+        .create_conversation(ConversationRequest::projectless("steering history"))
+        .await
+        .unwrap();
+    let first = fixture
+        .app
+        .submit(SubmitRequest {
+            command_id: "first".into(),
+            conversation_id: conversation.id,
+            content: "Implement the fixture".into(),
+            provider_override: Some(ProviderId::Codex),
+        })
+        .await
+        .unwrap();
+    first
+        .handle
+        .wait_for(prompting_time_core::domain::RunStatus::Running)
+        .await
+        .unwrap();
+    let steering = "Preserve QUARTZ_MARKER_482 compatibility";
+    fixture
+        .app
+        .steer(first.handle.run_id(), steering)
+        .await
+        .unwrap();
+    fixture.app.interrupt(first.handle.run_id()).await.unwrap();
+    first.handle.wait().await.unwrap();
+    let messages = fixture
+        .store
+        .load_timeline(conversation.id, None, 100)
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.content == steering)
+            .count(),
+        1
+    );
+    for (command, provider, expected) in [
+        ("second", ProviderId::Claude, 1),
+        ("third", ProviderId::Codex, 0),
+        ("fourth", ProviderId::Claude, 0),
+    ] {
+        fixture
+            .app
+            .submit(SubmitRequest {
+                command_id: command.into(),
+                conversation_id: conversation.id,
+                content: command.into(),
+                provider_override: Some(provider),
+            })
+            .await
+            .unwrap()
+            .handle
+            .wait()
+            .await
+            .unwrap();
+        let prompt = if provider == ProviderId::Codex {
+            fixture.codex.last_prompt()
+        } else {
+            fixture.claude.last_prompt()
+        };
+        assert_eq!(prompt.matches("QUARTZ_MARKER_482").count(), expected);
+    }
+    fixture.app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn acknowledged_questions_survive_provider_handoff() {
+    let fixture = TestApp::scripted([Plan::Questions]).await;
+    let conversation = fixture
+        .app
+        .create_conversation(ConversationRequest::projectless("question history"))
+        .await
+        .unwrap();
+    let first = fixture
+        .app
+        .submit(SubmitRequest {
+            command_id: "first".into(),
+            conversation_id: conversation.id,
+            content: "Prepare deployment".into(),
+            provider_override: Some(ProviderId::Codex),
+        })
+        .await
+        .unwrap();
+    first
+        .handle
+        .wait_for(prompting_time_core::domain::RunStatus::Waiting)
+        .await
+        .unwrap();
+    fixture
+        .app
+        .respond_to_approval(
+            first.handle.run_id(),
+            "question-request",
+            ApprovalResponse::Answer("QUARTZ_ENV_621 staging".into()),
+        )
+        .await
+        .unwrap();
+    fixture.app.interrupt(first.handle.run_id()).await.unwrap();
+    first.handle.wait().await.unwrap();
+    let approval = fixture
+        .store
+        .load_approval(first.handle.run_id(), "question-request")
+        .await
+        .unwrap();
+    assert!(matches!(
+        approval.resolution,
+        Some(prompting_time_core::domain::ApprovalResolution::Answer(_))
+    ));
+    fixture
+        .app
+        .submit(SubmitRequest {
+            command_id: "second".into(),
+            conversation_id: conversation.id,
+            content: "Continue deployment".into(),
+            provider_override: Some(ProviderId::Claude),
+        })
+        .await
+        .unwrap()
+        .handle
+        .wait()
+        .await
+        .unwrap();
+    let prompt = fixture.claude.last_prompt();
+    assert!(prompt.contains("QUARTZ_ENV_621"));
+    assert!(prompt.contains("Which environment should I use?"));
+    fixture.app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn structured_child_answers_keep_provenance_privacy_and_session_tree_boundary() {
+    let fixture = TestApp::scripted([Plan::ChildQuestions]).await;
+    let conversation = fixture
+        .app
+        .create_conversation(ConversationRequest::projectless("child question history"))
+        .await
+        .unwrap();
+    let first = fixture
+        .app
+        .submit(SubmitRequest {
+            command_id: "first".into(),
+            conversation_id: conversation.id,
+            content: "Prepare fixture".into(),
+            provider_override: Some(ProviderId::Codex),
+        })
+        .await
+        .unwrap();
+    first
+        .handle
+        .wait_for(prompting_time_core::domain::RunStatus::Waiting)
+        .await
+        .unwrap();
+    let approval = fixture
+        .store
+        .load_approval(first.handle.run_id(), "question-request")
+        .await
+        .unwrap();
+    fixture
+        .app
+        .respond_to_approval_id(
+            approval.id,
+            ApprovalResponse::Answers(std::collections::BTreeMap::from([
+                ("question-1".into(), vec!["SECRET_ANSWER".into()]),
+                (
+                    "question-2".into(),
+                    vec!["PUBLIC_FIRST".into(), "PUBLIC_SECOND".into()],
+                ),
+                ("question-3".into(), vec!["PUBLIC_LAST".into()]),
+            ])),
+        )
+        .await
+        .unwrap();
+    {
+        let calls = fixture.codex.calls.lock().unwrap();
+        let Call::Response(target, ApprovalResponse::Answers(answers)) = calls
+            .iter()
+            .find(|call| matches!(call, Call::Response(_, _)))
+            .unwrap()
+        else {
+            panic!("structured native response expected")
+        };
+        assert_eq!(target, "question-child");
+        assert_eq!(answers["z-native"], ["PUBLIC_FIRST", "PUBLIC_SECOND"]);
+    }
+    fixture.app.interrupt(first.handle.run_id()).await.unwrap();
+    first.handle.wait().await.unwrap();
+    let timeline = fixture
+        .store
+        .load_timeline(conversation.id, None, 100)
+        .await
+        .unwrap()
+        .items;
+    let event = timeline
+        .iter()
+        .find(|event| event.content.contains("PUBLIC_FIRST"))
+        .unwrap();
+    assert_eq!(event.agent_id, approval.agent_id);
+    assert!(event.content.contains("child agent"));
+    assert!(
+        event.content.find("PUBLIC_FIRST").unwrap() < event.content.find("PUBLIC_LAST").unwrap()
+    );
+    assert!(
+        timeline
+            .iter()
+            .all(|event| !event.content.contains("SECRET"))
+    );
+    for (command, provider, expected) in [
+        ("second", ProviderId::Claude, 1),
+        ("third", ProviderId::Codex, 0),
+        ("fourth", ProviderId::Claude, 0),
+    ] {
+        fixture
+            .app
+            .submit(SubmitRequest {
+                command_id: command.into(),
+                conversation_id: conversation.id,
+                content: command.into(),
+                provider_override: Some(provider),
+            })
+            .await
+            .unwrap()
+            .handle
+            .wait()
+            .await
+            .unwrap();
+        let prompt = if provider == ProviderId::Codex {
+            fixture.codex.last_prompt()
+        } else {
+            fixture.claude.last_prompt()
+        };
+        assert_eq!(prompt.matches("PUBLIC_FIRST").count(), expected);
+        assert!(!prompt.contains("SECRET"));
+        if expected == 1 {
+            assert!(prompt.contains("delivered to this child"));
+        }
+    }
+    fixture.app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn switching_back_resumes_provider_and_sends_only_unseen_context() {
     let fixture = TestApp::scripted([Plan::VisibleContext]).await;
     let conversation = fixture
@@ -865,6 +1111,8 @@ enum Plan {
     FailAfterMutation,
     ApprovalThenInterrupted,
     Wait,
+    Questions,
+    ChildQuestions,
 }
 
 #[derive(Clone)]
@@ -872,6 +1120,7 @@ enum Call {
     Start,
     Resume,
     Turn(String),
+    Response(String, ApprovalResponse),
 }
 
 impl FakeAdapter {
@@ -1020,7 +1269,67 @@ impl ProviderAdapter for FakeAdapter {
             }))
             .await
             .unwrap();
-        if matches!(plan, Plan::Wait) {
+        if matches!(plan, Plan::Questions) {
+            sender
+                .send(Ok(ProviderEvent::UserInputRequested {
+                    request_id: "question-request".into(),
+                    questions: vec![prompting_time_core::providers::UserInputQuestion {
+                        id: "native-environment".into(),
+                        header: "Deployment".into(),
+                        question: "Which environment should I use?".into(),
+                        options: None,
+                        is_other: false,
+                        is_secret: false,
+                    }],
+                    auto_resolution_ms: None,
+                }))
+                .await
+                .unwrap();
+        }
+        if matches!(plan, Plan::ChildQuestions) {
+            use prompting_time_core::providers::{
+                NativeChildEvent, NativeChildTurn, UserInputQuestion,
+            };
+            let owner = NativeChildTurn {
+                native_thread_id: "question-child".into(),
+                native_turn_id: "child-turn".into(),
+            };
+            for event in [
+                ProviderEvent::NativeChildIdentity {
+                    parent_native_thread_id: session.native_id.clone(),
+                    native_thread_id: owner.native_thread_id.clone(),
+                },
+                ProviderEvent::NativeChild {
+                    owner: owner.clone(),
+                    event: NativeChildEvent::Started,
+                },
+                ProviderEvent::NativeChild {
+                    owner,
+                    event: NativeChildEvent::UserInputRequested {
+                        request_id: "question-request".into(),
+                        questions: [
+                            ("secret", "SECRET_QUESTION", true),
+                            ("z-native", "First public question?", false),
+                            ("a-native", "Last public question?", false),
+                        ]
+                        .into_iter()
+                        .map(|(id, question, secret)| UserInputQuestion {
+                            id: id.into(),
+                            header: "Choice".into(),
+                            question: question.into(),
+                            options: None,
+                            is_other: false,
+                            is_secret: secret,
+                        })
+                        .collect(),
+                        auto_resolution_ms: None,
+                    },
+                },
+            ] {
+                sender.send(Ok(event)).await.unwrap();
+            }
+        }
+        if matches!(plan, Plan::Wait | Plan::Questions | Plan::ChildQuestions) {
             return Ok(ProviderTurn::new(
                 receiver,
                 NoopTurnOwner {
@@ -1122,6 +1431,10 @@ impl ProviderAdapter for FakeAdapter {
         _request_id: &str,
         _response: ApprovalResponse,
     ) -> Result<(), ProviderError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(Call::Response(_session.native_id.clone(), _response));
         Ok(())
     }
 
