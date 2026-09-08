@@ -236,7 +236,7 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
       <section className="composer" aria-label="Message composer" aria-busy={submitting} inert={interruptionDialogOpen}>
       <div className="composer-controls">
         <label>
-          <span>Provider</span>
+          <span className="sr-only">Provider</span>
           <select
             ref={providerSelect}
             value={choice}
@@ -256,11 +256,11 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
         </span>
       </div>
       <label className="message-field">
-        <span>Message</span>
+        <span className="sr-only">Message</span>
         <textarea
           ref={messageField}
           value={text}
-          rows={3}
+          rows={2}
           disabled={submitting}
           placeholder={active ? `Add direction for ${activeName}` : "Ask Prompting Time…"}
           onChange={(event) => {
@@ -284,6 +284,7 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
           : `${activeName} cannot be steered in this state. Interrupt it or wait for the turn to finish.`}</p>
       ) : null}
       <div className="composer-actions">
+        {!active || canSteer ? <small className="composer-shortcut">⌘ / Ctrl + Enter to {canSteer ? "steer" : "send"}</small> : null}
         {rootTurnActive && !interruptionPending ? (
           <button
             type="button"

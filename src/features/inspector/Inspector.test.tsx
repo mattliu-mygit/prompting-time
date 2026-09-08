@@ -1,7 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
-import type { ApprovalSnapshot, ConversationSummary, ProviderInstallation } from "../../bridge/types";
+import type { ApprovalSnapshot, ConversationSummary, ProviderInstallation, TimelineItem } from "../../bridge/types";
 import type { AppActions, ConversationActions } from "../../app/store";
 import { ApprovalCard } from "./ApprovalCard";
 import { Inspector } from "./Inspector";
@@ -313,6 +313,67 @@ describe("ApprovalCard", () => {
 });
 
 describe("Inspector", () => {
+  it("opens diagnostics independently before workspace inspection returns and never refreshes them implicitly", async () => {
+    const api = actions({ inspectWorkspace: vi.fn(() => new Promise<never>(() => {})), loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }) });
+    const view = render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
+    expect(api.loadDiagnostics).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Expand diagnostics" }));
+    await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledWith({ conversationId: conversation.id, cursor: null, limit: 30 }));
+    view.rerender(<Inspector conversation={conversation} providers={providers} refreshVersion={20} actions={api} />);
+    expect(api.loadDiagnostics).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh diagnostics" }));
+    await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(2));
+  });
+
+  it("pages diagnostics chronologically with four retained pages and lazy detail", async () => {
+    const item = (sequence: number): TimelineItem => ({ id: `d${sequence}`, sequence: String(sequence), conversationId: conversation.id,
+      runId: "run-1", agentId: "root", provider: "codex", kind: "diagnostic", presentation: "telemetry", role: null,
+      content: `notification ${sequence}`, contentBytes: "2000", truncated: true });
+    const api = actions({ loadDiagnostics: vi.fn(({ cursor }) => {
+      const end = cursor === null ? 150 : Number(cursor);
+      return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => item(end - 29 + index)), nextCursor: end > 30 ? String(end - 30) : null });
+    }), loadEventDetail: vi.fn().mockResolvedValue({ id: "d150", content: "exact notification", contentBytes: "18", truncated: false }) });
+    render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand diagnostics" }));
+    await screen.findByText("notification 150");
+    expect(api.loadEventDetail).not.toHaveBeenCalled();
+    const diagnostics = screen.getByRole("region", { name: "Diagnostics" });
+    fireEvent.click(within(diagnostics).getAllByRole("button", { name: "Show full provider activity" }).at(-1)!);
+    expect(await screen.findByText("exact notification")).toBeVisible();
+    for (let page = 0; page < 4; page += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Load older diagnostics" }));
+      await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(page + 2));
+    }
+    expect(screen.queryByText("notification 150")).not.toBeInTheDocument();
+    const entries = diagnostics.querySelectorAll("article");
+    expect(entries).toHaveLength(120);
+    expect(entries[0]).toHaveTextContent("notification 1");
+    expect(entries[119]).toHaveTextContent("notification 120");
+    fireEvent.click(screen.getByRole("button", { name: "Reload newest diagnostics" }));
+    expect(await screen.findByText("notification 150")).toBeVisible();
+    expect(diagnostics.querySelectorAll("article")).toHaveLength(30);
+  });
+
+  it("invalidates pending diagnostics on close and conversation switch and provides retry", async () => {
+    const pending: Array<(page: { items: TimelineItem[]; nextCursor: string | null }) => void> = [];
+    const api = actions({ loadDiagnostics: vi.fn()
+      .mockRejectedValueOnce(new Error("diagnostic read failed"))
+      .mockImplementation(() => new Promise((resolve) => { pending.push(resolve); })) });
+    const view = render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand diagnostics" }));
+    expect(await screen.findByText("diagnostic read failed")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry diagnostics" }));
+    await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse diagnostics" }));
+    await act(async () => pending[0]!({ items: [], nextCursor: "stale" }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand diagnostics" }));
+    await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(3));
+    view.rerender(<Inspector conversation={{ ...conversation, id: "other" }} providers={providers} refreshVersion={0} actions={api} />);
+    await act(async () => pending[1]!({ items: [], nextCursor: "stale" }));
+    expect(screen.getByRole("button", { name: "Expand diagnostics" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "Load older diagnostics" })).not.toBeInTheDocument();
+  });
+
   it("never publishes a stale workspace result after the selected conversation changes", async () => {
     const baseline = await actions().inspectWorkspace({ conversationId: conversation.id });
     const resolvers = new Map<string, (value: typeof baseline) => void>();

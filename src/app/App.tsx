@@ -245,7 +245,6 @@ function CommandCenter({ store }: { store: AppStore }) {
             <>
               <div className="workspace-heading">
                 <div>
-                  <p className="eyebrow">Current conversation</p>
                   <h1>{selectedConversation.title}</h1>
                 </div>
                 {selectedConversation.provider ? (
@@ -261,6 +260,8 @@ function CommandCenter({ store }: { store: AppStore }) {
               <Timeline
                 key={`timeline-${selectedConversation.id}`}
                 conversationId={selectedConversation.id}
+                currentRunId={selectedConversation.currentRunId}
+                runStatus={selectedConversation.runStatus}
                 refreshVersion={selectedVersion}
                 agents={selectedConversation.agents}
                 agentsTruncated={selectedConversation.agentsTruncated}

@@ -10,6 +10,7 @@ import type {
   RoutingCriterion,
 } from "../../bridge/types";
 import type { AppActions } from "../../app/store";
+import { Diagnostics } from "./Diagnostics";
 
 type InspectorProps = {
   conversation: ConversationSummary;
@@ -206,11 +207,10 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
     });
   }
 
-  if (error && !snapshot) return <p role="alert" className="inline-error">{error}</p>;
-  if (!snapshot) return <p role="status">Loading inspector…</p>;
-
   return (
     <div className="inspector-content">
+      <Diagnostics conversationId={conversation.id} actions={actions} />
+      {!snapshot ? error ? <p role="alert" className="inline-error">{error}</p> : <p role="status">Loading inspector…</p> : <>
       <div className="inspector-refresh">
         <button type="button" className="secondary-button" disabled={loading} onClick={() => refreshInspector(true)}>Refresh inspector</button>
         {refreshAvailable ? <small>New conversation activity is available. Refresh to update workspace details.</small> : null}
@@ -310,6 +310,7 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
           ))}
         </ul>
       </InspectorSection>
+      </>}
     </div>
   );
 }

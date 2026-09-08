@@ -59,6 +59,141 @@ const agents: AgentSnapshot[] = [
 ];
 
 describe("Timeline", () => {
+  it("uses selected run state for its quiet status and keeps activity disclosure through older-page joins", async () => {
+    const api = actions({ loadTimeline: vi.fn()
+      .mockResolvedValueOnce(timelinePage([event({ id: "t2", sequence: "2", kind: "tool", content: "newer tool" })], "older"))
+      .mockResolvedValueOnce(timelinePage([event({ id: "t1", sequence: "1", kind: "tool", content: "older tool" })], null)) });
+    const view = render(<Timeline conversationId="conversation-1" currentRunId="current" runStatus="waiting" refreshVersion={0} agents={[{ ...agents[0]!, status: "completed" }]} actions={api} />);
+    expect(screen.getByText("Waiting")).toHaveAttribute("role", "status");
+    fireEvent.click(await screen.findByRole("button", { name: /Show tool activity/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(await screen.findByText("older tool")).toBeVisible();
+    expect(screen.getByText("newer tool")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Hide tool activity/i })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container.querySelectorAll("[data-timeline-id]")).toHaveLength(2);
+  });
+  it("renders assistant Markdown and keeps user Markdown literal with honest copy feedback", async () => {
+    const content = "## Result\n\n- passes\n\n| Check | Result |\n| - | - |\n| Build | good |\n\n```rust\nlet n = 1;\n```";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([
+      event({ id: "user", sequence: "1", role: "user", content: "## literal **request**" }),
+      event({ id: "answer", sequence: "2", content }),
+    ], null)) });
+    render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    expect(await screen.findByRole("heading", { name: "Result" })).toBeVisible();
+    expect(screen.getByRole("table")).toHaveTextContent("Buildgood");
+    expect(screen.getByText("passes").closest("li")).not.toBeNull();
+    const user = screen.getByRole("article", { name: "You message" });
+    expect(user).toHaveTextContent("## literal **request**");
+    expect(within(user).queryByRole("heading")).not.toBeInTheDocument();
+    expect(user).not.toHaveTextContent("Codex");
+    const assistant = screen.getByRole("article", { name: "Codex assistant message" });
+    fireEvent.click(within(assistant).getByRole("button", { name: "Copy message" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(content));
+    expect(await within(assistant).findByText("Copied")).toBeVisible();
+    writeText.mockRejectedValueOnce(new Error("clipboard unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(await screen.findByText("Could not copy. Try again.")).toBeVisible();
+    expect(writeText).toHaveBeenLastCalledWith("let n = 1;\n");
+  });
+
+  it("copies only the disclosed preview until complete bounded detail has loaded", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([
+      event({ id: "preview", sequence: "1", content: "preview", truncated: true }),
+    ], null)), loadEventDetail: vi.fn().mockResolvedValue({ id: "preview", content: "complete message", contentBytes: "16", truncated: false }) });
+    render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Copy preview" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("preview"));
+    expect(api.loadEventDetail).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Show full message" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Copy message" }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("complete message"));
+  });
+
+  it("groups adjacent activity by run, agent and provider and preserves disclosure while streaming", async () => {
+    const activity = [
+      event({ id: "t1", sequence: "1", kind: "tool", content: "first output" }),
+      event({ id: "t2", sequence: "2", kind: "progress", content: "progress output" }),
+      event({ id: "m", sequence: "3", content: "answer" }),
+      event({ id: "t3", sequence: "4", kind: "tool" }),
+      event({ id: "t4", sequence: "5", kind: "tool", runId: "other-run" }),
+      event({ id: "t5", sequence: "6", kind: "tool", runId: "other-run", agentId: "reviewer" }),
+      event({ id: "t6", sequence: "7", kind: "tool", runId: "other-run", agentId: "reviewer", provider: "claude" }),
+    ];
+    const api = actions({ loadTimeline: vi.fn()
+      .mockResolvedValueOnce(timelinePage(activity, null))
+      .mockResolvedValueOnce(timelinePage(activity.map((item) => item.id === "t2" ? { ...item, content: "updated progress" } : item), null)) });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={agents} actions={api} />);
+    const groups = await screen.findAllByRole("button", { name: /Show tool activity/i });
+    expect(groups).toHaveLength(5);
+    expect(screen.queryByText("first output")).not.toBeInTheDocument();
+    fireEvent.click(groups[0]!);
+    expect(screen.getByText("first output")).toBeVisible();
+    expect(screen.getByText("progress output")).toBeVisible();
+    expect(view.container.querySelector('[data-timeline-id="t2"]')).not.toBeNull();
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={agents} actions={api} />);
+    expect(await screen.findByText("updated progress")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Hide tool activity/i })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps authoritative failures and legacy notices visible and excludes telemetry", async () => {
+    const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([
+      event({ id: "tool", sequence: "1", kind: "tool" }),
+      event({ id: "notice", sequence: "2", kind: "diagnostic", presentation: "notice", content: "Failed is just legacy text" }),
+      event({ id: "failure", sequence: "3", kind: "diagnostic", presentation: "failure", content: "Connection closed unexpectedly" }),
+      event({ id: "telemetry", sequence: "4", kind: "diagnostic", presentation: "telemetry", content: "private protocol noise" }),
+      event({ id: "tool2", sequence: "5", kind: "tool" }),
+    ], null)) });
+    render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    expect(await screen.findByRole("article", { name: "Codex notice" })).not.toHaveClass("failure");
+    expect(screen.getByRole("article", { name: "Codex failure" })).toHaveClass("failure");
+    expect(screen.queryByText("private protocol noise")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Show tool activity/i })).toHaveLength(2);
+  });
+
+  it("suspends following after an upward scroll near the bottom during an in-flight read", async () => {
+    let finish!: (page: ReturnType<typeof timelinePage>) => void;
+    const api = actions({ loadTimeline: vi.fn()
+      .mockResolvedValueOnce(timelinePage([event({ id: "first", sequence: "1" })], null))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })) });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    await screen.findByText("Done");
+    const box = screen.getByLabelText("Conversation activity");
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 200 });
+    Object.defineProperty(box, "clientHeight", { configurable: true, value: 50 });
+    box.scrollTop = 150;
+    fireEvent.scroll(box);
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={[]} actions={api} />);
+    await waitFor(() => expect(api.loadTimeline).toHaveBeenCalledTimes(2));
+    box.scrollTop = 140;
+    fireEvent.scroll(box);
+    await act(async () => finish(timelinePage([event({ id: "first", sequence: "1", content: "updated" })], null)));
+    expect(box.scrollTop).toBe(140);
+    fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+    expect(box.scrollTop).toBe(200);
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+  });
+
+  it("hides Jump to latest when viewport resizing clamps the reader to the bottom", async () => {
+    render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([event({ id: "one", sequence: "1" })], null)) })} />);
+    await screen.findByText("Done");
+    const box = screen.getByLabelText("Conversation activity");
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 500 });
+    Object.defineProperty(box, "clientHeight", { configurable: true, value: 100 });
+    box.scrollTop = 400;
+    fireEvent.scroll(box);
+    box.scrollTop = 300;
+    fireEvent.scroll(box);
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    Object.defineProperty(box, "clientHeight", { configurable: true, value: 250 });
+    box.scrollTop = 250;
+    fireEvent.scroll(box);
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+  });
+
   it("coalesces streamed newest-page invalidations into one in-flight read and one follow-up", async () => {
     const resolvers: Array<(page: ReturnType<typeof timelinePage>) => void> = [];
     let inFlight = 0;
@@ -187,7 +322,7 @@ describe("Timeline", () => {
     const api = actions();
     render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={agents} actions={api} />);
 
-    expect(await screen.findByRole("article", { name: "Codex user message" })).toHaveTextContent("Please inspect this");
+    expect(await screen.findByRole("article", { name: "You message" })).toHaveTextContent("Please inspect this");
     expect(screen.getByRole("article", { name: "Claude assistant message" })).toHaveTextContent("I found it");
     fireEvent.click(screen.getByRole("button", { name: "Show agent activity (2)" }));
     expect(screen.getByRole("article", { name: /Reviewer, Claude, Running/ })).toBeVisible();
@@ -195,6 +330,7 @@ describe("Timeline", () => {
     expect(screen.getByRole("article", { name: /Tester, Codex, Queued/ })).toHaveAttribute("data-depth", "2");
     expect(api.loadEventDetail).not.toHaveBeenCalled();
 
+    fireEvent.click(screen.getByRole("button", { name: /Show tool activity/i }));
     fireEvent.click(screen.getByRole("button", { name: "Show tool output" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
     expect(api.loadEventDetail).toHaveBeenCalledWith({ eventId: "tool-1" });
@@ -340,14 +476,15 @@ describe("Timeline", () => {
         items: [
           event({ id: "p", sequence: "1", kind: "progress", role: null, content: "Indexing" }),
           event({ id: "d", sequence: "2", kind: "diagnostic", role: null, content: "Provider protocol warning" }),
-          event({ id: "l", sequence: "3", kind: "lifecycle", role: null, content: "Run failed: process exited" }),
+          event({ id: "l", sequence: "3", kind: "lifecycle", presentation: "failure", role: null, content: "Run failed: process exited" }),
         ],
         nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
       }),
     });
     render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
 
-    expect(await screen.findByRole("article", { name: "Codex progress" })).toHaveTextContent("Indexing");
+    fireEvent.click(await screen.findByRole("button", { name: /Show progress/i }));
+    expect(screen.getByRole("article", { name: "Codex progress" })).toHaveTextContent("Indexing");
     expect(screen.queryByRole("status", { name: "Codex progress" })).not.toBeInTheDocument();
     expect(screen.getByRole("article", { name: "Codex provider activity" })).toBeVisible();
     expect(screen.getByRole("article", { name: "Codex failure" })).toHaveTextContent("Run failed");
@@ -370,7 +507,8 @@ describe("Timeline", () => {
     });
     render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
 
-    const user = await screen.findByRole("article", { name: "Codex user message" });
+    const user = await screen.findByRole("article", { name: "You message" });
+    fireEvent.click(screen.getByRole("button", { name: /Show progress/i }));
     const assistant = screen.getByRole("article", { name: "Codex assistant message" });
     const progress = screen.getByRole("article", { name: "Codex progress" });
     const diagnostic = screen.getByRole("article", { name: "Codex provider activity" });

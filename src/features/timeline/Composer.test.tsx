@@ -29,6 +29,16 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 describe("Composer", () => {
+  it("explains the supported keyboard action without implying a queue", () => {
+    const api = actions();
+    const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    expect(screen.getByText("⌘ / Ctrl + Enter to send")).toBeVisible();
+    view.rerender(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    expect(screen.getByText("⌘ / Ctrl + Enter to steer")).toBeVisible();
+    view.rerender(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "claude" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    expect(screen.queryByText(/Enter to/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/queued/i)).not.toBeInTheDocument();
+  });
   it("can interrupt steerable Codex when the other provider is unavailable", async () => {
     const api = actions();
     render(<Composer conversation={conversation({ currentRunId: "run-1", provider: "codex", runStatus: "running" })} providers={[providers[0]!, { ...providers[1]!, available: false }]} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);

@@ -4,10 +4,12 @@ import type {
   ApprovalDetailSnapshot,
   ApprovalSnapshot,
   ProviderId,
+  RunStatus,
   TimelineItem,
 } from "../../bridge/types";
 import type { AgentWindowSnapshot, ConversationActions } from "../../app/store";
 import { ApprovalCard } from "../inspector/ApprovalCard";
+import { TimelineEntry } from "./TimelineEntry";
 
 const PAGE_SIZE = 80;
 const APPROVAL_PAGE_SIZE = 30;
@@ -23,6 +25,8 @@ type TimelineProps = {
   agentWindow?: AgentWindowSnapshot | null;
   onLoadAgentPage?(restart: boolean): void;
   actions: ConversationActions;
+  currentRunId?: string | null;
+  runStatus?: RunStatus | null;
 };
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
@@ -35,7 +39,7 @@ const statusNames: Record<AgentSnapshot["status"], string> = {
   failed: "Failed",
 };
 
-export function Timeline({ conversationId, refreshVersion, agents, agentsTruncated = false, agentWindow = null, onLoadAgentPage = () => {}, actions }: TimelineProps) {
+export function Timeline({ conversationId, refreshVersion, agents, agentsTruncated = false, agentWindow = null, onLoadAgentPage = () => {}, actions, currentRunId = null, runStatus = null }: TimelineProps) {
   const [newestItems, setNewestItems] = useState<TimelineItem[]>([]);
   const [olderPages, setOlderPages] = useState<TimelineItem[][]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -71,6 +75,10 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   const heading = useRef<HTMLHeadingElement>(null);
   const prependAnchor = useRef<ScrollAnchor | null>(null);
   const scrollToEnd = useRef(false);
+  const following = useRef(true);
+  const lastScrollTop = useRef(0);
+  const [showJump, setShowJump] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const rootStatus = agents.find(({ parentId }) => parentId === null)?.status;
 
   useEffect(() => {
@@ -88,9 +96,10 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   }, [rootStatus]);
 
   const items = useMemo(
-    () => mergeTimeline(olderPages.flat(), newestItems),
+    () => mergeTimeline(olderPages.flat(), newestItems).filter((item) => item.presentation !== "telemetry"),
     [newestItems, olderPages],
   );
+  const groups = useMemo(() => groupActivity(items), [items]);
 
   function loadTimelinePage(request: { conversationId: string; cursor: string | null; limit: number }) {
     const result = readTail.current
@@ -112,6 +121,10 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     const changesConversation = requestedConversation.current !== conversationId;
     requestedConversation.current = conversationId;
     if (changesConversation) {
+      following.current = true;
+      lastScrollTop.current = 0;
+      setShowJump(false);
+      setExpandedGroups(new Set());
       requestGeneration.current += 1;
       historyRequestGeneration.current += 1;
       setNewestItems([]);
@@ -156,7 +169,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
             const box = scrollBox.current;
             scrollToEnd.current = replacesConversation
               || box === null
-              || box.scrollHeight - box.scrollTop - box.clientHeight < 32;
+              || (following.current && box.scrollHeight - box.scrollTop - box.clientHeight < 32);
             loadedConversation.current = targetConversation;
             const bounded = boundTimelinePage(page.items);
             if (!replacesConversation && newestItemsRef.current.length > 0) {
@@ -222,14 +235,46 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     if (!scrollBox.current) return;
     if (prependAnchor.current !== null) {
       restoreScrollAnchor(scrollBox.current, prependAnchor.current);
+      lastScrollTop.current = scrollBox.current.scrollTop;
       prependAnchor.current = null;
       return;
     }
     if (scrollToEnd.current) {
       scrollBox.current.scrollTop = scrollBox.current.scrollHeight;
+      lastScrollTop.current = scrollBox.current.scrollTop;
       scrollToEnd.current = false;
     }
   }, [items]);
+
+  function onScroll() {
+    const box = scrollBox.current;
+    if (!box) return;
+    const movedUp = box.scrollTop < lastScrollTop.current;
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 2;
+    // A larger viewport can clamp scrollTop downward while already at the end.
+    if (atBottom) following.current = true;
+    else if (movedUp) following.current = false;
+    lastScrollTop.current = box.scrollTop;
+    setShowJump(!following.current);
+  }
+
+  function jumpToLatest() {
+    following.current = true;
+    setShowJump(false);
+    if (scrollBox.current) {
+      scrollBox.current.scrollTop = scrollBox.current.scrollHeight;
+      lastScrollTop.current = scrollBox.current.scrollTop;
+    }
+  }
+
+  function toggleGroup(group: TimelineItem[]) {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (group.some(({ id }) => current.has(id))) group.forEach(({ id }) => next.delete(id));
+      else next.add(group[0]!.id);
+      return next;
+    });
+  }
 
   useLayoutEffect(() => {
     if (!resolvedApprovalFocus || approvals.some(({ id }) => id === resolvedApprovalFocus)) return;
@@ -275,6 +320,8 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     setCursor(newestCursor.current);
     setHistoryEvicted(false);
     scrollToEnd.current = true;
+    following.current = true;
+    setShowJump(false);
   }
 
   async function loadMoreApprovals() {
@@ -372,10 +419,11 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     <section className="timeline-region" aria-labelledby="timeline-heading">
       <div className="timeline-heading-row">
         <h2 ref={heading} id="timeline-heading" tabIndex={-1}>Timeline</h2>
+        {currentRunId && runStatus ? <span className={`run-status ${runStatus}`} role="status">{runStatus === "running" ? "Working" : statusNames[runStatus]}</span> : null}
         {loading ? <span role="status">Loading activity…</span> : null}
       </div>
       {error ? <p role="alert" className="inline-error">{error}</p> : null}
-      <div ref={scrollBox} className="timeline-scroll" tabIndex={0} aria-label="Conversation activity">
+      <div ref={scrollBox} className="timeline-scroll" tabIndex={0} aria-label="Conversation activity" onScroll={onScroll}>
         {historyEvicted ? (
           <div className="history-window-note" role="note">
             <span>Some history is outside this bounded view.</span>
@@ -389,11 +437,23 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
         ) : null}
         {!loading && items.length === 0 ? <p className="empty-note">No activity yet. Start with a message below.</p> : null}
         <ol className="timeline-list">
-          {items.map((item) => (
-            <li key={item.id} data-timeline-id={item.id}>
-              <TimelineEntry item={item} actions={actions} />
-            </li>
-          ))}
+          {groups.map((group) => {
+            const first = group[0]!;
+            if (!isGroupActivity(first)) return <li key={first.id} data-timeline-id={first.id}>
+              <TimelineEntry item={first} actions={actions} agentPath={agents.some(({ id }) => id === first.agentId) ? canonicalAgentPath(first.agentId, agents) : undefined} />
+            </li>;
+            const expanded = group.some(({ id }) => expandedGroups.has(id));
+            const label = group.some(({ kind }) => kind === "tool") ? "tool activity" : "progress";
+            const attribution = `${providerNames[first.provider]} · ${canonicalAgentPath(first.agentId, agents)}`;
+            return <li key={first.id} className="activity-group">
+              <button type="button" className="activity-toggle" data-timeline-id={expanded ? undefined : first.id} aria-expanded={expanded} onClick={() => toggleGroup(group)} aria-label={`${expanded ? "Hide" : "Show"} ${label} · ${attribution}`}>
+                <span aria-hidden="true">{expanded ? "▾" : "▸"}</span><span>{label === "tool activity" ? "Tool activity" : "Progress"}</span><small>{attribution}</small>
+              </button>
+              {expanded ? <><p className="activity-fragment-note">Activity in the loaded history.</p><ol className="activity-entries">
+                {group.map((item) => <li key={item.id} data-timeline-id={item.id}><TimelineEntry item={item} actions={actions} agentPath={canonicalAgentPath(item.agentId, agents)} /></li>)}
+              </ol></> : null}
+            </li>;
+          })}
         </ol>
         {agentActivity.branches.length > 0 || agentsTruncated ? (
           <AgentActivity
@@ -432,104 +492,27 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
           </section>
         ) : null}
       </div>
+      {showJump ? <button type="button" className="jump-to-latest secondary-button" onClick={jumpToLatest}>Jump to latest</button> : null}
     </section>
   );
 }
 
-function TimelineEntry({ item, actions }: { item: TimelineItem; actions: ConversationActions }) {
-  const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<{ content: string; truncated: boolean } | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const detailVersion = `${item.id}:${item.contentBytes}:${item.truncated}`;
-  const detailVersionRef = useRef(detailVersion);
-  const detailRequestGeneration = useRef(0);
-  const provider = providerNames[item.provider];
-
-  useLayoutEffect(() => {
-    if (detailVersionRef.current === detailVersion) return;
-    detailVersionRef.current = detailVersion;
-    setExpanded(false);
-    setDetail(null);
-    setDetailError(null);
-  }, [detailVersion]);
-
-  async function toggleDetail() {
-    const next = !expanded;
-    setExpanded(next);
-    if (!next) {
-      detailRequestGeneration.current += 1;
-      setDetail(null);
-      setDetailError(null);
-      return;
-    }
-    if (detail !== null || !item.truncated) return;
-    setDetailError(null);
-    const generation = ++detailRequestGeneration.current;
-    try {
-      const requestedVersion = detailVersion;
-      const result = await actions.loadEventDetail({ eventId: item.id });
-      if (detailVersionRef.current === requestedVersion && generation === detailRequestGeneration.current) {
-        setDetail({ content: result.content, truncated: result.truncated });
-      }
-    } catch (reason) {
-      if (detailVersionRef.current === detailVersion && generation === detailRequestGeneration.current) {
-        setDetailError(messageFor(reason));
-      }
-    }
-  }
-
-  function eventContent(label: string, preformatted = false) {
-    const content = expanded && detail ? detail.content : item.content;
-    return (
-      <>
-        {preformatted && expanded ? <pre>{detail?.content ?? (item.truncated ? "Loading bounded detail…" : item.content)}</pre> : <p>{content}</p>}
-        {item.truncated && !expanded ? <p className="truncation-note">Preview truncated.</p> : null}
-        {detail?.truncated ? <p className="truncation-note">Bounded detail remains truncated.</p> : null}
-        {item.truncated || preformatted ? (
-          <button type="button" className="disclosure-link" aria-expanded={expanded} onClick={() => void toggleDetail()}>
-            {expanded ? `Hide ${label}` : `Show ${label}`}
-          </button>
-        ) : null}
-        {detailError ? <p role="alert">{detailError}</p> : null}
-      </>
-    );
-  }
-
-  if (item.kind === "message") {
-    const role = item.role ?? "assistant";
-    return (
-      <article className={`timeline-message ${role}`} aria-label={`${provider} ${role} message`}>
-        <header><span>{provider}</span><span>{role === "user" ? "You" : "Assistant"}</span></header>
-        {eventContent("full message")}
-      </article>
-    );
-  }
-
-  if (item.kind === "tool") {
-    return (
-      <article className="timeline-activity tool-activity" aria-label={`${provider} tool activity`}>
-        <header><span>{provider}</span><span>Tool</span></header>
-        {eventContent("tool output", true)}
-      </article>
-    );
-  }
-
-  const failure = /^(?:run |provider (?:turn )?)?fail(?:ed|ure)\b/i.test(item.content);
-  const label = failure
-    ? "Failure"
-    : item.kind === "progress"
-      ? "Progress"
-      : item.kind === "lifecycle" ? "Run lifecycle" : "Provider activity";
-  return (
-    <article
-      className={`timeline-activity ${item.kind}${failure ? " failure" : ""}`}
-      aria-label={`${provider} ${label.toLowerCase()}`}
-    >
-      <header><span>{provider}</span><span>{label}</span></header>
-      {eventContent(`full ${label.toLowerCase()}`)}
-    </article>
-  );
+function isGroupActivity(item: TimelineItem) {
+  return item.presentation === "normal" && (item.kind === "tool" || item.kind === "progress");
 }
+
+function groupActivity(items: readonly TimelineItem[]) {
+  const groups: TimelineItem[][] = [];
+  for (const item of items) {
+    const previous = groups.at(-1);
+    const first = previous?.[0];
+    if (first && isGroupActivity(first) && isGroupActivity(item)
+      && first.runId === item.runId && first.agentId === item.agentId && first.provider === item.provider) previous!.push(item);
+    else groups.push([item]);
+  }
+  return groups;
+}
+
 
 type AgentBranch = { agent: AgentSnapshot; children: AgentBranch[] };
 
