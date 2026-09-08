@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useHotkeys } from "react-hotkeys-hook";
 import type { CreateConversationRequest, ProviderInstallation } from "../bridge/types";
 import { ConversationTree } from "../features/conversations/ConversationTree";
 import { Inspector } from "../features/inspector/Inspector";
@@ -15,6 +16,8 @@ import {
 type AppProps = {
   store: AppStore;
 };
+
+const CommandPalette = lazy(() => import("../features/commands/CommandPalette"));
 
 const statusOptions: Array<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "All statuses" },
@@ -52,6 +55,8 @@ function CommandCenter({ store }: { store: AppStore }) {
   const [archiveSubmitting, setArchiveSubmitting] = useState(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [composerModalOpen, setComposerModalOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState<boolean | null>(null);
+  const [messageFocusRequested, setMessageFocusRequested] = useState(false);
   const inspectorTrigger = useRef<HTMLButtonElement>(null);
   const inspectorClose = useRef<HTMLButtonElement>(null);
   const newConversationTrigger = useRef<HTMLButtonElement>(null);
@@ -59,6 +64,16 @@ function CommandCenter({ store }: { store: AppStore }) {
   const composerMessage = useRef<HTMLTextAreaElement>(null);
   const focusCreatedComposer = useRef(false);
   const lifecycleModalOpen = creatingConversation || archiveTarget !== null;
+  const paletteAvailable = snapshot.phase === "ready" && !lifecycleModalOpen
+    && !composerModalOpen && !(narrowInspector && inspectorOpen);
+
+  useHotkeys(["meta+k", "ctrl+k"], () => setPaletteOpen((open) => !open), {
+    enabled: paletteAvailable,
+    enableOnFormTags: true,
+    enableOnContentEditable: true,
+    ignoreEventWhen: (event) => event.isComposing || event.keyCode === 229 || event.repeat,
+    preventDefault: true,
+  });
 
   useEffect(() => {
     void store.initialize();
@@ -141,6 +156,24 @@ function CommandCenter({ store }: { store: AppStore }) {
     queueMicrotask(() => inspectorTrigger.current?.focus());
   }
 
+  function openNewConversation() {
+    setLifecycleError(null);
+    setCreatingConversation(true);
+  }
+
+  function toggleSidebar() {
+    setSidebarOpen((open) => !open);
+  }
+
+  function toggleInspector() {
+    setInspectorOpen((open) => !open);
+  }
+
+  function selectConversation(conversationId: string, agentId?: string) {
+    store.selectConversation(conversationId, agentId);
+    if (window.matchMedia("(max-width: 46rem)").matches) setSidebarOpen(false);
+  }
+
   function handleInspectorKeyDown(event: React.KeyboardEvent<HTMLElement>) {
     if (!narrowInspector) return;
     if (event.key === "Escape") {
@@ -172,10 +205,10 @@ function CommandCenter({ store }: { store: AppStore }) {
           <span>Prompting Time</span>
         </div>
         <div className="toolbar-actions">
-          <button ref={newConversationTrigger} type="button" className="toolbar-button" onClick={() => {
-            setLifecycleError(null);
-            setCreatingConversation(true);
-          }}>
+          <button type="button" className="toolbar-button palette-trigger" onClick={() => setPaletteOpen(true)} disabled={!paletteAvailable}>
+            Search <kbd aria-hidden="true">⌘K / Ctrl K</kbd>
+          </button>
+          <button ref={newConversationTrigger} type="button" className="toolbar-button" onClick={openNewConversation}>
             New conversation
           </button>
           <button
@@ -183,7 +216,7 @@ function CommandCenter({ store }: { store: AppStore }) {
             className="toolbar-button sidebar-toggle"
             aria-expanded={sidebarOpen}
             aria-controls="conversation-pane"
-            onClick={() => setSidebarOpen((open) => !open)}
+            onClick={toggleSidebar}
           >
             {sidebarOpen ? "Hide conversations" : "Show conversations"}
           </button>
@@ -193,7 +226,7 @@ function CommandCenter({ store }: { store: AppStore }) {
             className="toolbar-button"
             aria-expanded={inspectorOpen}
             aria-controls="inspector-pane"
-            onClick={() => setInspectorOpen((open) => !open)}
+            onClick={toggleInspector}
           >
             {inspectorOpen ? "Hide inspector" : "Show inspector"}
           </button>
@@ -232,10 +265,7 @@ function CommandCenter({ store }: { store: AppStore }) {
               onLoadAgentPage={(conversationId, restart) => {
                 void store.loadAgentPage(conversationId, restart);
               }}
-              onSelect={(conversationId, agentId) => {
-                store.selectConversation(conversationId, agentId);
-                if (window.matchMedia("(max-width: 46rem)").matches) setSidebarOpen(false);
-              }}
+              onSelect={selectConversation}
             />
           </aside>
         ) : null}
@@ -279,6 +309,8 @@ function CommandCenter({ store }: { store: AppStore }) {
                 onMutation={() => store.refreshConversation(selectedConversation.id)}
                 onModalChange={setComposerModalOpen}
                 messageRef={composerMessage}
+                focusRequested={messageFocusRequested}
+                onFocusHandled={() => setMessageFocusRequested(false)}
               />
             </>
           ) : (
@@ -336,6 +368,26 @@ function CommandCenter({ store }: { store: AppStore }) {
           </aside>
         ) : null}
       </div>
+      {paletteOpen !== null ? (
+        <Suspense fallback={null}>
+          <CommandPalette
+            open={paletteOpen}
+            onOpenChange={setPaletteOpen}
+            conversations={Object.values(snapshot.conversationsById).filter(({ archived }) => !archived)}
+            selectedId={snapshot.selectedConversationId}
+            onSelectConversation={(id) => {
+              selectConversation(id);
+              setMessageFocusRequested(true);
+            }}
+            commands={[
+              { id: "new", label: "New conversation", run: openNewConversation },
+              { id: "sidebar", label: sidebarOpen ? "Hide conversations" : "Show conversations", run: toggleSidebar },
+              { id: "inspector", label: inspectorOpen ? "Hide inspector" : "Show inspector", run: toggleInspector },
+              { id: "message", label: "Focus message", disabled: !selectedConversation || snapshot.submissionsById[selectedConversation.id]?.pending === true, run: () => setMessageFocusRequested(true) },
+            ]}
+          />
+        </Suspense>
+      ) : null}
       {lifecycleError && !creatingConversation && !archiveTarget ? <p role="alert" className="inline-error lifecycle-error">{lifecycleError}</p> : null}
       {creatingConversation ? (
         <NewConversationDialog

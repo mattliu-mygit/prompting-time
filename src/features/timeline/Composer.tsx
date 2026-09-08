@@ -25,6 +25,8 @@ type ComposerProps = {
   onMutation(): void | Promise<void>;
   onModalChange?(open: boolean): void;
   messageRef?: RefObject<HTMLTextAreaElement | null>;
+  focusRequested?: boolean;
+  onFocusHandled?(): void;
 };
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
@@ -34,7 +36,7 @@ const profileNames: Record<RoutingProfile, string> = {
   usageBalance: "Usage balance",
 };
 
-export function Composer({ conversation, providers, routingProfile, actions, store, onMutation, onModalChange, messageRef }: ComposerProps) {
+export function Composer({ conversation, providers, routingProfile, actions, store, onMutation, onModalChange, messageRef, focusRequested, onFocusHandled }: ComposerProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const text = snapshot.draftsById[conversation.id]?.text ?? "";
   const submission = snapshot.submissionsById[conversation.id];
@@ -67,6 +69,16 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   const canInterrupt = currentProvider?.capabilities.includes("interruption") === true;
   const interruptionDialogOpen = pendingInterruption !== null;
   const canSubmit = !submitting && !!text.trim() && (!active || canSteer) && !interruptionDialogOpen;
+
+  useLayoutEffect(() => {
+    if (!focusRequested || submitting || interruptionDialogOpen) return;
+    if (preview) {
+      setPreview(false);
+      return;
+    }
+    messageField.current?.focus();
+    onFocusHandled?.();
+  }, [focusRequested, interruptionDialogOpen, messageField, onFocusHandled, preview, submitting]);
 
   useLayoutEffect(() => {
     const field = messageField.current;

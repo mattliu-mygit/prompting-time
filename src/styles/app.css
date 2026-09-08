@@ -1,3 +1,91 @@
+.palette-trigger kbd {
+  margin-left: var(--space-2);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-secondary);
+}
+
+.palette-overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  background: rgb(0 0 0 / 55%);
+}
+
+.command-palette {
+  position: fixed;
+  z-index: 101;
+  top: min(15vh, 7rem);
+  left: 50%;
+  width: min(40rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - min(15vh, 7rem) - 1rem);
+  overflow: hidden;
+  transform: translateX(-50%);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  box-shadow: 0 1rem 4rem rgb(0 0 0 / 40%);
+  font-size: var(--font-size-ui);
+}
+
+.command-palette [cmdk-input] {
+  width: 100%;
+  min-height: 3rem;
+  padding: var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--color-line);
+  border-radius: 0;
+  background: var(--color-panel-raised);
+  font: inherit;
+}
+
+.command-palette [cmdk-list] {
+  max-height: min(28rem, calc(85dvh - 5rem));
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.command-palette [cmdk-group-heading],
+.command-palette [cmdk-empty] {
+  padding: var(--space-2);
+  color: var(--color-text-muted);
+}
+
+.command-palette [cmdk-group-heading],
+.palette-conversation small,
+.palette-current {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-secondary);
+}
+
+.command-palette [cmdk-item] {
+  display: flex;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.command-palette [cmdk-item][data-selected="true"] {
+  background: var(--color-accent-soft);
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.command-palette [cmdk-item][data-disabled="true"] {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.palette-conversation {
+  display: grid;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .app-shell {
   display: flex;
   height: 100%;

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import axe from "axe-core";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { createAppStore, type AppApi } from "./store";
 import { BridgeError } from "../bridge/api";
@@ -141,6 +141,147 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
     ...overrides,
   };
 }
+
+describe("command palette", () => {
+  const scrollIntoView = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (scrollIntoView) Object.defineProperty(Element.prototype, "scrollIntoView", scrollIntoView);
+    else Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  });
+
+  async function openWorkspace(items = [
+    createdConversation({ id: "a", title: "Alpha", projectRoot: "/projects/compiler" }),
+    createdConversation({ id: "b", title: "Beta", projectRoot: "/projects/renderer" }),
+  ]) {
+    const api = createApi({ listConversations: vi.fn().mockResolvedValue({ items, nextCursor: null }) });
+    const store = createAppStore(api);
+    render(<App store={store} />);
+    await screen.findByRole("button", { name: "New conversation" });
+    return { store, api };
+  }
+
+  async function openPalette() {
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    return screen.findByRole("combobox", { name: "Search conversations and commands" });
+  }
+
+  it("opens from the message hotkey and Escape preserves focus, selection, and raw draft", async () => {
+    await openWorkspace();
+    const message = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+    fireEvent.change(message, { target: { value: "Raw **draft**\n\nkeep" } });
+    message.focus();
+    message.setSelectionRange(4, 9);
+    fireEvent.keyDown(message, { key: "k", code: "KeyK", metaKey: true });
+    const search = await screen.findByRole("combobox", { name: "Search conversations and commands" });
+    expect(search).toHaveFocus();
+    fireEvent.keyDown(search, { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(message).toHaveFocus());
+    expect(message).toHaveValue("Raw **draft**\n\nkeep");
+    expect([message.selectionStart, message.selectionEnd]).toEqual([4, 9]);
+  });
+
+  it("searches all active conversations by project path and returns to independent drafts", async () => {
+    const { store } = await openWorkspace();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Alpha draft" } });
+    act(() => store.setStatusFilter("failed"));
+    const search = await openPalette();
+    fireEvent.change(search, { target: { value: "renderer" } });
+    fireEvent.keyDown(search, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("b"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Beta draft" } });
+    fireEvent.change(await openPalette(), { target: { value: "Alpha" } });
+    fireEvent.click(screen.getByRole("option", { name: /Alpha/ }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Alpha draft"));
+    expect(store.getSnapshot().draftsById.b.text).toBe("Beta draft");
+  });
+
+  it.each(["Focus message", "Alpha"])("leaves preview and focuses the raw message through %s", async (command) => {
+    await openWorkspace();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "**preserved**" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
+    const search = await openPalette();
+    fireEvent.change(search, { target: { value: command } });
+    fireEvent.keyDown(search, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("**preserved**");
+  });
+
+  it("runs shared layout commands and transitions to the focused creator after closing", async () => {
+    await openWorkspace();
+    await openPalette();
+    fireEvent.click(screen.getByRole("option", { name: "Hide conversations" }));
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "Conversations" })).not.toBeInTheDocument());
+    await openPalette();
+    fireEvent.click(screen.getByRole("option", { name: "Show inspector" }));
+    await waitFor(() => expect(screen.getByRole("complementary", { name: "Inspector" })).toBeVisible());
+    await openPalette();
+    fireEvent.click(screen.getByRole("option", { name: "New conversation" }));
+    const dialog = await screen.findByRole("dialog", { name: "New conversation" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Choose folder" })).toHaveFocus());
+    expect(screen.queryByRole("combobox", { name: "Search conversations and commands" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
+  });
+
+  it("shows no results and disables message focus in an empty workspace", async () => {
+    await openWorkspace([]);
+    const search = await openPalette();
+    const focus = screen.getByRole("option", { name: "Focus message" });
+    expect(focus).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(focus);
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: "zzzz-unfindable" } });
+    expect(screen.getByText("No conversations or commands found.")).toBeVisible();
+  });
+
+  it("ignores composition and repeat, supports contenteditable, and toggles closed with Ctrl K", async () => {
+    await openWorkspace();
+    const message = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.keyDown(message, { key: "k", code: "KeyK", ctrlKey: true, isComposing: true });
+    fireEvent.keyDown(message, { key: "k", code: "KeyK", ctrlKey: true, repeat: true });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    const editable = document.createElement("div");
+    editable.contentEditable = "true";
+    document.body.append(editable);
+    fireEvent.keyDown(editable, { key: "k", code: "KeyK", ctrlKey: true });
+    const search = await screen.findByRole("combobox", { name: "Search conversations and commands" });
+    fireEvent.keyDown(search, { key: "k", code: "KeyK", ctrlKey: true });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    editable.remove();
+  });
+
+  it("does not open behind lifecycle dialogs or the narrow inspector", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query === "(max-width: 72rem)", addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    })));
+    await openWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    fireEvent.keyDown(screen.getByRole("button", { name: "Choose folder" }), { key: "k", code: "KeyK", metaKey: true });
+    expect(screen.queryByRole("combobox", { name: "Search conversations and commands" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
+    fireEvent.keyDown(screen.getByRole("button", { name: "Close inspector" }), { key: "k", code: "KeyK", metaKey: true });
+    expect(screen.queryByRole("combobox", { name: "Search conversations and commands" })).not.toBeInTheDocument();
+  });
+
+  it("does not register the palette while workspace data is loading", async () => {
+    const pending = deferred<Awaited<ReturnType<AppApi["listConversations"]>>>();
+    const store = createAppStore(createApi({ listConversations: vi.fn(() => pending.promise) }));
+    render(<App store={store} />);
+    fireEvent.keyDown(document.body, { key: "k", code: "KeyK", metaKey: true });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Search/ })).not.toBeInTheDocument();
+    await act(async () => pending.resolve({ items: [], nextCursor: null }));
+    expect(screen.getByRole("button", { name: /Search/ })).toBeEnabled();
+  });
+});
 
 describe("App", () => {
   async function openDrafts(overrides: Partial<AppApi> = {}) {
@@ -497,6 +638,8 @@ describe("App", () => {
 
       expect(container.querySelector(".app-shell")).toHaveAttribute("inert");
       expect(container).not.toContainElement(dialog);
+      fireEvent.keyDown(within(dialog).getByRole("button", { name: "Keep Codex running" }), { key: "k", code: "KeyK", metaKey: true });
+      expect(screen.queryByRole("combobox", { name: "Search conversations and commands" })).not.toBeInTheDocument();
       fireEvent.click(within(dialog).getByRole("button", { name: "Keep Codex running" }));
       await waitFor(() => expect(container.querySelector(".app-shell")).not.toHaveAttribute("inert"));
       await waitFor(() => expect(provider).toHaveFocus());
