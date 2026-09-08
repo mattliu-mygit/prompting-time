@@ -77,12 +77,13 @@ describe("Timeline", () => {
     expect(screen.getByRole("button", { name: /Hide tool activity/i })).toHaveAttribute("aria-expanded", "true");
     expect(view.container.querySelectorAll("[data-timeline-id]")).toHaveLength(2);
   });
-  it("renders assistant Markdown and keeps user Markdown literal with honest copy feedback", async () => {
+  it("renders assistant and user Markdown with exact source copy and honest feedback", async () => {
     const content = "## Result\n\n- passes\n\n| Check | Result |\n| - | - |\n| Build | good |\n\n```rust\nlet n = 1;\n```";
+    const userContent = "    indented code\n\n## My **request**\n\n- inspect\n\nfirst line\nsecond line\n";
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([
-      event({ id: "user", sequence: "1", role: "user", content: "## literal **request**" }),
+      event({ id: "user", sequence: "1", role: "user", content: userContent }),
       event({ id: "answer", sequence: "2", content }),
     ], null)) });
     render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
@@ -90,15 +91,19 @@ describe("Timeline", () => {
     expect(screen.getByRole("table")).toHaveTextContent("Buildgood");
     expect(screen.getByText("passes").closest("li")).not.toBeNull();
     const user = screen.getByRole("article", { name: "You message" });
-    expect(user).toHaveTextContent("## literal **request**");
-    expect(within(user).queryByRole("heading")).not.toBeInTheDocument();
+    expect(within(user).getByRole("heading", { name: "My request" })).toBeVisible();
+    expect(within(user).getByText("request").tagName).toBe("STRONG");
+    expect(within(user).getByRole("listitem")).toHaveTextContent("inspect");
+    expect(user.querySelector("pre code")?.textContent).toBe("indented code\n");
     expect(user).not.toHaveTextContent("Codex");
+    fireEvent.click(within(user).getByRole("button", { name: "Copy message" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(userContent));
     const assistant = screen.getByRole("article", { name: "Codex assistant message" });
     fireEvent.click(within(assistant).getByRole("button", { name: "Copy message" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(content));
     expect(await within(assistant).findByText("Copied")).toBeVisible();
     writeText.mockRejectedValueOnce(new Error("clipboard unavailable"));
-    fireEvent.click(screen.getByRole("button", { name: "Copy code" }));
+    fireEvent.click(within(assistant).getByRole("button", { name: "Copy code" }));
     expect(await screen.findByText("Could not copy. Try again.")).toBeVisible();
     expect(writeText).toHaveBeenLastCalledWith("let n = 1;\n");
   });

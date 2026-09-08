@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type {
   ConversationSummary,
@@ -7,6 +7,7 @@ import type {
   RoutingProfile,
 } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
+import { MessageContent } from "./MessageContent";
 
 type ProviderChoice = "auto" | ProviderId;
 type PendingInterruption = {
@@ -34,6 +35,7 @@ const profileNames: Record<RoutingProfile, string> = {
 
 export function Composer({ conversation, providers, routingProfile, actions, onMutation, onModalChange, messageRef }: ComposerProps) {
   const [text, setText] = useState("");
+  const [preview, setPreview] = useState(false);
   const [choice, setChoice] = useState<ProviderChoice>("auto");
   const [pendingInterruption, setPendingInterruption] = useState<PendingInterruption | null>(null);
   const [interruptRequestedFor, setInterruptRequestedFor] = useState<string | null>(null);
@@ -44,6 +46,8 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
   const localMessageField = useRef<HTMLTextAreaElement>(null);
   const messageField = messageRef ?? localMessageField;
   const restoreFocusRequested = useRef(false);
+  const restoreDraftFocusRequested = useRef(false);
+  const submissionPending = useRef(false);
 
   const rootTurnActive = conversation.currentRunId !== null
     && (conversation.runStatus === "queued" || conversation.runStatus === "running" || conversation.runStatus === "waiting");
@@ -59,6 +63,34 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
     && currentProvider?.capabilities.includes("steering") === true;
   const canInterrupt = currentProvider?.capabilities.includes("interruption") === true;
   const interruptionDialogOpen = pendingInterruption !== null;
+  const canSubmit = !submitting && !!text.trim() && (!active || canSteer) && !interruptionDialogOpen;
+
+  useLayoutEffect(() => {
+    const field = messageField.current;
+    if (!field || preview) return;
+    function resize() {
+      if (!field) return;
+      field.style.height = "auto";
+      const style = window.getComputedStyle(field);
+      const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+      field.style.height = `${field.scrollHeight + border}px`;
+    }
+    resize();
+    let width = field.clientWidth;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
+      if (field.clientWidth === width) return;
+      width = field.clientWidth;
+      resize();
+    });
+    observer?.observe(field);
+    return () => observer?.disconnect();
+  }, [messageField, preview, text]);
+
+  useLayoutEffect(() => {
+    if (!restoreDraftFocusRequested.current || preview || submitting || pendingInterruption) return;
+    restoreDraftFocusRequested.current = false;
+    messageField.current?.focus();
+  }, [messageField, pendingInterruption, preview, submitting]);
 
   useEffect(() => {
     onModalChange?.(interruptionDialogOpen);
@@ -98,6 +130,10 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
 
   function restoreComposerFocus() {
     if (providerSelect.current && !providerSelect.current.disabled) providerSelect.current.focus();
+    else if (preview) {
+      restoreDraftFocusRequested.current = true;
+      setPreview(false);
+    }
     else messageField.current?.focus();
   }
 
@@ -183,14 +219,14 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
   }
 
   async function send() {
-    const trimmed = text.trim();
-    if (!trimmed || submitting) return;
+    if (!canSubmit || submissionPending.current) return;
+    submissionPending.current = true;
     const provider = choice === "auto" ? null : choice;
     const command = pendingCommand
-      && pendingCommand.text === trimmed
+      && pendingCommand.text === text
       && pendingCommand.provider === provider
       ? pendingCommand
-      : { id: newCommandId(), text: trimmed, provider };
+      : { id: newCommandId(), text, provider };
     setPendingCommand(command);
     setSubmitting(true);
     setError(null);
@@ -202,30 +238,41 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
         commandId: command.id,
       });
       setText("");
+      setPreview(false);
       setPendingCommand(null);
+      restoreDraftFocusRequested.current = true;
       await onMutation();
     } catch (reason) {
       if (!isAmbiguousTransportFailure(reason)) setPendingCommand(null);
       setError(messageFor(reason));
     } finally {
+      submissionPending.current = false;
       setSubmitting(false);
     }
   }
 
   async function steer() {
-    const trimmed = text.trim();
-    if (!trimmed || !conversation.currentRunId || !canSteer || submitting) return;
+    if (!canSubmit || !conversation.currentRunId || !canSteer || submissionPending.current) return;
+    submissionPending.current = true;
     setSubmitting(true);
     setError(null);
     try {
-      await actions.steerRun({ runId: conversation.currentRunId, text: trimmed });
+      await actions.steerRun({ runId: conversation.currentRunId, text });
       setText("");
+      setPreview(false);
+      restoreDraftFocusRequested.current = true;
       await onMutation();
     } catch (reason) {
       setError(messageFor(reason));
     } finally {
+      submissionPending.current = false;
       setSubmitting(false);
     }
+  }
+
+  function submitDraft() {
+    if (!canSubmit) return;
+    void (canSteer ? steer() : send());
   }
 
   const retrying = pendingCommand !== null && error !== null;
@@ -255,7 +302,7 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
           {choice === "auto" ? "Prompting Time will explain the selected route." : `Pinned to ${providerNames[choice]}.`}
         </span>
       </div>
-      <label className="message-field">
+      <label className="message-field" hidden={preview}>
         <span className="sr-only">Message</span>
         <textarea
           ref={messageField}
@@ -265,16 +312,18 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
           placeholder={active ? `Add direction for ${activeName}` : "Ask Prompting Time…"}
           onChange={(event) => {
             setText(event.target.value);
-            if (pendingCommand && event.target.value.trim() !== pendingCommand.text) setPendingCommand(null);
+            if (pendingCommand && event.target.value !== pendingCommand.text) setPendingCommand(null);
           }}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-              event.preventDefault();
-              void (canSteer ? steer() : active ? Promise.resolve() : send());
-            }
+            if (event.key !== "Enter" || event.shiftKey || event.altKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+            event.preventDefault();
+            if (!event.repeat) submitDraft();
           }}
         />
       </label>
+      {preview ? <section className="composer-preview" aria-label="Message preview">
+        {text ? <MessageContent content={text} /> : <p className="empty-note">Nothing to preview.</p>}
+      </section> : null}
       {error && !pendingInterruption ? <p role="alert" className="inline-error">{error}</p> : null}
       {active && !canSteer ? (
         <p className="composer-explanation">{interruptionPending
@@ -284,7 +333,17 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
           : `${activeName} cannot be steered in this state. Interrupt it or wait for the turn to finish.`}</p>
       ) : null}
       <div className="composer-actions">
-        {!active || canSteer ? <small className="composer-shortcut">⌘ / Ctrl + Enter to {canSteer ? "steer" : "send"}</small> : null}
+        {!active || canSteer ? <small className="composer-shortcut">Enter to {canSteer ? "steer" : "send"} · Shift + Enter for newline · ⌘ / Ctrl + Enter also {canSteer ? "steers" : "sends"}</small> : null}
+        <button
+          type="button"
+          className="disclosure-link"
+          aria-label={preview ? "Edit Markdown" : "Preview Markdown"}
+          disabled={submitting}
+          onClick={() => {
+            if (preview) restoreDraftFocusRequested.current = true;
+            setPreview(!preview);
+          }}
+        >{preview ? "Edit" : "Preview"}</button>
         {rootTurnActive && !interruptionPending ? (
           <button
             type="button"
@@ -306,8 +365,8 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
         <button
           type="button"
           className="primary-button"
-          disabled={submitting || !text.trim() || (active && !canSteer)}
-          onClick={() => void (canSteer ? steer() : send())}
+          disabled={!canSubmit}
+          onClick={submitDraft}
         >
           {submitting ? "Working…" : canSteer ? `Steer ${activeName}` : retrying ? "Retry send" : "Send"}
         </button>

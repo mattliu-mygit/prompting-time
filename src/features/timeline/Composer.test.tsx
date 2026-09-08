@@ -32,12 +32,182 @@ describe("Composer", () => {
   it("explains the supported keyboard action without implying a queue", () => {
     const api = actions();
     const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
-    expect(screen.getByText("⌘ / Ctrl + Enter to send")).toBeVisible();
+    expect(screen.getByText("Enter to send · Shift + Enter for newline · ⌘ / Ctrl + Enter also sends")).toBeVisible();
     view.rerender(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
-    expect(screen.getByText("⌘ / Ctrl + Enter to steer")).toBeVisible();
+    expect(screen.getByText("Enter to steer · Shift + Enter for newline · ⌘ / Ctrl + Enter also steers")).toBeVisible();
     view.rerender(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "claude" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
     expect(screen.queryByText(/Enter to/)).not.toBeInTheDocument();
     expect(screen.queryByText(/queued/i)).not.toBeInTheDocument();
+  });
+  it.each([{}, { metaKey: true }, { ctrlKey: true }])("sends on Enter with %j", async (modifiers) => {
+    const api = actions();
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "**Hello**" } });
+    expect(fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter", ...modifiers })).toBe(false);
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ text: "**Hello**" })));
+  });
+
+  it.each([
+    { shiftKey: true }, { shiftKey: true, metaKey: true }, { shiftKey: true, ctrlKey: true },
+    { altKey: true }, { altKey: true, ctrlKey: true }, { isComposing: true, metaKey: true }, { keyCode: 229, ctrlKey: true },
+  ])("preserves native editing without sending for %j", (modifiers) => {
+    const api = actions();
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "draft" } });
+    expect(fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter", ...modifiers })).toBe(true);
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    expect(api.steerRun).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Message")).toHaveValue("draft");
+  });
+
+  it("suppresses repeated Enter and duplicate events while a send is pending", async () => {
+    let finish!: (value: Awaited<ReturnType<ConversationActions["submitMessage"]>>) => void;
+    const submitMessage = vi.fn(() => new Promise<Awaited<ReturnType<ConversationActions["submitMessage"]>>>((resolve) => { finish = resolve; }));
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions({ submitMessage })} onMutation={vi.fn()} />);
+    const field = screen.getByLabelText("Message");
+    fireEvent.change(field, { target: { value: "draft" } });
+    expect(fireEvent.keyDown(field, { key: "Enter", repeat: true })).toBe(false);
+    expect(submitMessage).not.toHaveBeenCalled();
+    act(() => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    expect(submitMessage).toHaveBeenCalledTimes(1);
+    expect(field).toHaveValue("draft");
+    await act(async () => finish({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" }));
+    fireEvent.change(field, { target: { value: "next draft" } });
+    expect(fireEvent.keyDown(field, { key: "Enter", repeat: true })).toBe(false);
+    expect(submitMessage).toHaveBeenCalledTimes(1);
+    expect(field).toHaveValue("next draft");
+  });
+
+  it.each([
+    { provider: "claude" as const, runStatus: "running" as const },
+    { provider: "codex" as const, runStatus: "waiting" as const },
+    { provider: "codex" as const, runStatus: "completed" as const, rollupStatus: "active" as const },
+  ])("does not let Enter bypass active-run restrictions: %j", (state) => {
+    const api = actions();
+    render(<Composer conversation={conversation({ currentRunId: "run", ...state })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "draft" } });
+    fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter" });
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    expect(api.steerRun).not.toHaveBeenCalled();
+    expect(api.interruptRun).not.toHaveBeenCalled();
+  });
+
+  it("retains exact Markdown on ambiguous failure and gives whitespace edits a new command identity", async () => {
+    const submitMessage = vi.fn().mockRejectedValue(new BridgeError("outcome-unknown", "Disconnected", null));
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions({ submitMessage })} onMutation={vi.fn()} />);
+    const draft = "    indented code\n\n**bold**\n";
+    const field = screen.getByLabelText("Message");
+    fireEvent.change(field, { target: { value: draft } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("alert");
+    expect(submitMessage).toHaveBeenLastCalledWith(expect.objectContaining({ text: draft }));
+    expect(field).toHaveValue(draft);
+    fireEvent.click(screen.getByRole("button", { name: "Retry send" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry send" })).toBeEnabled());
+    expect(submitMessage.mock.calls[1]![0].commandId).toBe(submitMessage.mock.calls[0]![0].commandId);
+    fireEvent.change(field, { target: { value: `${draft}\n` } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(submitMessage).toHaveBeenCalledTimes(3));
+    expect(submitMessage.mock.calls[2]![0].commandId).not.toBe(submitMessage.mock.calls[0]![0].commandId);
+    expect(submitMessage.mock.calls[2]![0].text).toBe(`${draft}\n`);
+  });
+
+  it.each([false, true])("clears accepted raw text and restores edit focus after %s steering", async (steering) => {
+    const api = actions();
+    render(<Composer conversation={conversation(steering ? { currentRunId: "run", runStatus: "running", provider: "codex" } : {})} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    const field = screen.getByLabelText("Message");
+    const draft = "    code\n\n**direction**\n";
+    fireEvent.change(field, { target: { value: draft } });
+    const button = screen.getByRole("button", { name: steering ? "Steer Codex" : "Send" });
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => expect(steering ? api.steerRun : api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ text: draft })));
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(field).toHaveValue("");
+  });
+
+  it("does not retry accepted text when refreshing fails", async () => {
+    const api = actions();
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn().mockRejectedValue(new BridgeError("outcome-unknown", "Refresh failed", null))} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "accepted" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("alert");
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Retry send" })).not.toBeInTheDocument();
+  });
+
+  it("previews safe Markdown and returns to the exact source selection without submitting", () => {
+    const api = actions();
+    const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Message");
+    const draft = "**bold**\n\n- item\n\n```js\nalert('code')\n```\n\n![remote](https://remote.invalid/image.png) [unsafe](javascript:alert%281%29)\n";
+    fireEvent.change(field, { target: { value: draft } });
+    field.focus();
+    field.setSelectionRange(2, 6, "backward");
+    fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
+    const preview = screen.getByRole("region", { name: "Message preview" });
+    expect(within(preview).getByText("bold").tagName).toBe("STRONG");
+    expect(within(preview).getByRole("listitem")).toHaveTextContent("item");
+    expect(within(preview).getByRole("button", { name: "Copy code" })).toBeVisible();
+    expect(view.container.querySelector("img, script, iframe")).toBeNull();
+    expect(within(preview).queryByRole("link")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Markdown" }));
+    expect(screen.getByLabelText("Message")).toHaveValue(draft);
+    expect(field).toHaveFocus();
+    expect([field.selectionStart, field.selectionEnd, field.selectionDirection]).toEqual([2, 6, "backward"]);
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    expect(api.steerRun).not.toHaveBeenCalled();
+  });
+
+  it("resizes to measured content after editing and shrinking", () => {
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    const field = screen.getByLabelText("Message");
+    expect(field).toHaveAttribute("rows", "2");
+    Object.defineProperty(field, "scrollHeight", { configurable: true, value: 160 });
+    fireEvent.change(field, { target: { value: "long\n".repeat(8) } });
+    expect(parseFloat(field.style.height)).toBeGreaterThanOrEqual(160);
+    Object.defineProperty(field, "scrollHeight", { configurable: true, value: 48 });
+    fireEvent.change(field, { target: { value: "" } });
+    expect(parseFloat(field.style.height)).toBeLessThan(160);
+  });
+
+  it("retains a failed steer and excludes duplicate steering before React updates", async () => {
+    let reject!: (reason: Error) => void;
+    const steerRun = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; }));
+    render(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={actions({ steerRun })} onMutation={vi.fn()} />);
+    const field = screen.getByLabelText("Message");
+    const draft = "    exact direction\n";
+    fireEvent.change(field, { target: { value: draft } });
+    act(() => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(steerRun).toHaveBeenCalledExactlyOnceWith({ runId: "run", text: draft });
+    expect(field).toHaveValue(draft);
+    await act(async () => reject(new Error("Steer rejected")));
+    expect(screen.getByRole("alert")).toHaveTextContent("Steer rejected");
+    expect(field).toHaveValue(draft);
+    expect(screen.getByRole("button", { name: "Steer Codex" })).toBeEnabled();
+  });
+
+  it("does not move focus to another conversation after an old send finishes", async () => {
+    let finish!: (value: Awaited<ReturnType<ConversationActions["submitMessage"]>>) => void;
+    const submitMessage = vi.fn(() => new Promise<Awaited<ReturnType<ConversationActions["submitMessage"]>>>((resolve) => { finish = resolve; }));
+    const messageRef = { current: null };
+    const onMutation = vi.fn();
+    const api = actions({ submitMessage });
+    const view = render(<Composer key="old" conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={onMutation} messageRef={messageRef} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "old draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    view.rerender(<Composer key="new" conversation={conversation({ id: "conversation-2" })} providers={providers} routingProfile="balanced" actions={api} onMutation={onMutation} messageRef={messageRef} />);
+    const provider = screen.getByRole("combobox", { name: "Provider" });
+    provider.focus();
+    await act(async () => finish({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" }));
+    expect(provider).toHaveFocus();
   });
   it("can interrupt steerable Codex when the other provider is unavailable", async () => {
     const api = actions();
@@ -77,6 +247,18 @@ describe("Composer", () => {
     await act(async () => finishInterrupt());
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
     expect(screen.getByRole("region", { name: "Message composer" })).toHaveAttribute("aria-busy", "false");
+  });
+
+  it("returns from preview before restoring fallback focus after interruption", async () => {
+    const api = actions();
+    render(<Composer conversation={conversation({ currentRunId: "run-1", provider: "codex", runStatus: "running" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "**keep this draft**" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), { target: { value: "claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt and switch to Claude" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Message preview" })).not.toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("**keep this draft**");
   });
 
   it("shows Auto with its active profile and excludes unavailable manual routes", () => {

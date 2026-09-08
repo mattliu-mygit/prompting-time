@@ -294,6 +294,11 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.timeline-message.user .message-markdown :is(p, li),
+.composer-preview .message-markdown :is(p, li) {
+  white-space: pre-wrap;
+}
+
 .timeline-activity {
   padding: 0.5rem 0.75rem;
   font-size: 0.8125rem;
@@ -391,8 +396,24 @@ button:disabled {
 
 .message-field textarea {
   width: 100%;
-  resize: vertical;
+  resize: none;
   max-height: 30vh;
+  overflow-y: auto;
+}
+
+.message-field[hidden] {
+  display: none;
+}
+
+.composer-preview {
+  min-width: 0;
+  max-height: 30vh;
+  overflow: auto;
+  margin-top: var(--space-2);
+  padding: 0.5rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-canvas);
 }
 
 .route-note,
