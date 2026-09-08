@@ -605,6 +605,9 @@ async fn flush_resolved_roots(
         if resolving {
             continue;
         }
+        // The dispatcher admits no new frames while draining. These messages
+        // already passed ID admission; detach them before replay to avoid
+        // mistaking their own buffered copies for duplicate incoming requests.
         let queued = std::mem::take(&mut turn.children.queued);
         turn.children.queued_bytes = 0;
         for message in queued {
@@ -612,6 +615,41 @@ async fn flush_resolved_roots(
         }
     }
     Ok(())
+}
+
+/// Buffered requests share admission with registered controls. Remove an
+/// ambiguous original before the connection fails so no cleanup can answer it.
+pub(super) fn remove_queued_request(state: &mut DispatcherState, id: &RpcId) -> bool {
+    let queues = state
+        .turns
+        .values_mut()
+        .map(|turn| (&mut turn.children.queued, &mut turn.children.queued_bytes))
+        .chain(
+            state
+                .pending
+                .values_mut()
+                .filter_map(|pending| match pending {
+                    PendingResponse::ChildMetadata(lookup) => {
+                        Some((&mut lookup.queued, &mut lookup.queued_bytes))
+                    }
+                    _ => None,
+                }),
+        );
+    let mut removed = false;
+    for (queue, bytes) in queues {
+        queue.retain(|message| {
+            if message.get("id").and_then(super::parse_rpc_id).as_ref() == Some(id) {
+                *bytes -= serde_json::to_vec(message)
+                    .expect("queued JSON value")
+                    .len();
+                removed = true;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    removed
 }
 
 pub(super) async fn reject_discovery(

@@ -3304,6 +3304,83 @@ sleep 30
 }
 
 #[tokio::test]
+async fn discovery_request_id_collisions_close_the_shared_connection() {
+    for case in ["root", "candidate", "completed"] {
+        let extract_id = response_id_shell("request_id");
+        let root_request = if case != "candidate" {
+            r#"printf '%s\n' '{"id":"collision","method":"item/commandExecution/requestApproval","params":{"threadId":"root","turnId":"root-turn","itemId":"control","startedAtMs":1}}'"#
+        } else {
+            ""
+        };
+        let await_response = if case == "completed" {
+            "IFS= read -r line"
+        } else {
+            ""
+        };
+        let candidate_request = r#"printf '%s\n' '{"id":"collision","method":"item/commandExecution/requestApproval","params":{"threadId":"candidate","turnId":"candidate-turn","itemId":"control","startedAtMs":1}}'"#;
+        let first_candidate = if case == "candidate" {
+            candidate_request
+        } else {
+            ""
+        };
+        let script = format!(
+            r#"
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"userAgent":"codex-cli 0.test"}}}}\n' "$request_id"
+IFS= read -r line
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"thread":{{"id":"root","sessionId":"session"}}}}}}\n' "$request_id"
+IFS= read -r line
+{extract_id}
+printf '%s\n' '{{"method":"turn/started","params":{{"threadId":"root","turn":{{"id":"root-turn","items":[],"status":"inProgress"}}}}}}'
+printf '{{"id":%s,"result":{{"turn":{{"id":"root-turn","items":[],"status":"inProgress"}}}}}}\n' "$request_id"
+{root_request}
+{await_response}
+printf '%s\n' '{{"method":"turn/started","params":{{"threadId":"candidate","turn":{{"id":"candidate-turn"}}}}}}'
+IFS= read -r line
+{first_candidate}
+{candidate_request}
+sleep 30
+"#
+        );
+        let (_directory, binary) = fake_codex(&script);
+        let adapter = CodexAdapter::connect(binary).await.unwrap();
+        let session = adapter.start_session(start_request()).await.unwrap();
+        let mut turn = adapter
+            .start_turn(&session, TurnRequest::new("discovery collision"))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match turn.recv().await.expect("fatal error must reach the root") {
+                    Err(_) => break,
+                    Ok(ProviderEvent::ApprovalRequested { request_id, .. })
+                        if case == "completed" =>
+                    {
+                        adapter
+                            .respond(&session, &request_id, ApprovalResponse::Denied)
+                            .await
+                            .unwrap();
+                    }
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("discovery collision did not fail the root");
+        wait_for_unavailable(&adapter).await;
+        assert!(
+            adapter
+                .respond(&session, "string:collision", ApprovalResponse::Denied)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
 async fn duplicate_pending_server_request_id_is_answered_once_and_is_connection_fatal() {
     let extract_id = response_id_shell("request_id");
     let script = format!(

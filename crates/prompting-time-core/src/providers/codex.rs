@@ -1493,6 +1493,33 @@ async fn handle_server_message(
     sender: &JsonLineSender,
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
+    // Validate connection-wide request identity before correlation can defer or
+    // reject the payload. Responses use their separate client-request namespace.
+    let request_id = if let Some(method) = message.get("method")
+        && (message.get("id").is_some() || method.as_str().is_some_and(is_known_server_request))
+    {
+        let Some(id) = message.get("id").and_then(parse_rpc_id) else {
+            return send_invalid_request(sender, state).await;
+        };
+        if state.server_request_tombstones.contains(&id) {
+            return Err(protocol("duplicate-server-request-after-response"));
+        }
+        let registered = state.server_requests.remove(&id.external());
+        let buffered = children::remove_queued_request(state, &id);
+        if registered.is_some() || buffered {
+            required_write(
+                sender,
+                &state.process_shutdown,
+                duplicate_server_request_response(id.clone()),
+            )
+            .await?;
+            remember_server_request_tombstone(state, id);
+            return Err(protocol("duplicate-server-request-id"));
+        }
+        Some(id)
+    } else {
+        None
+    };
     if children::correlate(&message, sender, state).await? {
         return Ok(());
     }
@@ -1530,18 +1557,7 @@ async fn handle_server_message(
         {
             return turn.children.queue(message);
         }
-        let known_request = is_known_server_request(method);
-        if known_request || message.get("id").is_some() {
-            let Some(id) = message.get("id").and_then(parse_rpc_id) else {
-                return send_invalid_request(sender, state).await;
-            };
-            if state
-                .server_request_tombstones
-                .iter()
-                .any(|tombstone| tombstone == &id)
-            {
-                return Err(protocol("duplicate-server-request-after-response"));
-            }
+        if let Some(id) = request_id {
             return handle_server_request(message, id, sender, state).await;
         }
         let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -1953,16 +1969,6 @@ async fn handle_server_request(
         .unwrap_or_default();
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     let external_id = id.external();
-    if state.server_requests.remove(&external_id).is_some() {
-        required_write(
-            sender,
-            &state.process_shutdown,
-            duplicate_server_request_response(id.clone()),
-        )
-        .await?;
-        remember_server_request_tombstone(state, id);
-        return Err(protocol("duplicate-server-request-id"));
-    }
     if !is_known_server_request(method) {
         required_write(
             sender,
@@ -3499,6 +3505,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_request_admission_rejects_live_root_id_collision() {
+        discovery_request_admission("root").await;
+    }
+
+    #[tokio::test]
+    async fn discovery_request_admission_rejects_two_candidate_ids() {
+        discovery_request_admission("candidate").await;
+    }
+
+    #[tokio::test]
+    async fn discovery_request_admission_rejects_mapped_child_queue_collision() {
+        discovery_request_admission("mapped").await;
+    }
+
+    #[tokio::test]
+    async fn discovery_request_admission_rejects_completed_id_reuse() {
+        discovery_request_admission("completed").await;
+    }
+
+    #[tokio::test]
+    async fn discovery_request_admission_answers_malformed_ids() {
+        discovery_request_admission("malformed").await;
+    }
+
+    #[tokio::test]
+    async fn discovery_request_admission_replays_verified_control_once() {
+        discovery_request_admission("verified").await;
+    }
+
+    async fn discovery_request_admission(case: &str) {
+        for disposition in ["foreign", "timeout", "cancel", "replace"] {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+            ]);
+            let mut process = JsonLineProcess::spawn(command).unwrap();
+            let sender = process.sender();
+            let mut root = turn_sink(7);
+            root.native_turn_id = Some("root-turn".into());
+            let (events, mut receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+            root.events = events;
+            let mut state = DispatcherState {
+                // Client metadata RPCs may reuse a provider control's numeric ID.
+                next_id: 55,
+                pending: HashMap::new(),
+                turns: HashMap::from([("root".into(), root)]),
+                server_requests: HashMap::new(),
+                client_response_tombstones: VecDeque::new(),
+                server_request_tombstones: VecDeque::new(),
+                confirmed_interrupts: VecDeque::new(),
+                process_shutdown: process.shutdown_handle(),
+            };
+            let request = |thread: &str, id: serde_json::Value| json!({"id":id,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"turnId":format!("{thread}-turn"),"itemId":"control","startedAtMs":1}});
+            if matches!(case, "root" | "completed") {
+                super::handle_server_message(request("root", json!(55)), &sender, &mut state)
+                    .await
+                    .unwrap();
+                if case == "completed" {
+                    respond_to_server_request(
+                        &sender,
+                        "root",
+                        "number:55",
+                        ApprovalResponse::Denied,
+                        &mut state,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            if case == "mapped" {
+                super::handle_server_message(json!({"method":"thread/started","params":{"thread":{"id":"candidate","parentThreadId":"root","source":{"subAgent":{"thread_spawn":{"parent_thread_id":"root","depth":1}}}}}}), &sender, &mut state).await.unwrap();
+                super::handle_server_message(json!({"method":"turn/started","params":{"threadId":"candidate","turn":{"id":"candidate-turn"}}}), &sender, &mut state).await.unwrap();
+            }
+            let lookup_thread = if case == "mapped" {
+                "unresolved"
+            } else {
+                "candidate"
+            };
+            super::handle_server_message(json!({"method":"turn/started","params":{"threadId":lookup_thread,"turn":{"id":format!("{lookup_thread}-turn")}}}), &sender, &mut state).await.unwrap();
+            if matches!(case, "candidate" | "mapped") {
+                super::handle_server_message(request("candidate", json!(55)), &sender, &mut state)
+                    .await
+                    .unwrap();
+            }
+            let result = super::handle_server_message(
+                request(
+                    "candidate",
+                    if case == "malformed" {
+                        json!(true)
+                    } else {
+                        json!(55)
+                    },
+                ),
+                &sender,
+                &mut state,
+            )
+            .await;
+            if case == "verified" {
+                super::handle_server_message(json!({"id":55,"result":{"thread":{"id":"candidate","parentThreadId":"root","source":{"subAgent":{"thread_spawn":{"parent_thread_id":"root","depth":1}}}}}}), &sender, &mut state).await.unwrap();
+                respond_to_server_request(
+                    &sender,
+                    "candidate",
+                    "number:55",
+                    ApprovalResponse::Denied,
+                    &mut state,
+                )
+                .await
+                .unwrap();
+            } else if disposition == "foreign" {
+                super::handle_server_message(json!({"id":55,"result":{"thread":{"id":lookup_thread,"parentThreadId":null,"source":"cli"}}}), &sender, &mut state).await.unwrap();
+            } else {
+                if disposition == "cancel" {
+                    state.turns.get_mut("root").unwrap().cancelled = true;
+                } else if disposition == "replace" {
+                    let mut replacement = turn_sink(8);
+                    replacement.native_turn_id = Some("replacement-turn".into());
+                    state.turns.insert("root".into(), replacement);
+                } else if let PendingResponse::ChildMetadata(lookup) =
+                    state.pending.values_mut().next().unwrap()
+                {
+                    lookup.deadline = tokio::time::Instant::now();
+                }
+                super::children::expire_discoveries(&sender, &mut state)
+                    .await
+                    .unwrap();
+            }
+            // Even cleanup after the fatal return cannot answer the original twice.
+            reject_server_requests(&sender, &mut state, "root", "root-turn", "test cleanup")
+                .await
+                .unwrap();
+            sender.send(&json!({"fixture":"drained"})).await.unwrap();
+            let writes = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut writes = Vec::new();
+                while let Some(message) = process.recv().await {
+                    let message = message.unwrap();
+                    if message.get("fixture").is_some() {
+                        break;
+                    }
+                    writes.push(message);
+                }
+                writes
+            })
+            .await
+            .unwrap();
+            process.shutdown().await.unwrap();
+            let responses: Vec<_> = writes
+                .iter()
+                .filter(|message| message.get("method").is_none())
+                .collect();
+            assert_eq!(responses.len(), 1, "{case}/{disposition}: {writes:?}");
+            if matches!(case, "root" | "candidate" | "mapped") {
+                assert_eq!(
+                    responses[0],
+                    &duplicate_server_request_response(RpcId::Number(55))
+                );
+                assert_eq!(result, Err(super::protocol("duplicate-server-request-id")));
+            } else if case == "completed" {
+                assert_eq!(
+                    result,
+                    Err(super::protocol("duplicate-server-request-after-response"))
+                );
+                assert!(responses[0].get("result").is_some());
+            } else if case == "malformed" {
+                result.unwrap();
+                assert_eq!(responses[0]["id"], json!(null));
+                assert_eq!(responses[0]["error"]["code"], json!(-32600));
+            } else {
+                result.unwrap();
+                assert!(responses[0].get("result").is_some());
+                let controls = std::iter::from_fn(|| receiver.try_recv().ok())
+                    .filter(|event| event.as_ref().unwrap().control_request_id().is_some())
+                    .count();
+                assert_eq!(
+                    controls, 1,
+                    "verified deferred control must become actionable once"
+                );
+            }
+            assert!(state.server_requests.is_empty());
+            assert!(state.pending.is_empty());
+            if disposition == "replace" && case != "verified" {
+                assert_eq!(state.turns["root"].registration_id, 8);
+                assert_eq!(
+                    state.turns["root"].native_turn_id.as_deref(),
+                    Some("replacement-turn")
+                );
+            }
+            if disposition != "cancel" || case == "verified" {
+                assert!(!state.turns["root"].cancelled);
+                assert!(!state.turns["root"].children.resolving);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn native_child_foreign_discovery_rejects_controls_without_failing_owned_roots() {
         for disposition in ["foreign", "timeout", "cancel", "rows", "bytes"] {
             let mut command = Command::new("sh");
@@ -4078,7 +4279,7 @@ mod tests {
             })
         );
 
-        let result = handle_server_request(
+        let result = super::handle_server_message(
             json!({
                 "id": "duplicate",
                 "method": "item/commandExecution/requestApproval",
@@ -4089,7 +4290,6 @@ mod tests {
                     "startedAtMs": 1,
                 },
             }),
-            id.clone(),
             &sender,
             &mut state,
         )
@@ -4203,7 +4403,7 @@ mod tests {
             process_shutdown: shutdown,
         };
 
-        let result = handle_server_request(
+        let result = super::handle_server_message(
             json!({
                 "id": "duplicate-cancelling",
                 "method": "item/commandExecution/requestApproval",
@@ -4214,7 +4414,6 @@ mod tests {
                     "startedAtMs": 2,
                 },
             }),
-            id.clone(),
             &sender,
             &mut state,
         )
@@ -4270,7 +4469,7 @@ mod tests {
                 process_shutdown: process.shutdown_handle(),
             };
 
-            let result = handle_server_request(
+            let result = super::handle_server_message(
                 json!({
                     "id": format!("duplicate-{suffix}"),
                     "method": "item/commandExecution/requestApproval",
@@ -4281,7 +4480,6 @@ mod tests {
                         "startedAtMs": 2,
                     },
                 }),
-                id.clone(),
                 &sender,
                 &mut state,
             )
