@@ -2,6 +2,7 @@ import { waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
   AgentSnapshot,
+  BootstrapSnapshot,
   AgentTreePage,
   AppEvent,
   ConversationPage,
@@ -218,6 +219,59 @@ function createFakeApi() {
 }
 
 describe("app store", () => {
+  it("retains a late bootstrap diagnostic after a concurrent conversation failure", async () => {
+    const fake = createFakeApi();
+    let finishBootstrap!: (value: BootstrapSnapshot) => void;
+    fake.api.getBootstrap = vi.fn(() => new Promise<BootstrapSnapshot>((resolve) => { finishBootstrap = resolve; }));
+    fake.api.listConversations = vi.fn().mockRejectedValue(new Error("Services unavailable"));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    expect(fake.api.getBootstrap).toHaveBeenCalledOnce();
+    expect(fake.api.listConversations).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().phase).toBe("error");
+    const bootstrap = { providers: [], startupDiagnostic: { code: "storage-error", message: "Cannot open database", action: "Check permissions" } };
+    finishBootstrap(bootstrap);
+    await waitFor(() => expect(store.getSnapshot().bootstrap).toEqual(bootstrap));
+    expect(store.getSnapshot().error).toBe("Services unavailable");
+    store.dispose();
+  });
+
+  it.each(["retry", "dispose", "event"] as const)("ignores a late bootstrap from before %s", async (transition) => {
+    const fake = createFakeApi();
+    let finishBootstrap!: (value: BootstrapSnapshot) => void;
+    fake.api.getBootstrap = vi.fn()
+      .mockImplementationOnce(() => new Promise<BootstrapSnapshot>((resolve) => { finishBootstrap = resolve; }))
+      .mockResolvedValue({ providers: [] });
+    fake.api.listConversations = vi.fn()
+      .mockRejectedValueOnce(new Error("Services unavailable"))
+      .mockResolvedValue({ items: [], nextCursor: null });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    if (transition === "retry") await store.retry();
+    else if (transition === "dispose") store.dispose();
+    else {
+      fake.emit({ kind: "reloadRequired", sequence: "1" });
+      await waitFor(() => expect(store.getSnapshot().phase).toBe("ready"));
+    }
+    const before = store.getSnapshot();
+    finishBootstrap({ providers: [], startupDiagnostic: { code: "storage-error", message: "Obsolete failure", action: null } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.getSnapshot()).toBe(before);
+    store.dispose();
+  });
+
+  it("reports a failed bootstrap without waiting for the conversation request", async () => {
+    const fake = createFakeApi();
+    let finishConversations!: (value: ConversationPage) => void;
+    fake.api.getBootstrap = vi.fn().mockRejectedValue(new Error("Bootstrap disconnected"));
+    fake.api.listConversations = vi.fn(() => new Promise<ConversationPage>((resolve) => { finishConversations = resolve; }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    expect(store.getSnapshot()).toMatchObject({ phase: "error", error: "Bootstrap disconnected", bootstrap: null });
+    finishConversations({ items: [], nextCursor: null });
+    store.dispose();
+  });
+
   it("adds and selects a newly created projectless conversation on an empty install", async () => {
     const fake = createFakeApi();
     fake.api.listConversations = vi.fn().mockResolvedValue({ items: [], nextCursor: null });

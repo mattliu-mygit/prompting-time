@@ -29,6 +29,33 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 describe("Composer", () => {
+  it("can interrupt steerable Codex when the other provider is unavailable", async () => {
+    const api = actions();
+    render(<Composer conversation={conversation({ currentRunId: "run-1", provider: "codex", runStatus: "running" })} providers={[providers[0]!, { ...providers[1]!, available: false }]} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Steer Codex" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt Codex" }));
+    const dialog = screen.getByRole("dialog", { name: "Interrupt Codex" });
+    expect(api.interruptRun).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Interrupt Codex" }));
+    await waitFor(() => expect(api.interruptRun).toHaveBeenCalledExactlyOnceWith({ runId: "run-1" }));
+  });
+
+  it.each([
+    { currentRunId: "run-2" },
+    { provider: "claude" as const },
+    { runStatus: "completed" as const, rollupStatus: "completed" as const },
+  ])("dismisses an explicit interruption after its run changes: %j", async (change) => {
+    const api = actions();
+    const active = conversation({ currentRunId: "run-1", provider: "codex", runStatus: "running" });
+    const view = render(<Composer conversation={active} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt Codex" }));
+    const confirmation = within(screen.getByRole("dialog")).getByRole("button", { name: "Interrupt Codex" });
+    view.rerender(<Composer conversation={{ ...active, ...change }} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    fireEvent.click(confirmation);
+    expect(api.interruptRun).not.toHaveBeenCalled();
+  });
+
   it("exposes in-progress work and restores focus after a successful interrupt switch commit", async () => {
     let finishInterrupt!: () => void;
     const interruptRun = vi.fn(() => new Promise<void>((resolve) => { finishInterrupt = resolve; }));

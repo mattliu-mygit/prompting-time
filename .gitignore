@@ -1,5 +1,6 @@
 .DS_Store
 .superpowers/
+output/playwright/
 .worktrees/
 node_modules/
 dist/

@@ -282,7 +282,7 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
           : `${activeName} cannot be steered in this state. Interrupt it or wait for the turn to finish.`}</p>
       ) : null}
       <div className="composer-actions">
-        {rootTurnActive && !canSteer && !interruptionPending ? (
+        {rootTurnActive && !interruptionPending ? (
           <button
             type="button"
             className="secondary-button"

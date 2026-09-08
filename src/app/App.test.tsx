@@ -3,6 +3,7 @@ import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { createAppStore, type AppApi } from "./store";
+import { BridgeError } from "../bridge/api";
 
 function createApi(overrides: Partial<AppApi> = {}): AppApi {
   return {
@@ -287,6 +288,27 @@ describe("App", () => {
     expect(await screen.findByText("Bridge disconnected")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("No conversation selected")).toBeVisible();
+  });
+
+  it("retains the startup diagnostic and recovery action when services are unavailable", async () => {
+    const api = createApi({
+      getBootstrap: vi.fn().mockResolvedValueOnce({
+        providers: [],
+        startupDiagnostic: { code: "storage-error", message: "Cannot open database", action: "Check Application Support permissions and restart" },
+      }).mockResolvedValue({ providers: [] }),
+      listConversations: vi.fn()
+        .mockRejectedValueOnce(new BridgeError("startup-unavailable", "Application services are unavailable.", null))
+        .mockResolvedValue({ items: [], nextCursor: null }),
+    });
+    const store = createAppStore(api);
+    render(<App store={store} />);
+    expect(await screen.findByText("Application services are unavailable.")).toBeVisible();
+    expect(screen.getByText("Cannot open database")).toBeVisible();
+    expect(screen.getByText("Check Application Support permissions and restart")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No conversation selected")).toBeVisible();
+    expect(screen.queryByText("Cannot open database")).not.toBeInTheDocument();
+    store.dispose();
   });
 
   it("has no detectable axe violations in the three-pane workspace", async () => {

@@ -178,9 +178,16 @@ export function createAppStore(api: AppApi): AppStore {
 
   async function synchronize() {
     fullRefreshEpoch += 1;
+    const epoch = fullRefreshEpoch;
     const revisionAtStart = eventRevision;
     const [bootstrap, conversations] = await Promise.all([
-      api.getBootstrap(),
+      api.getBootstrap().then((bootstrap) => {
+        // Startup diagnostics remain useful even if conversation loading fails.
+        if (!disposed && epoch === fullRefreshEpoch && revisionAtStart === eventRevision) {
+          update({ bootstrap });
+        }
+        return bootstrap;
+      }),
       loadAllConversations(api),
     ]);
     const activeConversations = conversations.filter(({ archived }) => !archived);

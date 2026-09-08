@@ -93,6 +93,14 @@ function CommandCenter({ store }: { store: AppStore }) {
         <p className="eyebrow">Prompting Time</p>
         <h1>Command center unavailable</h1>
         <p>{snapshot.error}</p>
+        {snapshot.bootstrap?.startupDiagnostic ? (
+          <section className="diagnostic-card" aria-label="Startup diagnostic">
+            <p>{snapshot.bootstrap.startupDiagnostic.message}</p>
+            {snapshot.bootstrap.startupDiagnostic.action ? (
+              <p>{snapshot.bootstrap.startupDiagnostic.action}</p>
+            ) : null}
+          </section>
+        ) : null}
         <button type="button" className="primary-button" onClick={() => void store.retry()}>
           Retry
         </button>
