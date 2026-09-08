@@ -216,6 +216,42 @@ button:disabled {
   padding: clamp(0.625rem, 1.2vw, 1rem);
 }
 
+.agent-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  flex-shrink: 0;
+  margin-block: var(--space-1);
+  font-size: var(--font-size-secondary);
+}
+.agent-navigation ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.agent-navigation li { min-width: 0; max-width: 100%; }
+.agent-navigation li + li::before { content: "/"; margin-right: var(--space-1); color: var(--color-text-muted); }
+.agent-navigation button {
+  max-width: 100%;
+  padding: 0 var(--space-1);
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.agent-navigation [aria-current] { color: var(--color-accent); }
+.selected-agent-summary { min-width: 0; flex-shrink: 0; margin-bottom: var(--space-1); font-size: var(--font-size-secondary); }
+.selected-agent-summary p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.selected-agent-summary small { font-size: inherit; color: var(--color-text-muted); }
+
 .pane-heading,
 .workspace-heading {
   justify-content: space-between;

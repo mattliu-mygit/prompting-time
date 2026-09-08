@@ -52,4 +52,23 @@ describe("CommandPalette", () => {
     const result = await axe.run(document.body, { rules: { "color-contrast": { enabled: false } } });
     expect(result.violations.map(({ id }) => id)).toEqual([]);
   });
+
+  it("searches duplicate agent names with conversation context and selects after closing", async () => {
+    const onSelectAgent = vi.fn();
+    const props = { onOpenChange: vi.fn(), conversations: [], selectedId: null, onSelectConversation: vi.fn(), commands: [], onSelectAgent,
+      agents: [
+        { conversationId: "a", conversationTitle: "Compiler", agent: { id: "one", label: "Reviewer" } },
+        { conversationId: "b", conversationTitle: "Runtime", agent: { id: "two", label: "Reviewer" } },
+      ],
+    };
+    const view = render(<CommandPalette {...props} open />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "Reviewer Runtime" } });
+    await waitFor(() => expect(screen.getByRole("option", { name: /Reviewer Runtime/ })).toBeVisible());
+    expect(screen.queryByRole("option", { name: /Reviewer Compiler/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /Reviewer Runtime/ }));
+    expect(onSelectAgent).not.toHaveBeenCalled();
+    view.rerender(<CommandPalette {...props} open={false} />);
+    await waitFor(() => expect(onSelectAgent).toHaveBeenCalledWith("b", "two"));
+    expect(props.onSelectConversation).not.toHaveBeenCalled();
+  });
 });
