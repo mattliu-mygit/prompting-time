@@ -31,6 +31,7 @@ pub(super) struct Children {
     identities: HashMap<String, Identity>,
     activities: HashMap<String, ProviderEvent>,
     pub resolving: bool,
+    pub terminal_received: bool,
     queued: VecDeque<Value>,
     queued_bytes: usize,
 }

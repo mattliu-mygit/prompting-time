@@ -1385,6 +1385,12 @@ async fn handle_server_message(
             && turn.children.resolving
             && !turn.cancelled
         {
+            if raw_method.as_str() == Some("turn/completed")
+                && message.pointer("/params/turn/id").and_then(Value::as_str)
+                    == active_or_announced_turn_id(turn)
+            {
+                turn.children.terminal_received = true;
+            }
             return turn.children.queue(message);
         }
         if let (Some(method), Some(params)) = (raw_method.as_str(), message.get("params"))
@@ -1902,7 +1908,7 @@ async fn handle_server_request(
     if state
         .turns
         .get(&thread_id)
-        .is_some_and(|turn| turn.provisional_terminal)
+        .is_some_and(|turn| turn.provisional_terminal || turn.children.terminal_received)
     {
         required_write(
             sender,
@@ -2632,6 +2638,7 @@ async fn respond_to_server_request(
         turn.native_turn_id.as_deref() == Some(&request.turn_id)
             && !turn.cancelled
             && !turn.interrupt_pending
+            && !turn.children.terminal_received
     });
     if request.thread_id != thread_id || !active_owner {
         return Err(protocol("server-request-owner-mismatch"));
@@ -2904,7 +2911,13 @@ mod tests {
 
     #[tokio::test]
     async fn child_metadata_is_registration_scoped_and_has_a_bounded_deadline() {
-        for disposition in ["cancel", "replace", "timeout", "ambiguous-owner"] {
+        for disposition in [
+            "cancel",
+            "replace",
+            "timeout",
+            "ambiguous-owner",
+            "terminal-controls",
+        ] {
             let mut command = Command::new("sh");
             command.args(["-c", "sleep 30"]);
             let process = JsonLineProcess::spawn(command).unwrap();
@@ -2928,6 +2941,69 @@ mod tests {
             }}), &sender, &mut state).await.unwrap();
             assert_eq!(state.pending.len(), 1);
             assert!(receiver.try_recv().is_err(), "no activity before lineage");
+            if disposition == "terminal-controls" {
+                super::handle_server_message(json!({"method":"turn/completed", "params":{"threadId":"root", "turn":{"id":"stale-turn", "status":"completed"}}}), &sender, &mut state).await.unwrap();
+                assert!(
+                    !state.turns["root"].children.terminal_received,
+                    "stale terminals cannot seal the active turn"
+                );
+                state.server_requests.insert(
+                    "string:existing".into(),
+                    ServerRequest {
+                        id: RpcId::String("existing".into()),
+                        thread_id: "root".into(),
+                        turn_id: "turn-1".into(),
+                        kind: ServerRequestKind::Approval,
+                    },
+                );
+                super::handle_server_message(json!({"method":"turn/completed", "params":{"threadId":"root", "turn":{"id":"turn-1", "status":"completed"}}}), &sender, &mut state).await.unwrap();
+                let response = respond_to_server_request(
+                    &sender,
+                    "root",
+                    "string:existing",
+                    ApprovalResponse::Approved,
+                    &mut state,
+                )
+                .await;
+                handle_server_request(json!({"method":"item/commandExecution/requestApproval", "id":"late", "params":{"threadId":"root", "turnId":"turn-1", "itemId":"command", "command":"invented"}}), RpcId::String("late".into()), &sender, &mut state).await.unwrap();
+                handle_server_response(json!({"id":0,"result":{"thread":{"id":"child", "parentThreadId":"root", "source":{"subAgent":{"thread_spawn":{"parent_thread_id":"root", "depth":1}}}}}}), RpcId::Number(0), &sender, &mut state).await.unwrap();
+                let duplicate = super::handle_server_message(json!({"method":"item/commandExecution/requestApproval", "id":"late", "params":{"threadId":"root", "turnId":"turn-1", "itemId":"command"}}), &sender, &mut state).await;
+                process.shutdown().await.unwrap();
+                assert!(
+                    response.is_err(),
+                    "a terminal waiting for metadata must forbid approval dispatch"
+                );
+                assert!(
+                    !state.server_requests.contains_key("string:late"),
+                    "a terminal waiting for metadata must reject new approvals"
+                );
+                assert!(!state.turns.contains_key("root"));
+                assert!(matches!(
+                    receiver.try_recv().unwrap().unwrap(),
+                    ProviderEvent::ChildAgentActivity { .. }
+                ));
+                assert!(matches!(
+                    receiver.try_recv().unwrap().unwrap(),
+                    ProviderEvent::SubAgentActivity { .. }
+                ));
+                assert_eq!(
+                    receiver.try_recv().unwrap().unwrap(),
+                    ProviderEvent::TurnCompleted
+                );
+                assert!(state.server_requests.is_empty());
+                assert_eq!(
+                    state
+                        .server_request_tombstones
+                        .iter()
+                        .filter(|id| **id == RpcId::String("late".into()))
+                        .count(),
+                    1
+                );
+                assert!(
+                    matches!(duplicate, Err(ProviderError::Protocol { category }) if category == "duplicate-server-request-after-response")
+                );
+                continue;
+            }
             if disposition == "ambiguous-owner" {
                 handle_server_response(json!({"id":0,"result":{"thread":{"id":"child", "parentThreadId":"root", "source":{"subAgent":{"thread_spawn":{"parent_thread_id":"root", "depth":1}}}}}}), RpcId::Number(0), &sender, &mut state).await.unwrap();
                 let mut other = turn_sink(8);
