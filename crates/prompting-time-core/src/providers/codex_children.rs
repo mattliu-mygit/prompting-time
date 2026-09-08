@@ -1,15 +1,16 @@
-//! Metadata-only ancestry correlation for activities carried by an owned root turn.
-//! This does not forward descendant-owned turn, transcript, or control events.
+//! Bounded metadata-only ancestry and native child turn/control ownership.
+//! Child transcript content is never forwarded through this boundary.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use super::{
     DispatcherState, JsonLineSender, MAX_PENDING_REQUESTS, PendingResponse, ProviderError,
-    ProviderEvent, REQUEST_TIMEOUT, RpcId, deliver_to_turn, handle_server_message, protocol,
-    required_string, required_write,
+    ProviderEvent, REQUEST_TIMEOUT, RpcId, handle_server_message, protocol, required_string,
+    required_write,
 };
 
 const MAX_AGENTS: usize = 128;
@@ -34,9 +35,85 @@ pub(super) struct Children {
     pub terminal_received: bool,
     queued: VecDeque<Value>,
     queued_bytes: usize,
+    pub native: Arc<NativeTurns>,
+}
+
+#[derive(Default)]
+pub(super) struct NativeTurns {
+    pub turns: Mutex<HashMap<String, ChildTurn>>,
+    pub changed: tokio::sync::Notify,
+}
+
+impl NativeTurns {
+    pub fn live(&self) -> Vec<super::NativeChildTurn> {
+        self.turns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, turn)| !turn.ended)
+            .map(|(thread, turn)| super::NativeChildTurn {
+                native_thread_id: thread.clone(),
+                native_turn_id: turn.id.clone(),
+            })
+            .collect()
+    }
+
+    pub fn seal(&self, thread: &str, id: &str) {
+        if let Some(turn) = self.turns.lock().unwrap().get_mut(thread)
+            && turn.id == id
+        {
+            turn.terminal_received = true;
+        }
+    }
+}
+
+pub(super) struct ChildTurn {
+    pub id: String,
+    pub ended: bool,
+    pub terminal_received: bool,
+    pub history: HashSet<String>,
+    pub file_changes: HashMap<String, Vec<super::FileChangeApprovalDetail>>,
 }
 
 impl Children {
+    pub fn new(native: Arc<NativeTurns>) -> Self {
+        Self {
+            native,
+            ..Self::default()
+        }
+    }
+    pub fn start(&mut self, thread: &str, id: &str) -> Result<bool, ProviderError> {
+        validate_id(id)?;
+        let mut turns = self.native.turns.lock().unwrap();
+        if let Some(turn) = turns.get_mut(thread) {
+            if turn.id == id && !turn.ended {
+                return Ok(false);
+            }
+            if !turn.ended || turn.history.contains(id) || turn.history.len() >= 1024 {
+                return Err(protocol("child-turn-conflict"));
+            }
+            turn.id = id.to_owned();
+            turn.ended = false;
+            turn.terminal_received = false;
+            turn.history.insert(id.to_owned());
+            turn.file_changes.clear();
+        } else {
+            if !self.identities.contains_key(thread) {
+                return Err(protocol("child-identity-unresolved"));
+            }
+            turns.insert(
+                thread.to_owned(),
+                ChildTurn {
+                    id: id.to_owned(),
+                    ended: false,
+                    terminal_received: false,
+                    history: HashSet::from([id.to_owned()]),
+                    file_changes: HashMap::new(),
+                },
+            );
+        }
+        Ok(true)
+    }
     pub fn queue(&mut self, message: Value) -> Result<(), ProviderError> {
         let bytes = serde_json::to_vec(&message)
             .map_err(|_| protocol("child-event-encoding"))?
@@ -157,13 +234,27 @@ impl Children {
 }
 
 pub(super) struct Lookup {
-    pub root: String,
-    pub registration: u64,
+    roots: Vec<(String, u64)>,
     pub deadline: Instant,
     requested: String,
-    activity_id: String,
-    activity_path: String,
+    activity: Option<(String, String)>,
     chain: Vec<Identity>,
+    queued: VecDeque<Value>,
+    queued_bytes: usize,
+}
+
+impl Lookup {
+    pub fn is_discovery(&self) -> bool {
+        self.activity.is_none()
+    }
+    pub fn is_active(&self, state: &DispatcherState) -> bool {
+        self.roots.iter().any(|(root, registration)| {
+            state
+                .turns
+                .get(root)
+                .is_some_and(|turn| turn.registration_id == *registration && !turn.cancelled)
+        })
+    }
 }
 
 pub(super) fn activity_owner(
@@ -191,6 +282,112 @@ pub(super) fn activity_owner(
     Ok(owner)
 }
 
+pub(super) fn owner(
+    state: &DispatcherState,
+    thread: &str,
+) -> Result<Option<String>, ProviderError> {
+    let mut roots = state.turns.iter().filter(|(root, turn)| {
+        root.as_str() == thread || turn.children.identities.contains_key(thread)
+    });
+    let root = roots.next().map(|(root, _)| root.clone());
+    if roots.next().is_some() {
+        return Err(protocol("child-root-conflict"));
+    }
+    Ok(root)
+}
+
+pub(super) fn active(
+    state: &DispatcherState,
+    thread: &str,
+    id: &str,
+) -> Result<Option<String>, ProviderError> {
+    let Some(root) = owner(state, thread)? else {
+        return Ok(None);
+    };
+    let turn = &state.turns[&root];
+    if turn.cancelled
+        || turn.interrupt_pending
+        || turn.children.terminal_received
+        || turn.provisional_terminal
+    {
+        return Ok(None);
+    }
+    let matches = if root == thread {
+        super::active_or_announced_turn_id(turn) == Some(id)
+    } else {
+        turn.children
+            .native
+            .turns
+            .lock()
+            .unwrap()
+            .get(thread)
+            .is_some_and(|turn| turn.id == id && !turn.ended && !turn.terminal_received)
+    };
+    Ok(matches.then_some(root))
+}
+
+pub(super) async fn announce_thread(
+    params: &Value,
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    let id = required_string(params, &["thread", "id"], "thread-started-id")?;
+    if state.turns.contains_key(&id)
+        || params
+            .pointer("/thread/parentThreadId")
+            .is_none_or(Value::is_null)
+    {
+        return Ok(());
+    }
+    let identity = parse_metadata(&id, params)?;
+    if let Some(root) = owner(state, &identity.parent)? {
+        let turn = &state.turns[&root];
+        if turn.cancelled || turn.children.terminal_received {
+            return Ok(());
+        }
+        if turn
+            .children
+            .depth(&root, &identity.parent)
+            .map(|depth| depth + 1)
+            != Some(identity.depth)
+        {
+            return Err(protocol("child-depth-conflict"));
+        }
+        publish_identity(&root, identity, None, sender, state).await?;
+    }
+    Ok(())
+}
+
+async fn publish_identity(
+    root: &str,
+    identity: Identity,
+    activity_id: Option<String>,
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    let event = match activity_id {
+        Some(native_item_id) => ProviderEvent::ChildAgentActivity {
+            native_item_id,
+            parent_native_thread_id: identity.parent.clone(),
+            child_native_thread_ids: vec![identity.id.clone()],
+            child_statuses: Vec::new(),
+            operation: "resolveIdentity".into(),
+            status: "observed".into(),
+        },
+        None => ProviderEvent::NativeChildIdentity {
+            parent_native_thread_id: identity.parent.clone(),
+            native_thread_id: identity.id.clone(),
+        },
+    };
+    state
+        .turns
+        .get_mut(root)
+        .expect("registered root")
+        .children
+        .insert(identity)?;
+    super::deliver_or_buffer_turn_event(state, root, Ok(event), false, sender).await
+}
+
 /// Hold observations from a lookup target without trusting that target yet.
 /// They are replayed only after the complete chain reaches the registered root.
 pub(super) fn pending_activity_owner(
@@ -211,15 +408,14 @@ pub(super) fn pending_activity_owner(
         if let PendingResponse::ChildMetadata(lookup) = pending
             && (lookup.requested == observer
                 || lookup.chain.iter().any(|identity| identity.id == observer))
-            && state
-                .turns
-                .get(&lookup.root)
-                .is_some_and(|turn| turn.registration_id == lookup.registration && !turn.cancelled)
+            && lookup.activity.is_some()
+            && lookup.is_active(state)
         {
-            if owner.as_ref().is_some_and(|root| root != &lookup.root) {
+            let root = &lookup.roots[0].0;
+            if owner.as_ref().is_some_and(|previous| previous != root) {
                 return Err(protocol("child-root-conflict"));
             }
-            owner = Some(lookup.root.clone());
+            owner = Some(root.clone());
         }
     }
     Ok(owner)
@@ -262,13 +458,13 @@ pub(super) async fn resolve_activity(
         .queue(json!({"method": method, "params": params}))?;
     turn.children.resolving = true;
     let lookup = Lookup {
-        root: root.to_owned(),
-        registration: turn.registration_id,
+        roots: vec![(root.to_owned(), turn.registration_id)],
         deadline: Instant::now() + REQUEST_TIMEOUT,
         requested: agent_thread_id.clone(),
-        activity_id: native_item_id.clone(),
-        activity_path: agent_path.clone(),
+        activity: Some((native_item_id.clone(), agent_path.clone())),
         chain: Vec::new(),
+        queued: VecDeque::new(),
+        queued_bytes: 0,
     };
     request_metadata(lookup, sender, state).await?;
     Ok(true)
@@ -300,18 +496,22 @@ pub(super) async fn accept_metadata(
     sender: &JsonLineSender,
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
-    let Some(turn) = state
-        .turns
-        .get(&lookup.root)
-        .filter(|turn| turn.registration_id == lookup.registration && !turn.cancelled)
-    else {
+    if !lookup.is_active(state) {
         return Ok(());
-    };
+    }
     if lookup.deadline <= Instant::now() {
         return Err(protocol("child-metadata-timeout"));
     }
+    if lookup.is_discovery()
+        && result.pointer("/thread/id").and_then(Value::as_str) == Some(lookup.requested.as_str())
+        && result
+            .pointer("/thread/parentThreadId")
+            .is_none_or(Value::is_null)
+    {
+        return reject_discovery(lookup, sender, state).await;
+    }
     let identity = parse_metadata(&lookup.requested, &result)?;
-    if identity.id == lookup.root
+    if lookup.roots.iter().any(|(root, _)| root == &identity.id)
         || identity.parent == identity.id
         || lookup
             .chain
@@ -322,17 +522,30 @@ pub(super) async fn accept_metadata(
         return Err(protocol("child-ancestry-conflict"));
     }
     if lookup.chain.is_empty()
-        && identity
-            .path
-            .as_ref()
-            .is_some_and(|path| path != &lookup.activity_path)
+        && lookup.activity.as_ref().is_some_and(|(_, activity_path)| {
+            identity
+                .path
+                .as_ref()
+                .is_some_and(|path| path != activity_path)
+        })
     {
         return Err(protocol("child-path-conflict"));
     }
-    let parent_depth = turn.children.depth(&lookup.root, &identity.parent);
+    let mut owners = lookup.roots.iter().filter_map(|(root, registration)| {
+        state
+            .turns
+            .get(root)
+            .filter(|turn| turn.registration_id == *registration && !turn.cancelled)
+            .and_then(|turn| turn.children.depth(root, &identity.parent))
+            .map(|depth| (root.clone(), depth))
+    });
+    let parent = owners.next();
+    if owners.next().is_some() {
+        return Err(protocol("child-root-conflict"));
+    }
     lookup.requested = identity.parent.clone();
     lookup.chain.push(identity);
-    let Some(mut depth) = parent_depth else {
+    let Some((root, mut depth)) = parent else {
         return request_metadata(lookup, sender, state).await;
     };
     // Validate the entire chain before publishing any identity into the run.
@@ -342,44 +555,211 @@ pub(super) async fn accept_metadata(
             return Err(protocol("child-depth-conflict"));
         }
     }
-    if turn.children.identities.len() + lookup.chain.len() > MAX_AGENTS {
+    if state.turns[&root].children.identities.len() + lookup.chain.len() > MAX_AGENTS {
         return Err(protocol("child-identity-capacity-exceeded"));
     }
     for identity in lookup.chain.into_iter().rev() {
-        let event = ProviderEvent::ChildAgentActivity {
-            // The real activity caused this metadata observation; retain its ID.
-            native_item_id: lookup.activity_id.clone(),
-            parent_native_thread_id: identity.parent.clone(),
-            child_native_thread_ids: vec![identity.id.clone()],
-            child_statuses: Vec::new(),
-            operation: "resolveIdentity".to_owned(),
-            status: "observed".to_owned(),
-        };
-        let turn = state
+        publish_identity(
+            &root,
+            identity,
+            lookup.activity.as_ref().map(|(id, _)| id.clone()),
+            sender,
+            state,
+        )
+        .await?;
+    }
+    // Replay the discovered child's own start/control first; root output and terminal
+    // were fenced behind discovery. No candidate was trusted before this point.
+    let target = &mut state.turns.get_mut(&root).expect("verified root").children;
+    for message in lookup.queued.into_iter().rev() {
+        let bytes = serde_json::to_vec(&message)
+            .map_err(|_| protocol("child-event-encoding"))?
+            .len();
+        if target.queued.len() >= MAX_QUEUED_EVENTS
+            || bytes > MAX_QUEUED_BYTES - target.queued_bytes
+        {
+            return Err(protocol("child-event-capacity-exceeded"));
+        }
+        target.queued_bytes += bytes;
+        target.queued.push_front(message);
+    }
+    flush_resolved_roots(&lookup.roots, sender, state).await?;
+    Ok(())
+}
+
+async fn flush_resolved_roots(
+    roots: &[(String, u64)],
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    for (root, registration) in roots {
+        let resolving = state.pending.values().any(|pending| matches!(pending, PendingResponse::ChildMetadata(lookup) if lookup.roots.contains(&(root.clone(), *registration))));
+        let Some(turn) = state
             .turns
-            .get_mut(&lookup.root)
-            .expect("root registration checked above");
-        turn.children.insert(identity)?;
-        if turn.native_turn_id.is_none() {
-            if turn.provisional_events.len() >= super::PROVISIONAL_EVENT_CAPACITY {
-                return Err(protocol("provisional-event-capacity-exceeded"));
-            }
-            turn.provisional_events.push_back(Ok(event));
-        } else {
-            deliver_to_turn(state, &lookup.root, Ok(event), sender).await?;
+            .get_mut(root)
+            .filter(|turn| turn.registration_id == *registration && !turn.cancelled)
+        else {
+            continue;
+        };
+        turn.children.resolving = resolving;
+        if resolving {
+            continue;
+        }
+        let queued = std::mem::take(&mut turn.children.queued);
+        turn.children.queued_bytes = 0;
+        for message in queued {
+            Box::pin(handle_server_message(message, sender, state)).await?;
         }
     }
-    let turn = state
-        .turns
-        .get_mut(&lookup.root)
-        .expect("root registration checked above");
-    turn.children.resolving = false;
-    let buffered = std::mem::take(&mut turn.children.queued);
-    turn.children.queued_bytes = 0;
-    for message in buffered {
-        Box::pin(handle_server_message(message, sender, state)).await?;
+    Ok(())
+}
+
+pub(super) async fn reject_discovery(
+    lookup: Lookup,
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    for message in lookup.queued {
+        if let Some(id) = message.get("id").and_then(super::parse_rpc_id) {
+            required_write(sender, &state.process_shutdown, json!({"id":id,"error":{"code":-32003,"message":"Request owner could not be verified"}})).await?;
+            super::remember_server_request_tombstone(state, id);
+        }
+    }
+    flush_resolved_roots(&lookup.roots, sender, state).await
+}
+
+pub(super) async fn expire_discoveries(
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    let expired: Vec<_> = state.pending.iter().filter_map(|(id, pending)| {
+        matches!(pending, PendingResponse::ChildMetadata(lookup) if lookup.is_discovery() && (!lookup.is_active(state) || lookup.deadline <= Instant::now())).then_some(id.clone())
+    }).collect();
+    for id in expired {
+        if let Some(PendingResponse::ChildMetadata(lookup)) = state.pending.remove(&id) {
+            reject_discovery(lookup, sender, state).await?;
+        }
     }
     Ok(())
+}
+
+/// Unknown starts trigger metadata-only discovery against a snapshot of owned
+/// registrations. The candidate list is a fence, never evidence of parentage.
+pub(super) async fn correlate(
+    message: &Value,
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<bool, ProviderError> {
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let Some(params) = message.get("params") else {
+        return Ok(false);
+    };
+    let thread = if method == "thread/started" {
+        params.pointer("/thread/id")
+    } else {
+        params.get("threadId")
+    };
+    let Some(thread) = thread.and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if let Some(root) = owner(state, thread)? {
+        // Receipt seals the exact child before delayed lineage/output replay.
+        if method == "turn/completed" && root != thread {
+            let id = params.pointer("/turn/id").and_then(Value::as_str);
+            if let Some(id) = id {
+                state.turns[&root].children.native.seal(thread, id);
+            }
+        }
+        if root != thread && state.turns[&root].children.resolving {
+            state
+                .turns
+                .get_mut(&root)
+                .unwrap()
+                .children
+                .queue(message.clone())?;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+    let (pending_rows, pending_bytes) =
+        state
+            .pending
+            .values()
+            .fold((0usize, 0usize), |(rows, bytes), pending| match pending {
+                PendingResponse::ChildMetadata(lookup) if lookup.is_discovery() => {
+                    (rows + lookup.queued.len(), bytes + lookup.queued_bytes)
+                }
+                _ => (rows, bytes),
+            });
+    let bytes = serde_json::to_vec(message)
+        .map_err(|_| protocol("child-event-encoding"))?
+        .len();
+    for pending in state.pending.values_mut() {
+        if let PendingResponse::ChildMetadata(lookup) = pending
+            && lookup.activity.is_none()
+            && (lookup.requested == thread
+                || lookup.chain.iter().any(|identity| identity.id == thread))
+        {
+            if pending_rows >= MAX_QUEUED_EVENTS
+                || bytes > MAX_QUEUED_BYTES.saturating_sub(pending_bytes)
+            {
+                return Err(protocol("child-event-capacity-exceeded"));
+            }
+            lookup.queued_bytes += bytes;
+            lookup.queued.push_back(message.clone());
+            return Ok(true);
+        }
+    }
+    if !matches!(method, "thread/started" | "turn/started") {
+        return Ok(false);
+    }
+    if method == "thread/started"
+        && params
+            .pointer("/thread/parentThreadId")
+            .is_none_or(Value::is_null)
+    {
+        return Ok(false);
+    }
+    validate_id(thread)?;
+    let roots: Vec<_> = state
+        .turns
+        .iter()
+        .filter(|(_, turn)| !turn.cancelled && !turn.children.terminal_received)
+        .map(|(root, turn)| (root.clone(), turn.registration_id))
+        .collect();
+    if roots.is_empty() {
+        return Ok(false);
+    }
+    if pending_rows >= MAX_QUEUED_EVENTS || bytes > MAX_QUEUED_BYTES.saturating_sub(pending_bytes) {
+        return Err(protocol("child-event-capacity-exceeded"));
+    }
+    let mut lookup = Lookup {
+        roots,
+        deadline: Instant::now() + REQUEST_TIMEOUT,
+        requested: thread.into(),
+        activity: None,
+        chain: Vec::new(),
+        queued: VecDeque::new(),
+        queued_bytes: 0,
+    };
+    for (root, _) in &lookup.roots {
+        state.turns.get_mut(root).unwrap().children.resolving = true;
+    }
+    if method == "thread/started" {
+        Box::pin(accept_metadata(lookup, params.clone(), sender, state)).await?;
+    } else {
+        lookup.queued_bytes = serde_json::to_vec(message)
+            .map_err(|_| protocol("child-event-encoding"))?
+            .len();
+        if lookup.queued_bytes > MAX_QUEUED_BYTES {
+            return Err(protocol("child-event-capacity-exceeded"));
+        }
+        lookup.queued.push_back(message.clone());
+        request_metadata(lookup, sender, state).await?;
+    }
+    Ok(true)
 }
 
 fn parse_metadata(requested: &str, result: &Value) -> Result<Identity, ProviderError> {
@@ -445,10 +825,12 @@ pub(super) fn reap_lookups(state: &mut DispatcherState) -> Result<(), ProviderEr
         let PendingResponse::ChildMetadata(lookup) = pending else {
             return true;
         };
-        let active = state
-            .turns
-            .get(&lookup.root)
-            .is_some_and(|turn| turn.registration_id == lookup.registration && !turn.cancelled);
+        let active = lookup.roots.iter().any(|(root, registration)| {
+            state
+                .turns
+                .get(root)
+                .is_some_and(|turn| turn.registration_id == *registration && !turn.cancelled)
+        });
         expired |= active && lookup.deadline <= Instant::now();
         active
     });

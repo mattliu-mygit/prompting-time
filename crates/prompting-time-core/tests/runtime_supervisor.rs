@@ -59,6 +59,8 @@ struct ScriptedAdapter {
     interrupted: Mutex<Vec<String>>,
     steers: Mutex<Vec<String>>,
     responses: Mutex<Vec<String>>,
+    response_sessions: Mutex<Vec<String>>,
+    hold_after_response: bool,
     hang: Option<HangPoint>,
     response_error: bool,
     immediate_response_output: bool,
@@ -112,6 +114,8 @@ impl ScriptedAdapter {
             interrupted: Mutex::new(Vec::new()),
             steers: Mutex::new(Vec::new()),
             responses: Mutex::new(Vec::new()),
+            response_sessions: Mutex::new(Vec::new()),
+            hold_after_response: false,
             hang: None,
             response_error: false,
             immediate_response_output: false,
@@ -388,10 +392,14 @@ impl ProviderAdapter for ScriptedAdapter {
 
     async fn respond(
         &self,
-        _session: &ProviderSession,
+        session: &ProviderSession,
         request_id: &str,
         response: ApprovalResponse,
     ) -> Result<(), ProviderError> {
+        self.response_sessions
+            .lock()
+            .unwrap()
+            .push(session.native_id.clone());
         if self.hang == Some(HangPoint::Respond) {
             self.control_started.fetch_add(1, Ordering::SeqCst);
             std::future::pending().await
@@ -444,7 +452,7 @@ impl ProviderAdapter for ScriptedAdapter {
                     tokio::task::yield_now().await;
                 }
             }
-        } else {
+        } else if !self.hold_after_response {
             self.complete_one();
         }
         Ok(())
@@ -489,6 +497,276 @@ async fn eventually(mut condition: impl FnMut() -> bool) {
     })
     .await
     .expect("condition should become true");
+}
+
+#[tokio::test]
+async fn native_child_controls_use_canonical_owner_fifo_and_local_terminal() {
+    use prompting_time_core::domain::AgentStatus;
+    use prompting_time_core::providers::{NativeChildEvent, NativeChildTurn};
+    let (store, conversation) = fixture().await;
+    let mut adapter = ScriptedAdapter::new(ProviderId::Codex, [Plan::Blocking]);
+    adapter.hold_after_response = true;
+    let adapter = Arc::new(adapter);
+    let supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+    let handle = supervisor
+        .submit(request(conversation, ProviderId::Codex))
+        .await
+        .unwrap();
+    handle.wait_for(RunStatus::Running).await.unwrap();
+    let child = |thread: &str, event| ProviderEvent::NativeChild {
+        owner: NativeChildTurn {
+            native_thread_id: thread.into(),
+            native_turn_id: format!("{thread}-turn"),
+        },
+        event,
+    };
+    for thread in ["child", "sibling"] {
+        adapter.send_one(Ok(ProviderEvent::NativeChildIdentity {
+            parent_native_thread_id: "codex-session".into(),
+            native_thread_id: thread.into(),
+        }));
+        adapter.send_one(Ok(child(thread, NativeChildEvent::Started)));
+    }
+    for (thread, id) in [("child", "first"), ("sibling", "second")] {
+        adapter.send_one(Ok(child(
+            thread,
+            NativeChildEvent::ApprovalRequested {
+                request_id: id.into(),
+                operation: "write".into(),
+                scope: "invented".into(),
+                details: None,
+            },
+        )));
+    }
+    let waiting = handle.wait_for(RunStatus::Waiting).await;
+    if waiting.is_err() {
+        supervisor.shutdown().await.unwrap();
+    }
+    waiting.unwrap();
+    let approval = store.load_approval(handle.run_id(), "first").await.unwrap();
+    let tree = store.load_agent_page(conversation, None, 20).await.unwrap();
+    let (child_id, native) = store
+        .load_native_child_control_owner(handle.run_id(), "first")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(native.native_thread_id, "child");
+    let first = tree
+        .items
+        .iter()
+        .find(|item| item.agent.id == child_id)
+        .unwrap();
+    assert_eq!(approval.agent_id, first.agent.id);
+    assert_eq!(first.agent.status, AgentStatus::Waiting);
+    assert_eq!(
+        tree.items
+            .iter()
+            .find(|item| item.depth == 0)
+            .unwrap()
+            .agent
+            .status,
+        AgentStatus::Running
+    );
+    adapter.send_one(Ok(ProviderEvent::AssistantMessage {
+        content: "root during child wait".into(),
+    }));
+    supervisor
+        .respond(handle.run_id(), "first", ApprovalResponse::Denied)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if store.load_approval(handle.run_id(), "second").await.is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    adapter.send_one(Ok(child("child", NativeChildEvent::Completed)));
+    supervisor
+        .respond(handle.run_id(), "second", ApprovalResponse::Denied)
+        .await
+        .unwrap();
+    adapter.send_one(Ok(child("sibling", NativeChildEvent::Completed)));
+    adapter.complete_one();
+    let outcome = handle.wait().await;
+    supervisor.shutdown().await.unwrap();
+    assert_eq!(outcome.unwrap().status, RunStatus::Completed);
+    assert_eq!(
+        *adapter.response_sessions.lock().unwrap(),
+        ["child", "sibling"]
+    );
+    let root_id = tree
+        .items
+        .iter()
+        .find(|item| item.depth == 0)
+        .unwrap()
+        .agent
+        .id;
+    let timeline = store.load_timeline(conversation, None, 200).await.unwrap();
+    let output = timeline
+        .items
+        .iter()
+        .find(|event| event.content == "root during child wait")
+        .unwrap();
+    assert_eq!(output.agent_id, root_id);
+}
+
+#[tokio::test]
+async fn native_child_terminal_discards_its_controls_and_promotes_sibling_then_reactivates() {
+    use prompting_time_core::providers::{NativeChildEvent, NativeChildTurn};
+    let (store, conversation) = fixture().await;
+    let mut adapter = ScriptedAdapter::new(ProviderId::Codex, [Plan::Blocking]);
+    adapter.hold_after_response = true;
+    let adapter = Arc::new(adapter);
+    let supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+    let handle = supervisor
+        .submit(request(conversation, ProviderId::Codex))
+        .await
+        .unwrap();
+    handle.wait_for(RunStatus::Running).await.unwrap();
+    let child = |thread: &str, turn: &str, event| ProviderEvent::NativeChild {
+        owner: NativeChildTurn {
+            native_thread_id: thread.into(),
+            native_turn_id: turn.into(),
+        },
+        event,
+    };
+    for thread in ["child", "sibling"] {
+        adapter.send_one(Ok(ProviderEvent::NativeChildIdentity {
+            parent_native_thread_id: "codex-session".into(),
+            native_thread_id: thread.into(),
+        }));
+        adapter.send_one(Ok(child(thread, "turn-a", NativeChildEvent::Started)));
+    }
+    for (thread, id) in [
+        ("child", "selected"),
+        ("child", "queued-ended"),
+        ("sibling", "next"),
+    ] {
+        adapter.send_one(Ok(child(
+            thread,
+            "turn-a",
+            NativeChildEvent::ApprovalRequested {
+                request_id: id.into(),
+                operation: "invented".into(),
+                scope: "synthetic".into(),
+                details: None,
+            },
+        )));
+    }
+    handle.wait_for(RunStatus::Waiting).await.unwrap();
+    adapter.send_one(Ok(child("child", "turn-a", NativeChildEvent::Interrupted)));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if store.load_approval(handle.run_id(), "next").await.is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .load_approval(handle.run_id(), "selected")
+            .await
+            .unwrap()
+            .status,
+        ApprovalStatus::Cancelled
+    );
+    assert!(
+        store
+            .load_approval(handle.run_id(), "queued-ended")
+            .await
+            .is_err()
+    );
+    assert!(
+        supervisor
+            .respond(handle.run_id(), "selected", ApprovalResponse::Approved)
+            .await
+            .is_err()
+    );
+    adapter.send_one(Ok(child("child", "turn-b", NativeChildEvent::Started)));
+    supervisor
+        .respond(handle.run_id(), "next", ApprovalResponse::Denied)
+        .await
+        .unwrap();
+    adapter.send_one(Ok(child("child", "turn-b", NativeChildEvent::Completed)));
+    adapter.send_one(Ok(child("sibling", "turn-a", NativeChildEvent::Completed)));
+    adapter.complete_one();
+    let result = handle.wait().await;
+    supervisor.shutdown().await.unwrap();
+    assert_eq!(result.unwrap().status, RunStatus::Completed);
+    assert_eq!(*adapter.response_sessions.lock().unwrap(), ["sibling"]);
+}
+
+#[tokio::test]
+async fn native_child_identity_and_start_progress_while_root_control_waits() {
+    use prompting_time_core::providers::{NativeChildEvent, NativeChildTurn};
+    let (store, conversation) = fixture().await;
+    let mut adapter = ScriptedAdapter::new(ProviderId::Codex, [Plan::Approval]);
+    adapter.hold_after_response = true;
+    let adapter = Arc::new(adapter);
+    let supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+    let handle = supervisor
+        .submit(request(conversation, ProviderId::Codex))
+        .await
+        .unwrap();
+    handle.wait_for(RunStatus::Waiting).await.unwrap();
+    let native = NativeChildTurn {
+        native_thread_id: "child".into(),
+        native_turn_id: "child-turn".into(),
+    };
+    adapter.send_one(Ok(ProviderEvent::NativeChildIdentity {
+        parent_native_thread_id: "codex-session".into(),
+        native_thread_id: "child".into(),
+    }));
+    adapter.send_one(Ok(ProviderEvent::NativeChild {
+        owner: native.clone(),
+        event: NativeChildEvent::Started,
+    }));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if store
+                .load_agent_page(conversation, None, 10)
+                .await
+                .unwrap()
+                .items
+                .len()
+                == 2
+                || store.load_run(handle.run_id()).await.unwrap().status == RunStatus::Failed
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let status = store.load_run(handle.run_id()).await.unwrap().status;
+    if status == RunStatus::Failed {
+        supervisor.shutdown().await.unwrap();
+    }
+    assert_eq!(
+        status,
+        RunStatus::Waiting,
+        "child identity is independent of root waiting"
+    );
+    adapter.send_one(Ok(ProviderEvent::NativeChild {
+        owner: native.clone(),
+        event: NativeChildEvent::Completed,
+    }));
+    supervisor
+        .respond(handle.run_id(), "approval-1", ApprovalResponse::Denied)
+        .await
+        .unwrap();
+    adapter.complete_one();
+    let outcome = handle.wait().await;
+    supervisor.shutdown().await.unwrap();
+    assert_eq!(outcome.unwrap().status, RunStatus::Completed);
 }
 
 #[tokio::test]

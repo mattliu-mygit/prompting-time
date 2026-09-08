@@ -281,6 +281,113 @@ async fn adapter_turn_shutdown_awaits_its_owner_once() {
 }
 
 #[tokio::test]
+async fn codex_root_terminal_owned_shutdown_interrupts_live_native_children() {
+    native_child_cleanup_fixture(false, true).await;
+}
+
+#[tokio::test]
+async fn codex_dropped_completed_root_still_starts_native_child_cleanup() {
+    native_child_cleanup_fixture(true, true).await;
+}
+
+#[tokio::test]
+async fn codex_root_cancellation_rejects_child_control_and_awaits_child_interruption() {
+    native_child_cleanup_fixture(false, false).await;
+}
+
+async fn native_child_cleanup_fixture(drop_owner: bool, root_completed: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("interrupt.json");
+    let extract_id = response_id_shell("request_id");
+    let root_end = if root_completed {
+        r#"printf '%s\n' '{"method":"turn/completed","params":{"threadId":"root","turn":{"id":"root-turn","status":"completed"}}}'"#.to_owned()
+    } else {
+        format!(
+            r#"
+printf '%s\n' '{{"id":"child-control","method":"item/commandExecution/requestApproval","params":{{"threadId":"child","turnId":"child-turn","itemId":"synthetic","startedAtMs":1}}}}'
+IFS= read -r line
+printf '%s' "$line" | grep -q '"error"' || exit 3
+printf '%s' "$line" | grep -q '"id":"child-control"' || exit 4
+IFS= read -r line
+printf '%s' "$line" | grep -q '"threadId":"root"' || exit 5
+{extract_id}
+printf '{{"id":%s,"result":{{}}}}\n' "$request_id"
+printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"root","turn":{{"id":"root-turn","status":"interrupted"}}}}}}'
+"#
+        )
+    };
+    let script = format!(
+        r#"
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"userAgent":"codex-cli 0.test"}}}}\n' "$request_id"
+IFS= read -r line
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"thread":{{"id":"root","sessionId":"session"}}}}}}\n' "$request_id"
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"turn":{{"id":"root-turn"}}}}}}\n' "$request_id"
+printf '%s\n' '{{"method":"thread/started","params":{{"thread":{{"id":"child","parentThreadId":"root","source":{{"subAgent":{{"thread_spawn":{{"parent_thread_id":"root","depth":1}}}}}}}}}}}}'
+printf '%s\n' '{{"method":"turn/started","params":{{"threadId":"child","turn":{{"id":"child-turn"}}}}}}'
+{root_end}
+IFS= read -r line
+printf '%s' "$line" > '{}'
+{extract_id}
+printf '{{"id":%s,"result":{{}}}}\n' "$request_id"
+printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"child","turn":{{"id":"child-turn","status":"interrupted"}}}}}}'
+sleep 30
+"#,
+        log.display()
+    );
+    let (_fixture, binary) = fake_codex(&script);
+    let adapter = CodexAdapter::connect(binary).await.unwrap();
+    let session = adapter.start_session(start_request()).await.unwrap();
+    let mut turn = adapter
+        .start_turn(&session, TurnRequest::new("invented"))
+        .await
+        .unwrap();
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(event) = turn.recv().await {
+            let event = event?;
+            if event.is_terminal() || (!root_completed && event.control_request_id().is_some()) {
+                break;
+            }
+        }
+        Ok::<_, ProviderError>(())
+    })
+    .await;
+    let cleanup = if drop_owner {
+        drop(turn);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !log.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ProviderError::Protocol {
+            category: "dropped-owner-child-cleanup-missing".into(),
+        })
+    } else {
+        turn.shutdown().await
+    };
+    let shutdown = adapter.shutdown().await;
+    observed.unwrap().unwrap();
+    cleanup.unwrap();
+    shutdown.unwrap();
+    let request: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(log)
+            .expect("child interruption must be awaited before owned shutdown returns"),
+    )
+    .unwrap();
+    assert_eq!(request["method"], "turn/interrupt");
+    assert_eq!(
+        request["params"],
+        serde_json::json!({"threadId":"child","turnId":"child-turn"})
+    );
+}
+
+#[tokio::test]
 async fn codex_adapter_shutdown_awaits_app_server_reaping() {
     let process_directory = tempfile::tempdir().unwrap();
     let pid_file = process_directory.path().join("pid");

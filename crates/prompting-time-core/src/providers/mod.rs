@@ -171,7 +171,44 @@ pub enum NativeAgentStatus {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
+pub enum NativeChildEvent {
+    Started,
+    Completed,
+    Interrupted,
+    Failed,
+    ApprovalRequested {
+        request_id: String,
+        operation: String,
+        scope: String,
+        details: Option<ApprovalRequestDetails>,
+    },
+    UserInputRequested {
+        request_id: String,
+        questions: Vec<UserInputQuestion>,
+        auto_resolution_ms: Option<u64>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeChildTurn {
+    pub native_thread_id: String,
+    pub native_turn_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ProviderEvent {
+    NativeChildIdentity {
+        #[serde(rename = "parentNativeThreadId")]
+        parent_native_thread_id: String,
+        #[serde(rename = "nativeThreadId")]
+        native_thread_id: String,
+    },
+    NativeChild {
+        owner: NativeChildTurn,
+        event: NativeChildEvent,
+    },
     TurnStarted {
         native_turn_id: String,
     },
@@ -228,6 +265,20 @@ pub enum ProviderEvent {
 }
 
 impl ProviderEvent {
+    pub fn control_request_id(&self) -> Option<&str> {
+        match self {
+            Self::ApprovalRequested { request_id, .. }
+            | Self::UserInputRequested { request_id, .. }
+            | Self::NativeChild {
+                event:
+                    NativeChildEvent::ApprovalRequested { request_id, .. }
+                    | NativeChildEvent::UserInputRequested { request_id, .. },
+                ..
+            } => Some(request_id),
+            _ => None,
+        }
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::TurnCompleted | Self::Interrupted)
     }

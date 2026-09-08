@@ -459,9 +459,16 @@ struct ActiveAttempt {
     session: ProviderSession,
     native_turn_id: Option<String>,
     pending_request_id: Option<String>,
+    pending_child: Option<(AgentId, crate::providers::NativeChildTurn)>,
     response_in_flight: bool,
     response_operation_id: Option<u64>,
     done: watch::Sender<bool>,
+}
+
+struct PendingControl {
+    agent_id: AgentId,
+    event: ProviderEvent,
+    bytes: usize,
 }
 
 struct ActiveRun {
@@ -1673,7 +1680,7 @@ fn unique_manager_runs(
 
 async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeError> {
     let gate = job.active.attempt_gate.lock().await;
-    let (attempt_run_id, root_id, adapter, session, mut done, request_is_pending) = {
+    let (attempt_run_id, root_id, adapter, mut session, mut done, request_is_pending) = {
         let state = job
             .active
             .attempt
@@ -1707,6 +1714,27 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
             Err(error) => Err(error.into()),
         };
     }
+    let root_id = if let Some((agent_id, native)) = store
+        .load_native_child_control_owner(attempt_run_id, &job.request_id)
+        .await?
+    {
+        let selected_matches = job
+            .active
+            .attempt
+            .lock()
+            .expect("active attempt mutex must not be poisoned")
+            .as_ref()
+            .is_some_and(|attempt| {
+                attempt.pending_child.as_ref() == Some(&(agent_id, native.clone()))
+            });
+        if !selected_matches {
+            return Err(RuntimeError::OperationCancelled);
+        }
+        session.native_id = native.native_thread_id;
+        agent_id
+    } else {
+        root_id
+    };
     let mut cancelled = job.active.cancellation.subscribe();
     let mut shutdown = job.active.shutdown.subscribe();
     if *cancelled.borrow() || *shutdown.borrow() || *done.borrow() {
@@ -1881,7 +1909,11 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
                 acknowledgement.is_ok(),
             );
             acknowledgement?;
-            set_status(&job.active, attempt_run_id, RunStatus::Running);
+            set_status(
+                &job.active,
+                attempt_run_id,
+                store.load_run(attempt_run_id).await?.status,
+            );
             Ok(())
         }
     }
@@ -1898,6 +1930,7 @@ fn clear_response_state(active: &ActiveRun, run_id: RunId, request_id: &str, ack
         attempt.response_in_flight = false;
         if acknowledged && attempt.pending_request_id.as_deref() == Some(request_id) {
             attempt.pending_request_id = None;
+            attempt.pending_child = None;
         }
     }
     drop(attempt);
@@ -1923,7 +1956,7 @@ async fn reconcile_response_panic(
     dispatch_owner_id: &str,
 ) {
     let gate = active.attempt_gate.lock().await;
-    let (run_id, root_id) = *active
+    let (run_id, _root_id) = *active
         .attempt_identity
         .lock()
         .expect("attempt identity mutex must not be poisoned");
@@ -1940,7 +1973,7 @@ async fn reconcile_response_panic(
                 let _ = store
                     .reject_owned_response_intent(
                         run_id,
-                        root_id,
+                        approval.agent_id,
                         request_id,
                         DispatchCertainty::MayHaveDispatched,
                         dispatch_owner_id,
@@ -2342,6 +2375,7 @@ async fn execute_attempt(
         session: session.clone(),
         native_turn_id: None,
         pending_request_id: None,
+        pending_child: None,
         response_in_flight: false,
         response_operation_id: None,
         done,
@@ -2401,14 +2435,24 @@ async fn execute_attempt(
     let mut buffered_closed = false;
     // Controls are unpublished until their predecessor is acknowledged. They must never
     // enter buffered's staged prefix, which acknowledgement commits and then discards.
-    let mut pending_controls: VecDeque<(ProviderEvent, usize)> = VecDeque::new();
+    let mut pending_controls: VecDeque<PendingControl> = VecDeque::new();
     let mut pending_control_bytes = 0_usize;
+    let mut deferred_terminals = VecDeque::new();
     loop {
         if *cancellation.borrow() || *shutdown.borrow() {
             return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation)
                 .await;
         }
-        if approval_pending(&job.active) {
+        if !approval_responding(&job.active) && !deferred_terminals.is_empty() {
+            while let Some(event) = deferred_terminals.pop_back() {
+                buffered.push_front(event);
+            }
+        }
+        if approval_pending(&job.active)
+            && buffered
+                .front()
+                .is_none_or(|event| !matches!(event, ProviderEvent::NativeChild { .. }))
+        {
             if buffered_closed && !approval_responding(&job.active) {
                 return finalize_attempt(
                     store,
@@ -2470,6 +2514,18 @@ async fn execute_attempt(
                                 ).await;
                             }
                         };
+                        if (event.is_terminal() || matches!(&event, ProviderEvent::NativeChild { event: crate::providers::NativeChildEvent::Completed | crate::providers::NativeChildEvent::Interrupted | crate::providers::NativeChildEvent::Failed, .. }))
+                            && approval_responding(&job.active)
+                            && job.active.attempt.lock().unwrap().as_ref().is_some_and(|attempt| attempt.pending_child.as_ref().is_some_and(|(_, native)| {
+                                event.is_terminal() || matches!(&event, ProviderEvent::NativeChild { owner, .. } if owner == native)
+                            }))
+                        {
+                            if deferred_terminals.len() >= MAX_PENDING_CONTROLS {
+                                return finalize_attempt(store, &job.active, &attempt, turn, &mut buffered, active_failure(ProviderErrorCategory::ContractViolation, MutationState::Unknown)).await;
+                            }
+                            deferred_terminals.push_back(event);
+                            continue;
+                        }
                         if event.is_terminal() {
                             signal_attempt_done(&job.active);
                             #[cfg(test)]
@@ -2493,17 +2549,12 @@ async fn execute_attempt(
                             ).await;
                         }
                         let gate = job.active.attempt_gate.lock().await;
-                        if let ProviderEvent::ApprovalRequested { request_id, .. }
-                        | ProviderEvent::UserInputRequested { request_id, .. } = &event {
+                        if let Some(request_id) = event.control_request_id() {
                             let duplicate = job.active.attempt.lock()
                                 .expect("active attempt mutex must not be poisoned")
                                 .as_ref()
-                                .is_some_and(|attempt| attempt.pending_request_id.as_ref() == Some(request_id))
-                                || pending_controls.iter().any(|(event, _)| match event {
-                                    ProviderEvent::ApprovalRequested { request_id: queued, .. }
-                                    | ProviderEvent::UserInputRequested { request_id: queued, .. } => queued == request_id,
-                                    _ => unreachable!("only permission events enter the control queue"),
-                                });
+                                .is_some_and(|attempt| attempt.pending_request_id.as_deref() == Some(request_id))
+                                || pending_controls.iter().any(|queued| queued.event.control_request_id() == Some(request_id));
                             let bytes = serde_json::to_vec(&event).ok().map(|payload| payload.len());
                             if request_id.trim().is_empty() || duplicate
                                 || pending_controls.len() >= MAX_PENDING_CONTROLS
@@ -2514,10 +2565,22 @@ async fn execute_attempt(
                                     active_failure(ProviderErrorCategory::ContractViolation, MutationState::Unknown)).await;
                             }
                             let bytes = bytes.expect("serialized size was validated");
+                            let agent_id = if let ProviderEvent::NativeChild { owner, .. } = &event {
+                                store.load_active_native_child_agent(attempt.run_id, owner).await?
+                            } else { attempt.root_id };
                             pending_control_bytes += bytes;
-                            pending_controls.push_back((event, bytes));
+                            pending_controls.push_back(PendingControl { agent_id, event, bytes });
                             // Enqueue even if acknowledgement cleared the current ID while
                             // we waited for the gate: older controls still come first.
+                            continue;
+                        }
+                        if matches!(&event, ProviderEvent::NativeChild { .. } | ProviderEvent::NativeChildIdentity { .. }) {
+                            remove_ended_child_controls(&event, &mut pending_controls, &mut pending_control_bytes);
+                            let result = persist_child_event(store, &job.active, &attempt, event).await;
+                            drop(gate);
+                            if let Err(error) = result {
+                                return finalize_attempt(store, &job.active, &attempt, turn, &mut buffered, AttemptFinish::RuntimeError(error)).await;
+                            }
                             continue;
                         }
                         if !approval_pending(&job.active) {
@@ -2593,6 +2656,15 @@ async fn execute_attempt(
                                 ).await;
                             }
                         };
+                        let child_wait = job.active.attempt.lock().unwrap().as_ref().is_some_and(|attempt| attempt.pending_child.is_some());
+                        if child_wait {
+                            let result = store.append_owned_run_event(attempt.run_id, attempt.root_id, &attempt.dispatch_owner_id, record).await;
+                            drop(gate);
+                            if let Err(error) = result {
+                                return finalize_attempt(store, &job.active, &attempt, turn, &mut buffered, AttemptFinish::RuntimeError(error.into())).await;
+                            }
+                            continue;
+                        }
                         let stage = store
                             .stage_owned_waiting_event(
                                 attempt.run_id,
@@ -2648,13 +2720,21 @@ async fn execute_attempt(
             }
             staged_buffered = 0;
         }
-        let next = if buffered_closed {
+        let next = if let Some(event) = buffered.pop_front() {
+            Some(Ok(event))
+        } else if buffered_closed {
             None
-        } else if let Some(event) = buffered.pop_front() {
-            Some(Ok(event))
-        } else if let Some((event, bytes)) = pending_controls.pop_front() {
-            pending_control_bytes -= bytes;
-            Some(Ok(event))
+        } else if let Some(queued) = pending_controls.pop_front() {
+            pending_control_bytes -= queued.bytes;
+            if let ProviderEvent::NativeChild { owner, .. } = &queued.event
+                && store
+                    .load_active_native_child_agent(attempt.run_id, owner)
+                    .await?
+                    != queued.agent_id
+            {
+                return Err(StoreError::NativeAgentIdentityConflict.into());
+            }
+            Some(Ok(queued.event))
         } else {
             tokio::select! {
                 _ = cancellation.changed() => return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation).await,
@@ -2693,6 +2773,29 @@ async fn execute_attempt(
                 .await;
             }
         };
+        if started
+            && matches!(
+                &event,
+                ProviderEvent::NativeChild { .. } | ProviderEvent::NativeChildIdentity { .. }
+            )
+        {
+            let gate = job.active.attempt_gate.lock().await;
+            remove_ended_child_controls(&event, &mut pending_controls, &mut pending_control_bytes);
+            let result = persist_child_event(store, &job.active, &attempt, event).await;
+            drop(gate);
+            if let Err(error) = result {
+                return finalize_attempt(
+                    store,
+                    &job.active,
+                    &attempt,
+                    turn,
+                    &mut buffered,
+                    AttemptFinish::RuntimeError(error),
+                )
+                .await;
+            }
+            continue;
+        }
         match event {
             ProviderEvent::TurnStarted { native_turn_id } if !started => {
                 started = true;
@@ -3089,6 +3192,162 @@ async fn execute_attempt(
     }
 }
 
+fn remove_ended_child_controls(
+    event: &ProviderEvent,
+    controls: &mut VecDeque<PendingControl>,
+    bytes: &mut usize,
+) {
+    use crate::providers::NativeChildEvent;
+    if let ProviderEvent::NativeChild {
+        owner,
+        event:
+            NativeChildEvent::Completed | NativeChildEvent::Interrupted | NativeChildEvent::Failed,
+    } = event
+    {
+        controls.retain(|queued| {
+            if matches!(&queued.event, ProviderEvent::NativeChild { owner: candidate, .. } if candidate == owner) { *bytes -= queued.bytes; false } else { true }
+        });
+    }
+}
+
+async fn persist_child_event(
+    store: &Store,
+    active: &ActiveRun,
+    attempt: &AttemptSpec,
+    event: ProviderEvent,
+) -> Result<(), RuntimeError> {
+    use crate::providers::NativeChildEvent;
+    if let ProviderEvent::NativeChildIdentity {
+        parent_native_thread_id,
+        native_thread_id,
+    } = event
+    {
+        let record = ProviderEventRecord::ChildAgent {
+            native_item_id: None,
+            parent_native_thread_id,
+            child_native_thread_ids: vec![native_thread_id],
+            child_statuses: Vec::new(),
+            operation: "resolveIdentity".into(),
+            status: "observed".into(),
+        };
+        let root_waiting = active
+            .attempt
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|attempt| {
+                attempt.pending_request_id.is_some() && attempt.pending_child.is_none()
+            });
+        if root_waiting {
+            if matches!(
+                store
+                    .stage_owned_waiting_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        &attempt.dispatch_owner_id,
+                        record
+                    )
+                    .await?,
+                StageWaitingEventOutcome::Overflowed(_)
+            ) {
+                return Err(ProviderError::Protocol {
+                    category: "child-identity-staging-capacity".into(),
+                }
+                .into());
+            }
+        } else {
+            store
+                .append_owned_run_event(
+                    attempt.run_id,
+                    attempt.root_id,
+                    &attempt.dispatch_owner_id,
+                    record,
+                )
+                .await?;
+        }
+        return Ok(());
+    }
+    let ProviderEvent::NativeChild { owner, event } = event else {
+        unreachable!("native child boundary");
+    };
+    let selected = active
+        .attempt
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|attempt| {
+            attempt
+                .pending_child
+                .as_ref()
+                .is_some_and(|(_, native)| native == &owner)
+        });
+    let mut request = None;
+    let terminal = matches!(
+        event,
+        NativeChildEvent::Completed | NativeChildEvent::Interrupted | NativeChildEvent::Failed
+    );
+    let record = match event {
+        NativeChildEvent::Started => {
+            ProviderEventRecord::started_with_native_id(owner.native_turn_id.clone())
+        }
+        NativeChildEvent::Completed if selected => {
+            ProviderEventRecord::Failed("Child completed with an unresolved control".into())
+        }
+        NativeChildEvent::Completed => ProviderEventRecord::Completed,
+        NativeChildEvent::Interrupted => ProviderEventRecord::Interrupted,
+        NativeChildEvent::Failed => ProviderEventRecord::Failed("Native child turn failed".into()),
+        NativeChildEvent::ApprovalRequested {
+            request_id,
+            operation,
+            scope,
+            details,
+        } => {
+            request = Some(request_id.clone());
+            ProviderEventRecord::approval_requested_with_details(
+                ProviderId::Codex,
+                request_id,
+                operation,
+                scope,
+                details,
+            )
+        }
+        NativeChildEvent::UserInputRequested {
+            request_id,
+            questions,
+            auto_resolution_ms,
+        } => {
+            request = Some(request_id.clone());
+            ProviderEventRecord::user_input_requested(
+                ProviderId::Codex,
+                request_id,
+                questions,
+                auto_resolution_ms,
+            )
+        }
+    };
+    let persisted = store
+        .append_owned_native_child_event(attempt.run_id, &owner, &attempt.dispatch_owner_id, record)
+        .await?;
+    {
+        let mut state = active.attempt.lock().unwrap();
+        let state = state.as_mut().expect("active attempt");
+        if let Some(request) = request {
+            state.pending_request_id = Some(request);
+            state.pending_child = Some((persisted.agent_id, owner));
+        } else if terminal && selected {
+            state.pending_request_id = None;
+            state.pending_child = None;
+        }
+    }
+    set_status(
+        active,
+        attempt.run_id,
+        store.load_run(attempt.run_id).await?.status,
+    );
+    active.approval_changed.notify_one();
+    Ok(())
+}
+
 async fn interrupt_before_start(
     store: &Store,
     active: &ActiveRun,
@@ -3192,7 +3451,7 @@ async fn finalize_attempt(
     mut finish: AttemptFinish,
 ) -> Result<AttemptResult, RuntimeError> {
     signal_attempt_done(active);
-    let _gate = active.attempt_gate.lock().await;
+    let gate = active.attempt_gate.lock().await;
 
     if matches!(finish, AttemptFinish::ProviderTerminal(_)) {
         let pending_request_id = active
@@ -3217,6 +3476,7 @@ async fn finalize_attempt(
         }
     }
 
+    drop(gate);
     if matches!(finish, AttemptFinish::ProviderTerminal(_)) {
         let stream_closed = if buffered.pop_front().is_some() {
             false
@@ -3245,6 +3505,7 @@ async fn finalize_attempt(
         };
     }
 
+    let _gate = active.attempt_gate.lock().await;
     loop {
         let mut descendants = store
             .load_recovery_agent_batch_for_run(attempt.run_id, 200)
@@ -4231,6 +4492,143 @@ mod tests {
         ) -> Result<(), ProviderError> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn native_child_answer_write_precedes_child_and_root_terminal_before_ack() {
+        use crate::providers::{NativeChildEvent, NativeChildTurn, UserInputQuestion};
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("native answer ordering"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/native-answer-ordering"),
+                ProviderId::Codex,
+                TurnRequest::new("invented"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        supervisor
+            .respond(
+                handle.run_id(),
+                "fixture-approval",
+                ApprovalResponse::Denied,
+            )
+            .await
+            .unwrap();
+        let barrier = Arc::new(ResponsePreAcknowledgementBarrier::new());
+        supervisor.set_response_pre_acknowledgement_barrier(Arc::clone(&barrier));
+        let supervisor = Arc::new(supervisor);
+        let sender = adapter.sender.lock().unwrap().take().unwrap();
+        let native = NativeChildTurn {
+            native_thread_id: "child".into(),
+            native_turn_id: "child-turn".into(),
+        };
+        sender
+            .send(Ok(ProviderEvent::NativeChildIdentity {
+                parent_native_thread_id: "fixture-session".into(),
+                native_thread_id: "child".into(),
+            }))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(ProviderEvent::NativeChild {
+                owner: native.clone(),
+                event: NativeChildEvent::Started,
+            }))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(ProviderEvent::NativeChild {
+                owner: native.clone(),
+                event: NativeChildEvent::UserInputRequested {
+                    request_id: "native-question".into(),
+                    questions: vec![UserInputQuestion {
+                        id: "choice".into(),
+                        header: "Choice".into(),
+                        question: "Synthetic choice?".into(),
+                        options: None,
+                        is_other: true,
+                        is_secret: false,
+                    }],
+                    auto_resolution_ms: None,
+                },
+            }))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        let reply = {
+            let supervisor = Arc::clone(&supervisor);
+            let run = handle.run_id();
+            tokio::spawn(async move {
+                supervisor
+                    .respond(
+                        run,
+                        "native-question",
+                        ApprovalResponse::Answers(std::collections::BTreeMap::from([(
+                            "choice".into(),
+                            vec!["answer".into()],
+                        )])),
+                    )
+                    .await
+            })
+        };
+        barrier.ready.notified().await;
+        sender
+            .send(Ok(ProviderEvent::NativeChild {
+                owner: native,
+                event: NativeChildEvent::Completed,
+            }))
+            .await
+            .unwrap();
+        sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while sender.capacity() != sender.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(sender);
+        barrier.release.notify_one();
+        let reply = reply.await.unwrap();
+        let outcome = handle.wait().await;
+        supervisor.shutdown().await.unwrap();
+        reply.unwrap();
+        assert_eq!(outcome.unwrap().status, RunStatus::Completed);
+        let approval = store
+            .load_approval(handle.run_id(), "native-question")
+            .await
+            .unwrap();
+        assert_eq!(
+            approval.response_intent.unwrap().status,
+            ApprovalResponseIntentStatus::Acknowledged
+        );
+        assert!(
+            store
+                .load_agent_page(conversation.id, None, 10)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| item.agent.status == crate::domain::AgentStatus::Completed)
+        );
     }
 
     #[tokio::test]

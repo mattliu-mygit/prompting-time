@@ -16,10 +16,11 @@ use super::process::{EVENT_CHANNEL_CAPACITY, JsonLineProcess, JsonLineSender, Js
 use super::provider_command;
 use super::{
     ApprovalRequestDetails, ApprovalResponse, FileChangeApprovalDetail, FileChangeKind,
-    NativeAgentStatus, NativeChildStatus, NativeSubAgentActivityKind, ProviderAdapter,
-    ProviderCapabilities, ProviderError, ProviderEvent, ProviderHealth, ProviderId,
-    ProviderSession, ProviderTurn, ProviderTurnOwner, RequestedPermissionProfile, ResumeSession,
-    StartSession, TurnRequest, UserInputOption, UserInputQuestion,
+    NativeAgentStatus, NativeChildEvent, NativeChildStatus, NativeChildTurn,
+    NativeSubAgentActivityKind, ProviderAdapter, ProviderCapabilities, ProviderError,
+    ProviderEvent, ProviderHealth, ProviderId, ProviderSession, ProviderTurn, ProviderTurnOwner,
+    RequestedPermissionProfile, ResumeSession, StartSession, TurnRequest, UserInputOption,
+    UserInputQuestion,
 };
 use crate::router::ProviderCapability;
 
@@ -84,6 +85,10 @@ enum Cancellation {
         thread_id: String,
         registration_id: u64,
     },
+    FinishedTurn {
+        thread_id: String,
+        registration_id: u64,
+    },
 }
 
 enum ClientCommand {
@@ -105,6 +110,7 @@ enum ClientCommand {
         registration_id: u64,
         events: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
         completed: Arc<AtomicBool>,
+        native_children: Arc<children::NativeTurns>,
         response: oneshot::Sender<Result<(), ProviderError>>,
     },
     CancelTurn {
@@ -432,6 +438,7 @@ impl Client {
         registration_id: u64,
         events: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
         completed: Arc<AtomicBool>,
+        native_children: Arc<children::NativeTurns>,
     ) -> Result<(), ProviderError> {
         let (response, receiver) = oneshot::channel();
         self.commands
@@ -440,6 +447,7 @@ impl Client {
                 registration_id,
                 events,
                 completed,
+                native_children,
                 response,
             })
             .await
@@ -572,6 +580,7 @@ struct CodexTurnOwner {
     turn_id: String,
     registration_id: u64,
     completed: Arc<AtomicBool>,
+    native_children: Arc<children::NativeTurns>,
 }
 
 struct FatalShutdownGuard {
@@ -596,36 +605,107 @@ impl Drop for CodexTurnOwner {
                 registration_id: Some(self.registration_id),
             }));
         }
+        if !self.native_children.live().is_empty() {
+            for target in self.native_children.live() {
+                self.native_children
+                    .seal(&target.native_thread_id, &target.native_turn_id);
+            }
+            let client = self.client.clone();
+            let native = Arc::clone(&self.native_children);
+            let thread_id = self.thread_id.clone();
+            let registration_id = self.registration_id;
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = shutdown_native_children(&client, &native).await;
+                    client.cancel(Cancellation::FinishedTurn {
+                        thread_id,
+                        registration_id,
+                    });
+                });
+            } else {
+                self.client.process_shutdown.request();
+            }
+        } else if self.completed.load(Ordering::Acquire) {
+            self.client.cancel(Cancellation::FinishedTurn {
+                thread_id: self.thread_id.clone(),
+                registration_id: self.registration_id,
+            });
+        }
     }
 }
 
 #[async_trait]
 impl ProviderTurnOwner for CodexTurnOwner {
     async fn shutdown(self: Box<Self>) -> Result<(), ProviderError> {
-        if self.completed.load(Ordering::Acquire) {
+        if self.completed.load(Ordering::Acquire) && self.native_children.live().is_empty() {
             return Ok(());
         }
         let mut failure = FatalShutdownGuard {
             shutdown: self.client.process_shutdown.clone(),
             armed: true,
         };
-        let cancellation = self
-            .client
-            .cancel_turn(
-                self.thread_id.clone(),
-                Some(self.turn_id.clone()),
-                Some(self.registration_id),
-            )
-            .await;
+        let cancellation = if self.completed.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            self.client
+                .cancel_turn(
+                    self.thread_id.clone(),
+                    Some(self.turn_id.clone()),
+                    Some(self.registration_id),
+                )
+                .await
+        };
         match cancellation {
             Ok(()) => {}
             Err(ProviderError::NotDispatched { .. }) if self.completed.load(Ordering::Acquire) => {}
             Err(error) => return Err(error),
         }
+        shutdown_native_children(&self.client, &self.native_children).await?;
         failure.armed = false;
         self.completed.store(true, Ordering::Release);
         Ok(())
     }
+}
+
+async fn shutdown_native_children(
+    client: &Client,
+    native: &Arc<children::NativeTurns>,
+) -> Result<(), ProviderError> {
+    let mut failure = FatalShutdownGuard {
+        shutdown: client.process_shutdown.clone(),
+        armed: true,
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut requests = tokio::task::JoinSet::new();
+        for target in native.live() {
+            let client = client.clone();
+            requests.spawn(async move {
+                client
+                    .request(
+                        "turn/interrupt",
+                        json!({"threadId":target.native_thread_id,"turnId":target.native_turn_id}),
+                    )
+                    .await
+            });
+        }
+        while let Some(result) = requests.join_next().await {
+            // A natural terminal can beat interruption. Terminal evidence below,
+            // rather than an RPC acknowledgement or rejection, owns quiescence.
+            let _ = result.map_err(|_| protocol("child-interrupt-task-failed"))?;
+        }
+        loop {
+            let changed = native.changed.notified();
+            if native.live().is_empty() {
+                break;
+            }
+            changed.await;
+        }
+        Ok::<_, ProviderError>(())
+    })
+    .await
+    .map_err(|_| protocol("child-interrupt-terminal-timeout"))??;
+    failure.armed = false;
+    Ok(())
 }
 
 #[async_trait]
@@ -709,6 +789,7 @@ impl ProviderAdapter for CodexAdapter {
         require_codex_session(session)?;
         let (events, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let completed = Arc::new(AtomicBool::new(false));
+        let native_children = Arc::new(children::NativeTurns::default());
         let request_key = self
             .inner
             .client
@@ -729,6 +810,7 @@ impl ProviderAdapter for CodexAdapter {
                 request_key,
                 events,
                 Arc::clone(&completed),
+                Arc::clone(&native_children),
             )
             .await?;
         let result = self
@@ -754,6 +836,7 @@ impl ProviderAdapter for CodexAdapter {
                 turn_id,
                 registration_id: request_key,
                 completed,
+                native_children,
             },
         ))
     }
@@ -848,6 +931,10 @@ async fn run_dispatcher(
     let result = loop {
         tokio::select! {
             _ = metadata_tick.tick() => {
+                if let Err(error) = children::expire_discoveries(&sender, &mut state).await {
+                    broadcast_error(&mut state.turns, error.clone()).await;
+                    break Err(error);
+                }
                 if let Err(error) = children::reap_lookups(&mut state) {
                     broadcast_error(&mut state.turns, error.clone()).await;
                     break Err(error);
@@ -876,6 +963,11 @@ async fn run_dispatcher(
                                 registration_id,
                                 &mut state.turns,
                             );
+                        }
+                        Cancellation::FinishedTurn { thread_id, registration_id } => {
+                            if state.turns.get(&thread_id).is_some_and(|turn| turn.registration_id == registration_id && turn.completed.load(Ordering::Acquire) && turn.children.native.live().is_empty()) {
+                                state.turns.remove(&thread_id);
+                            }
                         }
                     }
                 }
@@ -978,8 +1070,14 @@ async fn handle_command(
             registration_id,
             events,
             completed,
+            native_children,
             response,
         } => {
+            if state.turns.get(&thread_id).is_some_and(|turn| {
+                turn.completed.load(Ordering::Acquire) && turn.children.native.live().is_empty()
+            }) {
+                state.turns.remove(&thread_id);
+            }
             let result = if response.is_closed() || events.is_closed() {
                 Ok(())
             } else if state.turns.len() >= EVENT_CHANNEL_CAPACITY {
@@ -991,7 +1089,7 @@ async fn handle_command(
                     }
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(TurnSink {
-                            children: children::Children::default(),
+                            children: children::Children::new(native_children),
                             registration_id,
                             events,
                             completed,
@@ -1117,9 +1215,25 @@ async fn cancel_registered_turn(
             }
             return Ok(());
         }
+        let targets = turn.children.native.live();
+        for target in &targets {
+            turn.children
+                .native
+                .seal(&target.native_thread_id, &target.native_turn_id);
+        }
         let completed = Arc::clone(&turn.completed);
         let confirmed = Arc::new(AtomicBool::new(false));
         let cancellation_resolved = Arc::clone(&turn.cancellation_resolved);
+        for target in targets {
+            reject_server_requests(
+                sender,
+                state,
+                &target.native_thread_id,
+                &target.native_turn_id,
+                "Owning root was cancelled",
+            )
+            .await?;
+        }
         if let Some(response) = response {
             send_request(
                 sender,
@@ -1378,6 +1492,9 @@ async fn handle_server_message(
     sender: &JsonLineSender,
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
+    if children::correlate(&message, sender, state).await? {
+        return Ok(());
+    }
     if let Some(raw_method) = message.get("method") {
         if message.get("id").is_none()
             && let Some(thread_id) = message.pointer("/params/threadId").and_then(Value::as_str)
@@ -1479,14 +1596,19 @@ async fn handle_server_response(
         return Ok(());
     };
     if let PendingResponse::ChildMetadata(lookup) = pending_response {
-        if !state
-            .turns
-            .get(&lookup.root)
-            .is_some_and(|turn| turn.registration_id == lookup.registration && !turn.cancelled)
-        {
+        if !lookup.is_active(state) {
+            if lookup.is_discovery() {
+                return children::reject_discovery(lookup, sender, state).await;
+            }
             return Ok(());
         }
-        return children::accept_metadata(lookup, parse_response(message)?, sender, state).await;
+        return match parse_response(message) {
+            Ok(result) => children::accept_metadata(lookup, result, sender, state).await,
+            Err(_) if lookup.is_discovery() => {
+                children::reject_discovery(lookup, sender, state).await
+            }
+            Err(error) => Err(error),
+        };
     }
     let PendingResponse::Deliver {
         kind,
@@ -1596,15 +1718,33 @@ async fn confirm_interrupted_turn(
     if matches {
         reject_server_requests(sender, state, thread_id, turn_id, "Turn was cancelled").await?;
     }
-    if matches && let Some(mut turn) = state.turns.remove(thread_id) {
-        remember_confirmed_interrupt(state, thread_id, turn_id, turn.registration_id);
-        let _ = turn.events.try_send(Ok(ProviderEvent::Interrupted));
+    if matches {
+        let registration = state.turns[thread_id].registration_id;
+        remember_confirmed_interrupt(state, thread_id, turn_id, registration);
+        let _ = state.turns[thread_id]
+            .events
+            .try_send(Ok(ProviderEvent::Interrupted));
+        close_root_stream(state, thread_id);
+    }
+    Ok(())
+}
+
+fn close_root_stream(state: &mut DispatcherState, thread_id: &str) {
+    if let Some(mut turn) = state.turns.remove(thread_id) {
         turn.completed.store(true, Ordering::Release);
         for waiter in turn.interrupt_waiters.drain(..) {
             let _ = waiter.send(Ok(()));
         }
+        if !turn.children.native.live().is_empty() {
+            // Keep native ownership until the existing turn owner completes child cleanup.
+            // Dropping the real sender closes the root stream; child text stays excluded.
+            let (closed, _) = mpsc::channel(1);
+            turn.events = closed;
+            turn.children.terminal_received = true;
+            turn.children.resolving = false;
+            state.turns.insert(thread_id.to_owned(), turn);
+        }
     }
-    Ok(())
 }
 
 fn resolve_interrupt_waiters(
@@ -1773,8 +1913,8 @@ async fn activate_turn(
     for event in buffered {
         deliver_to_turn(state, thread_id, event, sender).await?;
     }
-    if provisional_terminal && let Some(turn) = state.turns.remove(thread_id) {
-        turn.completed.store(true, Ordering::Release);
+    if provisional_terminal {
+        close_root_stream(state, thread_id);
     }
     Ok(())
 }
@@ -1870,12 +2010,8 @@ async fn handle_server_request(
         remember_server_request_tombstone(state, id);
         return Ok(());
     };
-    let active_owner = state
-        .turns
-        .get(&thread_id)
-        .and_then(active_or_announced_turn_id)
-        .is_some_and(|active_turn_id| active_turn_id == turn_id);
-    if !active_owner {
+    let root = children::active(state, &thread_id, &turn_id)?;
+    let Some(root) = root else {
         required_write(
             sender,
             &state.process_shutdown,
@@ -1887,7 +2023,7 @@ async fn handle_server_request(
         .await?;
         remember_server_request_tombstone(state, id);
         return Ok(());
-    }
+    };
     if state
         .turns
         .get(&thread_id)
@@ -1943,7 +2079,7 @@ async fn handle_server_request(
         return Ok(());
     }
     let parsed =
-        parse_supported_server_request(method, &params, &external_id, state.turns.get(&thread_id));
+        parse_supported_server_request(method, &params, &external_id, state.turns.get(&root));
     let Ok((kind, event)) = parsed else {
         required_write(
             sender,
@@ -1984,11 +2120,45 @@ async fn handle_server_request(
         ServerRequest {
             id,
             thread_id: thread_id.clone(),
-            turn_id,
+            turn_id: turn_id.clone(),
             kind,
         },
     );
-    deliver_or_buffer_turn_event(state, &thread_id, Ok(event), false, sender).await?;
+    let event = if root != thread_id {
+        let event = match event {
+            ProviderEvent::ApprovalRequested {
+                request_id,
+                operation,
+                scope,
+                details,
+            } => NativeChildEvent::ApprovalRequested {
+                request_id,
+                operation,
+                scope,
+                details,
+            },
+            ProviderEvent::UserInputRequested {
+                request_id,
+                questions,
+                auto_resolution_ms,
+            } => NativeChildEvent::UserInputRequested {
+                request_id,
+                questions,
+                auto_resolution_ms,
+            },
+            _ => unreachable!("known controls only"),
+        };
+        ProviderEvent::NativeChild {
+            owner: NativeChildTurn {
+                native_thread_id: thread_id,
+                native_turn_id: turn_id,
+            },
+            event,
+        }
+    } else {
+        event
+    };
+    deliver_or_buffer_turn_event(state, &root, Ok(event), false, sender).await?;
     Ok(())
 }
 
@@ -2026,8 +2196,17 @@ fn parse_supported_server_request(
             let item_id = required_string(params, &["itemId"], "file-change-item-id")?;
             required_i64(params, "startedAtMs", "file-change-approval-started-at")?;
             let changes = turn
-                .and_then(|turn| turn.file_changes.get(&item_id))
-                .cloned()
+                .and_then(|turn| {
+                    let children = turn.children.native.turns.lock().unwrap();
+                    match params
+                        .get("threadId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| children.get(id))
+                    {
+                        Some(child) => child.file_changes.get(&item_id).cloned(),
+                        None => turn.file_changes.get(&item_id).cloned(),
+                    }
+                })
                 .ok_or_else(|| protocol("file-change-item-not-observed"))?;
             Ok((
                 ServerRequestKind::Approval,
@@ -2188,12 +2367,152 @@ fn parse_user_input(
     Ok((questions, auto_resolution_ms))
 }
 
+async fn handle_child_notification(
+    root: &str,
+    thread: &str,
+    method: &str,
+    params: &Value,
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    if (state.turns[root].cancelled || state.turns[root].completed.load(Ordering::Acquire))
+        && method != "turn/completed"
+    {
+        return Ok(());
+    }
+    let id = match method {
+        "turn/started" | "turn/completed" => {
+            required_string(params, &["turn", "id"], "child-turn-id")?
+        }
+        _ => match params.get("turnId").and_then(Value::as_str) {
+            Some(id) => id.to_owned(),
+            None => return Ok(()),
+        },
+    };
+    let event = if method == "turn/started" {
+        if !state
+            .turns
+            .get_mut(root)
+            .unwrap()
+            .children
+            .start(thread, &id)?
+        {
+            return Ok(());
+        }
+        NativeChildEvent::Started
+    } else {
+        if !state.turns[root]
+            .children
+            .native
+            .turns
+            .lock()
+            .unwrap()
+            .get(thread)
+            .is_some_and(|turn| turn.id == id && !turn.ended)
+        {
+            return Ok(());
+        }
+        if method == "turn/completed" {
+            let event = match params.pointer("/turn/status").and_then(Value::as_str) {
+                Some("completed") => NativeChildEvent::Completed,
+                Some("interrupted") => NativeChildEvent::Interrupted,
+                Some("failed") => NativeChildEvent::Failed,
+                _ => return Err(protocol("invalid-child-turn-completion-status")),
+            };
+            state.turns[root]
+                .children
+                .native
+                .turns
+                .lock()
+                .unwrap()
+                .get_mut(thread)
+                .unwrap()
+                .ended = true;
+            state.turns[root].children.native.changed.notify_waiters();
+            reject_server_requests(
+                sender,
+                state,
+                thread,
+                &id,
+                "Child turn completed before a response",
+            )
+            .await?;
+            if state.turns[root].completed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            event
+        } else {
+            let change = if method == "item/fileChange/patchUpdated" {
+                Some((
+                    required_string(params, &["itemId"], "file-change-item-id")?,
+                    params.get("changes"),
+                ))
+            } else if matches!(method, "item/started" | "item/completed")
+                && params.pointer("/item/type").and_then(Value::as_str) == Some("fileChange")
+            {
+                Some((
+                    required_string(params, &["item", "id"], "file-change-item-id")?,
+                    params.pointer("/item/changes"),
+                ))
+            } else {
+                None
+            };
+            if let Some((item, changes)) = change {
+                let changes =
+                    parse_file_changes(changes.ok_or_else(|| protocol("file-change-details"))?)?;
+                let mut native = state.turns[root].children.native.turns.lock().unwrap();
+                let items = &mut native.get_mut(thread).unwrap().file_changes;
+                if !items.contains_key(&item) && items.len() >= MAX_FILE_CHANGE_ITEMS {
+                    return Err(protocol("file-change-item-capacity-exceeded"));
+                }
+                items.insert(item, changes);
+            }
+            // Native child transcript and generic tool output are outside this boundary.
+            return Ok(());
+        }
+    };
+    deliver_or_buffer_turn_event(
+        state,
+        root,
+        Ok(ProviderEvent::NativeChild {
+            owner: NativeChildTurn {
+                native_thread_id: thread.to_owned(),
+                native_turn_id: id,
+            },
+            event,
+        }),
+        false,
+        sender,
+    )
+    .await
+}
+
 async fn handle_notification(
     method: &str,
     params: Value,
     sender: &JsonLineSender,
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
+    if method == "thread/started" {
+        return children::announce_thread(&params, sender, state).await;
+    }
+    if let Some(thread) = params.get("threadId").and_then(Value::as_str)
+        && let Some(root) = children::owner(state, thread)?
+        && state.turns[&root].completed.load(Ordering::Acquire)
+        && (root == thread || method != "turn/completed")
+    {
+        return Ok(());
+    }
+    if let Some(thread) = params.get("threadId").and_then(Value::as_str)
+        && let Some(root) = children::owner(state, thread)?
+        && root != thread
+        && !matches!(
+            params.pointer("/item/type").and_then(Value::as_str),
+            Some("subAgentActivity" | "collabAgentToolCall")
+        )
+    {
+        return handle_child_notification(&root, thread, method, &params, sender, state).await;
+    }
     if let Some(root) = children::activity_owner(method, &params, state)? {
         required_string(&params, &["turnId"], "notification-turn-id")?;
         let event = normalize_item(&params)?.ok_or_else(|| protocol("child-activity-missing"))?;
@@ -2380,12 +2699,7 @@ async fn handle_notification(
             return Err(error);
         }
         send_to_turn(&mut state.turns, &thread_id, event);
-        if let Some(mut turn) = state.turns.remove(&thread_id) {
-            turn.completed.store(true, Ordering::Release);
-            for waiter in turn.interrupt_waiters.drain(..) {
-                let _ = waiter.send(Ok(()));
-            }
-        }
+        close_root_stream(state, &thread_id);
         if let Some(response) = primary_interrupt {
             let _ = response.send(Ok(json!({})));
         }
@@ -2630,18 +2944,21 @@ async fn respond_to_server_request(
     response: ApprovalResponse,
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
-    let request = state
-        .server_requests
-        .get(request_id)
-        .ok_or_else(|| protocol("unknown-server-request"))?;
-    let active_owner = state.turns.get(thread_id).is_some_and(|turn| {
-        turn.native_turn_id.as_deref() == Some(&request.turn_id)
-            && !turn.cancelled
-            && !turn.interrupt_pending
-            && !turn.children.terminal_received
-    });
+    let native_child = children::owner(state, thread_id)?.is_some_and(|root| root != thread_id);
+    let request = state.server_requests.get(request_id).ok_or_else(|| {
+        if native_child {
+            not_dispatched()
+        } else {
+            protocol("unknown-server-request")
+        }
+    })?;
+    let active_owner = children::active(state, thread_id, &request.turn_id)?.is_some();
     if request.thread_id != thread_id || !active_owner {
-        return Err(protocol("server-request-owner-mismatch"));
+        return Err(if native_child {
+            not_dispatched()
+        } else {
+            protocol("server-request-owner-mismatch")
+        });
     }
     let result = match (&request.kind, response) {
         (ServerRequestKind::Approval, ApprovalResponse::Approved) => json!({"decision": "accept"}),
@@ -2910,6 +3227,307 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_child_controls_isolate_two_roots_siblings_and_file_item_identity() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let process = JsonLineProcess::spawn(command).unwrap();
+        let sender = process.sender();
+        let mut turns = HashMap::new();
+        let mut receivers = Vec::new();
+        for (registration, root) in ["root-a", "root-b"].into_iter().enumerate() {
+            let mut turn = turn_sink(registration as u64);
+            turn.native_turn_id = Some(format!("{root}-turn"));
+            let (events, receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+            turn.events = events;
+            receivers.push(receiver);
+            turns.insert(root.to_owned(), turn);
+        }
+        let mut state = DispatcherState {
+            next_id: 0,
+            pending: HashMap::new(),
+            turns,
+            server_requests: HashMap::new(),
+            client_response_tombstones: VecDeque::new(),
+            server_request_tombstones: VecDeque::new(),
+            confirmed_interrupts: VecDeque::new(),
+            process_shutdown: process.shutdown_handle(),
+        };
+        for (child, root) in [
+            ("child-a", "root-a"),
+            ("sibling", "root-a"),
+            ("child-b", "root-b"),
+        ] {
+            super::handle_server_message(json!({"method":"thread/started","params":{"thread":{"id":child,"parentThreadId":root,"source":{"subAgent":{"thread_spawn":{"parent_thread_id":root,"depth":1}}}}}}), &sender, &mut state).await.unwrap();
+            handle_notification(
+                "turn/started",
+                json!({"threadId":child,"turn":{"id":format!("{child}-turn")}}),
+                &sender,
+                &mut state,
+            )
+            .await
+            .unwrap();
+        }
+        for (index, thread) in ["root-a", "child-a", "sibling", "child-b"]
+            .into_iter()
+            .enumerate()
+        {
+            let params = json!({"threadId":thread,"turnId":format!("{thread}-turn"),"itemId":"shared-item","changes":[{"path":format!("/tmp/{thread}"),"kind":{"type":"add"}}]});
+            handle_notification("item/fileChange/patchUpdated", params, &sender, &mut state)
+                .await
+                .unwrap();
+            handle_server_request(json!({"method":"item/fileChange/requestApproval","params":{"threadId":thread,"turnId":format!("{thread}-turn"),"itemId":"shared-item","startedAtMs":1}}), RpcId::Number(50 + index as i64), &sender, &mut state).await.unwrap();
+        }
+        let mut paths = Vec::new();
+        for receiver in &mut receivers {
+            while let Ok(event) = receiver.try_recv() {
+                let details = match event.unwrap() {
+                    ProviderEvent::ApprovalRequested { details, .. }
+                    | ProviderEvent::NativeChild {
+                        event: super::NativeChildEvent::ApprovalRequested { details, .. },
+                        ..
+                    } => details,
+                    _ => None,
+                };
+                if let Some(super::ApprovalRequestDetails::FileChange { changes, .. }) = details {
+                    paths.push(changes[0].path.clone());
+                }
+            }
+        }
+        assert!(
+            respond_to_server_request(
+                &sender,
+                "child-b",
+                "number:51",
+                ApprovalResponse::Approved,
+                &mut state
+            )
+            .await
+            .is_err()
+        );
+        super::handle_server_message(json!({"method":"turn/completed","params":{"threadId":"child-a","turn":{"id":"child-a-turn","status":"completed"}}}), &sender, &mut state).await.unwrap();
+        let stale = respond_to_server_request(
+            &sender,
+            "child-a",
+            "number:51",
+            ApprovalResponse::Approved,
+            &mut state,
+        )
+        .await;
+        let sibling = respond_to_server_request(
+            &sender,
+            "sibling",
+            "number:52",
+            ApprovalResponse::Denied,
+            &mut state,
+        )
+        .await;
+        let other = respond_to_server_request(
+            &sender,
+            "child-b",
+            "number:53",
+            ApprovalResponse::Denied,
+            &mut state,
+        )
+        .await;
+        process.shutdown().await.unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "/tmp/child-a",
+                "/tmp/child-b",
+                "/tmp/root-a",
+                "/tmp/sibling"
+            ]
+        );
+        assert!(matches!(stale, Err(ProviderError::NotDispatched { .. })));
+        sibling.unwrap();
+        other.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_child_foreign_discovery_rejects_controls_without_failing_owned_roots() {
+        for disposition in ["foreign", "timeout", "cancel", "rows", "bytes"] {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            let process = JsonLineProcess::spawn(command).unwrap();
+            let sender = process.sender();
+            let mut turn = turn_sink(7);
+            turn.native_turn_id = Some("root-turn".into());
+            let (events, _receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+            turn.events = events;
+            let mut state = DispatcherState {
+                next_id: 0,
+                pending: HashMap::new(),
+                turns: HashMap::from([("root".into(), turn)]),
+                server_requests: HashMap::new(),
+                client_response_tombstones: VecDeque::new(),
+                server_request_tombstones: VecDeque::new(),
+                confirmed_interrupts: VecDeque::new(),
+                process_shutdown: process.shutdown_handle(),
+            };
+            super::handle_server_message(json!({"method":"turn/started", "params":{"threadId":"foreign", "turn":{"id":"foreign-turn"}}}), &sender, &mut state).await.unwrap();
+            super::handle_server_message(json!({"id":55,"method":"item/commandExecution/requestApproval", "params":{"threadId":"foreign", "turnId":"foreign-turn", "itemId":"shared", "startedAtMs":1}}), &sender, &mut state).await.unwrap();
+            if disposition == "rows" {
+                for _ in 0..126 {
+                    super::handle_server_message(json!({"method":"item/agentMessage/delta","params":{"threadId":"foreign","turnId":"foreign-turn","itemId":"text","delta":"invented"}}), &sender, &mut state).await.unwrap();
+                }
+                assert!(super::handle_server_message(json!({"method":"item/agentMessage/delta","params":{"threadId":"foreign","turnId":"foreign-turn","itemId":"text","delta":"overflow"}}), &sender, &mut state).await.is_err());
+            }
+            if disposition == "bytes" {
+                assert!(super::handle_server_message(json!({"method":"item/agentMessage/delta","params":{"threadId":"foreign","turnId":"foreign-turn","itemId":"text","delta":"x".repeat(1024*1024)}}), &sender, &mut state).await.is_err());
+            }
+            let result = if disposition == "foreign" {
+                handle_server_response(json!({"id":0,"result":{"thread":{"id":"foreign","parentThreadId":null,"source":"cli"}}}), RpcId::Number(0), &sender, &mut state).await
+            } else {
+                if disposition == "cancel" {
+                    state.turns.get_mut("root").unwrap().cancelled = true;
+                }
+                if let PendingResponse::ChildMetadata(lookup) =
+                    state.pending.values_mut().next().unwrap()
+                {
+                    lookup.deadline = tokio::time::Instant::now();
+                }
+                let result = super::children::expire_discoveries(&sender, &mut state).await;
+                super::children::reap_lookups(&mut state).unwrap();
+                result
+            };
+            process.shutdown().await.unwrap();
+            result.expect("foreign metadata must reject discovery without failing the owned root");
+            assert!(state.server_request_tombstones.contains(&RpcId::Number(55)));
+            assert!(!state.turns["root"].children.resolving);
+            assert!(state.server_requests.is_empty());
+            assert!(state.pending.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_child_unassociated_start_resolves_missing_ancestors() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let process = JsonLineProcess::spawn(command).unwrap();
+        let sender = process.sender();
+        let mut turn = turn_sink(7);
+        let (events, mut receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+        turn.events = events;
+        turn.native_turn_id = Some("root-turn".into());
+        let mut state = DispatcherState {
+            next_id: 0,
+            pending: HashMap::new(),
+            turns: HashMap::from([("root".into(), turn)]),
+            server_requests: HashMap::new(),
+            client_response_tombstones: VecDeque::new(),
+            server_request_tombstones: VecDeque::new(),
+            confirmed_interrupts: VecDeque::new(),
+            process_shutdown: process.shutdown_handle(),
+        };
+        let mut other = turn_sink(8);
+        other.native_turn_id = Some("other-turn".into());
+        let (other_events, mut other_receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+        other.events = other_events;
+        state.turns.insert("other-root".into(), other);
+        super::handle_server_message(json!({"method":"turn/started", "params":{"threadId":"grandchild", "turn":{"id":"grandchild-turn"}}}), &sender, &mut state).await.unwrap();
+        let pending = state.pending.len();
+        for (rpc, child, parent, depth) in [(0, "grandchild", "child", 2), (1, "child", "root", 1)]
+        {
+            handle_server_response(json!({"id":rpc,"result":{"thread":{"id":child,"parentThreadId":parent,"source":{"subAgent":{"thread_spawn":{"parent_thread_id":parent,"depth":depth}}}}}}), RpcId::Number(rpc), &sender, &mut state).await.unwrap();
+        }
+        let values = std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|e| serde_json::to_value(e.unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        process.shutdown().await.unwrap();
+        assert_eq!(
+            pending, 1,
+            "unassociated start needs bounded metadata discovery"
+        );
+        assert_eq!(
+            values.len(),
+            3,
+            "two ancestor identities then child start: {values:?}"
+        );
+        assert_eq!(values[0]["parentNativeThreadId"], "root");
+        assert_eq!(values[1]["parentNativeThreadId"], "child");
+        assert_eq!(values[2]["owner"]["nativeThreadId"], "grandchild");
+        assert!(other_receiver.try_recv().is_err());
+        assert!(!state.turns["other-root"].children.resolving);
+    }
+
+    #[tokio::test]
+    async fn native_child_early_start_and_control_keep_exact_owner() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let process = JsonLineProcess::spawn(command).unwrap();
+        let sender = process.sender();
+        let mut turn = turn_sink(7);
+        let (events, mut receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+        turn.events = events;
+        turn.native_turn_id = Some("root-turn".into());
+        let mut state = DispatcherState {
+            next_id: 0,
+            pending: HashMap::new(),
+            turns: HashMap::from([("root".into(), turn)]),
+            server_requests: HashMap::new(),
+            client_response_tombstones: VecDeque::new(),
+            server_request_tombstones: VecDeque::new(),
+            confirmed_interrupts: VecDeque::new(),
+            process_shutdown: process.shutdown_handle(),
+        };
+        let result = async {
+            super::handle_server_message(
+                json!({"method":"thread/started","params":{"thread":{
+                    "id":"child", "parentThreadId":"root", "source":{"subAgent":{"thread_spawn":{
+                        "parent_thread_id":"root", "depth":1, "agent_path":"child"
+                    }}}
+                }}}),
+                &sender,
+                &mut state,
+            )
+            .await?;
+            super::handle_server_message(
+                json!({"method":"turn/started","params":{
+                    "threadId":"child", "turn":{"id":"child-turn"}
+                }}),
+                &sender,
+                &mut state,
+            )
+            .await?;
+            handle_server_request(
+                json!({"method":"item/commandExecution/requestApproval", "params":{
+                    "threadId":"child", "turnId":"child-turn", "itemId":"shared", "startedAtMs":1,
+                    "command":"synthetic", "cwd":"/tmp"
+                }}),
+                RpcId::Number(55),
+                &sender,
+                &mut state,
+            )
+            .await?;
+            let values = std::iter::from_fn(|| receiver.try_recv().ok())
+                .map(|event| serde_json::to_value(event.unwrap()).unwrap())
+                .collect::<Vec<_>>();
+            let response = respond_to_server_request(
+                &sender,
+                "child",
+                "number:55",
+                ApprovalResponse::Denied,
+                &mut state,
+            )
+            .await;
+            Ok::<_, ProviderError>((values, response))
+        }
+        .await;
+        process.shutdown().await.unwrap();
+        let (values, response) = result.unwrap();
+        assert_eq!(
+            values.len(),
+            3,
+            "identity, child start, child control: {values:?}"
+        );
+        assert_eq!(values[1]["owner"]["nativeThreadId"], "child");
+        assert_eq!(values[2]["owner"]["nativeTurnId"], "child-turn");
+        response.unwrap();
+    }
+
+    #[tokio::test]
     async fn child_metadata_is_registration_scoped_and_has_a_bounded_deadline() {
         for disposition in [
             "cancel",
@@ -3134,6 +3752,7 @@ mod tests {
                 registration_id: 8,
                 events: replacement_events,
                 completed: Arc::new(AtomicBool::new(false)),
+                native_children: Arc::new(super::children::NativeTurns::default()),
                 response: registered,
             },
             &sender,
@@ -3168,6 +3787,7 @@ mod tests {
             turn_id: "turn-1".to_owned(),
             registration_id: 7,
             completed: Arc::clone(&completed),
+            native_children: Arc::new(super::children::NativeTurns::default()),
         };
         let shutdown = tokio::spawn(Box::new(owner).shutdown());
         let command = command_receiver.recv().await.unwrap();

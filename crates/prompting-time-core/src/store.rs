@@ -23,8 +23,9 @@ use crate::domain::{
     ProviderRun, RunId, RunStatus, TimelineEvent, TimelineEventId, TimelineEventKind, Workspace,
 };
 use crate::providers::{
-    DispatchCertainty, NativeAgentStatus, NativeChildStatus, NativeSubAgentActivityKind,
-    ProviderErrorCategory, ProviderId, ProviderSession, UserInputQuestion, UserInputRequest,
+    DispatchCertainty, NativeAgentStatus, NativeChildStatus, NativeChildTurn,
+    NativeSubAgentActivityKind, ProviderErrorCategory, ProviderId, ProviderSession,
+    UserInputQuestion, UserInputRequest,
 };
 use crate::router::{RoutingDecision, RoutingProfile, RoutingReason, TaskKind};
 
@@ -261,14 +262,6 @@ impl NewConversation {
     }
 }
 
-/// Native identity supplied by the dispatcher after ancestry verification.
-/// The store resolves its canonical child within the owned provider run.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NativeChildTurn {
-    pub native_thread_id: String,
-    pub native_turn_id: String,
-}
-
 enum RunEventTarget<'a> {
     Agent(AgentId),
     NativeChild(&'a NativeChildTurn),
@@ -295,7 +288,7 @@ pub enum ProviderEventRecord {
         mutation: MutationState,
     },
     ChildAgent {
-        native_item_id: String,
+        native_item_id: Option<String>,
         parent_native_thread_id: String,
         child_native_thread_ids: Vec<String>,
         child_statuses: Vec<NativeChildStatus>,
@@ -398,7 +391,7 @@ impl ProviderEventRecord {
         status: impl Into<String>,
     ) -> Self {
         Self::ChildAgent {
-            native_item_id: native_item_id.into(),
+            native_item_id: Some(native_item_id.into()),
             parent_native_thread_id: parent_native_thread_id.into(),
             child_native_thread_ids,
             child_statuses,
@@ -3529,6 +3522,19 @@ impl Store {
         .transpose()
     }
 
+    pub(crate) async fn load_active_native_child_agent(
+        &self,
+        run_id: RunId,
+        native: &NativeChildTurn,
+    ) -> Result<AgentId, StoreError> {
+        let agent: Option<String> = sqlx::query_scalar("SELECT n.id FROM agent_nodes n JOIN native_child_turns t ON t.agent_id = n.id WHERE n.run_id = ? AND n.provider_native_id = ? AND n.parent_id IS NOT NULL AND t.native_turn_id = ? AND t.ended = 0")
+            .bind(run_id.to_string()).bind(&native.native_thread_id).bind(&native.native_turn_id).fetch_optional(&self.pool).await?;
+        agent
+            .map(|agent| parse_uuid("agent node", &agent).map(AgentId::from))
+            .transpose()?
+            .ok_or(StoreError::NativeAgentIdentityConflict)
+    }
+
     pub async fn load_approval(
         &self,
         run_id: RunId,
@@ -6178,7 +6184,7 @@ fn validate_event_state(
         | ProviderEventRecord::SubAgent { .. }
         | ProviderEventRecord::Unrecognized { .. }
             if agent.status != AgentStatus::Running
-                || (is_root && run.status != RunStatus::Running) =>
+                || (is_root && !matches!(run.status, RunStatus::Running | RunStatus::Waiting)) =>
         {
             Err(StoreError::InvalidEventState {
                 event: "progress",
