@@ -17,6 +17,17 @@ const MAX_APPROVALS = APPROVAL_PAGE_SIZE * 4;
 const MAX_OLDER_PAGES = 4;
 const AGENT_PAGE_SIZE = 20;
 
+export type TimelineViewState = {
+  newestItems: TimelineItem[];
+  olderPages: TimelineItem[][];
+  cursor: string | null;
+  newestCursor: string | null;
+  historyEvicted: boolean;
+  expandedGroups: ReadonlySet<string>;
+  following: boolean;
+  anchor: ScrollAnchor | null;
+};
+
 type TimelineProps = {
   conversationId: string;
   refreshVersion: number;
@@ -27,6 +38,7 @@ type TimelineProps = {
   actions: ConversationActions;
   currentRunId?: string | null;
   runStatus?: RunStatus | null;
+  viewStates?: Map<string, TimelineViewState>;
 };
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
@@ -39,7 +51,7 @@ const statusNames: Record<AgentSnapshot["status"], string> = {
   failed: "Failed",
 };
 
-export function Timeline({ conversationId, refreshVersion, agents, agentsTruncated = false, agentWindow = null, onLoadAgentPage = () => {}, actions, currentRunId = null, runStatus = null }: TimelineProps) {
+export function Timeline({ conversationId, refreshVersion, agents, agentsTruncated = false, agentWindow = null, onLoadAgentPage = () => {}, actions, currentRunId = null, runStatus = null, viewStates }: TimelineProps) {
   const [newestItems, setNewestItems] = useState<TimelineItem[]>([]);
   const [olderPages, setOlderPages] = useState<TimelineItem[][]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -80,6 +92,36 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   const [showJump, setShowJump] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const rootStatus = agents.find(({ parentId }) => parentId === null)?.status;
+  const retainedView = useRef({ newestItems, olderPages, cursor, historyEvicted, expandedGroups });
+  const viewCommitted = useRef(false);
+  useLayoutEffect(() => {
+    retainedView.current = { newestItems, olderPages, cursor, historyEvicted, expandedGroups };
+    viewCommitted.current = loadedConversation.current === conversationId;
+  });
+  useLayoutEffect(() => {
+    const box = scrollBox.current;
+    return () => {
+      if (viewStates && viewCommitted.current && loadedConversation.current === conversationId) {
+        const saved = retainedView.current;
+        const retainedIds = new Set([...saved.newestItems, ...saved.olderPages.flat()].map(({ id }) => id));
+        viewStates.delete(conversationId);
+        viewStates.set(conversationId, {
+          ...saved,
+          newestCursor: newestCursor.current,
+          expandedGroups: new Set([...saved.expandedGroups].filter((id) => retainedIds.has(id))),
+          following: following.current,
+          anchor: captureScrollAnchor(box),
+        });
+        while (viewStates.size > 10) viewStates.delete(viewStates.keys().next().value!);
+      }
+      requestGeneration.current += 1;
+      historyRequestGeneration.current += 1;
+      approvalRequestGeneration.current += 1;
+      approvalPagerToken.current += 1;
+      requestedConversation.current = null;
+      newestRefreshQueued.current = false;
+    };
+  }, [conversationId, viewStates]);
 
   useEffect(() => {
     if (rootStatus !== "completed" && rootStatus !== "interrupted" && rootStatus !== "failed") return;
@@ -121,21 +163,25 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     const changesConversation = requestedConversation.current !== conversationId;
     requestedConversation.current = conversationId;
     if (changesConversation) {
-      following.current = true;
+      const saved = viewStates?.get(conversationId);
+      following.current = saved?.following ?? true;
       lastScrollTop.current = 0;
-      setShowJump(false);
-      setExpandedGroups(new Set());
+      setShowJump(!following.current);
+      setExpandedGroups(saved?.expandedGroups ?? new Set());
       requestGeneration.current += 1;
       historyRequestGeneration.current += 1;
-      setNewestItems([]);
-      newestItemsRef.current = [];
-      setOlderPages([]);
-      olderPagesRef.current = [];
+      setNewestItems(saved?.newestItems ?? []);
+      newestItemsRef.current = saved?.newestItems ?? [];
+      setOlderPages(saved?.olderPages ?? []);
+      olderPagesRef.current = saved?.olderPages ?? [];
+      loadedConversation.current = saved ? conversationId : null;
+      prependAnchor.current = saved && !saved.following ? saved.anchor : null;
+      scrollToEnd.current = saved?.following ?? false;
       setApprovals([]);
       setResolvedApprovalFocus(null);
-      setCursor(null);
-      newestCursor.current = null;
-      setHistoryEvicted(false);
+      setCursor(saved?.cursor ?? null);
+      newestCursor.current = saved?.newestCursor ?? null;
+      setHistoryEvicted(saved?.historyEvicted ?? false);
       setApprovalCursor(null);
       approvalCursorRef.current = null;
       approvalPageCursors.current = [];
@@ -170,6 +216,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
             scrollToEnd.current = replacesConversation
               || box === null
               || (following.current && box.scrollHeight - box.scrollTop - box.clientHeight < 32);
+            if (!scrollToEnd.current) prependAnchor.current = captureScrollAnchor(box);
             loadedConversation.current = targetConversation;
             const bounded = boundTimelinePage(page.items);
             if (!replacesConversation && newestItemsRef.current.length > 0) {
@@ -229,7 +276,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
       });
     };
     drainNewest();
-  }, [actions, conversationId, refreshVersion]);
+  }, [actions, conversationId, refreshVersion, viewStates]);
 
   useLayoutEffect(() => {
     if (!scrollBox.current) return;
@@ -702,10 +749,11 @@ type ScrollAnchor = {
 
 function captureScrollAnchor(box: HTMLDivElement | null): ScrollAnchor | null {
   if (!box) return null;
-  const first = [...box.querySelectorAll<HTMLElement>("[data-timeline-id]")][0] ?? null;
+  const rows = [...box.querySelectorAll<HTMLElement>("[data-timeline-id]")];
+  const first = rows.find((row) => rowTop(box, row) + row.offsetHeight > box.scrollTop) ?? rows.at(-1) ?? null;
   return {
     id: first?.dataset.timelineId ?? null,
-    viewportOffset: (first?.offsetTop ?? 0) - box.scrollTop,
+    viewportOffset: (first ? rowTop(box, first) : 0) - box.scrollTop,
     scrollHeight: box.scrollHeight,
   };
 }
@@ -716,10 +764,16 @@ function restoreScrollAnchor(box: HTMLDivElement, anchor: ScrollAnchor) {
       .find(({ dataset }) => dataset.timelineId === anchor.id)
     : null;
   if (matched) {
-    box.scrollTop = matched.offsetTop - anchor.viewportOffset;
+    box.scrollTop = rowTop(box, matched) - anchor.viewportOffset;
   } else {
     box.scrollTop += box.scrollHeight - anchor.scrollHeight;
   }
+}
+
+function rowTop(box: HTMLDivElement, row: HTMLElement) {
+  // Rectangles handle nested activity lists and offset parents outside the scroller.
+  if (box.getClientRects().length) return row.getBoundingClientRect().top - box.getBoundingClientRect().top - box.clientTop + box.scrollTop;
+  return row.offsetTop;
 }
 
 function mergeApprovals(current: readonly ApprovalSnapshot[], incoming: readonly ApprovalSnapshot[]) {

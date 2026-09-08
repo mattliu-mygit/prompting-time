@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, TimelineItem } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
-import { Timeline } from "./Timeline";
+import { Timeline, type TimelineViewState } from "./Timeline";
+import { StrictMode } from "react";
 
 function event(overrides: Partial<TimelineItem> & Pick<TimelineItem, "id" | "sequence">): TimelineItem {
   return {
@@ -59,6 +60,131 @@ const agents: AgentSnapshot[] = [
 ];
 
 describe("Timeline", () => {
+  it("restores older pages, the visible row offset and expanded groups across keyed conversation mounts", async () => {
+    const viewStates = new Map<string, TimelineViewState>();
+    let newestReads = 0;
+    const api = actions({ loadTimeline: vi.fn(({ cursor }) => {
+      if (!cursor) newestReads += 1;
+      return Promise.resolve(timelinePage(cursor
+      ? [event({ id: "old", sequence: "1", content: "older reading" })]
+      : [event({ id: "new", sequence: "2", content: "new reading" }), event({ id: "tool", sequence: "3", kind: "tool", content: "expanded output" }),
+        ...(newestReads >= 3 ? [event({ id: "arrived", sequence: "4", content: "output while away" })] : [])], cursor ? null : "older"));
+    }) });
+    const offset = vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.timelineId === "old" ? 20 : this.dataset.timelineId === "new" ? 200 : 400;
+    });
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(100);
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1000);
+    const mount = (id: string) => <Timeline key={id} conversationId={id} refreshVersion={0} agents={[]} actions={api} viewStates={viewStates} />;
+    const view = render(mount("a"));
+    await screen.findByText("new reading");
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await screen.findByText("older reading");
+    fireEvent.click(screen.getByRole("button", { name: /Show tool activity/ }));
+    const box = screen.getByLabelText("Conversation activity");
+    box.scrollTop = 225;
+    fireEvent.scroll(box);
+    view.rerender(mount("b"));
+    expect(viewStates.get("a")?.anchor?.id).toBe("new");
+    await screen.findByText("new reading");
+    view.rerender(mount("a"));
+    await screen.findByText("output while away");
+    await waitFor(() => expect(screen.getByLabelText("Conversation activity").scrollTop).toBe(225));
+    expect(screen.getByText("older reading")).toBeVisible();
+    expect(screen.getByText("expanded output")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    expect(api.loadTimeline).toHaveBeenCalledTimes(4);
+    offset.mockRestore(); height.mockRestore(); scrollHeight.mockRestore();
+  });
+
+  it("retains only ten recent conversation views and does not cache approvals", async () => {
+    const viewStates = new Map<string, TimelineViewState>();
+    const api = actions();
+    const mount = (id: string) => <Timeline key={id} conversationId={id} refreshVersion={0} agents={[]} actions={api} viewStates={viewStates} />;
+    const view = render(mount("0"));
+    for (let index = 1; index <= 12; index += 1) {
+      await screen.findByText("I found it");
+      view.rerender(mount(String(index)));
+    }
+    await screen.findByText("I found it");
+    expect(viewStates.size).toBe(10);
+    expect(viewStates.has("0")).toBe(false);
+    expect(viewStates.has("11")).toBe(true);
+    expect(viewStates.get("11")).not.toHaveProperty("approvals");
+  });
+
+  it("follows fresh output on return and never presents retained approvals before the fresh read", async () => {
+    const viewStates = new Map<string, TimelineViewState>();
+    let resolveReturn!: (page: ReturnType<typeof timelinePage>) => void;
+    const returned = new Promise<ReturnType<typeof timelinePage>>((resolve) => { resolveReturn = resolve; });
+    const api = actions({ loadTimeline: vi.fn()
+      .mockResolvedValueOnce({ ...timelinePage([event({ id: "first", sequence: "1", content: "first output" })], null),
+        approvals: [{ id: "approval", runId: "run-1", agentId: "root", provider: "codex", agentPath: ["Root"], agentPathTruncated: false, operation: "Old approval", scope: "One", status: "pending", responsePending: false }] })
+      .mockResolvedValueOnce(timelinePage([], null))
+      .mockReturnValueOnce(returned) });
+    const height = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => screen.queryByText("fresh output") ? 2000 : 1000);
+    const mount = (id: string) => <Timeline key={id} conversationId={id} refreshVersion={0} agents={[]} actions={api} viewStates={viewStates} />;
+    const view = render(mount("a"));
+    await screen.findByRole("button", { name: "Review Old approval" });
+    view.rerender(mount("b"));
+    await screen.findByText("No activity yet. Start with a message below.");
+    view.rerender(mount("a"));
+    expect(screen.getByText("first output")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review Old approval" })).not.toBeInTheDocument();
+    await act(async () => resolveReturn(timelinePage([event({ id: "fresh", sequence: "2", content: "fresh output" })], null)));
+    expect(screen.getByLabelText("Conversation activity").scrollTop).toBe(2000);
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+    height.mockRestore();
+  });
+
+  it("ignores a departed mount's late read without overwriting the retained view in StrictMode", async () => {
+    const viewStates = new Map<string, TimelineViewState>();
+    let resolveLate!: (page: ReturnType<typeof timelinePage>) => void;
+    const late = new Promise<ReturnType<typeof timelinePage>>((resolve) => { resolveLate = resolve; });
+    let aReads = 0;
+    const api = actions({ loadTimeline: vi.fn(({ conversationId }) => {
+      if (conversationId === "a" && ++aReads === 3) return late;
+      return Promise.resolve(timelinePage([event({ id: conversationId, sequence: "1", content: `${conversationId} current` })], null));
+    }) });
+    const mount = (id: string, version = 0) => <StrictMode><Timeline key={id} conversationId={id} refreshVersion={version} agents={[]} actions={api} viewStates={viewStates} /></StrictMode>;
+    const view = render(mount("a"));
+    await screen.findByText("a current");
+    view.rerender(mount("a", 1));
+    await waitFor(() => expect(aReads).toBe(3));
+    view.rerender(mount("b"));
+    await screen.findByText("b current");
+    await act(async () => resolveLate(timelinePage([event({ id: "late", sequence: "2", content: "late output" })], null)));
+    view.rerender(mount("a"));
+    await screen.findByText("a current");
+    expect(screen.queryByText("late output")).not.toBeInTheDocument();
+    expect(viewStates.get("a")?.newestItems[0]?.id).toBe("a");
+  });
+
+  it("keeps a missing reading anchor honest and recoverable without fetching extra pages", async () => {
+    const viewStates = new Map<string, TimelineViewState>();
+    const api = actions({ loadTimeline: vi.fn()
+      .mockResolvedValueOnce(timelinePage([event({ id: "gone", sequence: "1", content: "original reading" })], "older"))
+      .mockResolvedValueOnce(timelinePage([], null))
+      .mockResolvedValueOnce(timelinePage([event({ id: "latest", sequence: "500", content: "latest reading" })], "new-older")) });
+    const height = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1000);
+    const mount = (id: string) => <Timeline key={id} conversationId={id} refreshVersion={0} agents={[]} actions={api} viewStates={viewStates} />;
+    const view = render(mount("a"));
+    await screen.findByText("original reading");
+    const box = screen.getByLabelText("Conversation activity");
+    box.scrollTop = 20;
+    fireEvent.scroll(box);
+    view.rerender(mount("b"));
+    await screen.findByText("No activity yet. Start with a message below.");
+    view.rerender(mount("a"));
+    await screen.findByText("latest reading");
+    expect(screen.getByText("Some history is outside this bounded view.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+    expect(screen.getByLabelText("Conversation activity").scrollTop).toBe(1000);
+    expect(api.loadTimeline).toHaveBeenCalledTimes(3);
+    height.mockRestore();
+  });
+
   it("uses selected run state for its quiet status and keeps activity disclosure through older-page joins", async () => {
     const api = actions({ loadTimeline: vi.fn()
       .mockResolvedValueOnce(timelinePage([event({ id: "t2", sequence: "2", kind: "tool", content: "newer tool", truncated: true })], "older"))

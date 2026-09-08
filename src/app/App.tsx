@@ -1,10 +1,10 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import type { CreateConversationRequest, ProviderInstallation } from "../bridge/types";
 import { ConversationTree } from "../features/conversations/ConversationTree";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
-import { Timeline } from "../features/timeline/Timeline";
+import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
 import {
   AppStoreContext,
   selectVisibleConversations,
@@ -44,6 +44,7 @@ export function App({ store }: AppProps) {
 }
 
 function CommandCenter({ store }: { store: AppStore }) {
+  const timelineViews = useMemo(() => new Map<string, TimelineViewState>(), [store]);
   const snapshot = useAppStore((state) => state);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -290,6 +291,7 @@ function CommandCenter({ store }: { store: AppStore }) {
               <Timeline
                 key={`timeline-${selectedConversation.id}`}
                 conversationId={selectedConversation.id}
+                viewStates={timelineViews}
                 currentRunId={selectedConversation.currentRunId}
                 runStatus={selectedConversation.runStatus}
                 refreshVersion={selectedVersion}
