@@ -520,7 +520,8 @@ async fn switching_back_resumes_provider_and_sends_only_unseen_context() {
 }
 
 #[tokio::test]
-async fn empty_objective_conversation_sends_the_first_user_request_without_inventing_an_objective() {
+async fn empty_objective_conversation_sends_the_first_user_request_without_inventing_an_objective()
+{
     let directory = TempDir::new().unwrap();
     let store = Store::open_in_memory().await.unwrap();
     let adapter = Arc::new(FakeAdapter::new(ProviderId::Codex));
