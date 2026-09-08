@@ -39,6 +39,9 @@ const REQUEST_CANCELLED: u8 = 4;
 const FATAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "codex_children.rs"]
+mod children;
+
 #[derive(Clone)]
 pub struct CodexAdapter {
     inner: Arc<AdapterInner>,
@@ -119,6 +122,7 @@ enum ClientCommand {
 }
 
 enum PendingResponse {
+    ChildMetadata(children::Lookup),
     Deliver {
         request_key: Option<u64>,
         kind: RequestKind,
@@ -155,6 +159,7 @@ struct OutboundRequest {
 }
 
 struct TurnSink {
+    children: children::Children,
     registration_id: u64,
     events: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
     completed: Arc<AtomicBool>,
@@ -839,8 +844,15 @@ async fn run_dispatcher(
         confirmed_interrupts: VecDeque::new(),
         process_shutdown: process.shutdown_handle(),
     };
+    let mut metadata_tick = tokio::time::interval(Duration::from_millis(100));
     let result = loop {
         tokio::select! {
+            _ = metadata_tick.tick() => {
+                if let Err(error) = children::reap_lookups(&mut state) {
+                    broadcast_error(&mut state.turns, error.clone()).await;
+                    break Err(error);
+                }
+            }
             _ = shutdown.changed() => break Ok(()),
             cancellation = cancellations.recv() => {
                 if let Some(cancellation) = cancellation {
@@ -979,6 +991,7 @@ async fn handle_command(
                     }
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(TurnSink {
+                            children: children::Children::default(),
                             registration_id,
                             events,
                             completed,
@@ -1366,12 +1379,33 @@ async fn handle_server_message(
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
     if let Some(raw_method) = message.get("method") {
+        if message.get("id").is_none()
+            && let Some(thread_id) = message.pointer("/params/threadId").and_then(Value::as_str)
+            && let Some(turn) = state.turns.get_mut(thread_id)
+            && turn.children.resolving
+            && !turn.cancelled
+        {
+            return turn.children.queue(message);
+        }
+        if let (Some(method), Some(params)) = (raw_method.as_str(), message.get("params"))
+            && let Some(root) = children::activity_owner(method, params, state)?
+            && let Some(turn) = state.turns.get_mut(&root)
+            && turn.children.resolving
+        {
+            return turn.children.queue(message);
+        }
         let Some(method) = raw_method.as_str() else {
             if message.get("id").is_some() {
                 return send_invalid_request(sender, state).await;
             }
             return Err(protocol("invalid-server-method"));
         };
+        if let Some(params) = message.get("params")
+            && let Some(root) = children::pending_activity_owner(method, params, state)?
+            && let Some(turn) = state.turns.get_mut(&root)
+        {
+            return turn.children.queue(message);
+        }
         let known_request = is_known_server_request(method);
         if known_request || message.get("id").is_some() {
             let Some(id) = message.get("id").and_then(parse_rpc_id) else {
@@ -1438,6 +1472,16 @@ async fn handle_server_response(
         }
         return Ok(());
     };
+    if let PendingResponse::ChildMetadata(lookup) = pending_response {
+        if !state
+            .turns
+            .get(&lookup.root)
+            .is_some_and(|turn| turn.registration_id == lookup.registration && !turn.cancelled)
+        {
+            return Ok(());
+        }
+        return children::accept_metadata(lookup, parse_response(message)?, sender, state).await;
+    }
     let PendingResponse::Deliver {
         kind,
         response: deliver,
@@ -1630,7 +1674,7 @@ fn confirm_terminal_interrupt(
             PendingResponse::Fatal { confirmed, .. } => {
                 confirmed.store(true, Ordering::Release);
             }
-            PendingResponse::Deliver { .. } => {
+            PendingResponse::Deliver { .. } | PendingResponse::ChildMetadata(_) => {
                 unreachable!("terminal interrupt lookup returned a non-interrupt request")
             }
         }
@@ -2144,6 +2188,24 @@ async fn handle_notification(
     sender: &JsonLineSender,
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
+    if let Some(root) = children::activity_owner(method, &params, state)? {
+        required_string(&params, &["turnId"], "notification-turn-id")?;
+        let event = normalize_item(&params)?.ok_or_else(|| protocol("child-activity-missing"))?;
+        if !children::resolve_activity(&root, method, &params, &event, sender, state).await? {
+            let turn = state.turns.get_mut(&root).expect("verified activity root");
+            if turn.children.observe_activity(&event)? {
+                if turn.native_turn_id.is_none() {
+                    if turn.provisional_events.len() >= PROVISIONAL_EVENT_CAPACITY {
+                        return Err(protocol("provisional-event-capacity-exceeded"));
+                    }
+                    turn.provisional_events.push_back(Ok(event));
+                } else {
+                    deliver_to_turn(state, &root, Ok(event), sender).await?;
+                }
+            }
+        }
+        return Ok(());
+    }
     let recognized = matches!(
         method,
         "turn/started"
@@ -2263,6 +2325,21 @@ async fn handle_notification(
     };
 
     let terminal = method == "turn/completed";
+    if let Ok(ref observation) = event {
+        if children::resolve_activity(&thread_id, method, &params, observation, sender, state)
+            .await?
+        {
+            return Ok(());
+        }
+        let turn = state
+            .turns
+            .get_mut(&thread_id)
+            .expect("notification owner checked above");
+        turn.children.observe_spawn(&thread_id, observation)?;
+        if !turn.children.observe_activity(observation)? {
+            return Ok(());
+        }
+    }
     let provisional = state
         .turns
         .get(&thread_id)
@@ -2388,6 +2465,7 @@ fn normalize_item(params: &Value) -> Result<Option<ProviderEvent>, ProviderError
             "started" => NativeSubAgentActivityKind::Started,
             "interacted" => NativeSubAgentActivityKind::Interacted,
             "interrupted" => NativeSubAgentActivityKind::Interrupted,
+            "completed" => NativeSubAgentActivityKind::Completed,
             _ => return Err(protocol("subagent-activity-kind")),
         };
         return Ok(Some(ProviderEvent::SubAgentActivity {
@@ -2759,6 +2837,7 @@ mod tests {
     fn turn_sink(registration_id: u64) -> TurnSink {
         let (events, _) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
         TurnSink {
+            children: super::children::Children::default(),
             registration_id,
             events,
             completed: Arc::new(AtomicBool::new(false)),
@@ -2772,6 +2851,20 @@ mod tests {
             interrupt_waiters: Vec::new(),
             file_changes: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn completed_subagent_activity_is_a_known_success_observation() {
+        let event = normalize_item(&json!({"threadId":"root", "item": {
+            "id":"activity", "type":"subAgentActivity", "agentThreadId":"child",
+            "agentPath":"child/path", "kind":"completed"
+        }}))
+        .expect("Codex 0.153.4 Completed kind must be supported")
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(event).unwrap()["activity"],
+            "completed"
+        );
     }
 
     #[test]
@@ -2807,6 +2900,105 @@ mod tests {
 
         unregister_turn_registration("thread-1", 2, &mut turns);
         assert!(!turns.contains_key("thread-1"));
+    }
+
+    #[tokio::test]
+    async fn child_metadata_is_registration_scoped_and_has_a_bounded_deadline() {
+        for disposition in ["cancel", "replace", "timeout", "ambiguous-owner"] {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            let process = JsonLineProcess::spawn(command).unwrap();
+            let sender = process.sender();
+            let mut turn = turn_sink(7);
+            let (events, mut receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+            turn.events = events;
+            turn.native_turn_id = Some("turn-1".to_owned());
+            let mut state = DispatcherState {
+                next_id: 0,
+                pending: HashMap::new(),
+                turns: HashMap::from([("root".to_owned(), turn)]),
+                server_requests: HashMap::new(),
+                client_response_tombstones: VecDeque::new(),
+                server_request_tombstones: VecDeque::new(),
+                confirmed_interrupts: VecDeque::new(),
+                process_shutdown: process.shutdown_handle(),
+            };
+            handle_notification("item/started", json!({"threadId":"root", "turnId":"turn-1", "item":{
+                "type":"subAgentActivity", "id":"activity", "agentThreadId":"child", "agentPath":"child/path", "kind":"started"
+            }}), &sender, &mut state).await.unwrap();
+            assert_eq!(state.pending.len(), 1);
+            assert!(receiver.try_recv().is_err(), "no activity before lineage");
+            if disposition == "ambiguous-owner" {
+                handle_server_response(json!({"id":0,"result":{"thread":{"id":"child", "parentThreadId":"root", "source":{"subAgent":{"thread_spawn":{"parent_thread_id":"root", "depth":1}}}}}}), RpcId::Number(0), &sender, &mut state).await.unwrap();
+                let mut other = turn_sink(8);
+                other
+                    .children
+                    .observe_spawn(
+                        "other-root",
+                        &ProviderEvent::ChildAgentActivity {
+                            native_item_id: "other-spawn".into(),
+                            parent_native_thread_id: "other-root".into(),
+                            child_native_thread_ids: vec!["child".into()],
+                            child_statuses: Vec::new(),
+                            operation: "spawnAgent".into(),
+                            status: "inProgress".into(),
+                        },
+                    )
+                    .unwrap();
+                state.turns.insert("other-root".into(), other);
+                let result = handle_notification("item/started", json!({"threadId":"child", "turnId":"child-turn", "item":{
+                    "type":"subAgentActivity", "id":"nested", "agentThreadId":"grandchild", "agentPath":"grandchild/path", "kind":"started"
+                }}), &sender, &mut state).await;
+                process.shutdown().await.unwrap();
+                assert!(
+                    matches!(result, Err(ProviderError::Protocol { category }) if category == "child-root-conflict"),
+                    "ambiguous descendant ownership must never choose an arbitrary root"
+                );
+                continue;
+            }
+            match disposition {
+                "cancel" => state.turns.get_mut("root").unwrap().cancelled = true,
+                "replace" => state.turns.get_mut("root").unwrap().registration_id = 8,
+                "timeout" => {
+                    let PendingResponse::ChildMetadata(lookup) =
+                        state.pending.values_mut().next().unwrap()
+                    else {
+                        panic!("metadata request required")
+                    };
+                    lookup.deadline = tokio::time::Instant::now();
+                }
+                _ => unreachable!(),
+            }
+            let reap = super::children::reap_lookups(&mut state);
+            if disposition == "timeout" {
+                assert!(
+                    matches!(reap, Err(ProviderError::Protocol { category }) if category == "child-metadata-timeout")
+                );
+            } else {
+                reap.unwrap();
+                assert!(state.pending.is_empty());
+                // A late response with malformed metadata is ignored after disposal.
+                handle_server_response(
+                    json!({"id":0,"result":{}}),
+                    RpcId::Number(0),
+                    &sender,
+                    &mut state,
+                )
+                .await
+                .unwrap();
+                assert!(receiver.try_recv().is_err());
+                if disposition == "cancel" {
+                    handle_notification("item/started", json!({"threadId":"root", "turnId":"turn-1", "item":{
+                        "type":"subAgentActivity", "id":"late-activity", "agentThreadId":"late-child", "agentPath":"late/path", "kind":"started"
+                    }}), &sender, &mut state).await.unwrap();
+                    assert!(
+                        state.pending.is_empty(),
+                        "cancelled roots must not start new metadata work"
+                    );
+                }
+            }
+            process.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -829,6 +829,352 @@ exit 0
 }
 
 #[tokio::test]
+async fn codex_first_subagent_resolves_metadata_before_activity_and_root_terminal() {
+    let extract_id = response_id_shell("request_id");
+    let script = format!(
+        r#"
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"userAgent":"codex-cli 0.test"}}}}\n' "$request_id"
+IFS= read -r line
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"thread":{{"id":"invented-root","sessionId":"invented-session"}}}}}}\n' "$request_id"
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"turn":{{"id":"invented-turn"}}}}}}\n' "$request_id"
+printf '{{"method":"item/started","params":{{"threadId":"invented-root","turnId":"invented-turn","item":{{"type":"subAgentActivity","id":"invented-activity","agentThreadId":"invented-child","agentPath":"invented/path","kind":"started"}}}}}}\n'
+printf '{{"method":"item/completed","params":{{"threadId":"invented-root","turnId":"invented-turn","item":{{"type":"subAgentActivity","id":"invented-activity","agentThreadId":"invented-child","agentPath":"invented/path","kind":"started"}}}}}}\n'
+printf '{{"method":"turn/completed","params":{{"threadId":"invented-root","turn":{{"id":"invented-turn","status":"completed"}}}}}}\n'
+IFS= read -r line
+printf '%s' "$line" | grep -q '"method":"thread/read"' || exit 3
+printf '%s' "$line" | grep -q '"includeTurns":false' || exit 4
+{extract_id}
+printf '{{"id":%s,"result":{{"thread":{{"id":"invented-child","parentThreadId":"invented-root","source":{{"subAgent":{{"thread_spawn":{{"parent_thread_id":"invented-root","depth":1,"agent_path":"invented/path"}}}}}}}}}}}}\n' "$request_id"
+sleep 30
+"#
+    );
+    let (_directory, binary) = fake_codex(&script);
+    let adapter = CodexAdapter::connect(binary).await.unwrap();
+    let session = adapter.start_session(start_request()).await.unwrap();
+    let mut turn = adapter
+        .start_turn(&session, TurnRequest::new("invented recursion"))
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut events = Vec::new();
+        while let Some(event) = turn.recv().await {
+            let terminal = event.as_ref().is_ok_and(ProviderEvent::is_terminal);
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        events
+    })
+    .await;
+    let shutdown = turn.shutdown().await;
+    adapter.shutdown().await.unwrap();
+    shutdown.unwrap();
+    let events = events
+        .unwrap()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        matches!(events.get(1), Some(ProviderEvent::ChildAgentActivity {
+        parent_native_thread_id, child_native_thread_ids, ..
+    }) if parent_native_thread_id == "invented-root" && child_native_thread_ids == &["invented-child"]),
+        "metadata must declare the first child before its activity: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProviderEvent::SubAgentActivity { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(events.last(), Some(ProviderEvent::TurnCompleted)));
+}
+
+fn invented_activity(observer: &str, target: &str, id: &str, kind: &str) -> serde_json::Value {
+    serde_json::json!({"method":"item/started", "params":{"threadId":observer,"turnId":"invented-turn",
+        "item":{"type":"subAgentActivity","id":id,"agentThreadId":target,"agentPath":format!("path/{target}"),"kind":kind}}})
+}
+
+fn invented_metadata(id: &str, parent: &str, depth: u64) -> serde_json::Value {
+    serde_json::json!({"thread":{"id":id,"parentThreadId":parent,"source":{"subAgent":{"thread_spawn":{
+        "parent_thread_id":parent,"depth":depth,"agent_path":format!("path/{id}")}}}}})
+}
+
+async fn lineage_fixture(
+    messages: Vec<serde_json::Value>,
+    metadata: Vec<serde_json::Value>,
+) -> Vec<Result<ProviderEvent, ProviderError>> {
+    let extract_id = response_id_shell("request_id");
+    let mut script = format!(
+        r#"
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"userAgent":"codex-cli 0.test"}}}}\n' "$request_id"
+IFS= read -r line
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"thread":{{"id":"invented-root","sessionId":"invented-session"}}}}}}\n' "$request_id"
+IFS= read -r line
+{extract_id}
+printf '{{"id":%s,"result":{{"turn":{{"id":"invented-turn"}}}}}}\n' "$request_id"
+"#
+    );
+    for message in messages.into_iter().chain([serde_json::json!({"method":"turn/completed","params":{"threadId":"invented-root","turn":{"id":"invented-turn","status":"completed"}}})]) {
+        script.push_str(&format!("printf '%s\\n' '{message}'\n"));
+    }
+    for result in metadata {
+        script.push_str(&format!("IFS= read -r line\nprintf '%s' \"$line\" | grep -q '\"includeTurns\":false' || exit 3\n{extract_id}\nprintf '{{\"id\":%s,\"result\":{result}}}\\n' \"$request_id\"\n"));
+    }
+    script.push_str("sleep 30\n");
+    let (_directory, binary) = fake_codex(&script);
+    let adapter = CodexAdapter::connect(binary).await.unwrap();
+    let session = adapter.start_session(start_request()).await.unwrap();
+    let mut turn = adapter
+        .start_turn(&session, TurnRequest::new("invented recursion"))
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut events = Vec::new();
+        while let Some(event) = turn.recv().await {
+            let terminal = event.as_ref().is_ok_and(ProviderEvent::is_terminal) || event.is_err();
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        events
+    })
+    .await;
+    let _ = turn.shutdown().await;
+    let _ = adapter.shutdown().await;
+    result.expect("lineage fixture must terminate within its bound")
+}
+
+#[tokio::test]
+async fn codex_root_observes_grandchild_with_authoritative_depth_and_completed_status() {
+    use prompting_time_core::store::{NewConversation, ProviderEventRecord, Store};
+    let events = lineage_fixture(
+        vec![
+            invented_activity("invented-root", "grandchild", "grandchild-start", "started"),
+            invented_activity(
+                "invented-root",
+                "grandchild",
+                "grandchild-done",
+                "completed",
+            ),
+            invented_activity("invented-root", "child", "child-done", "completed"),
+        ],
+        vec![
+            invented_metadata("grandchild", "child", 2),
+            invented_metadata("child", "invented-root", 1),
+        ],
+    )
+    .await;
+    let store = Store::open_in_memory().await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("invented lineage"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .bind_native_session(run.id, "invented-root")
+        .await
+        .unwrap();
+    for event in events.into_iter().collect::<Result<Vec<_>, _>>().unwrap() {
+        let record = match event {
+            ProviderEvent::TurnStarted { .. } => ProviderEventRecord::started(),
+            ProviderEvent::ChildAgentActivity {
+                native_item_id,
+                parent_native_thread_id,
+                child_native_thread_ids,
+                child_statuses,
+                operation,
+                status,
+            } => ProviderEventRecord::child_agent(
+                native_item_id,
+                parent_native_thread_id,
+                child_native_thread_ids,
+                child_statuses,
+                operation,
+                status,
+            ),
+            ProviderEvent::SubAgentActivity {
+                native_item_id,
+                agent_thread_id,
+                agent_path,
+                activity,
+            } => ProviderEventRecord::sub_agent(
+                native_item_id,
+                agent_thread_id,
+                agent_path,
+                activity,
+            ),
+            ProviderEvent::TurnCompleted => ProviderEventRecord::completed(),
+            _ => panic!("unexpected event"),
+        };
+        store
+            .append_run_event(run.id, root.id, record)
+            .await
+            .unwrap();
+    }
+    let tree = store
+        .load_agent_page(conversation.id, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(tree.items.len(), 3);
+    for depth in 0..=2 {
+        let node = tree.items.iter().find(|item| item.depth == depth).unwrap();
+        assert_eq!(
+            node.agent.status,
+            prompting_time_core::domain::AgentStatus::Completed
+        );
+        if depth > 0 {
+            assert_eq!(
+                node.agent.parent_id,
+                Some(
+                    tree.items
+                        .iter()
+                        .find(|item| item.depth == depth - 1)
+                        .unwrap()
+                        .agent
+                        .id
+                )
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_descendant_activity_waits_for_verified_observer_then_resolves_its_child() {
+    let events = lineage_fixture(
+        vec![
+            invented_activity("invented-root", "child", "child-start", "started"),
+            invented_activity("child", "grandchild", "grandchild-start", "started"),
+            invented_activity("child", "grandchild", "grandchild-done", "completed"),
+            invented_activity("invented-root", "child", "child-done", "completed"),
+        ],
+        vec![
+            invented_metadata("child", "invented-root", 1),
+            invented_metadata("grandchild", "child", 2),
+        ],
+    )
+    .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+    let relationships = events
+        .iter()
+        .filter_map(|event| {
+            if let ProviderEvent::ChildAgentActivity {
+                parent_native_thread_id,
+                child_native_thread_ids,
+                ..
+            } = event
+            {
+                Some((
+                    parent_native_thread_id.as_str(),
+                    child_native_thread_ids[0].as_str(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relationships,
+        [("invented-root", "child"), ("child", "grandchild")]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                ProviderEvent::SubAgentActivity {
+                    activity: NativeSubAgentActivityKind::Completed,
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+    assert!(matches!(events.last(), Some(ProviderEvent::TurnCompleted)));
+}
+
+#[tokio::test]
+async fn codex_rejects_conflicting_and_foreign_child_metadata_before_identity_delivery() {
+    let mut cases = Vec::new();
+    let mut mismatch = invented_metadata("wrong-id", "invented-root", 1);
+    cases.push(vec![mismatch.clone()]);
+    mismatch = invented_metadata("child", "invented-root", 1);
+    mismatch["thread"]["source"]["subAgent"]["thread_spawn"]["parent_thread_id"] =
+        "foreign-parent".into();
+    cases.push(vec![mismatch]);
+    mismatch = invented_metadata("child", "invented-root", 1);
+    mismatch["thread"]["source"]["subAgent"]["thread_spawn"]["agent_path"] = "wrong/path".into();
+    cases.push(vec![mismatch]);
+    cases.push(vec![invented_metadata("child", "child", 1)]);
+    cases.push(vec![
+        invented_metadata("child", "parent", 2),
+        invented_metadata("parent", "child", 1),
+    ]);
+    cases.push(vec![invented_metadata("child", "invented-root", 2)]);
+    cases.push(vec![
+        invented_metadata("child", "foreign-root", 1),
+        serde_json::json!({"thread":{"id":"foreign-root","source":"cli","parentThreadId":null}}),
+    ]);
+    for metadata in cases {
+        let events = lineage_fixture(
+            vec![invented_activity(
+                "invented-root",
+                "child",
+                "start",
+                "started",
+            )],
+            metadata,
+        )
+        .await;
+        assert!(
+            events.iter().any(Result::is_err),
+            "invalid lineage must fail explicitly"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::ChildAgentActivity { .. }))),
+            "invalid chain must never publish a partial identity"
+        );
+    }
+}
+
+#[tokio::test]
+async fn codex_unknown_activity_kind_never_proves_child_completion() {
+    let events = lineage_fixture(
+        vec![invented_activity(
+            "invented-root",
+            "child",
+            "future",
+            "future-completion",
+        )],
+        vec![],
+    )
+    .await;
+    assert!(events.iter().any(|event| matches!(event, Err(ProviderError::Protocol { category }) if category == "subagent-activity-kind")));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Ok(ProviderEvent::TurnCompleted)))
+    );
+}
+
+#[tokio::test]
 async fn codex_adapter_streams_schema_valid_fixture_events() {
     let fixture = include_str!("fixtures/codex/session.jsonl");
     let mut script = String::new();

@@ -146,6 +146,7 @@ pub enum NativeSubAgentActivityKind {
     Started,
     Interacted,
     Interrupted,
+    Completed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

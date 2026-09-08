@@ -16,6 +16,67 @@ use prompting_time_core::store::{
 use tempfile::TempDir;
 
 #[tokio::test]
+async fn subagent_interaction_and_interrupt_requests_preserve_completed_status() {
+    let store = Store::open_in_memory().await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("invented child activity"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store
+        .bind_native_session(run.id, "invented-root")
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::child_agent(
+                "invented-spawn",
+                "invented-root",
+                vec!["invented-child".to_owned()],
+                vec![NativeChildStatus {
+                    native_thread_id: "invented-child".to_owned(),
+                    status: NativeAgentStatus::Completed,
+                }],
+                "spawnAgent",
+                "completed",
+            ),
+        )
+        .await
+        .unwrap();
+    for activity in [
+        NativeSubAgentActivityKind::Interacted,
+        NativeSubAgentActivityKind::Interrupted,
+    ] {
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::sub_agent(
+                    format!("invented-{activity:?}"),
+                    "invented-child",
+                    "invented/path",
+                    activity,
+                ),
+            )
+            .await
+            .expect("tool observations must preserve authoritative completion");
+    }
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::completed())
+        .await
+        .expect("child should remain completed");
+}
+
+#[tokio::test]
 async fn normalized_tool_event_updates_mutation_and_payload_atomically() {
     let store = Store::open_in_memory().await.unwrap();
     let conversation = store

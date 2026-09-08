@@ -5016,10 +5016,13 @@ async fn update_sub_agent(
         return Err(StoreError::NativeAgentIdentityConflict);
     }
     let next = match activity {
-        NativeSubAgentActivityKind::Started | NativeSubAgentActivityKind::Interacted => {
-            AgentStatus::Running
+        NativeSubAgentActivityKind::Started => AgentStatus::Running,
+        NativeSubAgentActivityKind::Completed => AgentStatus::Completed,
+        // Interaction may only queue a message; interruption is a tool request,
+        // not acknowledgement of a particular child turn's termination.
+        NativeSubAgentActivityKind::Interacted | NativeSubAgentActivityKind::Interrupted => {
+            existing.status
         }
-        NativeSubAgentActivityKind::Interrupted => AgentStatus::Interrupted,
     };
     validate_native_agent_update(existing.status, next)?;
     sqlx::query(
