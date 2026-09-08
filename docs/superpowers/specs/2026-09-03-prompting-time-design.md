@@ -56,7 +56,7 @@ The center timeline keeps the newest 80 events plus at most four explicitly load
 ### Reading and participating in a conversation
 
 Assistant responses use an unboxed reading column with Markdown paragraphs, headings,
-lists, links, block quotes, tables, and fenced code. User messages remain literal text
+lists, links, block quotes, tables, and fenced code. User messages render Markdown
 in subtly filled bubbles. Code can be copied independently and is syntax-highlighted
 within a bounded budget; message copy preserves underlying text and distinguishes a
 preview from an undisclosed full response. Long code and tables scroll internally.
@@ -89,8 +89,19 @@ conversation, with stale responses discarded on switching or closing.
 Streaming follows the newest reply while the reader stays at the bottom. Scrolling up
 pauses following; Jump to latest restores it. Older-page loading and activity disclosure
 preserve a stable reading position. The composer remains visible and explains its
-existing Send/Steer/Interrupt behavior and keyboard shortcut. A message queue, message
-branch editing, attachment support, and artifact or diff viewers are separate work.
+existing Send/Steer/Interrupt behavior. Enter submits the current Send or Steer action;
+Shift+Enter inserts a newline. Cmd/Ctrl+Enter also submits, but Shift takes precedence.
+Composition confirmation and held-key repeats do not submit. An unavailable action
+does not silently queue or interrupt an active run.
+
+The composer edits raw Markdown by default, with an explicit Preview/Edit toggle
+using the same safe rendering as the transcript. Returning to edit preserves the
+draft and caret. Nonblank text is submitted without stripping Markdown indentation
+or trailing line breaks; failed submission retains it, while successful submission
+clears it and returns focus to the input. The input grows with content and wrapping,
+then scrolls internally at a bounded height; preview is similarly bounded. A message
+queue, message branch editing, attachment support, and artifact or diff viewers are
+separate work.
 
 ### Conversation creation
 

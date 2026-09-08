@@ -67,3 +67,25 @@ Use at least 960 × 600, the native minimum window size, and a wide 1440 × 900 
 After editing this fixture, restart Vite and reload before dynamic-import streaming
 checks: hot-reloaded module URLs can otherwise leave the console importing a separate
 fixture instance with no store listener.
+
+## Composer conventions
+
+Use `?composer=send` for browser-memory acknowledgment and sent-message rendering,
+`?composer=failure` to reject the send without clearing the draft, and
+`?composer=steer` for synthetic steering. No provider process runs. Check Enter sends
+once, Shift+Enter adds a newline, Markdown preview/edit preserves source and caret,
+long drafts grow then scroll internally, and success clears/shrinks/refocuses input.
+Preview and sent user messages should render the same safe Markdown; inspect exact
+submitted text and call counts with:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/composer-fixture.ts")).composerFixtureStats()'
+```
+
+Composition events can be simulated for guard checks, but that does not establish
+real macOS input-method acceptance in the native app.
+
+For modal focus integration, use `?chat=approval`, type a draft, open Preview, open
+Interrupt, then choose Keep running. After the dialog closes the provider selector
+must regain focus, with the preview/draft preserved. A real browser is necessary:
+jsdom does not model native inert focus suppression or the same rendering schedule.

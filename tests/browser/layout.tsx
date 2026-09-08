@@ -3,12 +3,14 @@ import { App } from "../../src/app/App";
 import { createAppStore, type AppApi } from "../../src/app/store";
 import type { AgentSnapshot, ConversationSummary } from "../../src/bridge/types";
 import { chatApproval, chatDiagnostics, chatScenario, chatTimeline, listenToChatEvents } from "./chat-fixture";
+import { composerMessages, composerScenario, steerComposerRun, submitComposerMessage } from "./composer-fixture";
 import "../../src/styles/tokens.css";
 import "../../src/styles/app.css";
 
 // Invented data only. This entry point never uses the native bridge or providers.
 const chatMode = new URLSearchParams(location.search).get("chat");
-const syntheticStatus = chatMode === "failure" ? "failed"
+const syntheticStatus = composerScenario === "send" || composerScenario === "failure" ? "completed"
+  : chatMode === "failure" ? "failed"
   : chatMode === "approval" ? "waiting"
   : chatMode === "reading" ? "completed" : "running";
 const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, index) => ({
@@ -50,7 +52,9 @@ const api: AppApi = {
     return { runId: conversation.currentRunId, items: conversation.agents.map((agent, depth) => ({ agent, depth })), nextCursor: null };
   },
   listenToAppEvents: async (handler) => listenToChatEvents(handler),
-  loadTimeline: async ({ conversationId }) => chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId) : ({
+  loadTimeline: async ({ conversationId }) => composerScenario ? ({
+    items: composerMessages(conversationId), nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+  }) : chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId) : ({
     items: Array.from({ length: conversationId.startsWith("created-") ? 0 : 80 }, (_, index) => ({
       id: `event-${index}`, conversationId, runId: "run-0", agentId: "root-0",
       sequence: String(index + 1), kind: "message", role: "assistant", provider: "codex",
@@ -83,8 +87,8 @@ const api: AppApi = {
     return { ...approval, input: null, details: null, questionCount: 0, truncated: false };
   },
   loadApprovalQuestions: unsupported,
-  submitMessage: unsupported,
-  steerRun: unsupported,
+  submitMessage: composerScenario ? submitComposerMessage : unsupported,
+  steerRun: composerScenario ? steerComposerRun : unsupported,
   respondToApproval: unsupported,
   interruptRun: unsupported,
   pickProjectDirectory: async () => {

@@ -67,9 +67,9 @@ Archiving removes a conversation from active navigation but keeps its durable hi
 
 ## Conversation continuity
 
-The center pane prioritizes the conversation: assistant replies render Markdown,
-tables, and copyable code blocks; your messages remain literal text. Tool and progress
-entries are grouped into compact, expandable activity. Real failures and requests for
+The center pane prioritizes the conversation: assistant replies and your messages
+render Markdown, tables, and copyable code blocks. Tool and progress entries are
+grouped into compact, expandable activity. Real failures and requests for
 approval stay visible. Routine protocol notifications live under **Diagnostics** in
 the right inspector and load only when you open that section or request another page
 or refresh. They remain in durable history without crowding out chat messages.
@@ -80,8 +80,14 @@ disclosure for truncated content; copy controls distinguish previews from comple
 messages. Markdown never runs code or automatically loads remote images. Ordinary
 HTTP(S) links open in the default browser; other external URL schemes are inert.
 
-The composer keeps **Send**, **Steer**, and **Interrupt** tied to the provider's
-supported state. It does not silently queue a message when steering is unavailable.
+The composer edits Markdown source with an optional preview. **Enter** submits;
+**Shift+Enter** inserts a newline. The input grows with the draft, then scrolls within
+its height limit. Successful submission clears the draft and restores input focus;
+failure keeps the draft available. Submitted text preserves Markdown whitespace.
+Composition input and held Enter keys do not accidentally submit messages.
+
+**Send**, **Steer**, and **Interrupt** stay tied to the provider's supported state.
+The composer does not silently queue a message when steering is unavailable.
 
 Confirmed steering is saved as user input in the shared timeline and message history before a
 turn becomes terminal. Dropping the UI request does not abandon an admitted operation. Rejected
