@@ -935,7 +935,7 @@ async fn run_dispatcher(
                     broadcast_error(&mut state.turns, error.clone()).await;
                     break Err(error);
                 }
-                if let Err(error) = children::reap_lookups(&mut state) {
+                if let Err(error) = children::reap_lookups(&sender, &mut state).await {
                     broadcast_error(&mut state.turns, error.clone()).await;
                     break Err(error);
                 }
@@ -1285,6 +1285,7 @@ async fn cancel_registered_turn(
     } else if let Some(response) = response {
         let _ = response.send(Err(protocol("turn-not-active")));
     }
+    children::discard_cancelled_queue(&thread_id, sender, state).await?;
     Ok(())
 }
 
@@ -3346,6 +3347,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_child_correlation_keeps_terminal_and_rejects_buffered_controls() {
+        for terminal_before_cancel in [false, true] {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+            ]);
+            let mut process = JsonLineProcess::spawn(command).unwrap();
+            let sender = process.sender();
+            let mut root = turn_sink(7);
+            root.native_turn_id = Some("root-turn".into());
+            let (events, mut receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+            root.events = events;
+            let native = Arc::clone(&root.children.native);
+            let mut other = turn_sink(8);
+            other.native_turn_id = Some("other-turn".into());
+            let (events, mut other_receiver) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
+            other.events = events;
+            let mut state = DispatcherState {
+                next_id: 0,
+                pending: HashMap::new(),
+                turns: HashMap::from([("root".into(), root), ("other-root".into(), other)]),
+                server_requests: HashMap::new(),
+                client_response_tombstones: VecDeque::new(),
+                server_request_tombstones: VecDeque::new(),
+                confirmed_interrupts: VecDeque::new(),
+                process_shutdown: process.shutdown_handle(),
+            };
+            super::handle_server_message(json!({"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"root","source":{"subAgent":{"thread_spawn":{"parent_thread_id":"root","depth":1}}}}}}), &sender, &mut state).await.unwrap();
+            super::handle_server_message(json!({"method":"turn/started","params":{"threadId":"child","turn":{"id":"child-turn"}}}), &sender, &mut state).await.unwrap();
+            super::handle_server_message(json!({"method":"item/started","params":{"threadId":"root","turnId":"root-turn","item":{"id":"lookup-activity","type":"subAgentActivity","agentThreadId":"unresolved","agentPath":"unresolved","kind":"started"}}}), &sender, &mut state).await.unwrap();
+            assert!(state.turns["root"].children.resolving);
+            let request = json!({"id":"buffered-control","method":"item/commandExecution/requestApproval","params":{"threadId":"child","turnId":"child-turn","itemId":"synthetic","startedAtMs":1}});
+            super::handle_server_message(request, &sender, &mut state)
+                .await
+                .unwrap();
+            super::handle_server_message(json!({"id":true,"method":"item/commandExecution/requestApproval","params":{"threadId":"child","turnId":"child-turn"}}), &sender, &mut state).await.unwrap();
+            let terminal = json!({"method":"turn/completed","params":{"threadId":"child","turn":{"id":"child-turn","status":"completed"}}});
+            if terminal_before_cancel {
+                super::handle_server_message(terminal.clone(), &sender, &mut state)
+                    .await
+                    .unwrap();
+            }
+            let (response, _cancelled) = oneshot::channel();
+            cancel_registered_turn(
+                "root".into(),
+                Some("root-turn".into()),
+                Some(7),
+                Some(response),
+                &sender,
+                &mut state,
+            )
+            .await
+            .unwrap();
+            if !terminal_before_cancel {
+                super::handle_server_message(terminal, &sender, &mut state)
+                    .await
+                    .unwrap();
+            }
+            let live_after_terminal = native.live();
+            // Stale UI responses after cancellation cannot dispatch the queued request.
+            assert!(matches!(
+                respond_to_server_request(
+                    &sender,
+                    "child",
+                    "string:buffered-control",
+                    ApprovalResponse::Denied,
+                    &mut state
+                )
+                .await,
+                Err(ProviderError::NotDispatched { .. })
+            ));
+            super::handle_server_message(json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"root-turn","status":"interrupted"}}}), &sender, &mut state).await.unwrap();
+            let closed_before_tick = !state.turns.contains_key("root");
+            let rejected_before_tick = state
+                .server_request_tombstones
+                .contains(&RpcId::String("buffered-control".into()));
+            super::children::expire_discoveries(&sender, &mut state)
+                .await
+                .unwrap();
+            super::children::reap_lookups(&sender, &mut state)
+                .await
+                .unwrap();
+            super::handle_server_message(json!({"method":"item/agentMessage/delta","params":{"threadId":"other-root","turnId":"other-turn","itemId":"other-message","delta":"still healthy"}}), &sender, &mut state).await.unwrap();
+            sender.send(&json!({"fixture":"drained"})).await.unwrap();
+            let writes = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut writes = Vec::new();
+                while let Some(message) = process.recv().await {
+                    let message = message.unwrap();
+                    if message.get("fixture").is_some() {
+                        break;
+                    }
+                    writes.push(message);
+                }
+                writes
+            })
+            .await
+            .unwrap();
+            process.shutdown().await.unwrap();
+            let controls: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok())
+                .filter_map(|event| event.unwrap().control_request_id().map(str::to_owned))
+                .collect();
+            assert!(
+                controls.is_empty(),
+                "cancelled buffered control became actionable: {controls:?}"
+            );
+            assert!(
+                live_after_terminal.is_empty(),
+                "received child terminal must reach shared cleanup state before root interruption: {live_after_terminal:?}"
+            );
+            assert!(
+                closed_before_tick,
+                "root stream must close without retaining an already ended child before metadata cleanup runs"
+            );
+            assert!(
+                rejected_before_tick,
+                "queued request must be explicitly rejected before the metadata tick"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .filter(|message| message["id"] == "buffered-control"
+                        && message.get("error").is_some())
+                    .count(),
+                1,
+                "buffered request requires exactly one explicit rejection: {writes:?}"
+            );
+            assert_eq!(
+                writes
+                    .iter()
+                    .filter(
+                        |message| message.get("id").is_some_and(serde_json::Value::is_null)
+                            && message.pointer("/error/code") == Some(&json!(-32600))
+                    )
+                    .count(),
+                1,
+                "malformed queued request still needs its invalid-request response: {writes:?}"
+            );
+            assert!(
+                state
+                    .server_request_tombstones
+                    .contains(&RpcId::String("buffered-control".into()))
+            );
+            assert!(!state.turns.contains_key("root"));
+            assert!(!state.turns["other-root"].cancelled);
+            assert!(
+                matches!(other_receiver.try_recv().unwrap().unwrap(), ProviderEvent::AssistantMessageDelta { content, .. } if content == "still healthy")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn native_child_foreign_discovery_rejects_controls_without_failing_owned_roots() {
         for disposition in ["foreign", "timeout", "cancel", "rows", "bytes"] {
             let mut command = Command::new("sh");
@@ -3389,7 +3542,9 @@ mod tests {
                     lookup.deadline = tokio::time::Instant::now();
                 }
                 let result = super::children::expire_discoveries(&sender, &mut state).await;
-                super::children::reap_lookups(&mut state).unwrap();
+                super::children::reap_lookups(&sender, &mut state)
+                    .await
+                    .unwrap();
                 result
             };
             process.shutdown().await.unwrap();
@@ -3663,7 +3818,7 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            let reap = super::children::reap_lookups(&mut state);
+            let reap = super::children::reap_lookups(&sender, &mut state).await;
             if disposition == "timeout" {
                 assert!(
                     matches!(reap, Err(ProviderError::Protocol { category }) if category == "child-metadata-timeout")

@@ -672,7 +672,8 @@ pub(super) async fn correlate(
                 state.turns[&root].children.native.seal(thread, id);
             }
         }
-        if root != thread && state.turns[&root].children.resolving {
+        if root != thread && state.turns[&root].children.resolving && !state.turns[&root].cancelled
+        {
             state
                 .turns
                 .get_mut(&root)
@@ -818,8 +819,72 @@ fn validate_path(path: &str) -> Result<(), ProviderError> {
     }
 }
 
+/// Cancellation drops correlation payloads, but received terminals still own
+/// cleanup state and buffered server requests still require a response.
+pub(super) async fn discard_cancelled_queue(
+    root: &str,
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    let Some(turn) = state.turns.get_mut(root).filter(|turn| turn.cancelled) else {
+        return Ok(());
+    };
+    let queued = std::mem::take(&mut turn.children.queued);
+    turn.children.queued_bytes = 0;
+    turn.children.resolving = false;
+    for message in queued {
+        if message.get("id").is_some()
+            || super::is_known_server_request(
+                message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+        {
+            let Some(id) = message.get("id").and_then(super::parse_rpc_id) else {
+                super::send_invalid_request(sender, state).await?;
+                continue;
+            };
+            // Registered requests are rejected by their existing owner. A request
+            // already answered (including another buffered copy) needs no second write.
+            if !state.server_request_tombstones.contains(&id)
+                && !state.server_requests.contains_key(&id.external())
+            {
+                required_write(
+                    sender,
+                    &state.process_shutdown,
+                    json!({"id":id,"error":{"code":-32003,"message":"Owning root was cancelled"}}),
+                )
+                .await?;
+                super::remember_server_request_tombstone(state, id);
+            }
+        } else if message.get("method").and_then(Value::as_str) == Some("turn/completed")
+            && let Some(params) = message.get("params")
+            && let Some(thread) = params.get("threadId").and_then(Value::as_str)
+            && thread != root
+            && owner(state, thread)?.as_deref() == Some(root)
+        {
+            super::handle_child_notification(root, thread, "turn/completed", params, sender, state)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 /// A cancelled or replaced root must not retain lookups or their event payloads.
-pub(super) fn reap_lookups(state: &mut DispatcherState) -> Result<(), ProviderError> {
+pub(super) async fn reap_lookups(
+    sender: &JsonLineSender,
+    state: &mut DispatcherState,
+) -> Result<(), ProviderError> {
+    let cancelled: Vec<_> = state
+        .turns
+        .iter()
+        .filter(|(_, turn)| turn.cancelled)
+        .map(|(root, _)| root.clone())
+        .collect();
+    for root in cancelled {
+        discard_cancelled_queue(&root, sender, state).await?;
+    }
     let mut expired = false;
     state.pending.retain(|_, pending| {
         let PendingResponse::ChildMetadata(lookup) = pending else {
@@ -834,11 +899,6 @@ pub(super) fn reap_lookups(state: &mut DispatcherState) -> Result<(), ProviderEr
         expired |= active && lookup.deadline <= Instant::now();
         active
     });
-    for turn in state.turns.values_mut().filter(|turn| turn.cancelled) {
-        turn.children.queued.clear();
-        turn.children.queued_bytes = 0;
-        turn.children.resolving = false;
-    }
     if expired {
         Err(protocol("child-metadata-timeout"))
     } else {

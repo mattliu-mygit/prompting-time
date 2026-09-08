@@ -74,6 +74,7 @@ struct ResponseAcknowledgementBarrier {
 struct ResponsePreAcknowledgementBarrier {
     ready: Notify,
     release: Notify,
+    hold_attempt_gate: bool,
 }
 
 #[cfg(test)]
@@ -82,6 +83,7 @@ impl ResponsePreAcknowledgementBarrier {
         Self {
             ready: Notify::new(),
             release: Notify::new(),
+            hold_attempt_gate: true,
         }
     }
 }
@@ -1824,6 +1826,13 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
         &mut done,
     )
     .await;
+    #[cfg(test)]
+    if let Some(barrier) = &job.pre_acknowledgement_barrier
+        && !barrier.hold_attempt_gate
+    {
+        barrier.ready.notify_one();
+        barrier.release.notified().await;
+    }
     let _gate = job.active.attempt_gate.lock().await;
     match response_result {
         Err(RuntimeError::OperationCancelled) => {
@@ -1879,7 +1888,9 @@ async fn execute_response(store: Store, job: ResponseJob) -> Result<(), RuntimeE
                 }
             }
             #[cfg(test)]
-            if let Some(barrier) = &job.pre_acknowledgement_barrier {
+            if let Some(barrier) = &job.pre_acknowledgement_barrier
+                && barrier.hold_attempt_gate
+            {
                 barrier.ready.notify_one();
                 barrier.release.notified().await;
             }
@@ -2437,22 +2448,20 @@ async fn execute_attempt(
     // enter buffered's staged prefix, which acknowledgement commits and then discards.
     let mut pending_controls: VecDeque<PendingControl> = VecDeque::new();
     let mut pending_control_bytes = 0_usize;
-    let mut deferred_terminals = VecDeque::new();
+    let mut deferred_events = VecDeque::new();
+    let mut deferred_event_bytes = 0_usize;
     loop {
         if *cancellation.borrow() || *shutdown.borrow() {
             return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation)
                 .await;
         }
-        if !approval_responding(&job.active) && !deferred_terminals.is_empty() {
-            while let Some(event) = deferred_terminals.pop_back() {
+        if !approval_responding(&job.active) && !deferred_events.is_empty() {
+            while let Some(event) = deferred_events.pop_back() {
                 buffered.push_front(event);
             }
+            deferred_event_bytes = 0;
         }
-        if approval_pending(&job.active)
-            && buffered
-                .front()
-                .is_none_or(|event| !matches!(event, ProviderEvent::NativeChild { .. }))
-        {
+        if approval_pending(&job.active) {
             if buffered_closed && !approval_responding(&job.active) {
                 return finalize_attempt(
                     store,
@@ -2488,7 +2497,13 @@ async fn execute_attempt(
                     _ = notified => continue,
                     _ = cancellation.changed() => return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation).await,
                     _ = shutdown.changed() => return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation).await,
-                    event = turn.recv() => {
+                    event = async {
+                        if buffered.front().is_some_and(|event| matches!(event, ProviderEvent::NativeChild { .. }) || event.control_request_id().is_some()) {
+                            buffered.pop_front().map(Ok)
+                        } else {
+                            turn.recv().await
+                        }
+                    } => {
                         let Some(event) = event else {
                             if approval_responding(&job.active) {
                                 buffered_closed = true;
@@ -2514,17 +2529,51 @@ async fn execute_attempt(
                                 ).await;
                             }
                         };
-                        if (event.is_terminal() || matches!(&event, ProviderEvent::NativeChild { event: crate::providers::NativeChildEvent::Completed | crate::providers::NativeChildEvent::Interrupted | crate::providers::NativeChildEvent::Failed, .. }))
+                        // Once a child's terminal waits for its response acknowledgement,
+                        // later turns and controls from that thread must wait behind it.
+                        // A deferred root terminal fences everything after it; siblings
+                        // may otherwise continue independently of the waiting child.
+                        use crate::providers::NativeChildEvent;
+                        let child_terminal_owner = match &event {
+                            ProviderEvent::NativeChild { owner, event: NativeChildEvent::Completed | NativeChildEvent::Interrupted | NativeChildEvent::Failed } => Some(owner),
+                            _ => None,
+                        };
+                        let follows_deferred = deferred_events.iter().any(|earlier: &ProviderEvent| {
+                            earlier.is_terminal() || matches!((earlier, &event),
+                                (ProviderEvent::NativeChild { owner: earlier, event: NativeChildEvent::Completed | NativeChildEvent::Interrupted | NativeChildEvent::Failed }, ProviderEvent::NativeChild { owner, .. })
+                                    if earlier.native_thread_id == owner.native_thread_id)
+                        });
+                        let waiting_terminal = (event.is_terminal() || child_terminal_owner.is_some())
                             && approval_responding(&job.active)
                             && job.active.attempt.lock().unwrap().as_ref().is_some_and(|attempt| attempt.pending_child.as_ref().is_some_and(|(_, native)| {
-                                event.is_terminal() || matches!(&event, ProviderEvent::NativeChild { owner, .. } if owner == native)
-                            }))
+                                event.is_terminal() || child_terminal_owner == Some(native)
+                            }));
+                        // Controls after the deferred terminal share its FIFO position,
+                        // without fencing their sibling's independent lifecycle.
+                        let later_control = !deferred_events.is_empty() && event.control_request_id().is_some();
+                        if follows_deferred || waiting_terminal || later_control
                         {
-                            if deferred_terminals.len() >= MAX_PENDING_CONTROLS {
+                            let bytes = serde_json::to_vec(&event).ok().map(|payload| payload.len());
+                            if deferred_events.len() >= MAX_PENDING_CONTROLS
+                                || bytes.is_none_or(|bytes| bytes > MAX_PENDING_CONTROL_BYTES - deferred_event_bytes)
+                            {
                                 return finalize_attempt(store, &job.active, &attempt, turn, &mut buffered, active_failure(ProviderErrorCategory::ContractViolation, MutationState::Unknown)).await;
                             }
-                            deferred_terminals.push_back(event);
+                            deferred_event_bytes += bytes.expect("serialized size was validated");
+                            deferred_events.push_back(event);
                             continue;
+                        }
+                        if let Some(owner) = child_terminal_owner {
+                            deferred_events.retain(|queued| {
+                                if queued.control_request_id().is_some()
+                                    && matches!(queued, ProviderEvent::NativeChild { owner: candidate, .. } if candidate == owner)
+                                {
+                                    deferred_event_bytes -= serde_json::to_vec(queued).expect("deferred event size was validated").len();
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
                         }
                         if event.is_terminal() {
                             signal_attempt_done(&job.active);
@@ -2720,7 +2769,14 @@ async fn execute_attempt(
             }
             staged_buffered = 0;
         }
-        let next = if let Some(event) = buffered.pop_front() {
+        // Deferred lifecycle must replay before its controls. Controls already in
+        // the FIFO were received earlier and retain their position when replay
+        // reaches another control; later controls then use normal waiting admission.
+        let queued_control_first = !pending_controls.is_empty()
+            && buffered
+                .front()
+                .is_some_and(|event| event.control_request_id().is_some());
+        let next = if !queued_control_first && let Some(event) = buffered.pop_front() {
             Some(Ok(event))
         } else if buffered_closed {
             None
@@ -4496,6 +4552,20 @@ mod tests {
 
     #[tokio::test]
     async fn native_child_answer_write_precedes_child_and_root_terminal_before_ack() {
+        native_child_answer_ordering(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn native_child_followup_keeps_order_before_answer_ack() {
+        native_child_answer_ordering(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn native_child_followup_deferral_allows_sibling_progress_before_answer_ack() {
+        native_child_answer_ordering(true, false).await;
+    }
+
+    async fn native_child_answer_ordering(followup: bool, hold_attempt_gate: bool) {
         use crate::providers::{NativeChildEvent, NativeChildTurn, UserInputQuestion};
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -4532,7 +4602,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let barrier = Arc::new(ResponsePreAcknowledgementBarrier::new());
+        let barrier = Arc::new(ResponsePreAcknowledgementBarrier {
+            hold_attempt_gate,
+            ..ResponsePreAcknowledgementBarrier::new()
+        });
         supervisor.set_response_pre_acknowledgement_barrier(Arc::clone(&barrier));
         let supervisor = Arc::new(supervisor);
         let sender = adapter.sender.lock().unwrap().take().unwrap();
@@ -4590,28 +4663,247 @@ mod tests {
             })
         };
         barrier.ready.notified().await;
+        if followup && !hold_attempt_gate {
+            sender
+                .send(Ok(ProviderEvent::ApprovalRequested {
+                    request_id: "earlier-root-control".into(),
+                    operation: "write".into(),
+                    scope: "invented".into(),
+                    details: None,
+                }))
+                .await
+                .unwrap();
+        }
         sender
             .send(Ok(ProviderEvent::NativeChild {
-                owner: native,
+                owner: native.clone(),
                 event: NativeChildEvent::Completed,
             }))
             .await
             .unwrap();
-        sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while sender.capacity() != sender.max_capacity() {
-                tokio::task::yield_now().await;
+        if followup {
+            let followup_owner = NativeChildTurn {
+                native_turn_id: "child-followup".into(),
+                ..native
+            };
+            sender
+                .send(Ok(ProviderEvent::NativeChild {
+                    owner: followup_owner.clone(),
+                    event: NativeChildEvent::Started,
+                }))
+                .await
+                .unwrap();
+            sender
+                .send(Ok(ProviderEvent::NativeChild {
+                    owner: followup_owner.clone(),
+                    event: NativeChildEvent::ApprovalRequested {
+                        request_id: "followup-control".into(),
+                        operation: "write".into(),
+                        scope: "invented".into(),
+                        details: None,
+                    },
+                }))
+                .await
+                .unwrap();
+            if !hold_attempt_gate {
+                sender
+                    .send(Ok(ProviderEvent::NativeChild {
+                        owner: followup_owner.clone(),
+                        event: NativeChildEvent::ApprovalRequested {
+                            request_id: "followup-control-2".into(),
+                            operation: "write".into(),
+                            scope: "invented".into(),
+                            details: None,
+                        },
+                    }))
+                    .await
+                    .unwrap();
             }
-        })
-        .await
-        .unwrap();
-        drop(sender);
-        barrier.release.notify_one();
-        let reply = reply.await.unwrap();
-        let outcome = handle.wait().await;
-        supervisor.shutdown().await.unwrap();
-        reply.unwrap();
-        assert_eq!(outcome.unwrap().status, RunStatus::Completed);
+            sender
+                .send(Ok(ProviderEvent::NativeChildIdentity {
+                    parent_native_thread_id: "fixture-session".into(),
+                    native_thread_id: "sibling".into(),
+                }))
+                .await
+                .unwrap();
+            sender
+                .send(Ok(ProviderEvent::NativeChild {
+                    owner: NativeChildTurn {
+                        native_thread_id: "sibling".into(),
+                        native_turn_id: "sibling-turn".into(),
+                    },
+                    event: NativeChildEvent::Started,
+                }))
+                .await
+                .unwrap();
+            if !hold_attempt_gate {
+                sender
+                    .send(Ok(ProviderEvent::NativeChild {
+                        owner: NativeChildTurn {
+                            native_thread_id: "sibling".into(),
+                            native_turn_id: "sibling-turn".into(),
+                        },
+                        event: NativeChildEvent::ApprovalRequested {
+                            request_id: "ended-sibling-control".into(),
+                            operation: "write".into(),
+                            scope: "invented".into(),
+                            details: None,
+                        },
+                    }))
+                    .await
+                    .unwrap();
+                sender
+                    .send(Ok(ProviderEvent::NativeChild {
+                        owner: NativeChildTurn {
+                            native_thread_id: "sibling".into(),
+                            native_turn_id: "sibling-turn".into(),
+                        },
+                        event: NativeChildEvent::Completed,
+                    }))
+                    .await
+                    .unwrap();
+                sender
+                    .send(Ok(ProviderEvent::ApprovalRequested {
+                        request_id: "later-root-control".into(),
+                        operation: "write".into(),
+                        scope: "invented".into(),
+                        details: None,
+                    }))
+                    .await
+                    .unwrap();
+            }
+            if !hold_attempt_gate {
+                let progress = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let page = store
+                            .load_agent_page(conversation.id, None, 10)
+                            .await
+                            .unwrap();
+                        if page.items.iter().any(|item| {
+                            item.depth == 1
+                                && item.agent.status == crate::domain::AgentStatus::Completed
+                        }) {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await;
+                // Release even on failure so the fixture cannot leave acknowledgement stuck.
+                barrier.release.notify_one();
+                assert!(
+                    progress.is_ok(),
+                    "sibling must progress while the same-child followup waits for acknowledgement: {:?}",
+                    store
+                        .load_agent_page(conversation.id, None, 10)
+                        .await
+                        .unwrap()
+                );
+            } else {
+                // The completion and following start have reached the consumer before ack.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while sender.capacity() < sender.max_capacity() - 3 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                barrier.release.notify_one();
+            }
+            let reply = reply.await.unwrap();
+            reply.unwrap();
+            let mut expected = vec!["followup-control"];
+            if !hold_attempt_gate {
+                expected.insert(0, "earlier-root-control");
+                expected.extend(["followup-control-2", "later-root-control"]);
+            }
+            for (index, request_id) in expected.iter().enumerate() {
+                let waiting = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Ok(approval) = store.load_approval(handle.run_id(), request_id).await {
+                        break approval;
+                    }
+                    if matches!(store.load_run(handle.run_id()).await.unwrap().status, RunStatus::Failed | RunStatus::Interrupted | RunStatus::Completed) {
+                        panic!("same-child followup must remain valid after the previous answer acknowledgement");
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+                assert_eq!(waiting.status, ApprovalStatus::Pending);
+                for later in &expected[index + 1..] {
+                    assert!(
+                        store.load_approval(handle.run_id(), later).await.is_err(),
+                        "later control {later} must stay unpublished while {request_id} waits"
+                    );
+                }
+                if request_id.starts_with("followup") {
+                    let (_, owner) = store
+                        .load_native_child_control_owner(handle.run_id(), request_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(owner, followup_owner);
+                }
+                let response = {
+                    let supervisor = Arc::clone(&supervisor);
+                    let run = handle.run_id();
+                    let request_id = request_id.to_string();
+                    tokio::spawn(async move {
+                        supervisor
+                            .respond(run, &request_id, ApprovalResponse::Denied)
+                            .await
+                    })
+                };
+                barrier.ready.notified().await;
+                barrier.release.notify_one();
+                response.await.unwrap().unwrap();
+            }
+            for owner in [
+                followup_owner,
+                NativeChildTurn {
+                    native_thread_id: "sibling".into(),
+                    native_turn_id: "sibling-turn".into(),
+                },
+            ] {
+                if !hold_attempt_gate && owner.native_thread_id == "sibling" {
+                    continue;
+                }
+                sender
+                    .send(Ok(ProviderEvent::NativeChild {
+                        owner,
+                        event: NativeChildEvent::Completed,
+                    }))
+                    .await
+                    .unwrap();
+            }
+            sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+            drop(sender);
+            let outcome = handle.wait().await;
+            supervisor.shutdown().await.unwrap();
+            assert_eq!(outcome.unwrap().status, RunStatus::Completed);
+            assert!(
+                store
+                    .load_approval(handle.run_id(), "ended-sibling-control")
+                    .await
+                    .is_err()
+            );
+        } else {
+            sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while sender.capacity() != sender.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(sender);
+            barrier.release.notify_one();
+            let reply = reply.await.unwrap();
+            let outcome = handle.wait().await;
+            supervisor.shutdown().await.unwrap();
+            reply.unwrap();
+            assert_eq!(outcome.unwrap().status, RunStatus::Completed);
+        }
         let approval = store
             .load_approval(handle.run_id(), "native-question")
             .await
