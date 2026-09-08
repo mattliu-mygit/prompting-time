@@ -3,6 +3,39 @@
 This document records version-specific observations that gate provider adapters. It contains no
 credentials, existing conversation content, private paths, or account identity.
 
+## Codex CLI 0.153.4 child integration (2026-09-08)
+
+Version-matched generated schemas and tagged source distinguish activity observations from
+native child turns. `subAgentActivity` includes `completed`; paired item-start/item-completion
+notifications share the activity identity and do not each represent a new child transition.
+`interacted` and `interrupted` report operations, not independently confirmed child termination.
+Metadata-only `thread/read` supplies authoritative parentage; display paths do not.
+
+The application adapter resolves missing ancestors before publishing early child starts and
+routes native child lifecycle, permission, and question events to the canonical child under its
+owned root. Requests retain their exact native thread and turn. Ended turns are sealed, while a
+later native turn can reactivate the same child. This does not import child transcripts or promise
+independent child sessions. Root completion with active descendants remains fail-and-cleanup.
+
+Two focused canonical application gates passed with inherited Astra and unchanged permission
+policy: recursive root/child/grandchild completion (28.52 seconds), and child command denial then
+approval (50.02 seconds). The latter validated the entire normalized command, exact temporary
+target and content, canonical child owner, and native tuple before allowing once. Denial left no
+target; approval produced exactly the expected content. Both runs durably acknowledged the
+response and completed root and child. Both tests shut down owned application/provider resources
+before assertions. These are application API tests, not native UI acceptance.
+
+After the ordering and cancellation review fixes, both gates were rerun together and passed in
+73.87 seconds, with the same exact-control and three-level completed-ancestry assertions.
+The final source checkpoint `7a485c8`, including canonical input history and discovery request-ID
+admission, passed both gates again in 66.70 seconds.
+
+Hermetic checks cover structured child answers, stale requests, sibling/root isolation, FIFO
+controls, root output attribution, and response-write/terminal/acknowledgement ordering. A response
+write before dispatcher receipt of a terminal is not proof of provider semantic acceptance.
+Known live child cleanup requests exact interrupts and waits for terminal evidence; missing
+evidence remains a bounded cleanup failure rather than fabricated completion.
+
 ## Cross-provider application switching (2026-09-07)
 
 The projectless application switching smoke passed with Codex CLI 0.153.4 using Astra and

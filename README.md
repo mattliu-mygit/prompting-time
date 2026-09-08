@@ -18,7 +18,7 @@ The React/TypeScript interface talks to a typed Tauri command boundary. Rust own
 
 ## Runtime compatibility
 
-- The current unsigned bundle is an Apple Silicon artifact. Its application binary declares macOS 11.0 as its deployment target; that inspection is not a blanket compatibility claim for every macOS 11+ machine.
+- The current development bundle is an Apple Silicon artifact. Its application binary declares macOS 11.0 as its deployment target; that inspection is not a blanket compatibility claim for every macOS 11+ machine.
 - Public CI builds on a macOS 14 runner. The locally inspected release artifact is Apple Silicon; Intel and universal bundles have not been locally built or tested.
 
 ## Development prerequisites
@@ -54,12 +54,34 @@ A conversation can run without a project. For a Git project, Prompting Time defa
 
 Archiving removes a conversation from active navigation but keeps its durable history. It does not imply worktree deletion. Prompting Time removes only app-owned worktrees proven clean, nondivergent, unused, and still bound to their recorded Git metadata; otherwise it reports the blocker and preserves the directory.
 
+## Conversation continuity
+
+Confirmed steering is saved as user input in the shared timeline and message history before a
+turn becomes terminal. Dropping the UI request does not abandon an admitted operation. Rejected
+or uncertain steering is not presented as accepted and is never automatically replayed.
+
+Acknowledged question answers contribute bounded question-and-answer context, associated with
+the requesting provider and agent. Secret questions and answers are excluded from this shared
+projection before formatting or truncation; the exact response remains in the private approval
+record. Child-answer context is available to another provider, but this does not prove that the
+original native root directly saw its child's answer.
+
+Handoffs select bounded recent history. Confirmed input is not guaranteed to remain in every
+future prompt after arbitrarily much newer content. These fixes apply to new input; they do not
+backfill previously lost steering or historical answers. A crash without durable confirmation
+leaves the outcome unconfirmed, with no replay.
+
 ## Develop and verify
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
+
+Vite binds `http://localhost:1420` and fails if the port is occupied, matching Tauri's
+development URL. The optional [browser layout regression](tests/browser/README.md) renders the
+real frontend with synthetic data to check pane scrolling and composer visibility. It does not
+connect to native providers or establish native WebView acceptance.
 
 Run the release checks with:
 
@@ -69,13 +91,14 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features -- --test-threads=1
 pnpm lint
 pnpm test
+pnpm exec tsc --project tests/browser/tsconfig.json
 pnpm build
 bash scripts/privacy-scan.test.sh
 bash scripts/privacy-scan.sh
 pnpm tauri build --bundles app
 ```
 
-The unsigned bundle is produced at `target/release/bundle/macos/Prompting Time.app`. Open it directly from Finder for local testing, or copy it into `/Applications`. Because the development bundle is neither signed nor notarized, macOS may require you to use Finder's **Open** confirmation. Do not distribute it as a trusted release artifact.
+The unsigned bundle is produced at `target/release/bundle/macos/Prompting Time.app`. Open it directly from Finder for local testing, or copy it into `/Applications`. Because the development bundle is not Developer ID-signed or notarized, macOS may require you to use Finder's **Open** confirmation. Do not distribute it as a trusted release artifact.
 
 ## Opt-in live probes
 
@@ -84,6 +107,9 @@ Public CI uses hermetic fixtures and does not consume provider accounts. Live pr
 ```sh
 PROMPTING_TIME_LIVE_CODEX=1 cargo test -p prompting-time-core --test adapter_contract \
   live_codex_smoke_uses_an_empty_temporary_git_repository -- --ignored --nocapture --test-threads=1
+
+PROMPTING_TIME_LIVE_CODEX=1 cargo test -p prompting-time-core --test codex_app \
+  -- --ignored --nocapture --test-threads=1
 
 PROMPTING_TIME_LIVE_CLAUDE=1 cargo test -p prompting-time-core --test claude_adapter \
   live_adapter -- --ignored --nocapture --test-threads=1
@@ -118,12 +144,20 @@ A competing instance leaves claimed work alone during startup, including a wall-
 
 Shutdown asks owned run tasks and provider adapters to stop, waits up to five seconds, then forces and awaits remaining owned work. Startup reconciliation has a fixed deadline and fails closed if it cannot establish coherent durable state.
 
+Provider transports and Git commands start in owned subprocess groups. Bounded cleanup signals
+the group before reaping its leader, including after a natural leader exit, so inheriting workers
+and Git hooks cannot simply outlive their direct parent. This contains signalable descendants
+that remain in the group; it does not contain processes that deliberately create another group,
+session, or credential boundary. Drop cleanup is a last-resort signal/reap path and cannot report
+errors to its former caller.
+
 ## Known limitations
 
 - Claude multi-select questions are safely declined; the current UI supports single-select responses.
+- Codex child lifecycle and controls are supported, but child transcripts are not imported into root history. A root ending with active descendants fails conservatively and cleans up; it does not leave an unbounded background run.
 - Claude task identities drive recursive hierarchy and status, but do not imply direct child-session resume. Grandchild text forwarding was not observed in the depth-two live protocol probe.
 - If Claude is cancelled before its first prompt and the app then restarts, initialization alone may have left no resumable native transcript. The next attempt fails closed and may require a new conversation. Completed and interrupted prompt sessions have resumed successfully in focused live probes.
-- The app is unsigned and not notarized.
+- The app is not Developer ID-signed or notarized.
 - There is no updater or packaged installer yet.
 - Active or approval-waiting provider turns are conservatively interrupted on app restart.
 - Native notification delivery and full Tauri visual/E2E flows have not been smoke-tested; current evidence is hermetic Rust/UI coverage and bundle inspection.

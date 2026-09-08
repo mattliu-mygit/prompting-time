@@ -52,6 +52,9 @@ jobs:
       - name: Test frontend
         run: pnpm test
 
+      - name: Type-check browser fixture
+        run: pnpm exec tsc --project tests/browser/tsconfig.json
+
       - name: Build frontend
         run: pnpm build
 
