@@ -40,8 +40,8 @@ Additional providers, remote execution, learned routing, scheduled tasks, mobile
 The main window uses a three-pane command-center layout:
 
 - The left pane lists conversations by project and status. Expanding a conversation reveals its recursive agent tree. Each node shows its provider and current status.
-- The center pane shows the selected conversation timeline, provider-labeled messages, tool activity, child-agent cards, approvals, and the composer.
-- The right inspector shows routing rationale, workspace and worktree state, changed files, and active agents. It is collapsible for focus and smaller windows.
+- The center pane prioritizes the selected conversation: readable assistant responses, compact user messages, expandable tool activity, approvals, and the composer. Provider identity stays visible without dominating the text.
+- The right inspector shows routing rationale, workspace and worktree state, changed files, active agents, and explicitly disclosed diagnostics. It is collapsible for focus and smaller windows.
 
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
 content scroll within their panes instead of pushing the composer below the window. Selecting a
@@ -52,6 +52,45 @@ available; confirmation remains bound to the original run.
 The UI must not invent child-agent identity. If a provider exposes a child agent, Prompting Time creates an agent node. If it exposes only an anonymous tool operation, the UI displays a tool event under the current agent.
 
 The center timeline keeps the newest 80 events plus at most four explicitly loaded 80-event history pages. Live invalidations are coalesced behind one read per selected conversation; the latest dirty state receives one follow-up read without overlapping an older-page request. Live refresh replaces the newest window by durable event identity while retaining loaded history; any eviction is visible and offers a way back to the newest window. Every truncated event kind remains visibly truncated and fetches its separately bounded detail only after explicit disclosure. Agent activity is collapsed by default and independently requests the selected run's bounded agent pages when opened; it pages the expanded depth-first view 20 cards at a time so a wide or deep provider tree cannot crowd out approvals or the composer. Agent restarts are single-flight with one latest coalesced restart. Pending approvals load 30 summaries initially, page independently on explicit request, and never fetch operation or question detail merely because a card is mounted. The approval view retains at most four pages: loading farther back evicts the newest retained page but preserves the returned cursor until every pending request is reachable, and an explicit control restores the newest page. Live invalidation rebases that bounded window onto the newest approvals by following the refreshed cursor chain, so insertion-driven page shifts cannot skip requests and terminal or missing requests disappear without unbounded fan-out. Explicit approval paging owns an independent busy token so overlapping refresh success or failure cannot strand its retry controls.
+
+### Reading and participating in a conversation
+
+Assistant responses use an unboxed reading column with Markdown paragraphs, headings,
+lists, links, block quotes, tables, and fenced code. User messages remain literal text
+in subtly filled bubbles. Code can be copied independently and is syntax-highlighted
+within a bounded budget; message copy preserves underlying text and distinguishes a
+preview from an undisclosed full response. Long code and tables scroll internally.
+Untrusted output cannot execute HTML or code, embed applications, load remote images
+automatically, or activate unsafe URL protocols. Ordinary HTTP(S) links open in the
+default browser through a main-window capability restricted to those two schemes.
+Local fragments remain in the document; other external URL schemes are inert.
+
+Consecutive tool/progress entries collapse into compact activity, without merging
+across messages, runs, providers, or agents. Summary text describes only evidence
+available in canonical data. Expansion retains attribution and explicit bounded-detail
+controls. Real failures and approval requests remain visible rather than disappearing
+inside a collapsed group. Routine lifecycle updates are quiet status rows, and current
+run status comes from authoritative conversation state rather than the first root in
+an arbitrary agent page.
+
+The Rust read projection separates routine protocol notifications from conversation
+events using stored structured evidence before pagination. Both views read the same
+durable history; the UI neither deletes notifications nor copies them into another
+log. Failure evidence takes precedence over routine-notification metadata. Legacy
+diagnostics without enough evidence stay visible as neutral notices instead of being
+silently hidden or classified by a text regex. Message previews have a larger bounded
+budget than routine activity so ordinary coding answers remain readable.
+
+Inspector diagnostics load only on explicit disclosure, paging, or refresh, independently
+of workspace inspection and streaming invalidations. Their bounded history window and
+any eviction are explicit; details remain lazy. Every request remains tied to its
+conversation, with stale responses discarded on switching or closing.
+
+Streaming follows the newest reply while the reader stays at the bottom. Scrolling up
+pauses following; Jump to latest restores it. Older-page loading and activity disclosure
+preserve a stable reading position. The composer remains visible and explains its
+existing Send/Steer/Interrupt behavior and keyboard shortcut. A message queue, message
+branch editing, attachment support, and artifact or diff viewers are separate work.
 
 ### Conversation creation
 

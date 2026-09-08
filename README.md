@@ -67,6 +67,22 @@ Archiving removes a conversation from active navigation but keeps its durable hi
 
 ## Conversation continuity
 
+The center pane prioritizes the conversation: assistant replies render Markdown,
+tables, and copyable code blocks; your messages remain literal text. Tool and progress
+entries are grouped into compact, expandable activity. Real failures and requests for
+approval stay visible. Routine protocol notifications live under **Diagnostics** in
+the right inspector and load only when you open that section or request another page
+or refresh. They remain in durable history without crowding out chat messages.
+
+Scrolling up pauses following streamed output. **Jump to latest** returns to the
+current reply. Long responses and event details remain bounded, with explicit
+disclosure for truncated content; copy controls distinguish previews from complete
+messages. Markdown never runs code or automatically loads remote images. Ordinary
+HTTP(S) links open in the default browser; other external URL schemes are inert.
+
+The composer keeps **Send**, **Steer**, and **Interrupt** tied to the provider's
+supported state. It does not silently queue a message when steering is unavailable.
+
 Confirmed steering is saved as user input in the shared timeline and message history before a
 turn becomes terminal. Dropping the UI request does not abandon an admitted operation. Rejected
 or uncertain steering is not presented as accepted and is never automatically replayed.

@@ -1,11 +1,16 @@
 import { createRoot } from "react-dom/client";
 import { App } from "../../src/app/App";
 import { createAppStore, type AppApi } from "../../src/app/store";
-import type { ConversationSummary } from "../../src/bridge/types";
+import type { AgentSnapshot, ConversationSummary } from "../../src/bridge/types";
+import { chatApproval, chatDiagnostics, chatScenario, chatTimeline, listenToChatEvents } from "./chat-fixture";
 import "../../src/styles/tokens.css";
 import "../../src/styles/app.css";
 
 // Invented data only. This entry point never uses the native bridge or providers.
+const chatMode = new URLSearchParams(location.search).get("chat");
+const syntheticStatus = chatMode === "failure" ? "failed"
+  : chatMode === "approval" ? "waiting"
+  : chatMode === "reading" ? "completed" : "running";
 const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, index) => ({
   id: `conversation-${index}`,
   title: `Synthetic conversation ${index}`,
@@ -15,11 +20,12 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
   projectRoot: null,
   currentRunId: `run-${index}`,
   provider: "codex",
-  runStatus: "running",
-  rollupStatus: "active",
+  runStatus: syntheticStatus,
+  rollupStatus: syntheticStatus === "failed" ? "failed" : syntheticStatus === "waiting" ? "needsAttention" : syntheticStatus === "completed" ? "completed" : "active",
   agents: [
-    { id: `root-${index}`, parentId: null, provider: "codex", label: "Root agent", summary: null, status: "running" },
-    { id: `child-${index}`, parentId: `root-${index}`, provider: "codex", label: `Synthetic child ${index}`, summary: "Reviewing invented work", status: "running" },
+    { id: `root-${index}`, parentId: null, provider: "codex", label: "Root agent", summary: null, status: syntheticStatus },
+    { id: `child-${index}`, parentId: `root-${index}`, provider: "codex", label: `Synthetic child ${index}`, summary: "Reviewing invented work", status: syntheticStatus },
+    ...(chatScenario ? [{ id: `grandchild-${index}`, parentId: `child-${index}`, provider: "codex", label: "Synthetic test agent", summary: "Checking invented test results", status: syntheticStatus } satisfies AgentSnapshot] : []),
   ],
   agentsTruncated: false,
 }));
@@ -39,16 +45,22 @@ const api: AppApi = {
   }),
   listConversations: async () => ({ items: conversations, nextCursor: null }),
   loadConversation: async ({ conversationId }) => conversations.find(({ id }) => id === conversationId)!,
-  loadAgentTree: async () => ({ runId: "run-0", items: [], nextCursor: null }),
-  listenToAppEvents: async () => () => {},
-  loadTimeline: async ({ conversationId }) => ({
+  loadAgentTree: async ({ conversationId }) => {
+    const conversation = conversations.find(({ id }) => id === conversationId)!;
+    return { runId: conversation.currentRunId, items: conversation.agents.map((agent, depth) => ({ agent, depth })), nextCursor: null };
+  },
+  listenToAppEvents: async (handler) => listenToChatEvents(handler),
+  loadTimeline: async ({ conversationId }) => chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId) : ({
     items: Array.from({ length: conversationId.startsWith("created-") ? 0 : 80 }, (_, index) => ({
       id: `event-${index}`, conversationId, runId: "run-0", agentId: "root-0",
       sequence: String(index + 1), kind: "message", role: "assistant", provider: "codex",
+      presentation: "normal",
       content: `Synthetic message ${index}. This is invented layout content.`, contentBytes: "60", truncated: false,
     })),
     nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
   }),
+  loadDiagnostics: async ({ conversationId, cursor, limit }) => chatScenario
+    ? chatDiagnostics(conversationId, cursor, limit) : { items: [], nextCursor: null },
   loadApprovals: async () => ({ items: [], nextCursor: null }),
   inspectWorkspace: async () => ({
     workspace: {
@@ -58,11 +70,18 @@ const api: AppApi = {
     },
     executionPath: "/synthetic/layout", ownedWorktree: false,
     cleanup: { eligible: false, blocker: "notOwned" }, currentRun: null,
-    routing: null, handoff: null, activeDescendantCount: 1, agentsTruncated: false,
+    routing: null, handoff: null,
+    activeDescendantCount: syntheticStatus === "running" || syntheticStatus === "waiting" ? (chatScenario ? 2 : 1) : 0,
+    agentsTruncated: false,
   }),
   listRunAudits: async () => ({ items: [], nextCursor: null }),
   loadEventDetail: unsupported,
-  loadApprovalDetail: unsupported,
+  loadApprovalDetail: async ({ approvalId }) => {
+    if (!chatScenario) return unsupported();
+    const conversationId = approvalId.replace(/-approval$/, "");
+    const approval = chatApproval(conversationId);
+    return { ...approval, input: null, details: null, questionCount: 0, truncated: false };
+  },
   loadApprovalQuestions: unsupported,
   submitMessage: unsupported,
   steerRun: unsupported,
