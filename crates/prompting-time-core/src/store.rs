@@ -55,6 +55,7 @@ const STAGED_OVERFLOW_CONTENT: &str = "Provider output omitted: staged queue lim
 const MAX_NATIVE_AGENT_ID_BYTES: usize = 256;
 const MAX_NATIVE_AGENT_PATH_BYTES: usize = 1_024;
 const MAX_CHILDREN_PER_EVENT: usize = 64;
+const MAX_NATIVE_CHILD_TURNS: i64 = 1_024;
 const MAX_HANDOFF_DECISIONS: i64 = 32;
 const MAX_HANDOFF_DECISION_REASON_BYTES: i64 = 64;
 const MAX_HANDOFF_TASK_KIND_BYTES: i64 = 32;
@@ -258,6 +259,19 @@ impl NewConversation {
             title: title.into(),
         }
     }
+}
+
+/// Native identity supplied by the dispatcher after ancestry verification.
+/// The store resolves its canonical child within the owned provider run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeChildTurn {
+    pub native_thread_id: String,
+    pub native_turn_id: String,
+}
+
+enum RunEventTarget<'a> {
+    Agent(AgentId),
+    NativeChild(&'a NativeChildTurn),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1630,7 +1644,7 @@ impl Store {
         let (_, created) = self
             .append_run_event_inner(
                 primary_run_id,
-                primary_root_id,
+                RunEventTarget::Agent(primary_root_id),
                 ProviderEventRecord::provider_failed(
                     category,
                     MutationState::NoneObserved,
@@ -1654,7 +1668,7 @@ impl Store {
         let (_, created) = self
             .append_run_event_inner(
                 primary_run_id,
-                primary_root_id,
+                RunEventTarget::Agent(primary_root_id),
                 ProviderEventRecord::provider_failed(
                     category,
                     MutationState::NoneObserved,
@@ -2166,7 +2180,7 @@ impl Store {
         agent_id: AgentId,
         record: ProviderEventRecord,
     ) -> Result<TimelineEvent, StoreError> {
-        self.append_run_event_inner(run_id, agent_id, record, None, None)
+        self.append_run_event_inner(run_id, RunEventTarget::Agent(agent_id), record, None, None)
             .await
             .map(|(event, _)| event)
     }
@@ -2178,15 +2192,41 @@ impl Store {
         expected_owner_id: &str,
         record: ProviderEventRecord,
     ) -> Result<TimelineEvent, StoreError> {
-        self.append_run_event_inner(run_id, agent_id, record, Some(expected_owner_id), None)
-            .await
-            .map(|(event, _)| event)
+        self.append_run_event_inner(
+            run_id,
+            RunEventTarget::Agent(agent_id),
+            record,
+            Some(expected_owner_id),
+            None,
+        )
+        .await
+        .map(|(event, _)| event)
+    }
+
+    /// Persist lifecycle or a control for an authoritative native child turn.
+    /// This deliberately does not accept child transcript/output records.
+    pub async fn append_owned_native_child_event(
+        &self,
+        run_id: RunId,
+        native: &NativeChildTurn,
+        expected_owner_id: &str,
+        record: ProviderEventRecord,
+    ) -> Result<TimelineEvent, StoreError> {
+        self.append_run_event_inner(
+            run_id,
+            RunEventTarget::NativeChild(native),
+            record,
+            Some(expected_owner_id),
+            None,
+        )
+        .await
+        .map(|(event, _)| event)
     }
 
     async fn append_run_event_inner(
         &self,
         run_id: RunId,
-        agent_id: AgentId,
+        target: RunEventTarget<'_>,
         record: ProviderEventRecord,
         expected_owner_id: Option<&str>,
         fallback: Option<(NewFallbackAttempt, Option<(&str, Duration)>)>,
@@ -2207,6 +2247,21 @@ impl Store {
             id: run_id.to_string(),
         })?;
         let mut run = run_row.into_domain()?;
+        let native = match &target {
+            RunEventTarget::NativeChild(native) => Some(*native),
+            RunEventTarget::Agent(_) => None,
+        };
+        let agent_id = match target {
+            RunEventTarget::Agent(id) => id,
+            RunEventTarget::NativeChild(native) => {
+                validate_native_agent_id(&native.native_thread_id)?;
+                validate_native_agent_id(&native.native_turn_id)?;
+                load_agent_by_native_id(&mut transaction, run_id, &native.native_thread_id)
+                    .await?
+                    .ok_or(StoreError::NativeAgentIdentityConflict)?
+                    .id
+            }
+        };
         let agent_row = sqlx::query_as::<_, AgentNodeRow>(
             "SELECT id, run_id, parent_id, provider, provider_native_id, provider_native_path, label, summary, status, created_at \
              FROM agent_nodes WHERE id = ? AND run_id = ?",
@@ -2239,7 +2294,28 @@ impl Store {
             transaction.commit().await?;
             return Ok((event, Some(existing)));
         }
-        validate_event_state(&record, &run, &agent)?;
+        let native_start =
+            native.is_some() && matches!(record, ProviderEventRecord::Started { .. });
+        if let Some(native) = native
+            && let Some(existing) =
+                validate_native_child_event(&mut transaction, &run, &agent, native, &record).await?
+        {
+            transaction.commit().await?;
+            return Ok((existing, None));
+        }
+        if !native_start {
+            validate_event_state(&record, &run, &agent)?;
+        }
+        if native.is_none()
+            && matches!(
+                record,
+                ProviderEventRecord::ApprovalRequested { .. }
+                    | ProviderEventRecord::UserInputRequested { .. }
+            )
+            && has_native_child_turn(&mut transaction, agent_id).await?
+        {
+            return Err(StoreError::NativeAgentIdentityConflict);
+        }
         if fallback.as_ref().is_some_and(|(fallback, _)| {
             !is_root
                 || fallback.provider == run.provider
@@ -2343,7 +2419,18 @@ impl Store {
             .await?;
         }
         let (kind, content) = record.event_fields(is_root);
-        let payload_json = record.payload_json();
+        let mut payload_json = record.payload_json();
+        if let Some(native) = native {
+            let mut payload: serde_json::Value = payload_json
+                .as_deref()
+                .map(|payload| {
+                    serde_json::from_str(payload).expect("record payload is generated JSON")
+                })
+                .unwrap_or_else(|| serde_json::json!({}));
+            payload["nativeThreadId"] = serde_json::json!(native.native_thread_id);
+            payload["nativeTurnId"] = serde_json::json!(native.native_turn_id);
+            payload_json = Some(payload.to_string());
+        }
         let native_item_id = match &record {
             ProviderEventRecord::NativeMessage { native_item_id, .. } => {
                 Some(native_item_id.as_str())
@@ -2492,6 +2579,11 @@ impl Store {
             .bind(now)
             .execute(&mut *transaction)
             .await?;
+            if let Some(native) = native {
+                sqlx::query("INSERT INTO native_child_controls (approval_id, agent_id, native_turn_id) VALUES (?, ?, ?)")
+                    .bind(approval_id.to_string()).bind(agent_id.to_string()).bind(&native.native_turn_id)
+                    .execute(&mut *transaction).await?;
+            }
             if let ProviderEventRecord::UserInputRequested { questions, .. } = &record {
                 persist_approval_questions(&mut transaction, approval_id, questions).await?;
             }
@@ -2566,12 +2658,19 @@ impl Store {
         }
 
         if let Some((next_run_status, next_agent_status)) = record.transition() {
-            if is_root {
+            let is_control = matches!(
+                record,
+                ProviderEventRecord::ApprovalRequested { .. }
+                    | ProviderEventRecord::UserInputRequested { .. }
+            );
+            if is_root || (is_control && run.status != RunStatus::Waiting) {
                 run.transition(next_run_status)?;
             }
-            validate_agent_transition(agent.status, next_agent_status)?;
+            if !native_start {
+                validate_agent_transition(agent.status, next_agent_status)?;
+            }
 
-            if is_root {
+            if is_root || is_control {
                 sqlx::query("UPDATE provider_runs SET status = ?, updated_at = ? WHERE id = ?")
                     .bind(run_status_label(run.status))
                     .bind(now)
@@ -2585,6 +2684,22 @@ impl Store {
                 .bind(agent_id.to_string())
                 .execute(&mut *transaction)
                 .await?;
+            if native_start {
+                sqlx::query("INSERT INTO native_child_turns (agent_id, native_turn_id, started_event_id) VALUES (?, ?, ?)")
+                    .bind(agent_id.to_string()).bind(&native.expect("native start has an owner").native_turn_id)
+                    .bind(event_id.to_string()).execute(&mut *transaction).await?;
+            }
+            if is_terminal_run_status(next_run_status) {
+                sqlx::query(
+                    "UPDATE native_child_turns SET ended = 1 WHERE agent_id = ? AND ended = 0",
+                )
+                .bind(agent_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+                if !is_root {
+                    reconcile_child_control_waiting(&mut transaction, run_id, now).await?;
+                }
+            }
         }
 
         let event_mutation = match &record {
@@ -3055,6 +3170,7 @@ impl Store {
             id: provider_request_id.to_owned(),
         })?
         .into_domain()?;
+        require_native_control_active(&mut transaction, approval.id).await?;
         if approval.status != ApprovalStatus::Pending {
             return Err(StoreError::NotFound {
                 entity: "pending approval",
@@ -3285,6 +3401,7 @@ impl Store {
             }) if approval.status == ApprovalStatus::Pending => resolution,
             _ => return Err(StoreError::InvalidApprovalResponseIntentState),
         };
+        require_native_control_active(&mut transaction, approval.id).await?;
         if run.status != RunStatus::Waiting || agent.status != AgentStatus::Waiting {
             return Err(StoreError::InvalidEventState {
                 event: "approval response acknowledgement",
@@ -3312,10 +3429,25 @@ impl Store {
         if result.rows_affected() != 1 {
             return Err(StoreError::InvalidApprovalResponseIntentState);
         }
-        run.transition(RunStatus::Running)?;
+        let other_pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM approvals WHERE run_id = ? AND status = 'pending') \
+             OR EXISTS(SELECT 1 FROM agent_nodes WHERE run_id = ? AND parent_id IS NULL AND id != ? AND status = 'waiting')",
+        )
+        .bind(run_id.to_string())
+        .bind(run_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !other_pending {
+            run.transition(RunStatus::Running)?;
+        }
         validate_agent_transition(agent.status, AgentStatus::Running)?;
         let event_id = TimelineEventId::new();
-        let content = "Provider run resumed";
+        let content = if agent.parent_id.is_none() {
+            "Provider run resumed"
+        } else {
+            "Agent resumed"
+        };
         let inserted = sqlx::query(
             "INSERT INTO events \
              (id, conversation_id, run_id, agent_id, kind, content, payload_json, created_at) \
@@ -3336,7 +3468,8 @@ impl Store {
         .bind(now)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query("UPDATE provider_runs SET status = 'running', updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE provider_runs SET status = ?, updated_at = ? WHERE id = ?")
+            .bind(run_status_label(run.status))
             .bind(now)
             .bind(run_id.to_string())
             .execute(&mut *transaction)
@@ -3369,6 +3502,31 @@ impl Store {
             role: None,
             content: content.to_owned(),
         })
+    }
+
+    /// Resolve the immutable native target for a persisted child control. The
+    /// response intent/ack transactions separately verify that turn is active.
+    pub async fn load_native_child_control_owner(
+        &self,
+        run_id: RunId,
+        provider_request_id: &str,
+    ) -> Result<Option<(AgentId, NativeChildTurn)>, StoreError> {
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT a.agent_id, n.provider_native_id, c.native_turn_id \
+             FROM approvals a JOIN native_child_controls c ON c.approval_id = a.id AND c.agent_id = a.agent_id \
+             JOIN agent_nodes n ON n.id = a.agent_id AND n.run_id = a.run_id \
+             WHERE a.run_id = ? AND a.provider_request_id = ?",
+        ).bind(run_id.to_string()).bind(provider_request_id).fetch_optional(&self.pool).await?;
+        row.map(|(agent, thread, turn)| {
+            Ok((
+                AgentId::from(parse_uuid("agent node", &agent)?),
+                NativeChildTurn {
+                    native_thread_id: thread,
+                    native_turn_id: turn,
+                },
+            ))
+        })
+        .transpose()
     }
 
     pub async fn load_approval(
@@ -3698,6 +3856,13 @@ impl Store {
              WHERE run_id = ? AND status IN ('queued', 'running', 'waiting')",
         )
         .bind(now)
+        .bind(run_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE native_child_turns SET ended = 1 WHERE ended = 0 \
+             AND agent_id IN (SELECT id FROM agent_nodes WHERE run_id = ?)",
+        )
         .bind(run_id.to_string())
         .execute(&mut *transaction)
         .await?;
@@ -4884,6 +5049,107 @@ impl Store {
     }
 }
 
+async fn has_native_child_turn(
+    transaction: &mut Transaction<'_, Sqlite>,
+    agent_id: AgentId,
+) -> Result<bool, StoreError> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM native_child_turns WHERE agent_id = ?)")
+            .bind(agent_id.to_string())
+            .fetch_one(&mut **transaction)
+            .await?,
+    )
+}
+
+async fn validate_native_child_event(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run: &ProviderRun,
+    agent: &AgentNode,
+    native: &NativeChildTurn,
+    record: &ProviderEventRecord,
+) -> Result<Option<TimelineEvent>, StoreError> {
+    if run.provider != ProviderId::Codex
+        || agent.provider != run.provider
+        || agent.parent_id.is_none()
+        || !matches!(run.status, RunStatus::Running | RunStatus::Waiting)
+        || !matches!(
+            record,
+            ProviderEventRecord::Started { .. }
+                | ProviderEventRecord::Completed
+                | ProviderEventRecord::Interrupted
+                | ProviderEventRecord::Failed(_)
+                | ProviderEventRecord::ApprovalRequested { .. }
+                | ProviderEventRecord::UserInputRequested { .. }
+        )
+    {
+        return Err(StoreError::NativeAgentIdentityConflict);
+    }
+    let previous: Option<(bool, String)> = sqlx::query_as(
+        "SELECT ended, started_event_id FROM native_child_turns WHERE agent_id = ? AND native_turn_id = ?",
+    ).bind(agent.id.to_string()).bind(&native.native_turn_id).fetch_optional(&mut **transaction).await?;
+    if let ProviderEventRecord::Started { native_turn_id } = record {
+        if native_turn_id.as_deref() != Some(native.native_turn_id.as_str()) {
+            return Err(StoreError::NativeAgentIdentityConflict);
+        }
+        if let Some((ended, event_id)) = previous {
+            if ended {
+                return Err(StoreError::NativeAgentIdentityConflict);
+            }
+            return sqlx::query_as::<_, TimelineEventRow>(
+                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, role, content FROM events WHERE id = ?",
+            ).bind(event_id).fetch_one(&mut **transaction).await?.into_domain().map(Some);
+        }
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM native_child_turns WHERE agent_id = ? AND ended = 0)",
+        )
+        .bind(agent.id.to_string())
+        .fetch_one(&mut **transaction)
+        .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM native_child_turns WHERE agent_id = ?")
+                .bind(agent.id.to_string())
+                .fetch_one(&mut **transaction)
+                .await?;
+        if active || count >= MAX_NATIVE_CHILD_TURNS || agent.status == AgentStatus::Waiting {
+            return Err(StoreError::NativeAgentIdentityConflict);
+        }
+    } else if !matches!(previous, Some((false, _))) {
+        return Err(StoreError::NativeAgentIdentityConflict);
+    }
+    Ok(None)
+}
+
+async fn require_native_control_active(
+    transaction: &mut Transaction<'_, Sqlite>,
+    approval_id: ApprovalId,
+) -> Result<(), StoreError> {
+    let ended: Option<bool> = sqlx::query_scalar(
+        "SELECT t.ended FROM native_child_controls c \
+         JOIN native_child_turns t ON t.agent_id = c.agent_id AND t.native_turn_id = c.native_turn_id \
+         WHERE c.approval_id = ?",
+    ).bind(approval_id.to_string()).fetch_optional(&mut **transaction).await?;
+    if ended == Some(true) {
+        return Err(StoreError::NativeAgentIdentityConflict);
+    }
+    Ok(())
+}
+
+// Only a child control can make the run Waiting while the root stays Running.
+// Preserve a root-owned wait and any other pending control when a child ends.
+async fn reconcile_child_control_waiting(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: RunId,
+    now: i64,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE provider_runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'waiting' \
+         AND NOT EXISTS(SELECT 1 FROM approvals WHERE run_id = ? AND status = 'pending') \
+         AND EXISTS(SELECT 1 FROM agent_nodes WHERE run_id = ? AND parent_id IS NULL AND status = 'running')",
+    ).bind(now).bind(run_id.to_string()).bind(run_id.to_string()).bind(run_id.to_string())
+        .execute(&mut **transaction).await?;
+    Ok(())
+}
+
 async fn materialize_child_agents(
     transaction: &mut Transaction<'_, Sqlite>,
     run: &ProviderRun,
@@ -4936,7 +5202,9 @@ async fn materialize_child_agents(
             if existing.parent_id != Some(parent.id) || existing.provider != run.provider {
                 return Err(StoreError::NativeAgentIdentityConflict);
             }
-            if let Some(next) = reported_status {
+            if let Some(next) = reported_status
+                && !has_native_child_turn(transaction, existing.id).await?
+            {
                 validate_native_agent_update(existing.status, next)?;
                 sqlx::query("UPDATE agent_nodes SET status = ?, updated_at = ? WHERE id = ?")
                     .bind(agent_status_label(next))
@@ -5015,13 +5283,19 @@ async fn update_sub_agent(
     {
         return Err(StoreError::NativeAgentIdentityConflict);
     }
-    let next = match activity {
-        NativeSubAgentActivityKind::Started => AgentStatus::Running,
-        NativeSubAgentActivityKind::Completed => AgentStatus::Completed,
-        // Interaction may only queue a message; interruption is a tool request,
-        // not acknowledgement of a particular child turn's termination.
-        NativeSubAgentActivityKind::Interacted | NativeSubAgentActivityKind::Interrupted => {
-            existing.status
+    let next = if has_native_child_turn(transaction, existing.id).await? {
+        // Observer activity has the observer's turn ID. It cannot finish or
+        // reactivate an independently tracked target turn.
+        existing.status
+    } else {
+        match activity {
+            NativeSubAgentActivityKind::Started => AgentStatus::Running,
+            NativeSubAgentActivityKind::Completed => AgentStatus::Completed,
+            // Interaction may only queue a message; interruption is a tool request,
+            // not acknowledgement of a particular child turn's termination.
+            NativeSubAgentActivityKind::Interacted | NativeSubAgentActivityKind::Interrupted => {
+                existing.status
+            }
         }
     };
     validate_native_agent_update(existing.status, next)?;
@@ -7015,7 +7289,7 @@ mod tests {
     use super::{
         ConversationSettings, MAX_APPROVAL_AGENT_PATH_NODES, MAX_CANONICAL_MESSAGE_BYTES,
         MAX_NATIVE_AGENT_ID_BYTES, MAX_OBJECTIVE_BYTES, MAX_RUN_AUDIT_HANDOFF_BYTES,
-        MAX_STAGED_EVENT_BYTES, MAX_STAGED_EVENT_ROWS, MIGRATOR, NewConversation,
+        MAX_STAGED_EVENT_BYTES, MAX_STAGED_EVENT_ROWS, MIGRATOR, NativeChildTurn, NewConversation,
         NewFallbackAttempt, NewSubmission, PreparedSubmission, ProviderEventRecord,
         STAGED_OVERFLOW_CONTENT, STORE_CHANGE_CHANNEL_CAPACITY, Store, StoreError,
         dispatch_lease_is_protected, provider_label,
@@ -10231,6 +10505,1043 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(remaining_owned_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn native_child_controls_retain_their_turn_and_reject_terminal_acknowledgement() {
+        let (store, run, root, child) = native_child_fixture().await;
+        let native = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        let questions = vec![UserInputQuestion {
+            id: "choice".into(),
+            header: "Choice".into(),
+            question: "Which synthetic value?".into(),
+            options: None,
+            is_other: true,
+            is_secret: false,
+        }];
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::user_input_requested(
+                    ProviderId::Codex,
+                    "question-a",
+                    questions.clone(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let approval = store.load_approval(run, "question-a").await.unwrap();
+        assert_eq!(approval.agent_id, child);
+        assert_eq!(approval.input.unwrap().questions, questions);
+        assert_eq!(
+            store
+                .load_native_child_control_owner(run, "question-a")
+                .await
+                .unwrap(),
+            Some((child, native.clone()))
+        );
+        let detail = store.load_approval_detail(approval.id).await.unwrap();
+        assert_eq!(detail.agent_path.len(), 2);
+        assert_eq!(detail.agent_path.last().map(String::as_str), Some("child"));
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Waiting
+        );
+        assert!(
+            store
+                .record_owned_response_intent(
+                    run,
+                    root,
+                    "question-a",
+                    ApprovalResolution::Answer("synthetic".into()),
+                    "owner"
+                )
+                .await
+                .is_err()
+        );
+        let answer = ApprovalResolution::Answers(std::collections::BTreeMap::from([(
+            "choice".into(),
+            vec!["synthetic".into()],
+        )]));
+        store
+            .record_owned_response_intent(run, child, "question-a", answer.clone(), "owner")
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .append_owned_native_child_event(
+                    run,
+                    &native,
+                    "owner",
+                    ProviderEventRecord::completed()
+                )
+                .await,
+            Err(StoreError::PendingApproval)
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            count
+        );
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::interrupted(),
+            )
+            .await
+            .unwrap();
+        let cancelled = store.load_approval(run, "question-a").await.unwrap();
+        assert_eq!(cancelled.resolution, Some(ApprovalResolution::Cancelled));
+        assert_eq!(
+            cancelled.response_intent.unwrap().status,
+            crate::domain::ApprovalResponseIntentStatus::DispatchUnknown
+        );
+        assert!(
+            store
+                .acknowledge_owned_response_intent(run, child, "question-a", "owner")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Running
+        );
+        let next = NativeChildTurn {
+            native_turn_id: "turn-b".into(),
+            ..native.clone()
+        };
+        store
+            .append_owned_native_child_event(
+                run,
+                &next,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-b"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_native_child_control_owner(run, "question-a")
+                .await
+                .unwrap(),
+            Some((child, native.clone()))
+        );
+        assert!(
+            store
+                .append_owned_native_child_event(
+                    run,
+                    &native,
+                    "owner",
+                    ProviderEventRecord::approval_requested(
+                        ProviderId::Codex,
+                        "stale",
+                        "synthetic",
+                        "scope"
+                    )
+                )
+                .await
+                .is_err()
+        );
+        store
+            .append_owned_native_child_event(
+                run,
+                &next,
+                "owner",
+                ProviderEventRecord::user_input_requested(
+                    ProviderId::Codex,
+                    "question-b",
+                    questions,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .record_owned_response_intent(run, child, "question-b", answer.clone(), "owner")
+            .await
+            .unwrap();
+        store
+            .acknowledge_owned_response_intent(run, child, "question-b", "owner")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_approval(run, "question-b")
+                .await
+                .unwrap()
+                .resolution,
+            Some(answer)
+        );
+        assert!(matches!(
+            store
+                .acknowledge_owned_response_intent(run, child, "question-b", "owner")
+                .await,
+            Err(StoreError::ApprovalResponseAlreadyAcknowledged)
+        ));
+        store
+            .append_owned_native_child_event(run, &next, "owner", ProviderEventRecord::completed())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn native_child_ownership_fences_and_rejected_events_are_atomic() {
+        let (store, run, root, child) = native_child_fixture().await;
+        let native = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        for (thread, turn, record) in [
+            (
+                "unknown",
+                "turn-a",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            ),
+            (
+                "native-root",
+                "turn-a",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            ),
+            (
+                "native-child",
+                "",
+                ProviderEventRecord::started_with_native_id(""),
+            ),
+            (
+                "native-child",
+                "turn-a",
+                ProviderEventRecord::started_with_native_id("different"),
+            ),
+            (
+                "native-child",
+                "turn-a",
+                ProviderEventRecord::message("child transcript out of scope"),
+            ),
+            (
+                "native-child",
+                "turn-a",
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    "before-start",
+                    "synthetic",
+                    "scope",
+                ),
+            ),
+        ] {
+            assert!(
+                store
+                    .append_owned_native_child_event(
+                        run,
+                        &NativeChildTurn {
+                            native_thread_id: thread.into(),
+                            native_turn_id: turn.into()
+                        },
+                        "owner",
+                        record
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM native_child_turns")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        let first = store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        let duplicate = store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.id, duplicate.id);
+        let active_replacement = NativeChildTurn {
+            native_turn_id: "turn-b".into(),
+            ..native.clone()
+        };
+        assert!(
+            store
+                .append_owned_native_child_event(
+                    run,
+                    &active_replacement,
+                    "owner",
+                    ProviderEventRecord::started_with_native_id("turn-b")
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .append_owned_run_event(
+                    run,
+                    child,
+                    "owner",
+                    ProviderEventRecord::approval_requested(
+                        ProviderId::Codex,
+                        "missing-native-turn",
+                        "synthetic",
+                        "scope"
+                    )
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .append_owned_run_event(run, root, "owner", ProviderEventRecord::completed())
+                .await
+                .is_err()
+        );
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    "permission",
+                    "synthetic",
+                    "scope",
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .replace_dispatch_owner_for_test(run, "replacement")
+            .await
+            .unwrap();
+        assert!(
+            matches!(store.append_owned_native_child_event(run, &native, "owner", ProviderEventRecord::interrupted()).await, Err(StoreError::DispatchOwnerMismatch(id)) if id == run)
+        );
+        assert!(
+            matches!(store.record_owned_response_intent(run, child, "permission", ApprovalResolution::Denied, "owner").await, Err(StoreError::DispatchOwnerMismatch(id)) if id == run)
+        );
+        store
+            .record_owned_response_intent(
+                run,
+                child,
+                "permission",
+                ApprovalResolution::Denied,
+                "replacement",
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(store.acknowledge_owned_response_intent(run, child, "permission", "owner").await, Err(StoreError::DispatchOwnerMismatch(id)) if id == run)
+        );
+        store
+            .acknowledge_owned_response_intent(run, child, "permission", "replacement")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_approval(run, "permission")
+                .await
+                .unwrap()
+                .resolution,
+            Some(ApprovalResolution::Denied)
+        );
+    }
+
+    #[tokio::test]
+    async fn native_child_acknowledgement_preserves_a_root_owned_wait() {
+        let (store, run, root, child) = native_child_fixture().await;
+        let native = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        store
+            .append_owned_run_event(run, root, "owner", ProviderEventRecord::waiting())
+            .await
+            .unwrap();
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    "permission",
+                    "synthetic",
+                    "scope",
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .record_owned_response_intent(
+                run,
+                child,
+                "permission",
+                ApprovalResolution::Denied,
+                "owner",
+            )
+            .await
+            .unwrap();
+        store
+            .acknowledge_owned_response_intent(run, child, "permission", "owner")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Waiting
+        );
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::completed(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Waiting
+        );
+    }
+
+    #[tokio::test]
+    async fn native_nested_child_terminal_preserves_a_sibling_control() {
+        let (store, run, root, child) = native_child_fixture().await;
+        let grandchild = insert_child(&store, run, child, "queued", "nested").await;
+        sqlx::query("UPDATE agent_nodes SET provider_native_id = 'native-nested' WHERE id = ?")
+            .bind(grandchild.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        for (thread, request) in [("native-child", "first"), ("native-nested", "second")] {
+            let native = NativeChildTurn {
+                native_thread_id: thread.into(),
+                native_turn_id: "turn-a".into(),
+            };
+            store
+                .append_owned_native_child_event(
+                    run,
+                    &native,
+                    "owner",
+                    ProviderEventRecord::started_with_native_id("turn-a"),
+                )
+                .await
+                .unwrap();
+            store
+                .append_owned_native_child_event(
+                    run,
+                    &native,
+                    "owner",
+                    ProviderEventRecord::approval_requested(
+                        ProviderId::Codex,
+                        request,
+                        "synthetic",
+                        "scope",
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let detail = store
+            .load_approval_detail(store.load_approval(run, "second").await.unwrap().id)
+            .await
+            .unwrap();
+        assert_eq!(detail.agent_path.len(), 3);
+        assert_eq!(
+            store.load_approval(run, "second").await.unwrap().agent_id,
+            grandchild
+        );
+        let parent = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        store
+            .append_owned_native_child_event(
+                run,
+                &parent,
+                "owner",
+                ProviderEventRecord::failed("synthetic child failure"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Waiting
+        );
+        assert_eq!(
+            store.load_approval(run, "first").await.unwrap().resolution,
+            Some(ApprovalResolution::Failed)
+        );
+        assert_eq!(
+            store.load_approval(run, "second").await.unwrap().status,
+            crate::domain::ApprovalStatus::Pending
+        );
+        store
+            .record_owned_response_intent(
+                run,
+                grandchild,
+                "second",
+                ApprovalResolution::Denied,
+                "owner",
+            )
+            .await
+            .unwrap();
+        store
+            .acknowledge_owned_response_intent(run, grandchild, "second", "owner")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Running
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM agent_nodes WHERE id = ?")
+                .bind(root.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            "running"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_child_control_foreign_key_rejects_another_agent_or_run() {
+        let (store, run, _root, child) = native_child_fixture().await;
+        let native = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    "permission",
+                    "synthetic",
+                    "scope",
+                ),
+            )
+            .await
+            .unwrap();
+        let second_conversation = store
+            .create_conversation(NewConversation::projectless("disjoint tree"))
+            .await
+            .unwrap();
+        let (second_run, second_root) = store
+            .create_run(second_conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .claim_provider_dispatch(second_run.id, "second-owner", Duration::from_secs(120))
+            .await
+            .unwrap();
+        store
+            .append_owned_run_event(
+                second_run.id,
+                second_root.id,
+                "second-owner",
+                ProviderEventRecord::started(),
+            )
+            .await
+            .unwrap();
+        let other = insert_child(
+            &store,
+            second_run.id,
+            second_root.id,
+            "queued",
+            "other child",
+        )
+        .await;
+        sqlx::query("UPDATE agent_nodes SET provider_native_id = 'native-child' WHERE id = ?")
+            .bind(other.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .append_owned_native_child_event(
+                second_run.id,
+                &native,
+                "second-owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        let approval = store.load_approval(run, "permission").await.unwrap();
+        assert!(
+            sqlx::query("UPDATE native_child_controls SET agent_id = ? WHERE approval_id = ?")
+                .bind(other.to_string())
+                .bind(approval.id.to_string())
+                .execute(&store.pool)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .load_native_child_control_owner(run, "permission")
+                .await
+                .unwrap(),
+            Some((child, native.clone()))
+        );
+        assert_eq!(
+            store
+                .load_native_child_control_owner(second_run.id, "permission")
+                .await
+                .unwrap(),
+            None
+        );
+        store
+            .append_owned_native_child_event(
+                second_run.id,
+                &native,
+                "second-owner",
+                ProviderEventRecord::completed(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Waiting
+        );
+        assert_eq!(
+            store.load_run(second_run.id).await.unwrap().status,
+            RunStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn native_child_turn_history_bound_rolls_back_before_lifecycle_write() {
+        let (store, run, _, child) = native_child_fixture().await;
+        let native = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        let started = store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::completed(),
+            )
+            .await
+            .unwrap();
+        sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) INSERT INTO native_child_turns (agent_id, native_turn_id, started_event_id, ended) SELECT ?, 'past-' || i, ?, 1 FROM n")
+            .bind(super::MAX_NATIVE_CHILD_TURNS - 1).bind(child.to_string()).bind(started.id.to_string()).execute(&store.pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let next = NativeChildTurn {
+            native_turn_id: "turn-b".into(),
+            ..native
+        };
+        assert!(
+            store
+                .append_owned_native_child_event(
+                    run,
+                    &next,
+                    "owner",
+                    ProviderEventRecord::started_with_native_id("turn-b")
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            count
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM agent_nodes WHERE id = ?")
+                .bind(child.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_child_emergency_failure_seals_controls_and_turns() {
+        let (store, run, root, child) = native_child_fixture().await;
+        let native = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            )
+            .await
+            .unwrap();
+        store
+            .append_owned_native_child_event(
+                run,
+                &native,
+                "owner",
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    "permission",
+                    "synthetic",
+                    "scope",
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .record_owned_response_intent(
+                run,
+                child,
+                "permission",
+                ApprovalResolution::Denied,
+                "owner",
+            )
+            .await
+            .unwrap();
+        store
+            .fail_owned_run_if_active(
+                run,
+                root,
+                ProviderErrorCategory::ContractViolation,
+                MutationState::Unknown,
+                DispatchCertainty::MayHaveDispatched,
+                "owner",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM native_child_turns WHERE ended = 0")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            store
+                .acknowledge_owned_response_intent(run, child, "permission", "owner")
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .append_owned_native_child_event(
+                    run,
+                    &native,
+                    "owner",
+                    ProviderEventRecord::started_with_native_id("turn-a")
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .load_approval(run, "permission")
+                .await
+                .unwrap()
+                .resolution,
+            Some(ApprovalResolution::Failed)
+        );
+    }
+
+    async fn native_child_fixture() -> (Store, RunId, AgentId, AgentId) {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("native child fixture"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .bind_native_session(run.id, "native-root")
+            .await
+            .unwrap();
+        store
+            .claim_provider_dispatch(run.id, "owner", Duration::from_secs(120))
+            .await
+            .unwrap();
+        store
+            .append_owned_run_event(run.id, root.id, "owner", ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let child = insert_child(&store, run.id, root.id, "queued", "child").await;
+        sqlx::query("UPDATE agent_nodes SET provider_native_id = 'native-child' WHERE id = ?")
+            .bind(child.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        (store, run.id, root.id, child)
+    }
+
+    #[tokio::test]
+    async fn native_child_turn_reactivation_rejects_replay_and_delayed_activity() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("child follow-up"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .bind_native_session(run.id, "native-root")
+            .await
+            .unwrap();
+        store
+            .claim_provider_dispatch(run.id, "owner", Duration::from_secs(120))
+            .await
+            .unwrap();
+        store
+            .append_owned_run_event(run.id, root.id, "owner", ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let child = insert_child(&store, run.id, root.id, "queued", "child").await;
+        sqlx::query("UPDATE agent_nodes SET provider_native_id = 'native-child' WHERE id = ?")
+            .bind(child.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        for (turn, record) in [
+            (
+                "turn-a",
+                ProviderEventRecord::started_with_native_id("turn-a"),
+            ),
+            ("turn-a", ProviderEventRecord::completed()),
+            (
+                "turn-b",
+                ProviderEventRecord::started_with_native_id("turn-b"),
+            ),
+        ] {
+            let native = NativeChildTurn {
+                native_thread_id: "native-child".into(),
+                native_turn_id: turn.into(),
+            };
+            let event = store
+                .append_owned_native_child_event(run.id, &native, "owner", record)
+                .await
+                .unwrap();
+            assert_eq!(event.agent_id, child);
+            let payload: String =
+                sqlx::query_scalar("SELECT payload_json FROM events WHERE id = ?")
+                    .bind(event.id.to_string())
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["nativeThreadId"], "native-child");
+            assert_eq!(payload["nativeTurnId"], turn);
+        }
+        let native = NativeChildTurn {
+            native_thread_id: "native-child".into(),
+            native_turn_id: "turn-a".into(),
+        };
+        assert!(
+            store
+                .append_owned_native_child_event(
+                    run.id,
+                    &native,
+                    "owner",
+                    ProviderEventRecord::started_with_native_id("turn-a")
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .append_owned_native_child_event(
+                    run.id,
+                    &native,
+                    "owner",
+                    ProviderEventRecord::completed()
+                )
+                .await
+                .is_err()
+        );
+        store
+            .append_owned_run_event(
+                run.id,
+                root.id,
+                "owner",
+                ProviderEventRecord::sub_agent(
+                    "late-completed",
+                    "native-child",
+                    "child",
+                    NativeSubAgentActivityKind::Completed,
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .append_owned_run_event(
+                run.id,
+                root.id,
+                "owner",
+                ProviderEventRecord::child_agent(
+                    "late-collab",
+                    "native-root",
+                    vec!["native-child".into()],
+                    vec![NativeChildStatus {
+                        native_thread_id: "native-child".into(),
+                        status: NativeAgentStatus::Completed,
+                    }],
+                    "wait",
+                    "completed",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.pending_recovery().await.unwrap()[0]
+                .agents
+                .iter()
+                .find(|agent| agent.id == child)
+                .unwrap()
+                .status,
+            crate::domain::AgentStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn child_control_waiting_and_acknowledgement_preserve_other_owners() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("child controls"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let first = insert_child(&store, run.id, root.id, "running", "first").await;
+        let second = insert_child(&store, run.id, root.id, "running", "second").await;
+        for (agent, request) in [(first, "permission-one"), (second, "permission-two")] {
+            store
+                .append_run_event(
+                    run.id,
+                    agent,
+                    ProviderEventRecord::approval_requested(
+                        ProviderId::Codex,
+                        request,
+                        "synthetic operation",
+                        "synthetic scope",
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let state = store.pending_recovery().await.unwrap();
+        assert_eq!(state[0].run.status, RunStatus::Waiting);
+        assert_eq!(
+            state[0]
+                .agents
+                .iter()
+                .find(|agent| agent.id == root.id)
+                .unwrap()
+                .status,
+            crate::domain::AgentStatus::Running
+        );
+        assert_eq!(
+            store
+                .load_approval(run.id, "permission-one")
+                .await
+                .unwrap()
+                .agent_id,
+            first
+        );
+        for (agent, request, expected_status) in [
+            (first, "permission-one", RunStatus::Waiting),
+            (second, "permission-two", RunStatus::Running),
+        ] {
+            store
+                .record_response_intent(run.id, agent, request, ApprovalResolution::Denied)
+                .await
+                .unwrap();
+            store
+                .acknowledge_response_intent(run.id, agent, request)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.pending_recovery().await.unwrap()[0].run.status,
+                expected_status
+            );
+        }
     }
 
     #[tokio::test]
