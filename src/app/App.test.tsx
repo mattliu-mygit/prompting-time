@@ -397,7 +397,7 @@ describe("App", () => {
     await waitFor(() => expect(create).toHaveFocus());
   });
 
-  it("makes the complete app background inert while the portaled provider-switch modal is open", async () => {
+  it.each([false, true])("restores app interaction and provider focus after canceling interruption (preview: %s)", async (preview) => {
     const browserFocus = HTMLElement.prototype.focus;
     const focus = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement) {
       if (this.closest("[inert]")) return;
@@ -414,14 +414,21 @@ describe("App", () => {
     try {
       const { container } = render(<App store={store} />);
       const provider = await screen.findByRole("combobox", { name: "Provider" });
-      fireEvent.change(provider, { target: { value: "claude" } });
-      const dialog = screen.getByRole("dialog", { name: "Interrupt Codex to switch provider" });
+      if (preview) {
+        fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "**keep draft**" } });
+        fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
+        fireEvent.click(screen.getByRole("button", { name: "Interrupt Codex" }));
+      } else {
+        fireEvent.change(provider, { target: { value: "claude" } });
+      }
+      const dialog = screen.getByRole("dialog", { name: preview ? "Interrupt Codex" : "Interrupt Codex to switch provider" });
 
       expect(container.querySelector(".app-shell")).toHaveAttribute("inert");
       expect(container).not.toContainElement(dialog);
       fireEvent.click(within(dialog).getByRole("button", { name: "Keep Codex running" }));
       await waitFor(() => expect(container.querySelector(".app-shell")).not.toHaveAttribute("inert"));
       await waitFor(() => expect(provider).toHaveFocus());
+      if (preview) expect(screen.getByRole("region", { name: "Message preview" })).toHaveTextContent("keep draft");
     } finally {
       focus.mockRestore();
     }

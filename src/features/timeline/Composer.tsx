@@ -92,7 +92,7 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
     messageField.current?.focus();
   }, [messageField, pendingInterruption, preview, submitting]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onModalChange?.(interruptionDialogOpen);
     return () => {
       if (interruptionDialogOpen) onModalChange?.(false);
