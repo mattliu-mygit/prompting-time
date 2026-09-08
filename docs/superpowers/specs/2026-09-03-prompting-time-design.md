@@ -81,8 +81,24 @@ new-conversation, pane-toggle, and focus-message actions. It is not message-cont
 search. Conversation selection focuses the chosen composer; cancellation restores
 the prior focus. Existing blocking dialogs and narrow inspector overlays retain
 keyboard priority. The palette uses cmdk for filtering and selection, Radix Dialog
-for dialog and focus management, and react-hotkeys-hook for shortcut registration, with our existing styling and
-store actions; no parallel action framework or additional state library.
+for dialog and focus management, and react-hotkeys-hook for shortcut registration,
+with our existing styling and store actions; no parallel action framework or
+additional state library.
+
+Reading context is session-local. Returning to a recently visited conversation
+restores its visible message and expanded activity, including explicitly loaded
+older history. Readers stay at their place when newer output arrives; views that
+were following latest continue to follow. Retention is bounded to ten recent
+conversation views and the existing per-view history limits. Evicted context is
+not a durable bookmark. Cached reading content does not make cached approvals
+actionable; current approval state must still be read from the service.
+
+Recursive agent navigation uses the existing agent identities and selection state.
+Breadcrumbs identify the selected agent and known ancestors; the palette also
+finds known current-run agents and provides a parent action. Missing ancestry is
+shown as incomplete, never invented. Navigation inspects an agent without changing
+the conversation's composer target, draft, or provider route. It does not establish
+direct messaging support for child agents.
 
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
 content scroll within their panes instead of pushing the composer below the window. Selecting a

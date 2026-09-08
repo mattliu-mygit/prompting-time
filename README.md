@@ -100,12 +100,21 @@ kept in memory only and are discarded when the app closes; no draft autosave fil
 are created. A completed send clears only the submitted draft, not newer edits or
 another conversation's text.
 
+Returning to a recently visited conversation restores your reading position and
+expanded activity, including loaded older history. A view following latest keeps
+following new output. Reading context stays in memory for up to ten recent views;
+it is not saved across app restarts.
+
 Press **⌘K** (or **Ctrl+K**) or use **Search** to find active conversations by title
 or project and run common commands. The same palette can create a conversation,
 toggle either side pane, or focus the message input. Arrow keys select, Enter opens
 or runs the selection, and Escape returns to where you were. Search covers
-conversation names/projects, not message contents.
+conversation names/projects and known agents, not message contents.
 Composition input and held Enter keys do not accidentally submit messages.
+
+Known agents also appear in Search with their conversation context. Selecting one
+shows its breadcrumb and summary; use an ancestor or Go to parent to navigate
+back. The composer still addresses the conversation, not the inspected child.
 
 **Send**, **Steer**, and **Interrupt** stay tied to the provider's supported state.
 The composer does not silently queue a message when steering is unavailable.

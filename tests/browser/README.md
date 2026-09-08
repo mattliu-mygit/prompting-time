@@ -134,6 +134,28 @@ Interrupt, then choose Keep running. After the dialog closes the provider select
 must regain focus, with the preview/draft preserved. A real browser is necessary:
 jsdom does not model native inert focus suppression or the same rendering schedule.
 
+## Reading context and nested agents
+
+Use `?chat=stream` at 1440 × 900. Scroll to an earlier observation, expand tool
+activity, and switch from Synthetic conversation 0 to 1 and back. Confirm the
+same message remains at the same viewport offset and the activity stays expanded.
+Repeat after advancing the synthetic stream while conversation 1 is selected.
+If conversation 0 was following latest instead, returning should show the newest
+output. Repeat at 960 × 600; window resizing may reflow text, but should not send
+a reader to the end. Reading state is session-local, not a reload guarantee.
+
+Use `?chat=orientation` for 240 paged messages. Load older messages explicitly,
+read one outside the newest 80, switch away, advance the stream, and return.
+The older message should remain visible; the same helper appends one new message
+to conversation 0 without changing the older messages.
+
+Use the nested agents in the same fixture to navigate from child to grandchild
+and back through the breadcrumb and palette. Verify the selected agent is clearly
+identified, duplicate labels include conversation context, and navigation leaves
+the composer draft and provider choice unchanged. Check Escape focus restoration,
+normal arrow-key text editing, and long-path wrapping at minimum window width.
+These checks inspect agents; they do not establish direct child messaging support.
+
 ## Comfortable readability
 
 Use `?chat=reading` at 1440 × 900 and 960 × 600. With the inspector initially closed,

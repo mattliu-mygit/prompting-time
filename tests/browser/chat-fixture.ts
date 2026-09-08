@@ -53,7 +53,20 @@ export function chatApproval(conversationId: string): ApprovalSnapshot {
   };
 }
 
-export function chatTimeline(conversationId: string): TimelinePage {
+export function chatTimeline(conversationId: string, cursor: string | null = null, limit = 80): TimelinePage {
+  if (scenario === "orientation") {
+    const count = 240 + (conversationId === "conversation-0" ? revision : 0);
+    const end = cursor === null ? count : Number(cursor);
+    const start = Math.max(0, end - limit);
+    return {
+      items: Array.from({ length: end - start }, (_, offset) => {
+        const sequence = start + offset + 1;
+        return item(conversationId, sequence, `### Observation ${sequence}\n\n${"Invented history for reading-position checks. ".repeat(8)}`);
+      }),
+      nextCursor: start === 0 ? null : String(start),
+      approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    };
+  }
   const items = [
     item(conversationId, 1, "Please simplify the parser, check Unicode handling, and show the important changes.", { role: "user" }),
     item(conversationId, 2, "I’ll inspect the parser and its tests, then make the smallest change that covers the missing validation."),

@@ -5,12 +5,17 @@ and validate its behavior before adding the next.
 
 ## Recommended order
 
-1. **Parent/child navigation.** Make jumping from an orchestrator to its children
-   and back convenient without taking over arrow keys while editing text.
-2. **Optional durable drafts.** In-session preservation is implemented. Disk
+1. **Unread and attention indicators.** Distinguish new responses from approvals
+   needing action, and navigate to the next conversation needing attention.
+   Extend the existing background notifications rather than duplicating them.
+2. **Conversation organization.** Rename folder-derived titles, pin frequent
+   conversations, and expose archived conversations with a restore action.
+3. **Find within conversation.** Search message contents with explicit coverage
+   of older history, not just the currently mounted page.
+4. **Optional durable drafts.** In-session preservation is implemented. Disk
    persistence needs an explicit privacy/retention decision because drafts may
    contain sensitive material.
-3. **More palette actions.** The shared palette covers conversation switching and
+5. **More palette actions.** The shared palette covers conversation switching and
    common shell actions. Extend it with existing actions such as zoom/reset only
    through their authoritative handlers.
 

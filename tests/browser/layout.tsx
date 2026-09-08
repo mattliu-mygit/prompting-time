@@ -52,9 +52,9 @@ const api: AppApi = {
     return { runId: conversation.currentRunId, items: conversation.agents.map((agent, depth) => ({ agent, depth })), nextCursor: null };
   },
   listenToAppEvents: async (handler) => listenToChatEvents(handler),
-  loadTimeline: async ({ conversationId }) => composerScenario ? ({
+  loadTimeline: async ({ conversationId, cursor, limit }) => composerScenario ? ({
     items: composerMessages(conversationId), nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
-  }) : chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId) : ({
+  }) : chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId, cursor, limit) : ({
     items: Array.from({ length: conversationId.startsWith("created-") ? 0 : 80 }, (_, index) => ({
       id: `event-${index}`, conversationId, runId: "run-0", agentId: "root-0",
       sequence: String(index + 1), kind: "message", role: "assistant", provider: "codex",
