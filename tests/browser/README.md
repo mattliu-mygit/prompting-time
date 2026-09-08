@@ -13,6 +13,12 @@ Start `pnpm dev` from the repository root. Run the following from
 playwright-cli -s=layout-check open http://localhost:1420/tests/browser/layout.html
 playwright-cli -s=layout-check resize 1280 720
 playwright-cli -s=layout-check snapshot
+```
+
+The inspector starts closed. At this width, open **Show inspector** using its fresh
+snapshot ref before running the long-pane check:
+
+```sh
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-layout.ts")).checkLayout()'
 ```
 
@@ -89,3 +95,21 @@ For modal focus integration, use `?chat=approval`, type a draft, open Preview, o
 Interrupt, then choose Keep running. After the dialog closes the provider selector
 must regain focus, with the preview/draft preserved. A real browser is necessary:
 jsdom does not model native inert focus suppression or the same rendering schedule.
+
+## Comfortable readability
+
+Use `?chat=reading` at 1440 × 900 and 960 × 600. With the inspector initially closed,
+run the computed-font/target/layout check:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-readability.ts")).checkReadability()'
+```
+
+Open the inspector and repeat with `checkReadability({ inspectorOpen: true })`.
+At minimum width it must overlay, trap focus and close with Escape; at wide width
+it docks beside the chat. Inspect long inspector values and buttons for wrapping,
+code/tables for local scrolling, and the nested sidebar for reachable disclosures.
+Expand the first conversation and its child and repeat the check at the default
+sidebar width; each of the first three names must retain at least 120px of space.
+Capture window `error` events in addition to console output when checking draft
+growth and width changes, so observer-delivery errors are not missed.

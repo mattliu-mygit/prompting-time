@@ -43,6 +43,23 @@ The main window uses a three-pane command-center layout:
 - The center pane prioritizes the selected conversation: readable assistant responses, compact user messages, expandable tool activity, approvals, and the composer. Provider identity stays visible without dominating the text.
 - The right inspector shows routing rationale, workspace and worktree state, changed files, active agents, and explicitly disclosed diagnostics. It is collapsible for focus and smaller windows.
 
+The inspector starts closed, leaving the conversation primary. Explicitly opening
+or closing it retains that choice while switching conversations. At smaller widths,
+it overlays the workspace instead of squeezing the reading column; its background
+is noninteractive, keyboard focus stays inside, and closing restores the trigger.
+New windows default to 1440 × 900, with a minimum of 960 × 600. This does not reset
+the size of an already open window.
+
+Readable defaults use 17px chat, preview and composer text, 14px controls/sidebar
+labels and code, and at least 13px secondary text at standard root scaling. Existing
+larger headings retain their hierarchy. Typed text uses the normal foreground color;
+placeholder and metadata remain secondary. Shared rem-based sizes preserve scaling
+without global zoom. Controls have at least 32px height, icon targets are 32px square,
+and conversation rows have at least 36px height. Long text wraps or scrolls within
+its own region rather than creating horizontal window overflow.
+Conversation and agent names occupy their own row, with provider/status metadata
+below, so badges do not crowd out nested names.
+
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
 content scroll within their panes instead of pushing the composer below the window. Selecting a
 child preserves usable navigation and the conversation workspace. An active interruptible turn
