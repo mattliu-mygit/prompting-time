@@ -17,6 +17,7 @@ use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::domain::{ConversationId, Workspace, WorkspaceId};
+use crate::owned_process::OwnedProcess;
 
 mod owned_fs;
 
@@ -2233,11 +2234,9 @@ async fn command_output_bounded_inner(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command
-        .spawn()
-        .map_err(|source| WorkspaceError::Io { operation, source })?;
+        .stderr(Stdio::piped());
+    let mut child =
+        OwnedProcess::spawn(command).map_err(|source| WorkspaceError::Io { operation, source })?;
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -2361,19 +2360,11 @@ async fn write_command_input(
 }
 
 async fn terminate_and_reap(
-    child: &mut tokio::process::Child,
+    child: &mut OwnedProcess,
     operation: &'static str,
 ) -> Result<std::process::ExitStatus, WorkspaceError> {
-    if let Err(source) = child.start_kill()
-        && child
-            .try_wait()
-            .map_err(|source| WorkspaceError::Io { operation, source })?
-            .is_none()
-    {
-        return Err(WorkspaceError::Io { operation, source });
-    }
     child
-        .wait()
+        .terminate()
         .await
         .map_err(|source| WorkspaceError::Io { operation, source })
 }
@@ -2633,6 +2624,67 @@ mod tests {
             })
         ));
         assert_process_was_reaped(&pid_path).await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_git_hook_cannot_mutate_after_workspace_rollback() {
+        let repo = TestRepository::new().await;
+        let marker = repo._temp.path().join("late-hook-mutation");
+        let hook = repo.path().join(".git/hooks/post-checkout");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\nsleep 12\n: > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let manager = WorkspaceManager::new(repo.app_data_dir());
+        let result = manager
+            .prepare(WorkspaceRequest::isolated(repo.path()))
+            .await;
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::GitCommandTimedOut { .. })
+        ));
+        assert!(!marker.exists());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            !marker.exists(),
+            "hook mutated after timeout and rollback returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_bounded_git_command_stops_owned_descendants() {
+        let temp = tempdir().unwrap();
+        let marker = temp.path().join("cancelled-mutation");
+        let ready = temp.path().join("ready");
+        let task = tokio::spawn({
+            let marker = marker.clone();
+            let ready = ready.clone();
+            async move {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args(["-c", "(sleep 0.5; : > \"$MARKER\") & : > \"$READY\"; wait"])
+                    .env("MARKER", marker)
+                    .env("READY", ready);
+                command_output_bounded(&mut command, "cancel fixture", 1024, Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !marker.exists(),
+            "descendant mutated after command cancellation"
+        );
     }
 
     async fn assert_process_was_reaped(pid_path: &Path) {

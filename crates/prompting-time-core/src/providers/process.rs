@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::ProviderError;
+use crate::owned_process::OwnedProcess;
 
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 pub const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -51,9 +52,8 @@ impl JsonLineProcess {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = command.spawn().map_err(transport_error)?;
+            .stderr(Stdio::piped());
+        let mut child = OwnedProcess::spawn(&mut command).map_err(transport_error)?;
         let id = child.id().ok_or_else(|| ProviderError::Transport {
             category: "missing-process-id".to_owned(),
         })?;
@@ -178,7 +178,7 @@ impl Drop for JsonLineProcess {
 }
 
 async fn own_process(
-    mut child: tokio::process::Child,
+    mut child: OwnedProcess,
     stdin: ChildStdin,
     stdout: impl AsyncRead + Unpin + Send + 'static,
     stderr_reader: impl AsyncRead + Unpin + Send + 'static,
@@ -207,241 +207,159 @@ async fn own_process(
     let mut stderr_done = false;
     let mut stdin_done = false;
 
-    loop {
-        if let Some(status) = child_status
-            && stdout_done
-            && stderr_done
-            && stdin_done
-        {
-            if !status.success() {
-                return send_exit_error_or_shutdown(&events, &mut shutdown).await;
-            }
-            return Ok(());
-        }
-        tokio::select! {
-            _ = shutdown.changed() => {
-                let result = if child_status.is_none() {
-                    kill_and_wait(&mut child).await
-                } else {
-                    Ok(())
-                };
-                cancel_and_join(
-                    &cancel_sender,
-                    &mut stdin_task,
-                    &mut stdout_task,
-                    &mut stderr_task,
-                    stdin_done,
-                    stdout_done,
-                    stderr_done,
-                )
-                .await;
-                return result;
-            }
-            status = child.wait(), if child_status.is_none() => {
-                match status {
-                    Ok(status) => {
-                        child_status = Some(status);
-                        write_sender.take();
-                    }
-                    Err(error) => {
-                        cancel_and_join(
-                            &cancel_sender,
-                            &mut stdin_task,
-                            &mut stdout_task,
-                            &mut stderr_task,
-                            stdin_done,
-                            stdout_done,
-                            stderr_done,
-                        )
-                        .await;
-                        return Err(transport_error(error));
-                    }
+    let result = async {
+        loop {
+            if let Some(status) = child_status
+                && stdout_done
+                && stderr_done
+                && stdin_done
+            {
+                if !status.success() {
+                    return send_exit_error_or_shutdown(&events, &mut shutdown).await;
                 }
+                return Ok(());
             }
-            result = &mut stdout_task, if !stdout_done => {
-                stdout_done = true;
-                if result.is_err() {
-                    if child_status.is_none() {
-                        kill_and_wait(&mut child).await?;
-                    }
-                    cancel_and_join(
-                        &cancel_sender,
-                        &mut stdin_task,
-                        &mut stdout_task,
-                        &mut stderr_task,
-                        stdin_done,
-                        stdout_done,
-                        stderr_done,
-                    )
-                    .await;
-                    return Err(reader_stopped("stdout-task"));
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    let result = if child_status.is_none() {
+                        kill_and_wait(&mut child).await
+                    } else {
+                        Ok(())
+                    };
+                    return result;
                 }
-            }
-            result = &mut stderr_task, if !stderr_done => {
-                stderr_done = true;
-                if result.is_err() {
-                    if child_status.is_none() {
-                        kill_and_wait(&mut child).await?;
-                    }
-                    cancel_and_join(
-                        &cancel_sender,
-                        &mut stdin_task,
-                        &mut stdout_task,
-                        &mut stderr_task,
-                        stdin_done,
-                        stdout_done,
-                        stderr_done,
-                    )
-                    .await;
-                    return Err(reader_stopped("stderr-task"));
-                }
-            }
-            result = &mut stdin_task, if !stdin_done => {
-                stdin_done = true;
-                match result {
-                    Ok(Ok(())) if child_status.is_some() => {}
-                    Ok(Ok(())) => {
-                        kill_and_wait(&mut child).await?;
-                        cancel_and_join(
-                            &cancel_sender,
-                            &mut stdin_task,
-                            &mut stdout_task,
-                            &mut stderr_task,
-                            stdin_done,
-                            stdout_done,
-                            stderr_done,
-                        ).await;
-                        return Err(reader_stopped("stdin-task"));
-                    }
-                    Ok(Err(error)) => {
-                        if child_status.is_none() {
-                            kill_and_wait(&mut child).await?;
+                status = child.wait(), if child_status.is_none() => {
+                    match status {
+                        Ok(status) => {
+                            child_status = Some(status);
+                            write_sender.take();
                         }
-                        cancel_and_join(
-                            &cancel_sender,
-                            &mut stdin_task,
-                            &mut stdout_task,
-                            &mut stderr_task,
-                            stdin_done,
-                            stdout_done,
-                            stderr_done,
-                        ).await;
-                        return Err(error);
-                    }
-                    Err(_) => {
-                        if child_status.is_none() {
-                            kill_and_wait(&mut child).await?;
-                        }
-                        cancel_and_join(
-                            &cancel_sender,
-                            &mut stdin_task,
-                            &mut stdout_task,
-                            &mut stderr_task,
-                            stdin_done,
-                            stdout_done,
-                            stderr_done,
-                        ).await;
-                        return Err(reader_stopped("stdin-task"));
-                    }
-                }
-            }
-            Some(reason) = fatal_receiver.recv() => {
-                if reason == StdoutFailure::UnexpectedEof {
-                    let status = match child.try_wait() {
-                        Ok(status) => status,
                         Err(error) => {
-                            cancel_and_join(
-                                &cancel_sender,
-                                &mut stdin_task,
-                                &mut stdout_task,
-                                &mut stderr_task,
-                                stdin_done,
-                                stdout_done,
-                                stderr_done,
-                            )
-                            .await;
                             return Err(transport_error(error));
                         }
-                    };
-                    if let Some(status) = status {
-                        child_status = Some(status);
-                        write_sender.take();
-                        continue;
                     }
                 }
-                let reap_result = if child_status.is_none() {
-                    kill_and_wait(&mut child).await
-                } else {
-                    Ok(())
-                };
-                cancel_and_join(
-                    &cancel_sender,
-                    &mut stdin_task,
-                    &mut stdout_task,
-                    &mut stderr_task,
-                    stdin_done,
-                    stdout_done,
-                    stderr_done,
-                )
-                .await;
-                reap_result?;
-                return match reason {
-                    StdoutFailure::Reported => Ok(()),
-                    StdoutFailure::UnexpectedEof => {
-                        send_error_or_shutdown(
-                            &events,
-                            ProviderError::StreamClosed,
-                            &mut shutdown,
-                        )
-                        .await
-                    }
-                };
-            }
-            command = commands.recv() => {
-                match command {
-                    Some(OwnerCommand::Send { line, reply }) => {
-                        if child_status.is_some() || write_sender.is_none() {
-                            let _ = reply.send(Err(ProviderError::ProcessExited));
-                            continue;
-                        }
-                        match write_sender
-                            .as_ref()
-                            .expect("writer exists while child is running")
-                            .try_send(WriteRequest { line, reply })
-                        {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(request)) => {
-                                let error = ProviderError::Transport {
-                                    category: "stdin-backpressure".to_owned(),
-                                };
-                                let _ = request.reply.send(Err(error));
-                            }
-                            Err(mpsc::error::TrySendError::Closed(request)) => {
-                                let error = owner_stopped();
-                                let _ = request.reply.send(Err(error));
-                            }
-                        }
-                    }
-                    None => {
+                result = &mut stdout_task, if !stdout_done => {
+                    stdout_done = true;
+                    if result.is_err() {
                         if child_status.is_none() {
                             kill_and_wait(&mut child).await?;
                         }
-                        cancel_and_join(
-                            &cancel_sender,
-                            &mut stdin_task,
-                            &mut stdout_task,
-                            &mut stderr_task,
-                            stdin_done,
-                            stdout_done,
-                            stderr_done,
-                        )
-                        .await;
-                        return Ok(());
+                        return Err(reader_stopped("stdout-task"));
+                    }
+                }
+                result = &mut stderr_task, if !stderr_done => {
+                    stderr_done = true;
+                    if result.is_err() {
+                        if child_status.is_none() {
+                            kill_and_wait(&mut child).await?;
+                        }
+                        return Err(reader_stopped("stderr-task"));
+                    }
+                }
+                result = &mut stdin_task, if !stdin_done => {
+                    stdin_done = true;
+                    match result {
+                        Ok(Ok(())) if child_status.is_some() => {}
+                        Ok(Ok(())) => {
+                            kill_and_wait(&mut child).await?;
+                            return Err(reader_stopped("stdin-task"));
+                        }
+                        Ok(Err(error)) => {
+                            if child_status.is_none() {
+                                kill_and_wait(&mut child).await?;
+                            }
+                            return Err(error);
+                        }
+                        Err(_) => {
+                            if child_status.is_none() {
+                                kill_and_wait(&mut child).await?;
+                            }
+                            return Err(reader_stopped("stdin-task"));
+                        }
+                    }
+                }
+                Some(reason) = fatal_receiver.recv() => {
+                    if reason == StdoutFailure::UnexpectedEof {
+                        let status = match child.try_wait() {
+                            Ok(status) => status,
+                            Err(error) => {
+                                return Err(transport_error(error));
+                            }
+                        };
+                        if let Some(status) = status {
+                            child_status = Some(status);
+                            write_sender.take();
+                            continue;
+                        }
+                    }
+                    let reap_result = if child_status.is_none() {
+                        kill_and_wait(&mut child).await
+                    } else {
+                        Ok(())
+                    };
+                    reap_result?;
+                    return match reason {
+                        StdoutFailure::Reported => Ok(()),
+                        StdoutFailure::UnexpectedEof => {
+                            send_error_or_shutdown(
+                                &events,
+                                ProviderError::StreamClosed,
+                                &mut shutdown,
+                            )
+                            .await
+                        }
+                    };
+                }
+                command = commands.recv() => {
+                    match command {
+                        Some(OwnerCommand::Send { line, reply }) => {
+                            if child_status.is_some() || write_sender.is_none() {
+                                let _ = reply.send(Err(ProviderError::ProcessExited));
+                                continue;
+                            }
+                            match write_sender
+                                .as_ref()
+                                .expect("writer exists while child is running")
+                                .try_send(WriteRequest { line, reply })
+                            {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(request)) => {
+                                    let error = ProviderError::Transport {
+                                        category: "stdin-backpressure".to_owned(),
+                                    };
+                                    let _ = request.reply.send(Err(error));
+                                }
+                                Err(mpsc::error::TrySendError::Closed(request)) => {
+                                    let error = owner_stopped();
+                                    let _ = request.reply.send(Err(error));
+                                }
+                            }
+                        }
+                        None => {
+                            if child_status.is_none() {
+                                kill_and_wait(&mut child).await?;
+                            }
+                            return Ok(());
+                        }
                     }
                 }
             }
         }
     }
+    .await;
+    // Always stop and join pipe tasks, including when signaling or reaping failed.
+    cancel_and_join(
+        &cancel_sender,
+        &mut stdin_task,
+        &mut stdout_task,
+        &mut stderr_task,
+        stdin_done,
+        stdout_done,
+        stderr_done,
+    )
+    .await;
+    result
 }
 
 struct OwnerChannels {
@@ -659,15 +577,9 @@ async fn read_stderr(
     }
 }
 
-async fn kill_and_wait(child: &mut tokio::process::Child) -> Result<(), ProviderError> {
-    match child.try_wait().map_err(transport_error)? {
-        Some(_) => Ok(()),
-        None => {
-            child.kill().await.map_err(transport_error)?;
-            child.wait().await.map_err(transport_error)?;
-            Ok(())
-        }
-    }
+async fn kill_and_wait(child: &mut OwnedProcess) -> Result<(), ProviderError> {
+    child.terminate().await.map_err(transport_error)?;
+    Ok(())
 }
 
 async fn join_reader(handle: &mut JoinHandle<()>) {

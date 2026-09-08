@@ -289,3 +289,69 @@ async fn drop_requests_child_reaping_through_the_owner() {
     .expect("drop must cause the owner task to reap its child");
     assert!(write.await.unwrap().is_err());
 }
+
+async fn descendant_cleanup(mode: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("owned-mutation");
+    let unrelated_marker = directory.path().join("unrelated-mutation");
+    let mut unrelated = shell("sleep 0.5; printf preserved > \"$MARKER\"")
+        .env("MARKER", &unrelated_marker)
+        .spawn()
+        .unwrap();
+    let tail = match mode {
+        "stdout-eof" => "exec 1>&-; wait",
+        "leader-exit" => "exit 0",
+        _ => "wait",
+    };
+    let mut command = shell(&format!(
+        "(sleep 0.5; printf mutated > \"$MARKER\") >/dev/null 2>&1 & printf '{{\"ready\":true}}\\n'; {tail}"
+    ));
+    command.env("MARKER", &marker);
+    let mut process = JsonLineProcess::spawn(command).unwrap();
+    assert_eq!(process.recv().await.unwrap().unwrap()["ready"], true);
+    match mode {
+        "drop" => drop(process),
+        "stdout-eof" => {
+            assert!(process.recv().await.unwrap().is_err());
+            process.shutdown().await.unwrap();
+        }
+        "leader-exit" => {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), process.recv())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            // The leader has already exited before explicit cleanup is requested.
+            process.shutdown().await.unwrap();
+        }
+        _ => process.shutdown().await.unwrap(),
+    }
+    unrelated.wait().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(!marker.exists(), "owned descendant mutated after {mode}");
+    assert!(
+        unrelated_marker.exists(),
+        "unrelated process was terminated"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_stops_owned_descendants() {
+    descendant_cleanup("shutdown").await;
+}
+
+#[tokio::test]
+async fn drop_stops_owned_descendants() {
+    descendant_cleanup("drop").await;
+}
+
+#[tokio::test]
+async fn stdout_eof_stops_owned_descendants() {
+    descendant_cleanup("stdout-eof").await;
+}
+
+#[tokio::test]
+async fn natural_leader_exit_stops_owned_descendants() {
+    descendant_cleanup("leader-exit").await;
+}
