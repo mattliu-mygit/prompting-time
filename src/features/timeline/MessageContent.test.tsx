@@ -5,6 +5,27 @@ import { CopyButton, MessageContent } from "./MessageContent";
 afterEach(() => { vi.useRealTimers(); });
 
 describe("MessageContent", () => {
+  it("opens HTTP(S) links externally and keeps fragments local", () => {
+    render(<MessageContent content="[http](http://example.com) [https](https://example.com) [section](#section)" />);
+    for (const name of ["http", "https"]) {
+      const link = screen.getByRole("link", { name });
+      expect(link).toHaveAttribute("href", `${name}://example.com`);
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noreferrer noopener");
+    }
+    const fragment = screen.getByRole("link", { name: "section" });
+    expect(fragment).toHaveAttribute("href", "#section");
+    expect(fragment).not.toHaveAttribute("target");
+  });
+
+  it("leaves non-HTTP(S) schemes inert", () => {
+    render(<MessageContent content="[mail](mailto:person@example.com) [phone](tel:12345) [script](javascript:alert%281%29) [data](data:text/plain,hello) [file](file:///tmp/example.txt)" />);
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    for (const label of ["mail", "phone", "script", "data", "file"]) {
+      expect(screen.getByText(label)).toBeVisible();
+    }
+  });
+
   it("does not report a previous copy as success for newly streamed content", async () => {
     let finish!: () => void;
     const writeText = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));

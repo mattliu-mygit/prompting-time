@@ -74,12 +74,16 @@ const components: Components = {
     return <CodeBlock code={code.children.map((child) => child.type === "text" ? child.value : "").join("")} language={String(languageClass ?? "").replace(/^language-/, "")} />;
   },
   img({ alt }) { return <span className="image-placeholder">{alt ? `[Image: ${alt}]` : "[Image]"}</span>; },
-  a({ href, children }) { return href ? <a href={href} target="_blank" rel="noreferrer noopener">{children}</a> : <span>{children}</span>; },
+  a({ href, children }) {
+    if (!href) return <span>{children}</span>;
+    if (href.startsWith("#")) return <a href={href}>{children}</a>;
+    return <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>;
+  },
   table({ children }) { return <div className="markdown-table"><table>{children}</table></div>; },
 };
 
 function safeUrl(url: string) {
-  return /^(?:https?:\/\/|mailto:|#)/i.test(url) ? url : "";
+  return /^(?:https?:\/\/|#)/i.test(url) ? url : "";
 }
 
 export const MessageContent = memo(function MessageContent({ content }: { content: string }) {
