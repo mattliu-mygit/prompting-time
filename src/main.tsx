@@ -1,7 +1,10 @@
+/// <reference types="vite/client" />
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { App } from "./app/App";
 import { createAppStore } from "./app/store";
+import { installAppZoom } from "./app/zoom";
 import {
   getBootstrap,
   createConversation,
@@ -54,7 +57,12 @@ const store = createAppStore({
   pickProjectDirectory,
 });
 
-window.addEventListener("beforeunload", () => store.dispose(), { once: true });
+const disposeZoom = installAppZoom((factor) => getCurrentWebview().setZoom(factor));
+window.addEventListener("beforeunload", () => {
+  disposeZoom();
+  store.dispose();
+}, { once: true });
+import.meta.hot?.dispose(disposeZoom);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
