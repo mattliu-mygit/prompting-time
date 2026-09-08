@@ -3,6 +3,18 @@
 This document records version-specific observations that gate provider adapters. It contains no
 credentials, existing conversation content, private paths, or account identity.
 
+## Cross-provider application switching (2026-09-07)
+
+The projectless application switching smoke passed with Codex CLI 0.153.4 using Astra and
+Claude Code 2.1.205. It exercised Claude → Claude → Codex → Claude through the canonical
+application APIs: an invented marker was recalled exactly on each subsequent turn, the original
+Claude session was resumed, and four run audits recorded the selected providers. The focused
+test passed in 15.11 seconds. No application code or model settings changed for this verification.
+
+The earlier Codex 0.144.1 attempt failed because Astra required a newer CLI. Upgrading the CLI
+resolved that failure; it was not an invalid model or adapter parsing defect. This result verifies
+the tested switching flow, not every Codex 0.153.4 feature or native UI/notification delivery.
+
 ## Claude Code 2.1.205 (2026-09-04)
 
 Authenticated probes establish the direct CLI boundaries below. The previous unauthenticated run
@@ -50,9 +62,9 @@ turns and Claude → Claude → Codex → Claude continuity, exact-file denial/a
 child/grandchild completion. Exact-file denial/approval and recursive completion passed against
 Claude 2.1.205. Recursive execution exposed `system/task_updated` terminal patches before their
 `task_notification` bookends; the adapter now validates these patches without treating them as
-completion. Switching reached Codex and failed with native HTTP 400: the configured Astra model
-requires a newer Codex CLI. This is an external CLI compatibility limitation; switching is not
-claimed as passed. These tests do not constitute native UI or notification evidence.
+completion. The initial switching run reached Codex and failed with a newer-CLI requirement;
+the subsequent upgrade and successful switching check are recorded above. These tests do not
+constitute native UI or notification evidence.
 
 Claude advertises streaming, permission/question responses, interruption, resume, and child
 hierarchy, but not steering. Multi-select questions are safely declined; duplicate question text

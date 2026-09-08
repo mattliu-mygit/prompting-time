@@ -9,7 +9,7 @@ The current release candidate integrates Codex App Server and Claude Code. Suppo
 - Multiple concurrent projectless and project-backed conversations.
 - Recursive agent trees: any child may act as an orchestrator and create descendants.
 - Deterministic automatic routing with a visible reason and per-turn provider override.
-- Provider switching and bounded context handoff at turn boundaries, with hermetic switching coverage and an opt-in live application smoke. Live switching is not implied by adapter-only tests.
+- Provider switching and bounded context handoff at turn boundaries, with hermetic coverage and a passed live Claude → Codex/Astra → Claude application smoke. See [version-specific evidence](docs/provider-protocols.md).
 - Streamed timeline activity, approval and question handling, steering where supported, interruption, and safe archival.
 - SQLite-backed conversation state with bounded queries, stable pagination, and startup recovery.
 - A narrow Tauri macOS notification integration for background completion, failure, and needs-attention transitions, with hermetic policy and deduplication tests. Native delivery has not been exercised by an automated Tauri E2E or visual smoke test.
@@ -120,7 +120,6 @@ Shutdown asks owned run tasks and provider adapters to stop, waits up to five se
 
 ## Known limitations
 
-- Live Claude application approval and recursive ancestry tests passed. Application switching remains blocked by the installed Codex CLI rejecting Astra with a newer-version requirement; native visual verification is a separate acceptance gate.
 - Claude multi-select questions are safely declined; the current UI supports single-select responses.
 - Claude task identities drive recursive hierarchy and status, but do not imply direct child-session resume. Grandchild text forwarding was not observed in the depth-two live protocol probe.
 - If Claude is cancelled before its first prompt and the app then restarts, initialization alone may have left no resumable native transcript. The next attempt fails closed and may require a new conversation. Completed and interrupted prompt sessions have resumed successfully in focused live probes.
