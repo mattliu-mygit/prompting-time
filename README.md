@@ -52,6 +52,17 @@ Claude runs with default permissions through stdio, empty filesystem settings so
 
 A conversation can run without a project. For a Git project, Prompting Time defaults to a dedicated worktree so concurrent conversations do not share a checkout. You can explicitly choose the current checkout instead. A non-Git directory runs directly because Git worktree isolation is unavailable.
 
+Choose **New conversation → Choose folder** to use the native macOS folder picker.
+Prompting Time checks the folder automatically, creates the conversation, and puts
+the cursor in the composer. No title, objective, typed path, or manual directory
+check is required. The folder name supplies the initial title; your first message
+supplies the task. **Without a folder** starts a projectless conversation.
+
+New conversations use **Auto · Best fit**. The collapsed **Advanced** options let you
+change routing or choose the current Git checkout before selecting a folder. Isolated
+worktrees do not copy uncommitted checkout edits, and failed isolation never silently
+falls back to the current checkout. Existing conversations keep their saved settings.
+
 Archiving removes a conversation from active navigation but keeps its durable history. It does not imply worktree deletion. Prompting Time removes only app-owned worktrees proven clean, nondivergent, unused, and still bound to their recorded Git metadata; otherwise it reports the blocker and preserves the directory.
 
 ## Conversation continuity

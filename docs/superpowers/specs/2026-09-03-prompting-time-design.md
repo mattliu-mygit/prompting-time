@@ -55,7 +55,33 @@ The center timeline keeps the newest 80 events plus at most four explicitly load
 
 ### Conversation creation
 
-A fresh installation always offers an accessible new-conversation flow. A new conversation may target a local directory or have no project. A typed local preflight classifies the selected directory before execution controls appear. For a Git project, isolated worktree execution is selected by default and the user may explicitly choose the current checkout. A non-Git directory is used directly without worktree controls. Archiving requires deliberate confirmation, retains durable history, removes the conversation from active navigation, and selects another active conversation or clears the workspace. The same reconciliation occurs when an external change reports that the selected conversation was archived.
+A fresh installation offers a compact new-conversation chooser with **Choose folder**,
+**Without a folder**, and collapsed **Advanced** options. Choose folder opens the native
+macOS single-directory picker. Selection automatically validates and classifies the
+directory, prepares the workspace, creates and selects an empty conversation, and
+focuses the composer without another form or manual inspection action. Picker cancellation
+creates nothing and returns to the chooser. Creation does not start a provider or submit
+a prompt.
+
+The folder name supplies the initial title, with **New conversation** as the fallback
+and projectless title. No title or objective is required. The initial objective is empty;
+ordinary message history carries the first user request without inferred instructions,
+an extra naming model call, or duplicated metadata. Advanced allows routing and Git
+execution overrides before selection. Git folders default to the existing isolated
+worktree behavior; non-Git folders use the selected directory directly. Isolation does
+not copy uncommitted edits. The user may explicitly choose the current Git checkout,
+but failed isolation never silently falls back to it.
+
+Only one picker/check/create operation is admitted at a time. Closing or unmounting the
+chooser invalidates pending pre-creation results; committed creation cannot be cancelled
+ambiguously. Busy controls prevent duplicates, errors permit another selection or retry,
+and existing preparation rollback remains authoritative. Keyboard focus remains inside
+the chooser until cancellation or successful creation.
+
+Archiving requires deliberate confirmation, retains durable history, removes the
+conversation from active navigation, and selects another active conversation or clears
+the workspace. The same reconciliation occurs when an external change reports that the
+selected conversation was archived.
 
 Before the first message, the user may choose automatic routing or pin Codex or Claude. Automatic routing remains the default. The selected provider and reason are visible on every provider run.
 
@@ -172,7 +198,9 @@ Automatic routing is deterministic and explainable in Milestone 1. Selection use
 4. Task signals available from the message and conversation type.
 5. Usage balancing among otherwise suitable providers.
 
-The default profile is Balanced. Settings also expose Best fit and Usage balance. Profiles adjust the relative weight of task suitability and distribution; they do not bypass eligibility or manual overrides.
+New conversations default to Best fit. Advanced options also expose Balanced and Usage balance.
+Existing conversations retain their saved profile. Profiles adjust the relative weight of task
+suitability and distribution; they do not bypass eligibility or manual overrides.
 
 Every run records and displays the selected provider and a concise reason. Prompt classification runs locally in Rust and does not add a separate model call. The application records manual overrides and outcomes locally so a learned router can be evaluated in later work instead of being guessed into Milestone 1.
 
