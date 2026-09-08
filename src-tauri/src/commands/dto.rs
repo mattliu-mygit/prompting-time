@@ -146,6 +146,15 @@ pub enum TimelineItemKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub enum TimelinePresentation {
+    Normal,
+    Notice,
+    Failure,
+    Telemetry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub enum MessageRole {
     User,
     Assistant,
@@ -160,6 +169,7 @@ pub struct TimelineItem {
     pub agent_id: String,
     pub sequence: String,
     pub kind: TimelineItemKind,
+    pub presentation: TimelinePresentation,
     pub role: Option<MessageRole>,
     pub content: String,
     pub content_bytes: String,
@@ -175,6 +185,13 @@ pub struct TimelinePage {
     pub approvals: Vec<ApprovalSnapshot>,
     pub approvals_truncated: bool,
     pub approvals_next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsPage {
+    pub items: Vec<TimelineItem>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]

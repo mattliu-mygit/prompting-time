@@ -34,8 +34,9 @@ const MAX_POOL_CONNECTIONS: u32 = 8;
 const STORE_CHANGE_CHANNEL_CAPACITY: usize = 256;
 const RECOVERY_BATCH_SIZE: i64 = 200;
 pub const MAX_TIMELINE_PREVIEW_BYTES: usize = 1_024;
+pub const MAX_MESSAGE_PREVIEW_BYTES: usize = 16_384;
 pub const MAX_TIMELINE_PAGE_CONTENT_BYTES: usize =
-    MAX_TIMELINE_PREVIEW_BYTES * MAX_PAGE_SIZE as usize;
+    MAX_MESSAGE_PREVIEW_BYTES * MAX_PAGE_SIZE as usize;
 pub const MAX_EVENT_DETAIL_BYTES: usize = 256 * 1_024;
 pub const MAX_CONVERSATION_TITLE_BYTES: usize = 256;
 const UNTITLED_CONVERSATION_TITLE: &str = "Untitled conversation";
@@ -661,6 +662,10 @@ impl ProviderEventRecord {
             Self::InterruptedWithMutation(mutation) => {
                 Some(serde_json::json!({ "mutation": mutation }).to_string())
             }
+            Self::Failed(_) => Some(serde_json::json!({ "failure": true }).to_string()),
+            Self::FailedWithMutation { mutation, .. } => {
+                Some(serde_json::json!({ "failure": true, "mutation": mutation }).to_string())
+            }
             Self::ProviderFailed {
                 category,
                 mutation,
@@ -700,8 +705,17 @@ pub struct SidebarDetails {
 pub struct TimelineRecord {
     pub event: TimelineEvent,
     pub provider: ProviderId,
+    pub presentation: TimelinePresentation,
     pub content_bytes: usize,
     pub content_truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelinePresentation {
+    Normal,
+    Notice,
+    Failure,
+    Telemetry,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4150,39 +4164,75 @@ impl Store {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<Page<TimelineRecord>, StoreError> {
+        self.load_timeline_partition(conversation_id, cursor, limit, false)
+            .await
+    }
+
+    pub async fn load_diagnostics(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Page<TimelineRecord>, StoreError> {
+        self.load_timeline_partition(conversation_id, cursor, limit, true)
+            .await
+    }
+
+    async fn load_timeline_partition(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+        diagnostics: bool,
+    ) -> Result<Page<TimelineRecord>, StoreError> {
         validate_page_limit(limit)?;
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
-        let rows = if let Some(cursor) = cursor {
-            sqlx::query_as::<_, TimelineRecordRow>(
-                "SELECT events.id, events.conversation_id, events.run_id, events.agent_id, \
-                        events.sequence, events.kind, events.role, substr(events.content, 1, 1024) AS content, \
-                        length(CAST(events.content AS BLOB)) AS content_bytes, provider_runs.provider \
-                 FROM events JOIN provider_runs ON provider_runs.id = events.run_id \
-                 WHERE events.conversation_id = ? AND \
-                       (events.sequence < ? OR (events.sequence = ? AND events.id < ?)) \
-                 ORDER BY events.sequence DESC, events.id DESC LIMIT ?",
-            )
-            .bind(conversation_id.to_string())
-            .bind(cursor_sequence_i64(&cursor)?)
-            .bind(cursor_sequence_i64(&cursor)?)
-            .bind(cursor.id.to_string())
-            .bind(i64::from(limit) + 1)
-            .fetch_all(&self.pool)
-            .await?
+        // Classify once in SQL so visibility and returned presentation cannot disagree.
+        // Only structured evidence distinguishes terminal failures from raw notifications;
+        // malformed or legacy payloads remain visible notices. No payload crosses this read.
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "WITH projected AS (SELECT events.*, \
+                CASE WHEN kind <> 'diagnostic' THEN 'normal' \
+                     WHEN NOT json_valid(payload_json) THEN 'notice' \
+                     WHEN json_type(payload_json, '$.failure') = 'true' \
+                       OR (json_type(payload_json, '$.errorCategory') = 'text' \
+                           AND substr(json_extract(payload_json, '$.errorCategory'), 1, 1) <> '') THEN 'failure' \
+                     WHEN json_type(payload_json, '$.method') = 'text' \
+                       AND substr(json_extract(payload_json, '$.method'), 1, 1) <> '' THEN 'telemetry' \
+                     ELSE 'notice' END AS presentation \
+             FROM events WHERE conversation_id = ",
+        );
+        query.push_bind(conversation_id.to_string());
+        query.push(") SELECT projected.id, projected.conversation_id, projected.run_id, projected.agent_id, \
+                    projected.sequence, projected.kind, projected.role, projected.presentation, \
+                    substr(projected.content, 1, CASE WHEN projected.kind = 'message' THEN ");
+        query.push_bind(MAX_MESSAGE_PREVIEW_BYTES as i64);
+        query.push(" ELSE ");
+        query.push_bind(MAX_TIMELINE_PREVIEW_BYTES as i64);
+        query.push(" END) AS content, length(CAST(projected.content AS BLOB)) AS content_bytes, provider_runs.provider \
+                    FROM projected JOIN provider_runs ON provider_runs.id = projected.run_id \
+                    WHERE projected.presentation ");
+        query.push(if diagnostics {
+            "= 'telemetry'"
         } else {
-            sqlx::query_as::<_, TimelineRecordRow>(
-                "SELECT events.id, events.conversation_id, events.run_id, events.agent_id, \
-                        events.sequence, events.kind, events.role, substr(events.content, 1, 1024) AS content, \
-                        length(CAST(events.content AS BLOB)) AS content_bytes, provider_runs.provider \
-                 FROM events JOIN provider_runs ON provider_runs.id = events.run_id \
-                 WHERE events.conversation_id = ? \
-                 ORDER BY events.sequence DESC, events.id DESC LIMIT ?",
-            )
-            .bind(conversation_id.to_string())
-            .bind(i64::from(limit) + 1)
+            "<> 'telemetry'"
+        });
+        if let Some(cursor) = cursor {
+            let sequence = cursor_sequence_i64(&cursor)?;
+            query.push(" AND (projected.sequence < ");
+            query.push_bind(sequence);
+            query.push(" OR (projected.sequence = ");
+            query.push_bind(sequence);
+            query.push(" AND projected.id < ");
+            query.push_bind(cursor.id.to_string());
+            query.push("))");
+        }
+        query.push(" ORDER BY projected.sequence DESC, projected.id DESC LIMIT ");
+        query.push_bind(i64::from(limit) + 1);
+        let rows = query
+            .build_query_as::<TimelineRecordRow>()
             .fetch_all(&self.pool)
-            .await?
-        };
+            .await?;
         let has_more = rows.len() > limit as usize;
         let mut items = rows
             .into_iter()
@@ -7250,6 +7300,7 @@ struct TimelineRecordRow {
     content: String,
     content_bytes: i64,
     provider: String,
+    presentation: String,
 }
 
 impl TimelineRecordRow {
@@ -7260,7 +7311,24 @@ impl TimelineRecordRow {
                 entity: "timeline event",
                 detail: "negative content length".to_owned(),
             })?;
-        let content = truncate_utf8(self.content, MAX_TIMELINE_PREVIEW_BYTES);
+        let presentation = match self.presentation.as_str() {
+            "normal" => TimelinePresentation::Normal,
+            "notice" => TimelinePresentation::Notice,
+            "failure" => TimelinePresentation::Failure,
+            "telemetry" => TimelinePresentation::Telemetry,
+            other => {
+                return Err(StoreError::InvalidData {
+                    entity: "timeline presentation",
+                    detail: other.to_owned(),
+                });
+            }
+        };
+        let preview_bytes = if self.kind == "message" {
+            MAX_MESSAGE_PREVIEW_BYTES
+        } else {
+            MAX_TIMELINE_PREVIEW_BYTES
+        };
+        let content = truncate_utf8(self.content, preview_bytes);
         let content_truncated = content_bytes > content.len();
         Ok(TimelineRecord {
             event: TimelineEventRow {
@@ -7275,6 +7343,7 @@ impl TimelineRecordRow {
             }
             .into_domain()?,
             provider,
+            presentation,
             content_bytes,
             content_truncated,
         })
@@ -8479,6 +8548,248 @@ mod tests {
             store.load_run(run.id).await.unwrap().status,
             RunStatus::Running
         );
+    }
+
+    #[tokio::test]
+    async fn chat_projection_notification_burst_does_not_evict_messages() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("chat"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let message = store
+            .append_run_event(run.id, root.id, ProviderEventRecord::message("answer"))
+            .await
+            .unwrap();
+        for index in 0..95 {
+            store
+                .append_run_event(
+                    run.id,
+                    root.id,
+                    ProviderEventRecord::unrecognized(format!("notification/{index}")),
+                )
+                .await
+                .unwrap();
+        }
+        let page = store
+            .load_recent_timeline(conversation.id, None, 80)
+            .await
+            .unwrap();
+        assert!(page.items.iter().any(|item| item.event.id == message.id));
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.event.kind != TimelineEventKind::Diagnostic)
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_projection_diagnostics_page_without_skips_and_isolate_conversations() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("diagnostics"))
+            .await
+            .unwrap();
+        let other = store
+            .create_conversation(NewConversation::projectless("other"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        let (other_run, other_root) = store.create_run(other.id, ProviderId::Codex).await.unwrap();
+        for (run_id, agent_id) in [(run.id, root.id), (other_run.id, other_root.id)] {
+            store
+                .append_run_event(run_id, agent_id, ProviderEventRecord::started())
+                .await
+                .unwrap();
+        }
+        let mut expected = Vec::new();
+        for index in 0..95 {
+            let event = store
+                .append_run_event(
+                    run.id,
+                    root.id,
+                    ProviderEventRecord::unrecognized(format!("notification/{index}")),
+                )
+                .await
+                .unwrap();
+            expected.push(event.id);
+            store
+                .append_run_event(run.id, root.id, ProviderEventRecord::message("answer"))
+                .await
+                .unwrap();
+            store
+                .append_run_event(
+                    other_run.id,
+                    other_root.id,
+                    ProviderEventRecord::unrecognized("other/notification"),
+                )
+                .await
+                .unwrap();
+        }
+        let mut actual = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = store
+                .load_diagnostics(conversation.id, cursor, 30)
+                .await
+                .unwrap();
+            assert!(
+                page.items
+                    .windows(2)
+                    .all(|pair| pair[0].event.sequence < pair[1].event.sequence)
+            );
+            assert!(page.items.iter().all(|item| item.presentation
+                == super::TimelinePresentation::Telemetry
+                && item.event.conversation_id == conversation.id));
+            actual.splice(0..0, page.items.into_iter().map(|item| item.event.id));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(actual, expected);
+        assert!(
+            store
+                .load_diagnostics(conversation.id, Some("bad-cursor".into()), 30)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .load_diagnostics(conversation.id, None, 0)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .load_diagnostics(conversation.id, None, 201)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_projection_structured_failures_override_method_and_legacy_notices_stay_visible() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("classification"))
+            .await
+            .unwrap();
+        for record in [
+            ProviderEventRecord::provider_failed(
+                crate::providers::ProviderErrorCategory::Protocol,
+                MutationState::NoneObserved,
+                crate::providers::DispatchCertainty::NotDispatched,
+            ),
+            ProviderEventRecord::failed("failure"),
+            ProviderEventRecord::failed_with_mutation(
+                "failure with mutation",
+                MutationState::NoneObserved,
+            ),
+        ] {
+            let (run, root) = store
+                .create_run(conversation.id, ProviderId::Codex)
+                .await
+                .unwrap();
+            store
+                .append_run_event(run.id, root.id, ProviderEventRecord::started())
+                .await
+                .unwrap();
+            let event = store
+                .append_run_event(run.id, root.id, record)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE events SET payload_json = json_set(payload_json, '$.method', 'failure/notification') WHERE id = ?").bind(event.id.to_string()).execute(&store.pool).await.unwrap();
+            let page = store
+                .load_recent_timeline(conversation.id, None, 1)
+                .await
+                .unwrap();
+            assert_eq!(page.items[0].event.id, event.id);
+            assert_eq!(
+                page.items[0].presentation,
+                super::TimelinePresentation::Failure
+            );
+        }
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        for content in ["legacy failure text", "item/unknown/notification"] {
+            let event = store
+                .append_run_event(run.id, root.id, ProviderEventRecord::diagnostic(content))
+                .await
+                .unwrap();
+            let page = store
+                .load_recent_timeline(conversation.id, None, 1)
+                .await
+                .unwrap();
+            assert_eq!(page.items[0].event.id, event.id);
+            assert_eq!(
+                page.items[0].presentation,
+                super::TimelinePresentation::Notice
+            );
+        }
+        assert!(
+            store
+                .load_diagnostics(conversation.id, None, 30)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_projection_message_preview_preserves_long_answers_and_unicode_boundaries() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("preview"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        for content in [
+            "answer ".repeat(1000),
+            "a".repeat(16_384),
+            format!("{}🦀", "a".repeat(16_383)),
+            "🦀".repeat(5000),
+        ] {
+            let event = store
+                .append_run_event(run.id, root.id, ProviderEventRecord::message(&content))
+                .await
+                .unwrap();
+            let page = store
+                .load_recent_timeline(conversation.id, None, 1)
+                .await
+                .unwrap();
+            let preview = &page.items[0];
+            assert_eq!(preview.event.id, event.id);
+            let expected = super::truncate_utf8(content.clone(), 16_384);
+            assert_eq!(preview.event.content, expected);
+            assert_eq!(preview.content_bytes, content.len());
+            assert_eq!(preview.content_truncated, content.len() > expected.len());
+        }
     }
 
     #[tokio::test]

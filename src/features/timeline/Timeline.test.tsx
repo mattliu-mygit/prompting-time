@@ -10,6 +10,7 @@ function event(overrides: Partial<TimelineItem> & Pick<TimelineItem, "id" | "seq
     runId: "run-1",
     agentId: "root",
     kind: "message",
+    presentation: "normal",
     role: "assistant",
     content: "Done",
     contentBytes: "4",
@@ -21,6 +22,7 @@ function event(overrides: Partial<TimelineItem> & Pick<TimelineItem, "id" | "seq
 
 function actions(overrides: Partial<ConversationActions> = {}): ConversationActions {
   return {
+    loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadTimeline: vi.fn().mockResolvedValue({
       items: [
         event({ id: "user-1", sequence: "1", role: "user", content: "Please inspect this" }),

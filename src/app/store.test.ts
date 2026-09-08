@@ -64,6 +64,7 @@ function conversation(
 function conversationActions(): Pick<
   AppApi,
   | "loadTimeline"
+  | "loadDiagnostics"
   | "loadEventDetail"
   | "loadApprovals"
   | "loadApprovalDetail"
@@ -81,6 +82,7 @@ function conversationActions(): Pick<
   | "pickProjectDirectory"
 > {
   return {
+    loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
     loadEventDetail: vi.fn(),
     loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
@@ -182,6 +184,7 @@ function createFakeApi() {
         nextCursor: null,
       };
     }),
+    loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadTimeline: vi.fn().mockResolvedValue({
       items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
     }),

@@ -110,6 +110,7 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
     loadTimeline: vi.fn().mockResolvedValue({
       items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
     }),
+    loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadEventDetail: vi.fn(),
     loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadApprovalDetail: vi.fn(),

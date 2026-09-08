@@ -34,6 +34,7 @@ import type {
   SubmissionSnapshot,
   SubmitMessageRequest,
   TimelinePage,
+  DiagnosticsPage,
   RunAuditPage,
   RunAuditDetailSnapshot,
 } from "./types";
@@ -108,6 +109,10 @@ export function loadConversation(request: LoadConversationRequest): Promise<Conv
 
 export function loadTimeline(request: LoadTimelineRequest): Promise<TimelinePage> {
   return call("load_timeline", { request });
+}
+
+export function loadDiagnostics(request: LoadTimelineRequest): Promise<DiagnosticsPage> {
+  return call("load_diagnostics", { request });
 }
 
 export function loadAgentTree(request: LoadAgentTreeRequest): Promise<AgentTreePage> {

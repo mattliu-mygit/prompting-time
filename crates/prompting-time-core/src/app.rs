@@ -568,6 +568,18 @@ impl PromptingTime {
         Ok(TimelineSnapshot { events, approvals })
     }
 
+    pub async fn load_diagnostics(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Page<TimelineRecord>, AppError> {
+        self.store
+            .load_diagnostics(conversation_id, cursor, limit)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn load_event_detail(
         &self,
         event_id: crate::domain::TimelineEventId,

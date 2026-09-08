@@ -203,11 +203,32 @@ impl From<TimelineRecord> for TimelineItem {
             agent_id: value.event.agent_id.to_string(),
             sequence: value.event.sequence.to_string(),
             kind: value.event.kind.into(),
+            presentation: value.presentation.into(),
             role: value.event.role.map(Into::into),
             content: value.event.content,
             content_bytes: value.content_bytes.to_string(),
             truncated: value.content_truncated,
             provider: value.provider.into(),
+        }
+    }
+}
+
+impl From<CoreTimelinePresentation> for TimelinePresentation {
+    fn from(value: CoreTimelinePresentation) -> Self {
+        match value {
+            CoreTimelinePresentation::Normal => Self::Normal,
+            CoreTimelinePresentation::Notice => Self::Notice,
+            CoreTimelinePresentation::Failure => Self::Failure,
+            CoreTimelinePresentation::Telemetry => Self::Telemetry,
+        }
+    }
+}
+
+impl From<Page<TimelineRecord>> for DiagnosticsPage {
+    fn from(value: Page<TimelineRecord>) -> Self {
+        Self {
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
         }
     }
 }

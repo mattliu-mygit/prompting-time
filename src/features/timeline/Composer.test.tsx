@@ -20,7 +20,7 @@ function conversation(overrides: Partial<ConversationSummary> = {}): Conversatio
 
 function actions(overrides: Partial<ConversationActions> = {}): ConversationActions {
   return {
-    loadTimeline: vi.fn(), loadEventDetail: vi.fn(), loadApprovals: vi.fn(),
+    loadDiagnostics: vi.fn(), loadTimeline: vi.fn(), loadEventDetail: vi.fn(), loadApprovals: vi.fn(),
     loadApprovalDetail: vi.fn(), loadApprovalQuestions: vi.fn(),
     submitMessage: vi.fn().mockResolvedValue({ runId: "run-2", status: "queued", provider: "codex", duplicate: false, routingExplanation: "Continuity" }),
     steerRun: vi.fn().mockResolvedValue(undefined), respondToApproval: vi.fn(),

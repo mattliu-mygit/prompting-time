@@ -9,6 +9,7 @@ export const commands = {
 	listConversations: (request: ListConversationsRequest) => typedError<ConversationPage, CommandError>(__TAURI_INVOKE("list_conversations", { request })),
 	loadConversation: (request: LoadConversationRequest) => typedError<ConversationSummary, CommandError>(__TAURI_INVOKE("load_conversation", { request })),
 	loadTimeline: (request: LoadTimelineRequest) => typedError<TimelinePage, CommandError>(__TAURI_INVOKE("load_timeline", { request })),
+	loadDiagnostics: (request: LoadTimelineRequest) => typedError<DiagnosticsPage, CommandError>(__TAURI_INVOKE("load_diagnostics", { request })),
 	loadAgentTree: (request: LoadAgentTreeRequest) => typedError<AgentTreePage, CommandError>(__TAURI_INVOKE("load_agent_tree", { request })),
 	loadEventDetail: (request: LoadEventDetailRequest) => typedError<EventDetailSnapshot, CommandError>(__TAURI_INVOKE("load_event_detail", { request })),
 	loadApprovals: (request: LoadApprovalsRequest) => typedError<ApprovalPage, CommandError>(__TAURI_INVOKE("load_approvals", { request })),
@@ -170,6 +171,11 @@ export type CurrentRunSnapshot = {
 	id: string,
 	provider: ProviderId,
 	status: RunStatus,
+};
+
+export type DiagnosticsPage = {
+	items: TimelineItem[],
+	nextCursor: string | null,
 };
 
 export type EventDetailSnapshot = {
@@ -399,6 +405,7 @@ export type TimelineItem = {
 	agentId: string,
 	sequence: string,
 	kind: TimelineItemKind,
+	presentation: TimelinePresentation,
 	role: MessageRole | null,
 	content: string,
 	contentBytes: string,
@@ -415,6 +422,8 @@ export type TimelinePage = {
 	approvalsTruncated: boolean,
 	approvalsNextCursor: string | null,
 };
+
+export type TimelinePresentation = "normal" | "notice" | "failure" | "telemetry";
 
 export type UserInputOption = {
 	label: string,

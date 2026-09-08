@@ -30,7 +30,8 @@ use prompting_time_core::router::{
 };
 use prompting_time_core::runtime::RuntimeError;
 use prompting_time_core::store::{
-    EventDetail as CoreEventDetail, Page, StoreError, TimelineRecord,
+    EventDetail as CoreEventDetail, Page, StoreError,
+    TimelinePresentation as CoreTimelinePresentation, TimelineRecord,
 };
 use prompting_time_core::workspace::{
     CleanupEligibility as CoreCleanupEligibility, WorkspaceBlocker as CoreWorkspaceBlocker,
@@ -102,6 +103,20 @@ pub async fn load_timeline(
         .load_timeline_snapshot(conversation_id, request.cursor, request.limit)
         .await?;
     Ok(page.into())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn load_diagnostics(
+    state: State<'_, Arc<AppState>>,
+    request: LoadTimelineRequest,
+) -> Result<DiagnosticsPage, CommandError> {
+    let conversation_id = parse_conversation_id(&request.conversation_id)?;
+    Ok(state
+        .service()?
+        .load_diagnostics(conversation_id, request.cursor, request.limit)
+        .await?
+        .into())
 }
 
 #[tauri::command]
@@ -343,6 +358,7 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             list_conversations,
             load_conversation,
             load_timeline,
+            load_diagnostics,
             load_agent_tree,
             load_event_detail,
             load_approvals,
@@ -498,6 +514,7 @@ mod tests {
             agent_id: "agent-1".to_owned(),
             sequence: "1".to_owned(),
             kind: TimelineItemKind::Progress,
+            presentation: TimelinePresentation::Normal,
             role: None,
             content: "Working".to_owned(),
             content_bytes: "7".to_owned(),
@@ -509,6 +526,60 @@ mod tests {
 
         assert!(!encoded.contains("native"));
         assert!(!encoded.contains("payload"));
+    }
+
+    #[tokio::test]
+    async fn diagnostic_projection_preserves_requested_conversation_and_canonical_ownership() {
+        use prompting_time_core::store::{NewConversation, ProviderEventRecord, Store};
+        let store = Store::open_in_memory().await.unwrap();
+        let mut owners = Vec::new();
+        for title in ["selected", "other"] {
+            let conversation = store
+                .create_conversation(NewConversation::projectless(title))
+                .await
+                .unwrap();
+            let (run, root) = store
+                .create_run(conversation.id, CoreProviderId::Codex)
+                .await
+                .unwrap();
+            store
+                .append_run_event(run.id, root.id, ProviderEventRecord::started())
+                .await
+                .unwrap();
+            let event = store
+                .append_run_event(
+                    run.id,
+                    root.id,
+                    ProviderEventRecord::unrecognized("notification/example"),
+                )
+                .await
+                .unwrap();
+            owners.push((conversation.id, run.id, root.id, event.id));
+        }
+        let (conversation_id, run_id, agent_id, event_id) = owners[0];
+        let request: LoadTimelineRequest = serde_json::from_value(serde_json::json!({
+            "conversationId": conversation_id.to_string(), "cursor": null, "limit": 30,
+        }))
+        .unwrap();
+        let parsed_id = parse_conversation_id(&request.conversation_id).unwrap();
+        let page: DiagnosticsPage = store
+            .load_diagnostics(parsed_id, request.cursor, request.limit)
+            .await
+            .unwrap()
+            .into();
+        assert_eq!(page.items.len(), 1);
+        let item = &page.items[0];
+        assert_eq!(item.conversation_id, conversation_id.to_string());
+        assert_eq!(item.run_id, run_id.to_string());
+        assert_eq!(item.agent_id, agent_id.to_string());
+        assert_eq!(item.id, event_id.to_string());
+        assert_eq!(item.presentation, TimelinePresentation::Telemetry);
+        let encoded = serde_json::to_value(page).unwrap();
+        assert_eq!(encoded["items"][0]["presentation"], "telemetry");
+        assert!(encoded.get("approvals").is_none());
+        assert!(encoded.get("workspace").is_none());
+        assert!(!encoded.to_string().contains("payload"));
+        assert!(!encoded.to_string().contains("native"));
     }
 
     #[test]

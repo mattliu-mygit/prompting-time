@@ -21,6 +21,7 @@ import {
   loadRunAudit,
   listenToAppEvents,
   loadTimeline,
+  loadDiagnostics,
   pickProjectDirectory,
   respondToApproval,
   steerRun,
@@ -92,6 +93,7 @@ describe("desktop bridge", () => {
     await listConversations({ cursor: null, limit: 25 });
     await loadConversation({ conversationId: "c-1" });
     await loadTimeline({ conversationId: "c-1", cursor: null, limit: 50 });
+    await loadDiagnostics({ conversationId: "c-1", cursor: null, limit: 30 });
     await loadAgentTree({ conversationId: "c-1", cursor: null, limit: 100 });
     await loadEventDetail({ eventId: "event-1" });
     await loadApprovals({ conversationId: "c-1", cursor: null, limit: 100, kind: "pending" });
@@ -124,6 +126,7 @@ describe("desktop bridge", () => {
         "load_timeline",
         { request: { conversationId: "c-1", cursor: null, limit: 50 } },
       ],
+      ["load_diagnostics", { request: { conversationId: "c-1", cursor: null, limit: 30 } }],
       [
         "load_agent_tree",
         { request: { conversationId: "c-1", cursor: null, limit: 100 } },
@@ -264,6 +267,7 @@ describe("desktop bridge", () => {
           agentId: "agent-1",
           sequence: 1,
           kind: "progress",
+          presentation: "normal",
           content: "Working",
         },
       ],

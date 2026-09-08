@@ -8,7 +8,7 @@ import { Inspector } from "./Inspector";
 
 function actions(overrides: Partial<AppActions> = {}): AppActions {
   return {
-    loadTimeline: vi.fn(), loadEventDetail: vi.fn(), loadApprovals: vi.fn(),
+    loadDiagnostics: vi.fn(), loadTimeline: vi.fn(), loadEventDetail: vi.fn(), loadApprovals: vi.fn(),
     loadApprovalDetail: vi.fn().mockResolvedValue({
       id: "approval-1", status: "pending", responsePending: false, operation: "Run command", scope: "This command",
       agentPath: ["Root", "Reviewer"], agentPathTruncated: false,

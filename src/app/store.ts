@@ -20,6 +20,7 @@ import type {
   RespondToApprovalRequest,
   SubmissionSnapshot,
   TimelinePage,
+  DiagnosticsPage,
 } from "../bridge/types";
 
 const PAGE_SIZE = 200;
@@ -43,6 +44,7 @@ export type AppApi = {
   }): Promise<AgentTreePage>;
   listenToAppEvents(handler: (event: AppEvent) => void): Promise<() => void>;
   loadTimeline(request: { conversationId: string; cursor: string | null; limit: number }): Promise<TimelinePage>;
+  loadDiagnostics(request: { conversationId: string; cursor: string | null; limit: number }): Promise<DiagnosticsPage>;
   loadEventDetail(request: { eventId: string }): Promise<EventDetailSnapshot>;
   loadApprovals(request: { conversationId: string; cursor: string | null; limit: number; kind: "pending" | "history" }): Promise<ApprovalPage>;
   loadApprovalDetail(request: { approvalId: string }): Promise<ApprovalDetailSnapshot>;
@@ -63,6 +65,7 @@ export type AppApi = {
 export type ConversationActions = Pick<
   AppApi,
   | "loadTimeline"
+  | "loadDiagnostics"
   | "loadEventDetail"
   | "loadApprovals"
   | "loadApprovalDetail"
@@ -748,6 +751,7 @@ export function createAppStore(api: AppApi): AppStore {
     },
     actions: {
       loadTimeline: api.loadTimeline,
+      loadDiagnostics: api.loadDiagnostics,
       loadEventDetail: api.loadEventDetail,
       loadApprovals: api.loadApprovals,
       loadApprovalDetail: api.loadApprovalDetail,
