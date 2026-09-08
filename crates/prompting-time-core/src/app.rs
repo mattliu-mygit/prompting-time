@@ -62,7 +62,7 @@ impl ConversationRequest {
             title,
             constraints: Vec::new(),
             workspace: ConversationWorkspace::Projectless,
-            routing_profile: RoutingProfile::Balanced,
+            routing_profile: RoutingProfile::BestFit,
         }
     }
 }
@@ -1175,6 +1175,14 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn new_projectless_conversation_defaults_to_best_fit() {
+        assert_eq!(
+            ConversationRequest::projectless("Scratch").routing_profile,
+            RoutingProfile::BestFit
+        );
+    }
 
     struct RecoveryAdapter {
         starts: AtomicUsize,

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AppEvent,
   AgentTreePage,
@@ -135,6 +136,22 @@ export function loadApprovalQuestions(
 
 export function createConversation(request: CreateConversationRequest): Promise<ConversationSummary> {
   return call("create_conversation", { request });
+}
+
+export async function pickProjectDirectory(): Promise<string | null> {
+  try {
+    return await open({
+      directory: true,
+      multiple: false,
+      title: "Choose a project folder",
+    });
+  } catch {
+    throw new BridgeError(
+      "folder-picker",
+      "Prompting Time could not open the folder picker.",
+      "Try choosing the folder again.",
+    );
+  }
 }
 
 export function submitMessage(request: SubmitMessageRequest): Promise<SubmissionSnapshot> {

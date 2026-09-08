@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BridgeError,
@@ -20,6 +21,7 @@ import {
   loadRunAudit,
   listenToAppEvents,
   loadTimeline,
+  pickProjectDirectory,
   respondToApproval,
   steerRun,
   submitMessage,
@@ -27,6 +29,7 @@ import {
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
@@ -34,6 +37,33 @@ const listenMock = vi.mocked(listen);
 describe("desktop bridge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("selects one native directory", async () => {
+    vi.mocked(open).mockResolvedValueOnce("/tmp/synthetic-project");
+
+    expect(await pickProjectDirectory()).toBe("/tmp/synthetic-project");
+    expect(open).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+      title: "Choose a project folder",
+    });
+  });
+
+  it("preserves native cancellation", async () => {
+    vi.mocked(open).mockResolvedValueOnce(null);
+
+    expect(await pickProjectDirectory()).toBeNull();
+  });
+
+  it("reports picker failure with recovery guidance", async () => {
+    vi.mocked(open).mockRejectedValueOnce(new Error("synthetic failure"));
+
+    await expect(pickProjectDirectory()).rejects.toEqual(new BridgeError(
+      "folder-picker",
+      "Prompting Time could not open the folder picker.",
+      "Try choosing the folder again.",
+    ));
   });
 
   it("uses the exact command names and camel-case request envelope", async () => {

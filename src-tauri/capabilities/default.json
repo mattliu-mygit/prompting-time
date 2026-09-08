@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capabilities for Prompting Time.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

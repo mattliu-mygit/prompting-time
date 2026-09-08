@@ -10,6 +10,7 @@ pub fn run() {
     let command_builder = commands::binding_builder();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(command_builder.invoke_handler())
         .setup(|app| {
             let state = match app.path().app_data_dir() {
