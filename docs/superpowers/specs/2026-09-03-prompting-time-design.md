@@ -68,6 +68,22 @@ and while editing, without changing draft contents. Missing or invalid storage
 falls back to 100%; storage failures do not prevent using zoom. This explicit user
 zoom is separate from the default typography sizes above.
 
+Unsent composer text belongs to its conversation rather than its mounted view.
+Switching conversations and refreshing their snapshots preserves separate drafts
+within the app session. Drafts and pending-send bookkeeping stay in memory only;
+app shutdown discards them. Successful send or steering clears the submitted
+version, never a newer edit or another conversation's draft. Switching away and
+back during a request must not bypass in-flight or ambiguous-retry protection.
+
+A shared searchable palette opens from Search or Command-K (Control-K also works).
+It searches active conversation titles and project paths and exposes existing
+new-conversation, pane-toggle, and focus-message actions. It is not message-content
+search. Conversation selection focuses the chosen composer; cancellation restores
+the prior focus. Existing blocking dialogs and narrow inspector overlays retain
+keyboard priority. The palette uses cmdk's accessible filtering/selection/dialog
+and react-hotkeys-hook for shortcut registration, with our existing styling and
+store actions; no parallel action framework or additional state library.
+
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
 content scroll within their panes instead of pushing the composer below the window. Selecting a
 child preserves usable navigation and the conversation workspace. An active interruptible turn

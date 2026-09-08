@@ -9,7 +9,7 @@ import "../../src/styles/app.css";
 
 // Invented data only. This entry point never uses the native bridge or providers.
 const chatMode = new URLSearchParams(location.search).get("chat");
-const syntheticStatus = composerScenario === "send" || composerScenario === "failure" ? "completed"
+const syntheticStatus = composerScenario === "send" || composerScenario === "failure" || composerScenario === "pending" ? "completed"
   : chatMode === "failure" ? "failed"
   : chatMode === "approval" ? "waiting"
   : chatMode === "reading" ? "completed" : "running";

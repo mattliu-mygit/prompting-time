@@ -5,20 +5,24 @@ and validate its behavior before adding the next.
 
 ## Recommended order
 
-1. **Preserve per-conversation drafts.** Switching away and back should not discard
-   unsent text. The current composer owns its draft in local React state and is
-   keyed by conversation, so changing conversations remounts it. Start with
-   in-session preservation; disk persistence needs an explicit privacy/retention
-   decision because drafts may contain sensitive material.
-2. **Quick conversation switching and search.** A keyboard-opened switcher should
-   find conversations by title/project and restore composer focus. Search must
-   clearly distinguish loaded results from all stored conversations.
-3. **Discoverable commands and shortcuts.** A small command palette can expose
-   existing actions such as new conversation, pane toggles, focus composer, and
-   zoom/reset. Reuse the existing action handlers instead of creating a parallel
-   command implementation.
-4. **Parent/child navigation.** Make jumping from an orchestrator to its children
+1. **Parent/child navigation.** Make jumping from an orchestrator to its children
    and back convenient without taking over arrow keys while editing text.
+2. **Optional durable drafts.** In-session preservation is implemented. Disk
+   persistence needs an explicit privacy/retention decision because drafts may
+   contain sensitive material.
+3. **More palette actions.** The shared palette covers conversation switching and
+   common shell actions. Extend it with existing actions such as zoom/reset only
+   through their authoritative handlers.
+
+## Separately scoped retry issue
+
+Code review confirmed an inherited edge case: if a send receives an ambiguous
+transport result but the accepted run later appears active, Composer may route a
+retry through steering instead of retrying the original send command identity.
+This routing existed before draft preservation. Reproduce it with a targeted
+accepted-but-response-lost fixture and fix it as a separate submission-state change;
+the current preservation feature does not establish exactly-once behavior across
+that route transition.
 
 ## Inspiration and boundaries
 

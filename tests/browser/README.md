@@ -91,6 +91,44 @@ playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/c
 Composition events can be simulated for guard checks, but that does not establish
 real macOS input-method acceptance in the native app.
 
+For conversation drafts, use `?composer=send`: enter different Markdown drafts in
+Synthetic conversation 0 and 1, switch between them, and verify each restores its
+own text. Send one and verify only its draft clears. Reloading discards unsent
+drafts because they are deliberately in memory only. Use `?composer=failure` to
+verify failed submission still retains text after switching away and back.
+
+Use `?composer=pending` to hold a synthetic send while switching conversations.
+Return to the original conversation and confirm its editor remains disabled and
+another Enter does not create a second submission. Complete the request with:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/composer-fixture.ts")).completePendingSubmissions()'
+```
+
+Only the submitted conversation clears. This fixture never calls a provider.
+After editing the fixture, restart Vite before this check: hot-reloaded module
+URLs can otherwise make the console release a different module's pending requests.
+
+## Conversation and command palette
+
+At 1440 × 900 and 960 × 600, type a draft, select part of it, and press Command-K.
+The palette search input must receive focus. Escape restores the editor and its
+selection. Search for another synthetic conversation, press Enter, and verify its
+editor receives focus; returning through the palette restores the original draft.
+
+Check ArrowUp/ArrowDown selection, no results, and Control-K toggling as well.
+From Markdown preview, the Focus message command must restore editing without
+changing raw text. New conversation must close the palette before focusing Choose
+folder; simulated creation focuses the new editor. Opening the narrow inspector
+must focus its close button. Command-K must not open another dialog behind the
+inspector or a creation/interruption dialog. Confirm no horizontal overflow and
+that long palette lists scroll internally. Library behavior still needs these
+browser checks; mocked DOM focus alone is not sufficient.
+
+After installing new lazy-loaded dependencies, let Vite optimize them and reload
+before acceptance. Capture fresh window errors so optimizer reloads are not
+mistaken for a persistent production error.
+
 For modal focus integration, use `?chat=approval`, type a draft, open Preview, open
 Interrupt, then choose Keep running. After the dialog closes the provider selector
 must regain focus, with the preview/draft preserved. A real browser is necessary:

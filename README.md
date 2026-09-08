@@ -94,6 +94,17 @@ The composer edits Markdown source with an optional preview. **Enter** submits;
 **Shift+Enter** inserts a newline. The input grows with the draft, then scrolls within
 its height limit. Successful submission clears the draft and restores input focus;
 failure keeps the draft available. Submitted text preserves Markdown whitespace.
+
+Unsent drafts stay with each conversation when you switch away and back. They are
+kept in memory only and are discarded when the app closes; no draft autosave files
+are created. A completed send clears only the submitted draft, not newer edits or
+another conversation's text.
+
+Press **⌘K** (or **Ctrl+K**) or use **Search** to find active conversations by title
+or project and run common commands. The same palette can create a conversation,
+toggle either side pane, or focus the message input. Arrow keys select, Enter opens
+or runs the selection, and Escape returns to where you were. Search covers
+conversation names/projects, not message contents.
 Composition input and held Enter keys do not accidentally submit messages.
 
 **Send**, **Steer**, and **Interrupt** stay tied to the provider's supported state.

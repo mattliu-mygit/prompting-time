@@ -6,6 +6,12 @@ export const composerScenario = new URLSearchParams(location.search).get("compos
 const submissions: Parameters<AppApi["submitMessage"]>[0][] = [];
 const steers: Parameters<AppApi["steerRun"]>[0][] = [];
 const messages: TimelineItem[] = [];
+const pendingSubmissions: Array<() => void> = [];
+
+// Only the explicit pending fixture waits; release without any native execution.
+export function completePendingSubmissions() {
+  pendingSubmissions.splice(0).forEach((resolve) => resolve());
+}
 
 export function composerFixtureStats() {
   return { submissions: [...submissions], steers: [...steers] };
@@ -28,6 +34,7 @@ export const submitComposerMessage: AppApi["submitMessage"] = async (request) =>
   if (!composerScenario) throw new Error("Enable an explicit composer fixture to submit synthetic text.");
   submissions.push({ ...request });
   if (composerScenario === "failure") throw new Error("Synthetic send failure. Your draft was not accepted.");
+  if (composerScenario === "pending") await new Promise<void>((resolve) => pendingSubmissions.push(resolve));
   appendMessage(request.conversationId, request.text);
   return { runId: "synthetic-accepted-run", provider: "codex", status: "completed", duplicate: false, routingExplanation: "Synthetic acceptance only" };
 };
