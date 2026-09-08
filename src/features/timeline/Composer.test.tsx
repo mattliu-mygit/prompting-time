@@ -1,9 +1,21 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState, type ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { ConversationSummary, ProviderInstallation } from "../../bridge/types";
 import { BridgeError } from "../../bridge/api";
-import type { ConversationActions } from "../../app/store";
-import { Composer } from "./Composer";
+import { createAppStore, type ConversationActions } from "../../app/store";
+import { Composer as StoreComposer } from "./Composer";
+
+function Composer(props: Omit<ComponentProps<typeof StoreComposer>, "store">) {
+  const [store] = useState(() => createAppStore({
+    ...props.actions,
+    getBootstrap: vi.fn(), listConversations: vi.fn(), loadConversation: vi.fn(),
+    loadAgentTree: vi.fn(), listenToAppEvents: vi.fn(), listRunAudits: vi.fn(),
+    loadRunAudit: vi.fn(), createConversation: vi.fn(), archiveConversation: vi.fn(),
+    inspectProject: vi.fn(), pickProjectDirectory: vi.fn(),
+  }));
+  return <StoreComposer {...props} store={store} />;
+}
 
 const providers: ProviderInstallation[] = [
   { id: "codex", installed: true, available: true, version: "1", diagnostic: null, capabilities: ["steering", "interruption"] },

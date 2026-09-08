@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type {
   ConversationSummary,
@@ -6,7 +6,7 @@ import type {
   ProviderInstallation,
   RoutingProfile,
 } from "../../bridge/types";
-import type { ConversationActions } from "../../app/store";
+import type { AppStore, ConversationActions } from "../../app/store";
 import { MessageContent } from "./MessageContent";
 
 type ProviderChoice = "auto" | ProviderId;
@@ -21,6 +21,7 @@ type ComposerProps = {
   providers: readonly ProviderInstallation[];
   routingProfile: RoutingProfile;
   actions: ConversationActions;
+  store: AppStore;
   onMutation(): void | Promise<void>;
   onModalChange?(open: boolean): void;
   messageRef?: RefObject<HTMLTextAreaElement | null>;
@@ -33,21 +34,23 @@ const profileNames: Record<RoutingProfile, string> = {
   usageBalance: "Usage balance",
 };
 
-export function Composer({ conversation, providers, routingProfile, actions, onMutation, onModalChange, messageRef }: ComposerProps) {
-  const [text, setText] = useState("");
+export function Composer({ conversation, providers, routingProfile, actions, store, onMutation, onModalChange, messageRef }: ComposerProps) {
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const text = snapshot.draftsById[conversation.id]?.text ?? "";
+  const submission = snapshot.submissionsById[conversation.id];
   const [preview, setPreview] = useState(false);
-  const [choice, setChoice] = useState<ProviderChoice>("auto");
+  const [choice, setChoice] = useState<ProviderChoice>(() => submission?.providerOverride ?? "auto");
   const [pendingInterruption, setPendingInterruption] = useState<PendingInterruption | null>(null);
   const [interruptRequestedFor, setInterruptRequestedFor] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [pendingCommand, setPendingCommand] = useState<{ id: string; text: string; provider: ProviderId | null } | null>(null);
+  const [localSubmitting, setSubmitting] = useState(false);
+  const submitting = localSubmitting || submission?.pending === true;
+  const [localError, setError] = useState<string | null>(null);
+  const error = localError ?? submission?.error ?? null;
   const providerSelect = useRef<HTMLSelectElement>(null);
   const localMessageField = useRef<HTMLTextAreaElement>(null);
   const messageField = messageRef ?? localMessageField;
   const restoreFocusRequested = useRef(false);
   const restoreDraftFocusRequested = useRef(false);
-  const submissionPending = useRef(false);
 
   const rootTurnActive = conversation.currentRunId !== null
     && (conversation.runStatus === "queued" || conversation.runStatus === "running" || conversation.runStatus === "waiting");
@@ -161,7 +164,7 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
       return;
     }
     setChoice(next);
-    setPendingCommand(null);
+    store.resetDraftCommand(conversation.id);
   }
 
   function closeInterruptionDialog() {
@@ -226,64 +229,24 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
     }
   }
 
-  async function send() {
-    if (!canSubmit || submissionPending.current) return;
-    submissionPending.current = true;
-    const provider = choice === "auto" ? null : choice;
-    const command = pendingCommand
-      && pendingCommand.text === text
-      && pendingCommand.provider === provider
-      ? pendingCommand
-      : { id: newCommandId(), text, provider };
-    setPendingCommand(command);
-    setSubmitting(true);
-    setError(null);
-    try {
-      await actions.submitMessage({
-        conversationId: conversation.id,
-        text: command.text,
-        providerOverride: command.provider,
-        commandId: command.id,
-      });
-      setText("");
-      setPreview(false);
-      setPendingCommand(null);
-      restoreDraftFocusRequested.current = true;
-      await onMutation();
-    } catch (reason) {
-      if (!isAmbiguousTransportFailure(reason)) setPendingCommand(null);
-      setError(messageFor(reason));
-    } finally {
-      submissionPending.current = false;
-      setSubmitting(false);
-    }
-  }
-
-  async function steer() {
-    if (!canSubmit || !conversation.currentRunId || !canSteer || submissionPending.current) return;
-    submissionPending.current = true;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await actions.steerRun({ runId: conversation.currentRunId, text });
-      setText("");
-      setPreview(false);
-      restoreDraftFocusRequested.current = true;
-      await onMutation();
-    } catch (reason) {
-      setError(messageFor(reason));
-    } finally {
-      submissionPending.current = false;
-      setSubmitting(false);
-    }
-  }
-
-  function submitDraft() {
+  async function submitDraft() {
     if (!canSubmit) return;
-    void (canSteer ? steer() : send());
+    const provider = choice === "auto" ? null : choice;
+    setSubmitting(true);
+    setError(null);
+    try {
+      if (!await store.submitDraft(conversation.id, provider, canSteer ? conversation.currentRunId : null)) return;
+      setPreview(false);
+      restoreDraftFocusRequested.current = true;
+      await onMutation();
+    } catch (reason) {
+      setError(messageFor(reason));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  const retrying = pendingCommand !== null && error !== null;
+  const retrying = submission?.command != null && error !== null;
   const activeName = conversation.provider ? providerNames[conversation.provider] : "provider";
 
   return (
@@ -319,13 +282,12 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
           disabled={submitting}
           placeholder={active ? `Add direction for ${activeName}` : "Ask Prompting Time…"}
           onChange={(event) => {
-            setText(event.target.value);
-            if (pendingCommand && event.target.value !== pendingCommand.text) setPendingCommand(null);
+            store.setDraft(conversation.id, event.target.value);
           }}
           onKeyDown={(event) => {
             if (event.key !== "Enter" || event.shiftKey || event.altKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
             event.preventDefault();
-            if (!event.repeat) submitDraft();
+            if (!event.repeat) void submitDraft();
           }}
         />
       </label>
@@ -374,7 +336,7 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
           type="button"
           className="primary-button"
           disabled={!canSubmit}
-          onClick={submitDraft}
+          onClick={() => void submitDraft()}
         >
           {submitting ? "Working…" : canSteer ? `Steer ${activeName}` : retrying ? "Retry send" : "Send"}
         </button>
@@ -404,16 +366,6 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
       ), document.body) : null}
     </>
   );
-}
-
-function newCommandId() {
-  return globalThis.crypto.randomUUID();
-}
-
-function isAmbiguousTransportFailure(reason: unknown) {
-  return reason instanceof Error
-    && "code" in reason
-    && reason.code === "outcome-unknown";
 }
 
 function messageFor(reason: unknown) {

@@ -143,6 +143,77 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
 }
 
 describe("App", () => {
+  async function openDrafts(overrides: Partial<AppApi> = {}) {
+    const conversations = [createdConversation({ id: "a", title: "Draft A" }), createdConversation({ id: "b", title: "Draft B" })];
+    const api = createApi({
+      listConversations: vi.fn().mockResolvedValue({ items: conversations, nextCursor: null }),
+      loadConversation: vi.fn(async ({ conversationId }) => conversations.find(({ id }) => id === conversationId)!),
+      ...overrides,
+    });
+    const store = createAppStore(api);
+    render(<App store={store} />);
+    await screen.findByRole("textbox", { name: "Message" });
+    return { api, store, select: (id: string) => act(() => store.selectConversation(id)) };
+  }
+
+  it("preserves independent raw Markdown drafts across switching and refresh", async () => {
+    const { store, select } = await openDrafts();
+    const draft = "    code\n\n**raw Markdown**\n";
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: draft } });
+    select("b");
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "B draft" } });
+    select("a");
+    expect(screen.getByLabelText("Message")).toHaveValue(draft);
+    await act(async () => store.retry());
+    expect(screen.getByLabelText("Message")).toHaveValue(draft);
+    select("b");
+    expect(screen.getByLabelText("Message")).toHaveValue("B draft");
+  });
+
+  it("keeps a reopened send pending and clears only its accepted draft", async () => {
+    const pending = deferred<Awaited<ReturnType<AppApi["submitMessage"]>>>();
+    const submitMessage = vi.fn<AppApi["submitMessage"]>(() => pending.promise);
+    const { select } = await openDrafts({ submitMessage });
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "A draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    select("b");
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "B draft" } });
+    select("a");
+    expect(screen.getByLabelText("Message")).toHaveValue("A draft");
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter" });
+    expect(submitMessage).toHaveBeenCalledTimes(1);
+    select("b");
+    await act(async () => pending.resolve({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" }));
+    expect(screen.getByLabelText("Message")).toHaveValue("B draft");
+    select("a");
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+  });
+
+  it.each(["outcome-unknown", "invalid-request"])("retains a failed draft after remount and retries %s with the appropriate command identity", async (code) => {
+    const pending = deferred<Awaited<ReturnType<AppApi["submitMessage"]>>>();
+    const submitMessage = vi.fn<AppApi["submitMessage"]>(() => pending.promise);
+    const { select } = await openDrafts({ submitMessage });
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), { target: { value: "codex" } });
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "A draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    select("b");
+    await act(async () => pending.reject(new BridgeError(code, "Send failed", null)));
+    select("a");
+    expect(screen.getByLabelText("Message")).toHaveValue("A draft");
+    expect(screen.getByRole("alert")).toHaveTextContent("Send failed");
+    fireEvent.click(screen.getByRole("button", { name: code === "outcome-unknown" ? "Retry send" : "Send" }));
+    await waitFor(() => expect(submitMessage).toHaveBeenCalledTimes(2));
+    const first = submitMessage.mock.calls[0]![0];
+    const retry = submitMessage.mock.calls[1]![0];
+    if (code === "outcome-unknown") {
+      expect(retry).toEqual(first);
+    } else {
+      expect(retry.commandId).not.toBe(first.commandId);
+    }
+  });
+
   it("chooses a Git folder and creates an empty Best fit conversation from an empty install", async () => {
     const { api, dialog, choose, store } = await openChooser({
       listConversations: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),

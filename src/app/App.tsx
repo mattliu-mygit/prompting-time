@@ -271,6 +271,7 @@ function CommandCenter({ store }: { store: AppStore }) {
               />
               <Composer
                 key={`composer-${selectedConversation.id}`}
+                store={store}
                 conversation={selectedConversation}
                 providers={snapshot.bootstrap?.providers ?? []}
                 routingProfile={selectedConversation.routingProfile}

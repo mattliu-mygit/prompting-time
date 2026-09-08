@@ -79,6 +79,13 @@ export type ConversationActions = Pick<
 
 export type AppActions = ConversationActions & Pick<AppApi, "listRunAudits" | "loadRunAudit">;
 
+type DraftSubmission = Readonly<{
+  pending: boolean;
+  providerOverride: ProviderId | null;
+  command: Readonly<{ id: string; text: string; provider: ProviderId | null }> | null;
+  error: string | null;
+}>;
+
 export type NormalizedConversation = Omit<ConversationSummary, "agents"> & {
   summaryAgentsTruncated: boolean;
   summaryAgentIds: readonly string[];
@@ -109,6 +116,8 @@ export type AppSnapshot = Readonly<{
   queuedCount: number;
   lastSequence: string | null;
   conversationVersions: Readonly<Record<string, number>>;
+  draftsById: Readonly<Record<string, Readonly<{ text: string }>>>;
+  submissionsById: Readonly<Record<string, DraftSubmission>>;
 }>;
 
 export type AppStore = {
@@ -125,6 +134,9 @@ export type AppStore = {
   selectConversation(conversationId: string, agentId?: string): void;
   setStatusFilter(filter: StatusFilter): void;
   refreshConversation(conversationId: string): void;
+  setDraft(conversationId: string, text: string): void;
+  resetDraftCommand(conversationId: string): void;
+  submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null): Promise<boolean>;
   readonly actions: AppActions;
 };
 
@@ -142,6 +154,8 @@ const emptySnapshot: AppSnapshot = freezeSnapshot({
   queuedCount: 0,
   lastSequence: null,
   conversationVersions: {},
+  draftsById: {},
+  submissionsById: {},
 });
 
 export function createAppStore(api: AppApi): AppStore {
@@ -179,6 +193,66 @@ export function createAppStore(api: AppApi): AppStore {
 
   function update(changes: Partial<AppSnapshot>) {
     publish({ ...snapshot, ...changes });
+  }
+
+  function setDraft(conversationId: string, text: string) {
+    if (disposed || (snapshot.draftsById[conversationId]?.text ?? "") === text) return;
+    const draftsById = { ...snapshot.draftsById };
+    if (text) draftsById[conversationId] = Object.freeze({ text });
+    else delete draftsById[conversationId];
+    update({ draftsById });
+    resetDraftCommand(conversationId);
+  }
+
+  function setSubmission(conversationId: string, submission: DraftSubmission | null) {
+    if (disposed) return;
+    const submissionsById = { ...snapshot.submissionsById };
+    if (submission) submissionsById[conversationId] = Object.freeze(submission);
+    else delete submissionsById[conversationId];
+    update({ submissionsById });
+  }
+
+  function resetDraftCommand(conversationId: string) {
+    const submission = snapshot.submissionsById[conversationId];
+    if (submission?.command && !submission.pending) {
+      setSubmission(conversationId, { ...submission, command: null });
+    }
+  }
+
+  async function submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null) {
+    const draft = snapshot.draftsById[conversationId];
+    const previous = snapshot.submissionsById[conversationId];
+    if (disposed || !draft?.text.trim() || previous?.pending) return false;
+    const command = runId ? null : previous?.command
+      && previous.command.text === draft.text
+      && previous.command.provider === providerOverride
+      ? previous.command
+      : Object.freeze({ id: globalThis.crypto.randomUUID(), text: draft.text, provider: providerOverride });
+    setSubmission(conversationId, { pending: true, providerOverride, command, error: null });
+    try {
+      if (runId) await api.steerRun({ runId, text: draft.text });
+      else if (command) await api.submitMessage({
+        conversationId,
+        text: command.text,
+        providerOverride: command.provider,
+        commandId: command.id,
+      });
+      if (disposed) return false;
+      // Identity protects even an edit away from and back to the submitted text.
+      if (snapshot.draftsById[conversationId] === draft) setDraft(conversationId, "");
+      setSubmission(conversationId, null);
+      return true;
+    } catch (reason) {
+      if (disposed) return false;
+      const ambiguous = reason instanceof Error && "code" in reason && reason.code === "outcome-unknown";
+      setSubmission(conversationId, snapshot.draftsById[conversationId] === draft ? {
+        pending: false,
+        providerOverride,
+        command: ambiguous ? command : null,
+        error: reason instanceof Error ? reason.message : "Prompting Time could not submit this request.",
+      } : null);
+      return false;
+    }
   }
 
   async function synchronize() {
@@ -690,6 +764,9 @@ export function createAppStore(api: AppApi): AppStore {
       return () => listeners.delete(listener);
     },
     initialize,
+    setDraft,
+    resetDraftCommand,
+    submitDraft,
     loadAgentPage,
     createConversation,
     archiveConversation,
@@ -711,6 +788,7 @@ export function createAppStore(api: AppApi): AppStore {
       unlisten?.();
       unlisten = null;
       listeners.clear();
+      update({ draftsById: {}, submissionsById: {} });
     },
     selectConversation(conversationId, agentId) {
       const conversation = snapshot.conversationsById[conversationId];
@@ -948,6 +1026,8 @@ function freezeSnapshot(snapshot: AppSnapshot): AppSnapshot {
       pages: Object.freeze(snapshot.agentWindow.pages.map((page) => Object.freeze([...page]))),
     }) : null,
     conversationVersions: Object.freeze(snapshot.conversationVersions),
+    draftsById: Object.freeze(snapshot.draftsById),
+    submissionsById: Object.freeze(snapshot.submissionsById),
   });
 }
 

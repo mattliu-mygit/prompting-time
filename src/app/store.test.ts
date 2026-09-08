@@ -11,6 +11,58 @@ import type {
 } from "../bridge/types";
 import { createAppStore, selectVisibleConversations, type AppApi } from "./store";
 
+describe("in-session drafts", () => {
+  it("retains drafts through refresh and archive, removes empty entries, and drops them on disposal", async () => {
+    const { api } = createFakeApi();
+    const store = createAppStore(api);
+    await store.initialize();
+    store.setDraft("c1", "    **raw**\n");
+    store.setDraft("c2", "second");
+    await store.retry();
+    expect(store.getSnapshot().draftsById.c1?.text).toBe("    **raw**\n");
+    await store.archiveConversation("c1");
+    expect(store.getSnapshot().draftsById.c1?.text).toBe("    **raw**\n");
+    store.setDraft("c2", "");
+    expect(store.getSnapshot().draftsById).not.toHaveProperty("c2");
+    store.dispose();
+    expect(store.getSnapshot().draftsById).toEqual({});
+  });
+
+  it.each([null, "run-c1"])("preserves a newer draft when an older request completes (run %s)", async (runId) => {
+    const { api } = createFakeApi();
+    let resolve!: () => void;
+    const pending = new Promise<void>((finish) => { resolve = finish; });
+    api.submitMessage = vi.fn<AppApi["submitMessage"]>(async () => {
+      await pending;
+      return { runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" };
+    });
+    api.steerRun = vi.fn(() => pending);
+    const store = createAppStore(api);
+    store.setDraft("c1", "original");
+    const sending = store.submitDraft("c1", null, runId);
+    store.setDraft("c1", "newer");
+    store.setDraft("c1", "original");
+    resolve();
+    expect(await sending).toBe(true);
+    expect(store.getSnapshot().draftsById.c1?.text).toBe("original");
+    expect(store.getSnapshot().submissionsById).toEqual({});
+  });
+
+  it("does not restore transient state when a request fails after disposal", async () => {
+    const { api } = createFakeApi();
+    let reject!: (reason: Error) => void;
+    api.steerRun = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; }));
+    const store = createAppStore(api);
+    store.setDraft("c1", "direction");
+    const sending = store.submitDraft("c1", null, "run-c1");
+    store.dispose();
+    reject(new Error("Disconnected"));
+    expect(await sending).toBe(false);
+    expect(store.getSnapshot().draftsById).toEqual({});
+    expect(store.getSnapshot().submissionsById).toEqual({});
+  });
+});
+
 function agent(
   id: string,
   parentId: string | null,
