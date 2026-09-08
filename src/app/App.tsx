@@ -68,7 +68,7 @@ function CommandCenter({ store }: { store: AppStore }) {
     && !composerModalOpen && !(narrowInspector && inspectorOpen);
 
   useHotkeys(["meta+k", "ctrl+k"], () => setPaletteOpen((open) => !open), {
-    enabled: paletteAvailable,
+    enabled: paletteOpen === true || paletteAvailable,
     enableOnFormTags: true,
     enableOnContentEditable: true,
     ignoreEventWhen: (event) => event.isComposing || event.keyCode === 229 || event.repeat,

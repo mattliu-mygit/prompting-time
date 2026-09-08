@@ -281,6 +281,29 @@ describe("command palette", () => {
     await act(async () => pending.resolve({ items: [], nextCursor: null }));
     expect(screen.getByRole("button", { name: /Search/ })).toBeEnabled();
   });
+
+  it.each(["metaKey", "ctrlKey"])("still closes with %s after resizing over the narrow inspector, without reopening behind it", async (modifier) => {
+    let onResize = () => {};
+    const inspectorQuery = {
+      matches: false,
+      addEventListener: (_event: string, listener: () => void) => { onResize = listener; },
+      removeEventListener: vi.fn(),
+    };
+    vi.stubGlobal("matchMedia", vi.fn(() => inspectorQuery));
+    await openWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
+    const search = await openPalette();
+    act(() => {
+      inspectorQuery.matches = true;
+      onResize();
+    });
+    fireEvent.keyDown(search, { key: "k", code: "KeyK", [modifier]: true });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Search conversations and commands" })).not.toBeInTheDocument());
+    const closeInspector = screen.getByRole("button", { name: "Close inspector" });
+    fireEvent.keyDown(closeInspector, { key: "k", code: "KeyK", [modifier]: true });
+    expect(screen.queryByRole("dialog", { name: "Search conversations and commands" })).not.toBeInTheDocument();
+    expect(closeInspector).toBeVisible();
+  });
 });
 
 describe("App", () => {
