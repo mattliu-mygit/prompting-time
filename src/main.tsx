@@ -8,6 +8,7 @@ import {
   archiveConversation,
   inspectWorkspace,
   inspectProject,
+  pickProjectDirectory,
   interruptRun,
   listConversations,
   listenToAppEvents,
@@ -48,6 +49,7 @@ const store = createAppStore({
   interruptRun,
   inspectWorkspace,
   inspectProject,
+  pickProjectDirectory,
 });
 
 window.addEventListener("beforeunload", () => store.dispose(), { once: true });

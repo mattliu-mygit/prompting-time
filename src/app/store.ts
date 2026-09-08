@@ -53,6 +53,7 @@ export type AppApi = {
   interruptRun(request: { runId: string }): Promise<void>;
   inspectWorkspace(request: { conversationId: string }): Promise<InspectorSnapshot>;
   inspectProject(request: { path: string }): Promise<ProjectPathSnapshot>;
+  pickProjectDirectory(): Promise<string | null>;
   createConversation(request: CreateConversationRequest): Promise<ConversationSummary>;
   archiveConversation(request: { conversationId: string }): Promise<void>;
   listRunAudits(request: { conversationId: string; cursor: string | null; limit: number }): Promise<RunAuditPage>;
@@ -117,6 +118,7 @@ export type AppStore = {
   createConversation(request: CreateConversationRequest): Promise<void>;
   archiveConversation(conversationId: string): Promise<void>;
   inspectProject(path: string): Promise<ProjectPathSnapshot>;
+  pickProjectDirectory(): Promise<string | null>;
   selectConversation(conversationId: string, agentId?: string): void;
   setStatusFilter(filter: StatusFilter): void;
   refreshConversation(conversationId: string): void;
@@ -689,6 +691,7 @@ export function createAppStore(api: AppApi): AppStore {
     createConversation,
     archiveConversation,
     inspectProject: (path) => api.inspectProject({ path }),
+    pickProjectDirectory: () => api.pickProjectDirectory(),
     retry: async () => {
       if (disposed) return;
       if (!unlisten) {

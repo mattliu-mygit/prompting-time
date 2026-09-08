@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type {
   ConversationSummary,
@@ -22,6 +22,7 @@ type ComposerProps = {
   actions: ConversationActions;
   onMutation(): void | Promise<void>;
   onModalChange?(open: boolean): void;
+  messageRef?: RefObject<HTMLTextAreaElement | null>;
 };
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
@@ -31,7 +32,7 @@ const profileNames: Record<RoutingProfile, string> = {
   usageBalance: "Usage balance",
 };
 
-export function Composer({ conversation, providers, routingProfile, actions, onMutation, onModalChange }: ComposerProps) {
+export function Composer({ conversation, providers, routingProfile, actions, onMutation, onModalChange, messageRef }: ComposerProps) {
   const [text, setText] = useState("");
   const [choice, setChoice] = useState<ProviderChoice>("auto");
   const [pendingInterruption, setPendingInterruption] = useState<PendingInterruption | null>(null);
@@ -40,7 +41,8 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
   const [error, setError] = useState<string | null>(null);
   const [pendingCommand, setPendingCommand] = useState<{ id: string; text: string; provider: ProviderId | null } | null>(null);
   const providerSelect = useRef<HTMLSelectElement>(null);
-  const messageField = useRef<HTMLTextAreaElement>(null);
+  const localMessageField = useRef<HTMLTextAreaElement>(null);
+  const messageField = messageRef ?? localMessageField;
   const restoreFocusRequested = useRef(false);
 
   const rootTurnActive = conversation.currentRunId !== null

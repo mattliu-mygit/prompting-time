@@ -25,8 +25,10 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
 }));
 
 async function unsupported(): Promise<never> {
-  throw new Error("This read-only layout fixture does not support that action.");
+  throw new Error("This synthetic layout fixture does not support that action.");
 }
+
+const folderScenario = new URLSearchParams(location.search).get("folder");
 
 const api: AppApi = {
   getBootstrap: async () => ({
@@ -40,7 +42,7 @@ const api: AppApi = {
   loadAgentTree: async () => ({ runId: "run-0", items: [], nextCursor: null }),
   listenToAppEvents: async () => () => {},
   loadTimeline: async ({ conversationId }) => ({
-    items: Array.from({ length: 80 }, (_, index) => ({
+    items: Array.from({ length: conversationId.startsWith("created-") ? 0 : 80 }, (_, index) => ({
       id: `event-${index}`, conversationId, runId: "run-0", agentId: "root-0",
       sequence: String(index + 1), kind: "message", role: "assistant", provider: "codex",
       content: `Synthetic message ${index}. This is invented layout content.`, contentBytes: "60", truncated: false,
@@ -66,8 +68,23 @@ const api: AppApi = {
   steerRun: unsupported,
   respondToApproval: unsupported,
   interruptRun: unsupported,
-  inspectProject: unsupported,
-  createConversation: unsupported,
+  pickProjectDirectory: async () => {
+    if (folderScenario === "cancel") return null;
+    if (folderScenario === "error") throw new Error("Synthetic picker failure. Try again or continue without a folder.");
+    return folderScenario === "non-git" ? "/synthetic/plain-folder" : "/synthetic/project";
+  },
+  inspectProject: async () => ({ isGit: folderScenario !== "non-git" }),
+  createConversation: async (request) => {
+    const conversation: ConversationSummary = {
+      id: `created-${conversations.length}`, title: request.title,
+      routingProfile: request.routingProfile, workspaceId: `synthetic-workspace-${conversations.length}`,
+      projectRoot: request.workspace.kind === "projectless" ? null : request.workspace.path,
+      archived: false, currentRunId: null, provider: null, runStatus: null,
+      rollupStatus: null, agents: [], agentsTruncated: false,
+    };
+    conversations.unshift(conversation);
+    return conversation;
+  },
   archiveConversation: unsupported,
   loadRunAudit: unsupported,
 };

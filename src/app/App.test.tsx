@@ -1,9 +1,38 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { createAppStore, type AppApi } from "./store";
 import { BridgeError } from "../bridge/api";
+import type { ConversationSummary } from "../bridge/types";
+
+function createdConversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
+  return {
+    id: "new-1", title: "synthetic-project", routingProfile: "bestFit", workspaceId: "w-1",
+    archived: false, projectRoot: "/tmp/synthetic-project", currentRunId: null, provider: null,
+    runStatus: null, rollupStatus: null, agents: [], agentsTruncated: false,
+    ...overrides,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+async function openChooser(overrides: Partial<AppApi> = {}, strict = false) {
+  const api = createApi(overrides);
+  const store = createAppStore(api);
+  const app = <App store={store} />;
+  const rendered = render(strict ? <StrictMode>{app}</StrictMode> : app);
+  const trigger = await screen.findByRole("button", { name: "New conversation" });
+  fireEvent.click(trigger);
+  const dialog = screen.getByRole("dialog", { name: "New conversation" });
+  return { ...rendered, api, store, trigger, dialog, choose: within(dialog).getByRole("button", { name: "Choose folder" }) };
+}
 
 function createApi(overrides: Partial<AppApi> = {}): AppApi {
   return {
@@ -101,9 +130,10 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
       agentsTruncated: false,
     }),
     inspectProject: vi.fn().mockResolvedValue({ isGit: true }),
+    pickProjectDirectory: vi.fn().mockResolvedValue("/tmp/synthetic-project"),
     listRunAudits: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadRunAudit: vi.fn(),
-    createConversation: vi.fn(),
+    createConversation: vi.fn().mockResolvedValue(createdConversation()),
     archiveConversation: vi.fn(),
     listenToAppEvents: vi.fn().mockResolvedValue(() => {}),
     ...overrides,
@@ -111,45 +141,226 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
 }
 
 describe("App", () => {
-  it("creates projectless and project-backed conversations from an empty install", async () => {
-    const createConversation = vi.fn()
-      .mockResolvedValueOnce({
-        id: "new-1", title: "Scratch", routingProfile: "balanced", workspaceId: null,
-        archived: false, projectRoot: null, currentRunId: null, provider: null,
-        runStatus: null, rollupStatus: null, agents: [], agentsTruncated: false,
-      })
-      .mockResolvedValueOnce({
-        id: "new-2", title: "Repo work", routingProfile: "bestFit", workspaceId: "workspace-2",
-        archived: false, projectRoot: "/repo", currentRunId: null, provider: null,
-        runStatus: null, rollupStatus: null, agents: [], agentsTruncated: false,
-      });
-    const store = createAppStore(createApi({
+  it("chooses a Git folder and creates an empty Best fit conversation from an empty install", async () => {
+    const { api, dialog, choose, store } = await openChooser({
       listConversations: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
-      createConversation,
+    }, true);
+    expect(within(dialog).queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Objective")).not.toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/uncommitted/i);
+    fireEvent.click(choose);
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith({
+      title: "synthetic-project", objective: "", constraints: [],
+      workspace: { kind: "isolated", path: "/tmp/synthetic-project" }, routingProfile: "bestFit",
     }));
-    render(<App store={store} />);
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(store.getSnapshot().selectedConversationId).toBe("new-1");
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus();
+    expect(api.submitMessage).not.toHaveBeenCalled();
+  });
 
-    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
-    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Scratch" } });
-    fireEvent.change(screen.getByLabelText("Objective"), { target: { value: "Explore" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create conversation" }));
-    await waitFor(() => expect(createConversation).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      title: "Scratch", workspace: { kind: "projectless" },
-    })));
+  it("restores chooser focus when the native picker is canceled", async () => {
+    const { api, choose, dialog } = await openChooser({ pickProjectDirectory: vi.fn().mockResolvedValue(null) });
+    fireEvent.click(choose);
+    await waitFor(() => expect(choose).toBeEnabled());
+    expect(choose).toHaveFocus();
+    expect(api.inspectProject).not.toHaveBeenCalled();
+    expect(api.createConversation).not.toHaveBeenCalled();
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
-    const dialog = screen.getByRole("dialog", { name: "New conversation" });
-    fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: "Repo work" } });
-    fireEvent.change(within(dialog).getByLabelText("Objective"), { target: { value: "Implement" } });
-    fireEvent.change(within(dialog).getByLabelText("Workspace"), { target: { value: "project" } });
-    fireEvent.change(within(dialog).getByLabelText("Project root"), { target: { value: "/repo" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Check directory" }));
-    await within(dialog).findByRole("combobox", { name: "Execution" });
-    fireEvent.change(within(dialog).getByLabelText("Routing profile"), { target: { value: "bestFit" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Create conversation" }));
-    await waitFor(() => expect(createConversation).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      title: "Repo work", workspace: { kind: "isolated", path: "/repo" }, routingProfile: "bestFit",
+  it.each(["picker", "preflight", "preparation"] as const)("recovers from %s errors without falling back", async (stage) => {
+    const failing = vi.fn().mockRejectedValueOnce(new Error("Directory is unavailable"));
+    const overrides: Partial<AppApi> = stage === "picker"
+      ? { pickProjectDirectory: failing.mockResolvedValue("/tmp/synthetic-project") }
+      : stage === "preflight"
+      ? { inspectProject: failing.mockResolvedValue({ isGit: true }) }
+      : { createConversation: failing.mockResolvedValue(createdConversation()) };
+    const { api, dialog, choose } = await openChooser(overrides);
+    fireEvent.click(choose);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Directory is unavailable");
+    expect(api.createConversation).toHaveBeenCalledTimes(stage === "preparation" ? 1 : 0);
+    fireEvent.click(choose);
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(api.createConversation).toHaveBeenLastCalledWith(expect.objectContaining({
+      workspace: { kind: "isolated", path: "/tmp/synthetic-project" },
+    }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("uses a non-Git directory directly despite the isolation default", async () => {
+    const { api, choose } = await openChooser({ inspectProject: vi.fn().mockResolvedValue({ isGit: false }) });
+    fireEvent.click(choose);
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith(expect.objectContaining({
+      workspace: { kind: "direct", path: "/tmp/synthetic-project" },
     })));
+  });
+
+  it.each(["balanced", "usageBalance"] as const)("honors Current checkout and the %s routing override", async (routingProfile) => {
+    const { api, choose, dialog } = await openChooser();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Advanced" }));
+    fireEvent.change(within(dialog).getByLabelText("Git execution"), { target: { value: "direct" } });
+    fireEvent.change(within(dialog).getByLabelText("Routing profile"), { target: { value: routingProfile } });
+    fireEvent.click(choose);
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith(expect.objectContaining({
+      routingProfile, workspace: { kind: "direct", path: "/tmp/synthetic-project" },
+    })));
+  });
+
+  it.each([["/tmp/synthetic-project///", "synthetic-project"], ["/", "New conversation"]])("derives the title for %s", async (path, title) => {
+    const { api, choose } = await openChooser({ pickProjectDirectory: vi.fn().mockResolvedValue(path) });
+    fireEvent.click(choose);
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith(expect.objectContaining({ title })));
+  });
+
+  it("creates without a folder and sends only the ordinary first message", async () => {
+    const submitMessage = vi.fn().mockResolvedValue({});
+    const { api, dialog } = await openChooser({ submitMessage });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(api.createConversation).toHaveBeenCalledWith({
+      title: "New conversation", objective: "", constraints: [], workspace: { kind: "projectless" }, routingProfile: "bestFit",
+    });
+    expect(api.pickProjectDirectory).not.toHaveBeenCalled();
+    expect(api.inspectProject).not.toHaveBeenCalled();
+    expect(submitMessage).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Explain the synthetic project" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(submitMessage).toHaveBeenCalledWith({
+      conversationId: "new-1", text: "Explain the synthetic project", providerOverride: null, commandId: expect.any(String),
+    }));
+  });
+
+  it.each(["picker", "preflight"] as const)("ignores a late %s result after unmount", async (stage) => {
+    const picker = deferred<string | null>();
+    const preflight = deferred<{ isGit: boolean }>();
+    const { api, choose, unmount } = await openChooser(stage === "picker"
+      ? { pickProjectDirectory: vi.fn().mockReturnValue(picker.promise) }
+      : { inspectProject: vi.fn().mockReturnValue(preflight.promise) });
+    fireEvent.click(choose);
+    if (stage === "preflight") await waitFor(() => expect(api.inspectProject).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => { picker.resolve("/tmp/synthetic-project"); preflight.resolve({ isGit: true }); });
+    expect(api.createConversation).not.toHaveBeenCalled();
+    if (stage === "picker") expect(api.inspectProject).not.toHaveBeenCalled();
+  });
+
+  it.each(["folder", "projectless"] as const)("admits only one same-tick operation starting with %s", async (intent) => {
+    const picker = deferred<string | null>();
+    const creation = deferred<ConversationSummary>();
+    const { api, choose, dialog } = await openChooser({
+      pickProjectDirectory: vi.fn().mockReturnValue(picker.promise),
+      createConversation: vi.fn().mockReturnValue(creation.promise),
+    });
+    const projectless = within(dialog).getByRole("button", { name: "Without a folder" });
+    act(() => {
+      for (const button of intent === "folder" ? [choose, choose, projectless] : [projectless, projectless, choose]) {
+        button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      }
+    });
+    expect(api.pickProjectDirectory).toHaveBeenCalledTimes(intent === "folder" ? 1 : 0);
+    expect(api.createConversation).toHaveBeenCalledTimes(intent === "projectless" ? 1 : 0);
+    await act(async () => { picker.resolve("/tmp/synthetic-project"); });
+    expect(api.createConversation).toHaveBeenCalledTimes(1);
+    await act(async () => { creation.resolve(createdConversation()); });
+  });
+
+  it("keeps options and cancellation disabled throughout picker, preflight, and creation", async () => {
+    const picker = deferred<string | null>();
+    const preflight = deferred<{ isGit: boolean }>();
+    const creation = deferred<ConversationSummary>();
+    const { choose, dialog } = await openChooser({
+      pickProjectDirectory: vi.fn().mockReturnValue(picker.promise),
+      inspectProject: vi.fn().mockReturnValue(preflight.promise),
+      createConversation: vi.fn().mockReturnValue(creation.promise),
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Advanced" }));
+    fireEvent.click(choose);
+    const checkBusy = () => {
+      expect(dialog).toHaveAttribute("aria-busy", "true");
+      for (const control of within(dialog).getAllByRole("button")) expect(control).toBeDisabled();
+      for (const control of within(dialog).getAllByRole("combobox")) expect(control).toBeDisabled();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(dialog).toBeInTheDocument();
+      expect(fireEvent.keyDown(dialog, { key: "Tab" })).toBe(false);
+    };
+    checkBusy();
+    await act(async () => { picker.resolve("/tmp/synthetic-project"); });
+    checkBusy();
+    await act(async () => { preflight.resolve({ isGit: true }); });
+    checkBusy();
+    await act(async () => { creation.resolve(createdConversation()); });
+  });
+
+  it("traps focus using only visible Advanced controls and restores Cancel focus", async () => {
+    const { dialog, choose, trigger } = await openChooser();
+    const advanced = within(dialog).getByRole("button", { name: "Advanced" });
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    expect(advanced).toHaveAttribute("aria-expanded", "false");
+    expect(within(dialog).queryByLabelText("Git execution")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Routing profile")).not.toBeInTheDocument();
+    choose.focus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(choose).toHaveFocus();
+    fireEvent.click(advanced);
+    expect(advanced).toHaveAttribute("aria-expanded", "true");
+    expect(within(dialog).getByLabelText("Git execution")).toBeVisible();
+    fireEvent.click(cancel);
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("focuses the committed new composer after removing inert and closing a narrow inspector", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    const focus = HTMLElement.prototype.focus;
+    const focusSpy = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement) {
+      if (!this.closest("[inert]")) focus.call(this);
+    });
+    try {
+      const { dialog } = await openChooser();
+      fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
+      await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
+      expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
+      expect(document.querySelector(".command-center")).not.toHaveAttribute("inert");
+    } finally {
+      focusSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retains an existing saved Balanced profile after creating a Best fit conversation", async () => {
+    const saved = createdConversation({ id: "saved", title: "Saved Balanced", routingProfile: "balanced" });
+    const { store, dialog } = await openChooser({
+      listConversations: vi.fn().mockResolvedValue({ items: [saved], nextCursor: null }),
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(store.getSnapshot().conversationsById.saved.routingProfile).toBe("balanced");
+    act(() => store.selectConversation("saved"));
+    expect(screen.getByRole("option", { name: "Auto · Balanced" })).toBeInTheDocument();
+  });
+
+  it("focuses the composer if the inspector becomes a narrow overlay during creation", async () => {
+    const media = { matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue(media));
+    const creation = deferred<ConversationSummary>();
+    try {
+      const { dialog } = await openChooser({ createConversation: vi.fn().mockReturnValue(creation.promise) });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
+      act(() => {
+        media.matches = true;
+        media.addEventListener.mock.calls[0][1]();
+      });
+      await act(async () => { creation.resolve(createdConversation()); });
+      expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("requires deliberate confirmation before archiving the current conversation", async () => {
@@ -213,23 +424,6 @@ describe("App", () => {
     } finally {
       focus.mockRestore();
     }
-  });
-
-  it("surfaces a project preflight failure and permits retry", async () => {
-    const inspectProject = vi.fn()
-      .mockRejectedValueOnce(new Error("Directory is unavailable"))
-      .mockResolvedValueOnce({ isGit: true });
-    const store = createAppStore(createApi({ inspectProject }));
-    render(<App store={store} />);
-    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
-    const dialog = screen.getByRole("dialog", { name: "New conversation" });
-    fireEvent.change(within(dialog).getByLabelText("Workspace"), { target: { value: "project" } });
-    fireEvent.change(within(dialog).getByLabelText("Project root"), { target: { value: "/repo" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Check directory" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Directory is unavailable");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Check directory" }));
-    expect(await within(dialog).findByRole("combobox", { name: "Execution" })).toBeVisible();
-    expect(inspectProject).toHaveBeenCalledTimes(2);
   });
 
   it("renders the three-pane command center with queue and provider diagnostics", async () => {

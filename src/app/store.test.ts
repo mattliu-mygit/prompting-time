@@ -78,6 +78,7 @@ function conversationActions(): Pick<
   | "createConversation"
   | "archiveConversation"
   | "inspectProject"
+  | "pickProjectDirectory"
 > {
   return {
     loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
@@ -95,6 +96,7 @@ function conversationActions(): Pick<
     createConversation: vi.fn(),
     archiveConversation: vi.fn(),
     inspectProject: vi.fn().mockResolvedValue({ isGit: true }),
+    pickProjectDirectory: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -197,6 +199,7 @@ function createFakeApi() {
     createConversation: vi.fn(),
     archiveConversation: vi.fn(),
     inspectProject: vi.fn().mockResolvedValue({ isGit: true }),
+    pickProjectDirectory: vi.fn().mockResolvedValue(null),
     listenToAppEvents: vi.fn(async (handler) => {
       calls.listen += 1;
       eventHandler = handler;
@@ -219,6 +222,22 @@ function createFakeApi() {
 }
 
 describe("app store", () => {
+  it("delegates folder selection including cancellation and failure", async () => {
+    const fake = createFakeApi();
+    const failure = new Error("Picker failed");
+    fake.api.pickProjectDirectory = vi.fn()
+      .mockResolvedValueOnce("/tmp/synthetic-project")
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(failure);
+    const store = createAppStore(fake.api);
+    await expect(store.pickProjectDirectory()).resolves.toBe("/tmp/synthetic-project");
+    await expect(store.pickProjectDirectory()).resolves.toBeNull();
+    await expect(store.pickProjectDirectory()).rejects.toBe(failure);
+    expect(fake.api.pickProjectDirectory).toHaveBeenCalledTimes(3);
+    expect(fake.api.inspectProject).not.toHaveBeenCalled();
+    expect(fake.api.createConversation).not.toHaveBeenCalled();
+  });
+
   it("retains a late bootstrap diagnostic after a concurrent conversation failure", async () => {
     const fake = createFakeApi();
     let finishBootstrap!: (value: BootstrapSnapshot) => void;

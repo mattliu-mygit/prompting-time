@@ -520,6 +520,46 @@ async fn switching_back_resumes_provider_and_sends_only_unseen_context() {
 }
 
 #[tokio::test]
+async fn empty_objective_conversation_sends_the_first_user_request_without_inventing_an_objective() {
+    let directory = TempDir::new().unwrap();
+    let store = Store::open_in_memory().await.unwrap();
+    let adapter = Arc::new(FakeAdapter::new(ProviderId::Codex));
+    let app = make_app(directory.path(), store.clone(), adapter.clone()).await;
+    let conversation = app
+        .create_conversation(ConversationRequest {
+            title: "New conversation".into(),
+            objective: String::new(),
+            constraints: vec![],
+            workspace: ConversationWorkspace::Projectless,
+            routing_profile: RoutingProfile::BestFit,
+        })
+        .await
+        .unwrap();
+    let first_request = "Explain the synthetic fixture";
+    let submission = app
+        .submit(SubmitRequest {
+            command_id: "first-empty-objective".into(),
+            conversation_id: conversation.id,
+            content: first_request.into(),
+            provider_override: None,
+        })
+        .await
+        .unwrap();
+    submission.handle.wait().await.unwrap();
+
+    assert!(adapter.last_prompt().contains(first_request));
+    assert!(
+        store
+            .load_conversation_settings(conversation.id)
+            .await
+            .unwrap()
+            .objective
+            .is_empty()
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn failed_conversation_persistence_removes_prepared_projectless_workspace() {
     let directory = TempDir::new().unwrap();
     let store = Store::open_in_memory().await.unwrap();

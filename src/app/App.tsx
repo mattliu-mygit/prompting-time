@@ -56,6 +56,8 @@ function CommandCenter({ store }: { store: AppStore }) {
   const inspectorClose = useRef<HTMLButtonElement>(null);
   const newConversationTrigger = useRef<HTMLButtonElement>(null);
   const archiveTrigger = useRef<HTMLButtonElement>(null);
+  const composerMessage = useRef<HTMLTextAreaElement>(null);
+  const focusCreatedComposer = useRef(false);
   const lifecycleModalOpen = creatingConversation || archiveTarget !== null;
 
   useEffect(() => {
@@ -77,6 +79,17 @@ function CommandCenter({ store }: { store: AppStore }) {
   useEffect(() => {
     if (archiveTarget && !snapshot.conversationsById[archiveTarget]) setArchiveTarget(null);
   }, [archiveTarget, snapshot.conversationsById]);
+
+  useEffect(() => {
+    if (!focusCreatedComposer.current || lifecycleModalOpen) return;
+    if (narrowInspector && inspectorOpen) {
+      setInspectorOpen(false);
+      return;
+    }
+    if (!composerMessage.current) return;
+    composerMessage.current.focus();
+    focusCreatedComposer.current = false;
+  }, [lifecycleModalOpen, narrowInspector, inspectorOpen, snapshot.selectedConversationId]);
 
   if (snapshot.phase === "idle" || snapshot.phase === "loading") {
     return (
@@ -263,6 +276,7 @@ function CommandCenter({ store }: { store: AppStore }) {
                 actions={store.actions}
                 onMutation={() => store.refreshConversation(selectedConversation.id)}
                 onModalChange={setComposerModalOpen}
+                messageRef={composerMessage}
               />
             </>
           ) : (
@@ -323,20 +337,16 @@ function CommandCenter({ store }: { store: AppStore }) {
       {lifecycleError && !creatingConversation && !archiveTarget ? <p role="alert" className="inline-error lifecycle-error">{lifecycleError}</p> : null}
       {creatingConversation ? (
         <NewConversationDialog
-          error={lifecycleError}
+          pickProjectDirectory={() => store.pickProjectDirectory()}
           inspectProject={(path) => store.inspectProject(path)}
           onCancel={() => {
             setCreatingConversation(false);
             queueMicrotask(() => newConversationTrigger.current?.focus());
           }}
-          onCreate={async (request) => {
-            try {
-              await store.createConversation(request);
-              setCreatingConversation(false);
-              queueMicrotask(() => newConversationTrigger.current?.focus());
-            } catch (reason) {
-              setLifecycleError(messageFor(reason, "Prompting Time could not create the conversation."));
-            }
+          onCreate={(request) => store.createConversation(request)}
+          onCreated={() => {
+            focusCreatedComposer.current = true;
+            setCreatingConversation(false);
           }}
         />
       ) : null}
@@ -376,96 +386,115 @@ function CommandCenter({ store }: { store: AppStore }) {
 }
 
 function NewConversationDialog({
-  error,
+  pickProjectDirectory,
   inspectProject,
   onCancel,
   onCreate,
+  onCreated,
 }: {
-  error: string | null;
+  pickProjectDirectory(): Promise<string | null>;
   inspectProject(path: string): Promise<{ isGit: boolean }>;
   onCancel(): void;
   onCreate(request: CreateConversationRequest): Promise<void>;
+  onCreated(): void;
 }) {
-  const [title, setTitle] = useState("");
-  const [objective, setObjective] = useState("");
-  const [workspaceKind, setWorkspaceKind] = useState<"projectless" | "project">("projectless");
-  const [projectRoot, setProjectRoot] = useState("");
-  const [projectCheck, setProjectCheck] = useState<{ path: string; isGit: boolean } | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
-  const [checkingProject, setCheckingProject] = useState(false);
   const [executionMode, setExecutionMode] = useState<"isolated" | "direct">("isolated");
-  const [routingProfile, setRoutingProfile] = useState<CreateConversationRequest["routingProfile"]>("balanced");
-  const [submitting, setSubmitting] = useState(false);
-  const valid = title.trim() !== "" && objective.trim() !== ""
-    && (workspaceKind === "projectless" || projectCheck?.path === projectRoot.trim());
+  const [routingProfile, setRoutingProfile] = useState<CreateConversationRequest["routingProfile"]>("bestFit");
+  const [advanced, setAdvanced] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const lifetime = useRef({ active: false });
+  const chooseButton = useRef<HTMLButtonElement>(null);
+  const restoreChooserFocus = useRef(false);
+
+  useEffect(() => {
+    const current = { active: true };
+    lifetime.current = current;
+    return () => { current.active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (busy || !restoreChooserFocus.current) return;
+    restoreChooserFocus.current = false;
+    chooseButton.current?.focus();
+  }, [busy]);
+
+  function cancel() {
+    if (!pending.current) onCancel();
+  }
+
+  async function create(intent: "folder" | "projectless") {
+    if (pending.current) return;
+    pending.current = true;
+    const current = lifetime.current;
+    const options = { executionMode, routingProfile };
+    setBusy(true);
+    setProjectError(null);
+    try {
+      let title = "New conversation";
+      let workspace: CreateConversationRequest["workspace"] = { kind: "projectless" };
+      if (intent === "folder") {
+        const path = await pickProjectDirectory();
+        if (!current.active || path === null) return;
+        const { isGit } = await inspectProject(path);
+        if (!current.active) return;
+        title = path.replace(/\/+$/, "").split("/").pop() || title;
+        workspace = { kind: isGit ? options.executionMode : "direct", path };
+      }
+      await onCreate({ title, objective: "", constraints: [], workspace, routingProfile: options.routingProfile });
+      if (current.active) onCreated();
+    } catch (reason) {
+      if (current.active) setProjectError(messageFor(reason, "Prompting Time could not create the conversation."));
+    } finally {
+      pending.current = false;
+      if (current.active) {
+        restoreChooserFocus.current = true;
+        setBusy(false);
+      }
+    }
+  }
 
   return (
     <div className="dialog-backdrop">
-      <form
+      <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-conversation-title"
         className="confirm-dialog conversation-dialog"
-        aria-busy={submitting}
-        onKeyDown={(event) => trapLifecycleDialog(event, onCancel, submitting)}
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!valid || submitting) return;
-          setSubmitting(true);
-          const workspace: CreateConversationRequest["workspace"] = workspaceKind === "projectless"
-            ? { kind: "projectless" }
-            : { kind: projectCheck?.isGit ? executionMode : "direct", path: projectRoot.trim() };
-          void onCreate({
-            title: title.trim(), objective: objective.trim(), constraints: [], workspace, routingProfile,
-          }).finally(() => setSubmitting(false));
-        }}
+        aria-busy={busy}
+        onKeyDown={(event) => trapLifecycleDialog(event, cancel, pending.current)}
       >
         <h2 id="new-conversation-title">New conversation</h2>
-        {error ? <p role="alert" className="inline-error">{error}</p> : null}
-        <label><span>Title</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-        <label><span>Objective</span><textarea rows={3} value={objective} onChange={(event) => setObjective(event.target.value)} /></label>
-        <label>
-          <span>Workspace</span>
-          <select value={workspaceKind} onChange={(event) => setWorkspaceKind(event.target.value as typeof workspaceKind)}>
-            <option value="projectless">No project</option>
-            <option value="project">Local directory</option>
-          </select>
-        </label>
-        {workspaceKind === "project" ? (
-          <>
-            <label><span>Project root</span><input value={projectRoot} onChange={(event) => { setProjectRoot(event.target.value); setProjectCheck(null); setProjectError(null); }} /></label>
-            <button type="button" className="secondary-button" disabled={!projectRoot.trim() || checkingProject} onClick={async () => {
-              setCheckingProject(true);
-              setProjectError(null);
-              try {
-                const result = await inspectProject(projectRoot.trim());
-                setProjectCheck({ path: projectRoot.trim(), isGit: result.isGit });
-                setExecutionMode("isolated");
-              } catch (reason) {
-                setProjectCheck(null);
-                setProjectError(messageFor(reason, "Prompting Time could not inspect this directory."));
-              } finally {
-                setCheckingProject(false);
-              }
-            }}>{checkingProject ? "Checking directory…" : "Check directory"}</button>
-            {projectError ? <p role="alert" className="inline-error">{projectError}</p> : null}
-            {projectCheck?.isGit ? <label><span>Execution</span><select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as typeof executionMode)}><option value="isolated">Isolated worktree</option><option value="direct">Current checkout</option></select></label> : null}
-            {projectCheck && !projectCheck.isGit ? <p>This non-Git directory will be used directly.</p> : null}
-          </>
+        <p>Git folders use an isolated worktree by default, without uncommitted edits. Non-Git folders are used directly.</p>
+        {projectError ? <p role="alert" className="inline-error">{projectError}</p> : null}
+        <button ref={chooseButton} type="button" className="primary-button" autoFocus disabled={busy} onClick={() => void create("folder")}>Choose folder</button>
+        <button type="button" className="secondary-button" disabled={busy} onClick={() => void create("projectless")}>Without a folder</button>
+        <button type="button" className="secondary-button" aria-expanded={advanced} aria-controls="new-conversation-advanced" disabled={busy} onClick={() => setAdvanced((open) => !open)}>Advanced</button>
+        {advanced ? (
+          <div id="new-conversation-advanced" className="conversation-options">
+            <label>
+              <span>Git execution</span>
+              <select value={executionMode} disabled={busy} onChange={(event) => setExecutionMode(event.target.value as typeof executionMode)}>
+                <option value="isolated">Isolated worktree</option>
+                <option value="direct">Current checkout</option>
+              </select>
+            </label>
+            <p>This execution option applies only to Git folders.</p>
+            <label>
+              <span>Routing profile</span>
+              <select value={routingProfile} disabled={busy} onChange={(event) => setRoutingProfile(event.target.value as typeof routingProfile)}>
+                <option value="bestFit">Best fit</option>
+                <option value="balanced">Balanced</option>
+                <option value="usageBalance">Usage balance</option>
+              </select>
+            </label>
+          </div>
         ) : null}
-        <label>
-          <span>Routing profile</span>
-          <select value={routingProfile} onChange={(event) => setRoutingProfile(event.target.value as CreateConversationRequest["routingProfile"])}>
-            <option value="balanced">Balanced</option>
-            <option value="bestFit">Best fit</option>
-            <option value="usageBalance">Usage balance</option>
-          </select>
-        </label>
         <div className="dialog-actions">
-          <button type="button" className="secondary-button" disabled={submitting} onClick={onCancel}>Cancel</button>
-          <button type="submit" className="primary-button" disabled={!valid || submitting}>Create conversation</button>
+          <button type="button" className="secondary-button" disabled={busy} onClick={cancel}>Cancel</button>
         </div>
-      </form>
+      </div>
     </div>
   );
 }
@@ -486,7 +515,10 @@ function trapLifecycleDialog(
   )];
   const first = controls[0];
   const last = controls.at(-1);
-  if (!first || !last) return;
+  if (!first || !last) {
+    event.preventDefault();
+    return;
+  }
   if (event.shiftKey && document.activeElement === first) {
     event.preventDefault();
     last.focus();
