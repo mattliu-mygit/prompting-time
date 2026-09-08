@@ -118,6 +118,7 @@ describe("Composer", () => {
     await screen.findByRole("alert");
     expect(submitMessage).toHaveBeenLastCalledWith(expect.objectContaining({ text: draft }));
     expect(field).toHaveValue(draft);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry send" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Retry send" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Retry send" })).toBeEnabled());
     expect(submitMessage.mock.calls[1]![0].commandId).toBe(submitMessage.mock.calls[0]![0].commandId);

@@ -80,8 +80,8 @@ It searches active conversation titles and project paths and exposes existing
 new-conversation, pane-toggle, and focus-message actions. It is not message-content
 search. Conversation selection focuses the chosen composer; cancellation restores
 the prior focus. Existing blocking dialogs and narrow inspector overlays retain
-keyboard priority. The palette uses cmdk's accessible filtering/selection/dialog
-and react-hotkeys-hook for shortcut registration, with our existing styling and
+keyboard priority. The palette uses cmdk for filtering and selection, Radix Dialog
+for dialog and focus management, and react-hotkeys-hook for shortcut registration, with our existing styling and
 store actions; no parallel action framework or additional state library.
 
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
