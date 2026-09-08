@@ -12,6 +12,9 @@ pub(crate) struct OwnedProcess {
     pub(crate) stdout: Option<ChildStdout>,
     pub(crate) stderr: Option<ChildStderr>,
     group: Option<Pid>,
+    cleanup_deadline: Option<tokio::time::Instant>,
+    #[cfg(all(test, target_os = "macos"))]
+    signal_permission_failures: usize,
 }
 
 impl OwnedProcess {
@@ -30,6 +33,9 @@ impl OwnedProcess {
             stderr: child.stderr.take(),
             child,
             group: Some(group),
+            cleanup_deadline: None,
+            #[cfg(all(test, target_os = "macos"))]
+            signal_permission_failures: 0,
         })
     }
 
@@ -37,14 +43,18 @@ impl OwnedProcess {
         self.child.id()
     }
 
-    pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+    // A running leader returns None immediately. An observed exit awaits bounded group
+    // cleanup, so callers never mistake pending cleanup for a still-running process.
+    pub(crate) async fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         if let Some(group) = self.group {
             match waitid(
                 WaitId::Pid(group),
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
             ) {
                 Ok(None) => return Ok(None),
-                Ok(Some(_)) => self.signal_group()?,
+                Ok(Some(_)) => {
+                    self.cleanup_group().await?;
+                }
                 Err(rustix::io::Errno::INTR) => return Ok(None),
                 Err(error) => {
                     // If another reaper consumed our child, the saved ID is no longer safe.
@@ -60,7 +70,7 @@ impl OwnedProcess {
 
     pub(crate) async fn wait(&mut self) -> io::Result<ExitStatus> {
         loop {
-            if let Some(status) = self.try_wait()? {
+            if let Some(status) = self.try_wait().await? {
                 return Ok(status);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -68,11 +78,25 @@ impl OwnedProcess {
     }
 
     pub(crate) async fn terminate(&mut self) -> io::Result<ExitStatus> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = self.cleanup_group().await?;
+        tokio::time::timeout_at(deadline, self.child.wait())
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "owned process reaping timed out")
+            })?
+    }
+
+    async fn cleanup_group(&mut self) -> io::Result<tokio::time::Instant> {
+        // Store the deadline on the owner: select! may cancel and recreate a natural
+        // wait, or switch to termination. Neither should restart the cleanup allowance.
+        let deadline = *self
+            .cleanup_deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(2));
         loop {
             match self.signal_group() {
                 // Darwin can exclude an exiting leader from killpg before waitid reports it
-                // waitable. Allow that transition to settle; persistent errors remain errors.
+                // waitable, and additional zombies can briefly remain after natural exit.
+                // Allow either transition to settle; persistent errors remain errors.
                 #[cfg(target_os = "macos")]
                 Err(error)
                     if error.kind() == io::ErrorKind::PermissionDenied
@@ -82,18 +106,20 @@ impl OwnedProcess {
                 }
                 result => {
                     result?;
-                    break;
+                    return Ok(deadline);
                 }
             }
         }
-        tokio::time::timeout_at(deadline, self.child.wait())
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "owned process reaping timed out")
-            })?
     }
 
     fn signal_group(&mut self) -> io::Result<()> {
+        // Simulate the guarded OS signaling boundary: Darwin's zombie-group lifetime
+        // depends on its external reaper and cannot be scheduled deterministically.
+        #[cfg(all(test, target_os = "macos"))]
+        if self.group.is_some() && self.signal_permission_failures > 0 {
+            self.signal_permission_failures -= 1;
+            return Err(rustix::io::Errno::PERM.into());
+        }
         if let Some(group) = self.group {
             match kill_process_group(group, Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => self.group = None,
@@ -143,5 +169,106 @@ impl Drop for OwnedProcess {
         // Cancellation cannot await or report errors. Signal before Child's drop can reap the
         // leader; kill_on_drop provides Tokio's eventual direct-child reaping fallback.
         let _ = self.signal_group();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    async fn exited_process() -> OwnedProcess {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        let process = OwnedProcess::spawn(&mut command).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if waitid(
+                    WaitId::Pid(process.group.unwrap()),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                )
+                .unwrap()
+                .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("finite child should exit");
+        process
+    }
+
+    #[tokio::test]
+    async fn natural_exit_retries_transient_group_permission_failures() {
+        let mut process = exited_process().await;
+        process.signal_permission_failures = 3;
+        let status = tokio::time::timeout(Duration::from_secs(3), process.try_wait())
+            .await
+            .expect("cleanup must be bounded")
+            .expect("transient zombie-group cleanup must preserve successful exit")
+            .expect("an observed exit must not become a still-running result");
+        assert!(status.success());
+        assert!(process.group.is_none());
+        assert!(process.id().is_none(), "leader must be reaped");
+    }
+
+    #[tokio::test]
+    async fn natural_exit_with_exiting_background_child_succeeds() {
+        for _ in 0..32 {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "(exit 0) & exit 0"]);
+            let mut process = OwnedProcess::spawn(&mut command).unwrap();
+            let status = tokio::time::timeout(Duration::from_secs(3), process.wait())
+                .await
+                .expect("cleanup must be bounded")
+                .expect("exiting background child must not fail a successful command");
+            assert!(status.success());
+            assert!(process.id().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn natural_exit_reports_persistent_group_permission_failure() {
+        let mut process = exited_process().await;
+        process.signal_permission_failures = usize::MAX;
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(Duration::from_secs(3), process.wait())
+            .await
+            .expect("persistent failure must be bounded")
+            .expect_err("permission failure must remain observable");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(
+            process.group.is_some(),
+            "retain the reserved group on failure"
+        );
+        assert!(
+            process.id().is_some(),
+            "do not reap before cleanup succeeds"
+        );
+        process.signal_permission_failures = 0;
+        assert!(process.terminate().await.unwrap().success());
+    }
+
+    #[tokio::test]
+    async fn canceled_natural_exit_keeps_cleanup_deadline_for_termination() {
+        let mut process = exited_process().await;
+        process.signal_permission_failures = usize::MAX;
+        let started = tokio::time::Instant::now();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), process.wait())
+                .await
+                .is_err(),
+            "natural exit should keep retrying until cancellation"
+        );
+        let error =
+            tokio::time::timeout_at(started + Duration::from_millis(2300), process.terminate())
+                .await
+                .expect("termination must share the original cleanup deadline")
+                .expect_err("persistent permission failure must remain observable");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        process.signal_permission_failures = 0;
+        assert!(process.terminate().await.unwrap().success());
     }
 }

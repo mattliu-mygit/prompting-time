@@ -281,7 +281,7 @@ async fn own_process(
                 }
                 Some(reason) = fatal_receiver.recv() => {
                     if reason == StdoutFailure::UnexpectedEof {
-                        let status = match child.try_wait() {
+                        let status = match child.try_wait().await {
                             Ok(status) => status,
                             Err(error) => {
                                 return Err(transport_error(error));
