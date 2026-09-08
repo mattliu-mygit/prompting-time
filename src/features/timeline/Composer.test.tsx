@@ -175,6 +175,50 @@ describe("Composer", () => {
     expect(parseFloat(field.style.height)).toBeLessThan(160);
   });
 
+  it("defers width-driven resizing outside observer delivery and cancels pending work on unmount", () => {
+    let notifyResize!: ResizeObserverCallback;
+    let resizeFrame!: FrameRequestCallback;
+    const disconnect = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { notifyResize = callback; }
+      observe() {}
+      disconnect = disconnect;
+    });
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      resizeFrame = callback;
+      return 1;
+    });
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame");
+    try {
+      const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+      const field = screen.getByLabelText("Message");
+      Object.defineProperty(field, "scrollHeight", { configurable: true, value: 160 });
+      fireEvent.change(field, { target: { value: "wrapped draft" } });
+      const previousHeight = field.style.height;
+      Object.defineProperty(field, "clientWidth", { configurable: true, value: 700 });
+      Object.defineProperty(field, "scrollHeight", { configurable: true, value: 80 });
+      act(() => notifyResize([], {} as ResizeObserver));
+      expect(field.style.height).toBe(previousHeight);
+      Object.defineProperty(field, "clientWidth", { configurable: true, value: 400 });
+      Object.defineProperty(field, "scrollHeight", { configurable: true, value: 200 });
+      act(() => notifyResize([], {} as ResizeObserver));
+      expect(requestFrame).toHaveBeenCalledTimes(1);
+      act(() => resizeFrame(0));
+      expect(parseFloat(field.style.height)).toBeGreaterThanOrEqual(200);
+      Object.defineProperty(field, "clientWidth", { configurable: true, value: 300 });
+      act(() => notifyResize([], {} as ResizeObserver));
+      expect(requestFrame).toHaveBeenCalledTimes(2);
+      disconnect.mockClear();
+      view.unmount();
+      expect(disconnect).toHaveBeenCalledTimes(1);
+      expect(cancelFrame).toHaveBeenCalledWith(1);
+    } finally {
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retains a failed steer and excludes duplicate steering before React updates", async () => {
     let reject!: (reason: Error) => void;
     const steerRun = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; }));

@@ -77,13 +77,21 @@ export function Composer({ conversation, providers, routingProfile, actions, onM
     }
     resize();
     let width = field.clientWidth;
+    let resizeFrame: number | null = null;
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
       if (field.clientWidth === width) return;
       width = field.clientWidth;
-      resize();
+      if (resizeFrame !== null) return;
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = null;
+        resize();
+      });
     });
     observer?.observe(field);
-    return () => observer?.disconnect();
+    return () => {
+      observer?.disconnect();
+      if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+    };
   }, [messageField, preview, text]);
 
   useLayoutEffect(() => {
