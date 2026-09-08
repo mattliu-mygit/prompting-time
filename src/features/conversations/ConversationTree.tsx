@@ -476,8 +476,10 @@ function TreeRow({
         </button>
       ) : <span className="disclosure-spacer" aria-hidden="true" />}
       <span className="tree-label">{label}</span>
-      {provider ? <span className="provider-badge">{providerLabels[provider]}</span> : null}
-      <span className="status-badge" data-status={status.key}>{status.label}</span>
+      <span className="tree-metadata">
+        {provider ? <span className="provider-badge">{providerLabels[provider]}</span> : null}
+        <span className="status-badge" data-status={status.key}>{status.label}</span>
+      </span>
     </div>
   );
 }
