@@ -442,10 +442,12 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
             if (!isGroupActivity(first)) return <li key={first.id} data-timeline-id={first.id}>
               <TimelineEntry item={first} actions={actions} agentPath={agents.some(({ id }) => id === first.agentId) ? canonicalAgentPath(first.agentId, agents) : undefined} />
             </li>;
-            const expanded = group.some(({ id }) => expandedGroups.has(id));
+            const expandedAnchor = group.find(({ id }) => expandedGroups.has(id));
+            const expanded = expandedAnchor !== undefined;
             const label = group.some(({ kind }) => kind === "tool") ? "tool activity" : "progress";
             const attribution = `${providerNames[first.provider]} · ${canonicalAgentPath(first.agentId, agents)}`;
-            return <li key={first.id} className="activity-group">
+            // Keep the disclosed subtree mounted when older activity joins its front.
+            return <li key={expandedAnchor?.id ?? first.id} className="activity-group">
               <button type="button" className="activity-toggle" data-timeline-id={expanded ? undefined : first.id} aria-expanded={expanded} onClick={() => toggleGroup(group)} aria-label={`${expanded ? "Hide" : "Show"} ${label} · ${attribution}`}>
                 <span aria-hidden="true">{expanded ? "▾" : "▸"}</span><span>{label === "tool activity" ? "Tool activity" : "Progress"}</span><small>{attribution}</small>
               </button>

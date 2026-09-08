@@ -61,14 +61,19 @@ const agents: AgentSnapshot[] = [
 describe("Timeline", () => {
   it("uses selected run state for its quiet status and keeps activity disclosure through older-page joins", async () => {
     const api = actions({ loadTimeline: vi.fn()
-      .mockResolvedValueOnce(timelinePage([event({ id: "t2", sequence: "2", kind: "tool", content: "newer tool" })], "older"))
+      .mockResolvedValueOnce(timelinePage([event({ id: "t2", sequence: "2", kind: "tool", content: "newer tool", truncated: true })], "older"))
       .mockResolvedValueOnce(timelinePage([event({ id: "t1", sequence: "1", kind: "tool", content: "older tool" })], null)) });
     const view = render(<Timeline conversationId="conversation-1" currentRunId="current" runStatus="waiting" refreshVersion={0} agents={[{ ...agents[0]!, status: "completed" }]} actions={api} />);
     expect(screen.getByText("Waiting")).toHaveAttribute("role", "status");
     fireEvent.click(await screen.findByRole("button", { name: /Show tool activity/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Show tool output" }));
+    expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
+    expect(api.loadEventDetail).toHaveBeenCalledExactlyOnceWith({ eventId: "t2" });
     fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
     expect(await screen.findByText("older tool")).toBeVisible();
-    expect(screen.getByText("newer tool")).toBeVisible();
+    expect(screen.getByText("Complete bounded tool output")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Hide tool output" })).toHaveAttribute("aria-expanded", "true");
+    expect(api.loadEventDetail).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: /Hide tool activity/i })).toHaveAttribute("aria-expanded", "true");
     expect(view.container.querySelectorAll("[data-timeline-id]")).toHaveLength(2);
   });
