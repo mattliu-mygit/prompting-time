@@ -73,6 +73,10 @@ standard display scaling, controls and sidebar labels use 14px, and secondary te
 is at least 13px. The new-window default is 1440 × 900; smaller windows remain
 supported, with the inspector opening as an overlay when it would crowd the chat.
 
+On macOS, **⌘+** (or **⌘=**) zooms the whole app in, **⌘−** zooms out, and
+**⌘0** resets to 100%. Zoom ranges from 75% to 200% in 25-point steps and is
+remembered on this device across launches. These shortcuts also work while typing.
+
 The center pane prioritizes the conversation: assistant replies and your messages
 render Markdown, tables, and copyable code blocks. Tool and progress entries are
 grouped into compact, expandable activity. Real failures and requests for

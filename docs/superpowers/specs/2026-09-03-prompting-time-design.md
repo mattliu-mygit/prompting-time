@@ -60,6 +60,14 @@ its own region rather than creating horizontal window overflow.
 Conversation and agent names occupy their own row, with provider/status metadata
 below, so badges do not crowd out nested names.
 
+Users can scale the entire native webview with Command-plus (including unshifted
+Command-equals), Command-minus, and Command-zero to reset. The display preference
+starts at 100%, advances in 25-percentage-point steps between 75% and 200%, and is
+remembered locally after successful application. It applies across conversations
+and while editing, without changing draft contents. Missing or invalid storage
+falls back to 100%; storage failures do not prevent using zoom. This explicit user
+zoom is separate from the default typography sizes above.
+
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
 content scroll within their panes instead of pushing the composer below the window. Selecting a
 child preserves usable navigation and the conversation workspace. An active interruptible turn
