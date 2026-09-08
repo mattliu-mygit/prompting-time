@@ -2498,7 +2498,10 @@ async fn execute_attempt(
                     _ = cancellation.changed() => return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation).await,
                     _ = shutdown.changed() => return interrupt_attempt(store, &job.active, &attempt, turn, &mut buffered, mutation).await,
                     event = async {
-                        if buffered.front().is_some_and(|event| matches!(event, ProviderEvent::NativeChild { .. }) || event.control_request_id().is_some()) {
+                        // A replayed control can select a new approval before the
+                        // following root terminal. Handle that received terminal
+                        // even if the provider keeps its event stream open.
+                        if buffered.front().is_some_and(|event| event.is_terminal() || matches!(event, ProviderEvent::NativeChild { .. }) || event.control_request_id().is_some()) {
                             buffered.pop_front().map(Ok)
                         } else {
                             turn.recv().await
@@ -4563,6 +4566,194 @@ mod tests {
     #[tokio::test]
     async fn native_child_followup_deferral_allows_sibling_progress_before_answer_ack() {
         native_child_answer_ordering(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn native_child_ack_replays_root_completion_with_unanswered_control() {
+        for close_stream in [false, true] {
+            native_child_ack_replays_root_terminal(ProviderEvent::TurnCompleted, close_stream)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn native_child_ack_replays_root_interruption_with_unanswered_control() {
+        for close_stream in [false, true] {
+            native_child_ack_replays_root_terminal(ProviderEvent::Interrupted, close_stream).await;
+        }
+    }
+
+    async fn native_child_ack_replays_root_terminal(terminal: ProviderEvent, close_stream: bool) {
+        use crate::providers::{NativeChildEvent, NativeChildTurn, UserInputQuestion};
+
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("terminal replay"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let mut supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/terminal-replay"),
+                ProviderId::Codex,
+                TurnRequest::new("invented"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        supervisor
+            .respond(
+                handle.run_id(),
+                "fixture-approval",
+                ApprovalResponse::Denied,
+            )
+            .await
+            .unwrap();
+        let barrier = Arc::new(ResponsePreAcknowledgementBarrier {
+            hold_attempt_gate: false,
+            ..ResponsePreAcknowledgementBarrier::new()
+        });
+        supervisor.set_response_pre_acknowledgement_barrier(Arc::clone(&barrier));
+        let supervisor = Arc::new(supervisor);
+        let sender = adapter.sender.lock().unwrap().take().unwrap();
+        let owner = NativeChildTurn {
+            native_thread_id: "child".into(),
+            native_turn_id: "child-turn".into(),
+        };
+        for event in [
+            ProviderEvent::NativeChildIdentity {
+                parent_native_thread_id: "fixture-session".into(),
+                native_thread_id: owner.native_thread_id.clone(),
+            },
+            ProviderEvent::NativeChild {
+                owner: owner.clone(),
+                event: NativeChildEvent::Started,
+            },
+            ProviderEvent::NativeChild {
+                owner: owner.clone(),
+                event: NativeChildEvent::UserInputRequested {
+                    request_id: "native-question".into(),
+                    questions: vec![UserInputQuestion {
+                        id: "choice".into(),
+                        header: "Choice".into(),
+                        question: "Synthetic choice?".into(),
+                        options: None,
+                        is_other: true,
+                        is_secret: false,
+                    }],
+                    auto_resolution_ms: None,
+                },
+            },
+        ] {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        let answers = std::collections::BTreeMap::from([("choice".into(), vec!["answer".into()])]);
+        let reply = {
+            let supervisor = Arc::clone(&supervisor);
+            let run = handle.run_id();
+            let answer = ApprovalResponse::Answers(answers.clone());
+            tokio::spawn(async move { supervisor.respond(run, "native-question", answer).await })
+        };
+        barrier.ready.notified().await;
+        for event in [
+            ProviderEvent::NativeChild {
+                owner,
+                event: NativeChildEvent::Completed,
+            },
+            ProviderEvent::ApprovalRequested {
+                request_id: "unanswered-root-control".into(),
+                operation: "write".into(),
+                scope: "invented".into(),
+                details: None,
+            },
+            terminal,
+        ] {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        // All three events have reached the consumer while the child answer's
+        // provider write has finished but its durable acknowledgement is held.
+        let received = tokio::time::timeout(Duration::from_secs(2), async {
+            while sender.capacity() != sender.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let _open_sender = (!close_stream).then_some(sender);
+        barrier.release.notify_one();
+        let reply = reply.await.unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(3), handle.wait()).await;
+        let stale_response = if outcome.is_ok() {
+            Some(
+                supervisor
+                    .respond(
+                        handle.run_id(),
+                        "unanswered-root-control",
+                        ApprovalResponse::Denied,
+                    )
+                    .await,
+            )
+        } else {
+            None
+        };
+        // Always clean up, including the RED path where the open stream stalls.
+        supervisor.shutdown().await.unwrap();
+        received.expect("terminal must be received before releasing acknowledgement");
+        reply.unwrap();
+        assert_eq!(
+            outcome
+                .expect(
+                    "received root terminal must finalize without another control response or EOF"
+                )
+                .unwrap()
+                .status,
+            RunStatus::Failed
+        );
+        assert_eq!(adapter.owner_shutdowns.load(Ordering::SeqCst), 1);
+        assert!(stale_response.unwrap().is_err());
+        assert_eq!(adapter.responses.load(Ordering::SeqCst), 2);
+        let root_approval = store
+            .load_approval(handle.run_id(), "unanswered-root-control")
+            .await
+            .unwrap();
+        assert_eq!(root_approval.status, ApprovalStatus::Failed);
+        assert!(root_approval.response_intent.is_none());
+        let approval = store
+            .load_approval(handle.run_id(), "native-question")
+            .await
+            .unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Answered);
+        let intent = approval.response_intent.unwrap();
+        assert_eq!(intent.status, ApprovalResponseIntentStatus::Acknowledged);
+        assert_eq!(intent.resolution, ApprovalResolution::Answers(answers));
+        assert!(
+            store
+                .load_agent_page(conversation.id, None, 10)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| {
+                    item.agent.status
+                        == if item.depth == 0 {
+                            crate::domain::AgentStatus::Failed
+                        } else {
+                            crate::domain::AgentStatus::Completed
+                        }
+                })
+        );
     }
 
     async fn native_child_answer_ordering(followup: bool, hold_attempt_gate: bool) {
