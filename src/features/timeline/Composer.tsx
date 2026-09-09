@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { CircleHelp } from "lucide-react";
 import type {
   ConversationSummary,
   ProviderId,
@@ -264,27 +265,6 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   return (
     <>
       <section className="composer" aria-label="Message composer" aria-busy={submitting} inert={interruptionDialogOpen}>
-      <div className="composer-controls">
-        <label>
-          <span className="sr-only">Provider</span>
-          <select
-            ref={providerSelect}
-            value={choice}
-            disabled={submitting || descendantOnlyActive || interruptionPending}
-            onChange={(event) => selectProvider(event.target.value as ProviderChoice)}
-          >
-            <option value="auto">Auto · {profileNames[routingProfile]}</option>
-            {providers.map((provider) => (
-              <option key={provider.id} value={provider.id} disabled={!provider.available}>
-                {providerNames[provider.id]}{provider.available ? "" : ` — ${provider.diagnostic ?? "Unavailable"}`}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="route-note">
-          {choice === "auto" ? "Prompting Time will explain the selected route." : `Pinned to ${providerNames[choice]}.`}
-        </span>
-      </div>
       <label className="message-field" hidden={preview}>
         <span className="sr-only">Message</span>
         <textarea
@@ -315,11 +295,34 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
           : `${activeName} cannot be steered in this state. Interrupt it or wait for the turn to finish.`}</p>
       ) : null}
       <div className="composer-actions">
-        {!active || canSteer ? <small className="composer-shortcut">Enter to {canSteer ? "steer" : "send"} · Shift + Enter for newline · ⌘ / Ctrl + Enter also {canSteer ? "steers" : "sends"}</small> : null}
+        <label className="composer-provider">
+          <span className="sr-only">Provider</span>
+          <select
+            ref={providerSelect}
+            value={choice}
+            disabled={submitting || descendantOnlyActive || interruptionPending}
+            onChange={(event) => selectProvider(event.target.value as ProviderChoice)}
+          >
+            <option value="auto">Auto · {profileNames[routingProfile]}</option>
+            {providers.map((provider) => (
+              <option key={provider.id} value={provider.id} disabled={!provider.available}>
+                {providerNames[provider.id]}{provider.available ? "" : ` — ${provider.diagnostic ?? "Unavailable"}`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <details className="composer-help">
+          <summary title="Composer help"><CircleHelp size={16} aria-hidden="true" /><span className="sr-only">Composer help</span></summary>
+          <div className="composer-help-content">
+            <p className="route-note">{choice === "auto" ? "Prompting Time will explain the selected route." : `Pinned to ${providerNames[choice]}.`}</p>
+            {!active || canSteer ? <p className="composer-shortcut">Enter to {canSteer ? "steer" : "send"} · Shift + Enter for newline · ⌘ / Ctrl + Enter also {canSteer ? "steers" : "sends"}</p> : null}
+          </div>
+        </details>
         <button
           type="button"
           className="disclosure-link"
           aria-label={preview ? "Edit Markdown" : "Preview Markdown"}
+          title={preview ? "Edit Markdown" : "Preview Markdown"}
           disabled={submitting}
           onClick={() => {
             if (preview) restoreDraftFocusRequested.current = true;

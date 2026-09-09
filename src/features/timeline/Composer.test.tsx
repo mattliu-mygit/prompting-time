@@ -44,12 +44,27 @@ describe("Composer", () => {
   it("explains the supported keyboard action without implying a queue", () => {
     const api = actions();
     const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    const help = screen.getByText("Composer help").closest("details")!;
+    expect(help).not.toHaveAttribute("open");
+    expect(screen.getByText("Enter to send · Shift + Enter for newline · ⌘ / Ctrl + Enter also sends")).not.toBeVisible();
+    fireEvent.click(screen.getByText("Composer help"));
     expect(screen.getByText("Enter to send · Shift + Enter for newline · ⌘ / Ctrl + Enter also sends")).toBeVisible();
+    expect(api.submitMessage).not.toHaveBeenCalled();
     view.rerender(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
     expect(screen.getByText("Enter to steer · Shift + Enter for newline · ⌘ / Ctrl + Enter also steers")).toBeVisible();
     view.rerender(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "claude" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
     expect(screen.queryByText(/Enter to/)).not.toBeInTheDocument();
     expect(screen.queryByText(/queued/i)).not.toBeInTheDocument();
+  });
+  it("places the visible provider choice with the actions below the message and keeps routine routing help collapsed", () => {
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    const field = screen.getByLabelText("Message");
+    const provider = screen.getByRole("combobox", { name: "Provider" });
+    expect(field.compareDocumentPosition(provider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(provider.closest(".composer-actions")).toContainElement(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByText("Prompting Time will explain the selected route.")).not.toBeVisible();
+    fireEvent.click(screen.getByText("Composer help"));
+    expect(screen.getByText("Prompting Time will explain the selected route.")).toBeVisible();
   });
   it.each([{}, { metaKey: true }, { ctrlKey: true }])("sends on Enter with %j", async (modifiers) => {
     const api = actions();
