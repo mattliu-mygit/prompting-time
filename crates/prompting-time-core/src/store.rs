@@ -715,8 +715,7 @@ pub struct SidebarDetails {
     pub run: Option<ProviderRun>,
     pub rollup_status: Option<crate::domain::RollupStatus>,
     pub active_descendant_count: usize,
-    pub agents: Vec<AgentNode>,
-    pub agents_truncated: bool,
+    pub summary: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4151,13 +4150,7 @@ impl Store {
                          WHEN latest_runs.interrupted_agent_count > 0 THEN 'interrupted' \
                          WHEN latest_runs.id IS NOT NULL THEN 'completed' END AS rollup_status, \
                     latest_runs.active_descendant_count, \
-                    latest_runs.agent_total_count AS total_agent_count, sidebar_agents.id AS agent_id, \
-                    sidebar_agents.parent_id, sidebar_agents.provider AS agent_provider, \
-                    NULL AS provider_native_id, NULL AS provider_native_path, \
-                    substr(sidebar_agents.label, 1, 256) AS label, \
-                    substr(sidebar_agents.summary, 1, 2048) AS summary, \
-                    sidebar_agents.status AS agent_status, \
-                    sidebar_agents.created_at AS agent_created_at \
+                    substr(sidebar_agents.summary, 1, 2048) AS summary \
              FROM selected \
              LEFT JOIN conversations ON conversations.id = selected.id \
              LEFT JOIN conversation_settings \
@@ -4193,8 +4186,7 @@ impl Store {
                     run: None,
                     rollup_status: None,
                     active_descendant_count: 0,
-                    agents: Vec::new(),
-                    agents_truncated: false,
+                    summary: None,
                 },
             );
         }
@@ -4212,25 +4204,22 @@ impl Store {
             details.binding = row.binding()?;
             details.has_children = row.has_children;
             details.routing_profile = parse_routing_profile(&row.routing_profile)?;
-            if details.run.is_none() {
-                details.run = row.provider_run()?;
-                details.rollup_status = row
-                    .rollup_status
-                    .as_deref()
-                    .map(parse_rollup_status)
-                    .transpose()?;
-                details.active_descendant_count =
-                    usize::try_from(row.active_descendant_count.unwrap_or(0)).map_err(|_| {
-                        StoreError::InvalidData {
-                            entity: "sidebar active descendant count",
-                            detail: "negative count".to_owned(),
-                        }
-                    })?;
-                details.agents_truncated = row.total_agent_count.unwrap_or(0) > 1;
-            }
-            if let Some(agent) = row.agent()? {
-                details.agents.push(agent);
-            }
+            details.run = row.provider_run()?;
+            details.rollup_status = row
+                .rollup_status
+                .as_deref()
+                .map(parse_rollup_status)
+                .transpose()?;
+            details.active_descendant_count =
+                usize::try_from(row.active_descendant_count.unwrap_or(0)).map_err(|_| {
+                    StoreError::InvalidData {
+                        entity: "sidebar active descendant count",
+                        detail: "negative count".to_owned(),
+                    }
+                })?;
+            details.summary = row
+                .summary
+                .map(|summary| truncate_utf8(summary, MAX_AGENT_SUMMARY_PREVIEW_BYTES));
         }
         conversation_ids
             .iter()
@@ -7564,16 +7553,7 @@ struct SidebarDetailRow {
     run_created_at: Option<i64>,
     rollup_status: Option<String>,
     active_descendant_count: Option<i64>,
-    total_agent_count: Option<i64>,
-    agent_id: Option<String>,
-    parent_id: Option<String>,
-    agent_provider: Option<String>,
-    provider_native_id: Option<String>,
-    provider_native_path: Option<String>,
-    label: Option<String>,
     summary: Option<String>,
-    agent_status: Option<String>,
-    agent_created_at: Option<i64>,
 }
 
 impl SidebarDetailRow {
@@ -7609,39 +7589,6 @@ impl SidebarDetailRow {
                 entity: "sidebar run",
                 detail: "missing creation timestamp".to_owned(),
             })?,
-        }
-        .into_domain()
-        .map(Some)
-    }
-
-    fn agent(&self) -> Result<Option<AgentNode>, StoreError> {
-        let Some(id) = self.agent_id.as_deref() else {
-            return Ok(None);
-        };
-        let run_id = required_sidebar(&self.run_id, "run id")?;
-        let _ = self.agent_created_at;
-        AgentNodeRow {
-            id: id.to_owned(),
-            run_id,
-            parent_id: self.parent_id.clone(),
-            provider: required_sidebar(&self.agent_provider, "agent provider")?,
-            provider_native_id: self.provider_native_id.clone(),
-            provider_native_path: self.provider_native_path.clone(),
-            label: truncate_utf8(
-                required_sidebar(&self.label, "agent label")?,
-                MAX_AGENT_LABEL_PREVIEW_BYTES,
-            ),
-            summary: self
-                .summary
-                .clone()
-                .map(|summary| truncate_utf8(summary, MAX_AGENT_SUMMARY_PREVIEW_BYTES)),
-            status: required_sidebar(&self.agent_status, "agent status")?,
-            created_at: self
-                .agent_created_at
-                .ok_or_else(|| StoreError::InvalidData {
-                    entity: "sidebar agent",
-                    detail: "missing creation timestamp".to_owned(),
-                })?,
         }
         .into_domain()
         .map(Some)
@@ -9185,7 +9132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidebar_details_preserve_recursive_agents_and_roll_up_attention() {
+    async fn sidebar_details_keep_summary_and_roll_up_attention_without_agent_projection() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
             .create_conversation(NewConversation::projectless("agent tree"))
@@ -9210,9 +9157,8 @@ mod tests {
             details.rollup_status,
             Some(crate::domain::RollupStatus::NeedsAttention)
         );
-        assert_eq!(details.agents.len(), 1);
-        assert_eq!(details.agents[0].id, root.id);
-        assert!(details.agents_truncated);
+        assert!(details.has_children);
+        assert!(details.summary.is_none());
         let page = store
             .load_agent_page(conversation.id, None, 20)
             .await
@@ -9231,7 +9177,6 @@ mod tests {
                 .and_then(|item| item.agent.parent_id),
             Some(child)
         );
-        assert!(details.agents_truncated);
         assert_eq!(details.active_descendant_count, 2);
     }
 

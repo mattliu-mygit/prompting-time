@@ -12,7 +12,8 @@ import {
   interruptRun,
   listConversations,
   loadConversation,
-  loadAgentTree,
+  listChildConversations,
+  loadConversationPath,
   loadApprovalDetail,
   loadApprovalQuestions,
   loadApprovals,
@@ -94,7 +95,8 @@ describe("desktop bridge", () => {
     await loadConversation({ conversationId: "c-1" });
     await loadTimeline({ conversationId: "c-1", cursor: null, limit: 50 });
     await loadDiagnostics({ conversationId: "c-1", cursor: null, limit: 30 });
-    await loadAgentTree({ conversationId: "c-1", cursor: null, limit: 100 });
+    await listChildConversations({ parentId: "c-1", cursor: "child-cursor", limit: 20 });
+    await loadConversationPath({ conversationId: "child-1" });
     await loadEventDetail({ eventId: "event-1" });
     await loadApprovals({ conversationId: "c-1", cursor: null, limit: 100, kind: "pending" });
     await loadApprovalDetail({ approvalId: "approval-1" });
@@ -128,9 +130,10 @@ describe("desktop bridge", () => {
       ],
       ["load_diagnostics", { request: { conversationId: "c-1", cursor: null, limit: 30 } }],
       [
-        "load_agent_tree",
-        { request: { conversationId: "c-1", cursor: null, limit: 100 } },
+        "list_child_conversations",
+        { request: { parentId: "c-1", cursor: "child-cursor", limit: 20 } },
       ],
+      ["load_conversation_path", { request: { conversationId: "child-1" } }],
       ["load_event_detail", { request: { eventId: "event-1" } }],
       [
         "load_approvals",

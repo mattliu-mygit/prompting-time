@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { createAppStore, type AppApi } from "./store";
 import { BridgeError } from "../bridge/api";
-import type { ConversationSummary } from "../bridge/types";
+import type { ConversationSummary, ListChildConversationsRequest, LoadConversationRequest, TimelineItem } from "../bridge/types";
 
 function createdConversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
@@ -13,10 +13,140 @@ function createdConversation(overrides: Partial<ConversationSummary> = {}): Conv
     parentId: null, hasChildren: false, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     archived: false, projectRoot: "/tmp/synthetic-project", currentRunId: null, provider: null,
-    runStatus: null, rollupStatus: null, agents: [], agentsTruncated: false,
+    runStatus: null, rollupStatus: null,
     ...overrides,
   };
 }
+
+describe("shared conversation hierarchy", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); Reflect.deleteProperty(Element.prototype, "scrollIntoView"); });
+
+  function hierarchyApi() {
+    const root = createdConversation({ id: "compiler", title: "Compiler", hasChildren: true,
+      currentRunId: "run-compiler", provider: "codex", runStatus: "completed", rollupStatus: "completed" });
+    const unavailableReason = "This provider exposes recorded child activity, not an independently controllable chat.";
+    const child = createdConversation({ ...root, id: "reviewer", parentId: root.id, title: "Parser reviewer",
+      summary: "Checked parser ownership", capabilities: { canSend: false, canInterrupt: false,
+        canArchive: false, canRoute: false, unavailableReason } });
+    const grandchild = createdConversation({ ...child, id: "researcher", parentId: child.id,
+      title: "Schema researcher", hasChildren: false });
+    const nodes = [root, child, grandchild];
+    const captured = new Map(nodes.map(node => [node.id, `Captured ${node.id} activity`]));
+    const api = {
+      ...createApi({
+        getBootstrap: vi.fn().mockResolvedValue({ providers: [
+          { id: "codex", installed: true, available: true, version: "1", diagnostic: null, capabilities: ["steering", "interruption"] },
+          { id: "claude", installed: true, available: true, version: "2", diagnostic: null, capabilities: ["interruption"] },
+        ] }),
+        listConversations: vi.fn().mockResolvedValue({ items: [root], nextCursor: null }),
+        loadConversation: vi.fn(async ({ conversationId }: LoadConversationRequest) => {
+          const node = nodes.find(item => item.id === conversationId);
+          if (!node) throw new Error("Conversation unavailable");
+          return node;
+        }),
+        loadTimeline: vi.fn(async ({ conversationId }) => {
+          const content = captured.get(conversationId)!;
+          const item: TimelineItem = { id: `event-${conversationId}`, conversationId,
+            runId: root.currentRunId!, agentId: `execution-${conversationId}`, sequence: "1",
+            kind: "message", presentation: "normal", role: "assistant", content,
+            contentBytes: String(content.length), truncated: false, provider: "codex", operation: null };
+          return { items: [item], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null };
+        }),
+      }),
+      listChildConversations: vi.fn(async ({ parentId }: ListChildConversationsRequest) => ({
+        items: nodes.filter(node => node.parentId === parentId), nextCursor: null,
+      })),
+      loadConversationPath: vi.fn(async ({ conversationId }: LoadConversationRequest) => ({
+        items: nodes.slice(0, nodes.findIndex(node => node.id === conversationId) + 1),
+        truncated: false, ownerConversationId: root.id,
+      })),
+    };
+    return { api, root, child, grandchild, unavailableReason };
+  }
+
+  it("opens root, child, and grandchild through the same conversation timeline", async () => {
+    const { api } = hierarchyApi();
+    const store = createAppStore(api);
+    const view = render(<App store={store} />);
+    try {
+      await screen.findByText("Captured compiler activity");
+      fireEvent.click(await screen.findByRole("treeitem", { name: /Parser reviewer/ }));
+      await screen.findByText("Captured reviewer activity");
+      expect(store.getSnapshot().selectedConversationId).toBe("reviewer");
+      expect(screen.queryByText("Captured compiler activity")).not.toBeInTheDocument();
+      expect(screen.queryByRole("treeitem", { name: /Schema researcher/ })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Expand Parser reviewer" }));
+      fireEvent.click(await screen.findByRole("treeitem", { name: /Schema researcher/ }));
+      await screen.findByText("Captured researcher activity");
+      expect(screen.queryByText("Captured reviewer activity")).not.toBeInTheDocument();
+      expect(vi.mocked(api.loadTimeline).mock.calls.map(([request]) => request.conversationId)).toEqual(["compiler", "reviewer", "researcher"]);
+    } finally { view.unmount(); store.dispose(); }
+  });
+
+  it("keeps unsupported child Enter and controls from submitting to the parent", async () => {
+    const { api, unavailableReason } = hierarchyApi();
+    const store = createAppStore(api);
+    const view = render(<App store={store} />);
+    try {
+      fireEvent.change(await screen.findByRole("textbox", { name: "Message" }), { target: { value: "Parent draft" } });
+      fireEvent.click(await screen.findByRole("treeitem", { name: /Parser reviewer/ }));
+      await screen.findByText("Captured reviewer activity");
+      expect(screen.getByText(unavailableReason)).toBeVisible();
+      expect(screen.queryByRole("textbox", { name: "Message" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("combobox", { name: "Provider" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Interrupt/ })).not.toBeInTheDocument();
+      fireEvent.keyDown(screen.getByRole("main", { name: "Conversation workspace" }), { key: "Enter" });
+      await act(async () => {
+        store.setDraft("reviewer", "Unsupported child draft");
+        expect(await store.submitDraft("reviewer", null, null)).toBe(false);
+      });
+      expect(api.submitMessage).not.toHaveBeenCalled();
+      expect(api.steerRun).not.toHaveBeenCalled();
+      expect(store.getSnapshot().draftsById.compiler?.text).toBe("Parent draft");
+    } finally { view.unmount(); store.dispose(); }
+  });
+
+  it("restores the parent's provider choice, Markdown preview, and exact draft after a child visit", async () => {
+    const { api } = hierarchyApi();
+    const store = createAppStore(api);
+    const view = render(<App store={store} />);
+    try {
+      const draft = "    indented code\n\nKeep **parent draft**\n";
+      fireEvent.change(await screen.findByRole("textbox", { name: "Message" }), { target: { value: draft } });
+      fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), { target: { value: "claude" } });
+      fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
+      fireEvent.click(await screen.findByRole("treeitem", { name: /Parser reviewer/ }));
+      await screen.findByText("Captured reviewer activity");
+      fireEvent.click(within(screen.getByRole("navigation", { name: "Conversation ancestry" })).getByRole("button", { name: "Compiler" }));
+      await screen.findByText("Captured compiler activity");
+      expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue("claude");
+      expect(screen.getByRole("region", { name: "Message preview" })).toHaveTextContent("parent draft");
+      fireEvent.click(screen.getByRole("button", { name: "Edit Markdown" }));
+      expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(draft);
+      expect(api.submitMessage).not.toHaveBeenCalled();
+      expect(api.steerRun).not.toHaveBeenCalled();
+    } finally { view.unmount(); store.dispose(); }
+  });
+
+  it("keeps the current conversation and explains a failed path lookup", async () => {
+    const { api } = hierarchyApi();
+    api.loadConversationPath.mockRejectedValue(new Error("Conversation no longer available"));
+    const store = createAppStore(api);
+    const view = render(<App store={store} />);
+    try {
+      await screen.findByText("Captured compiler activity");
+      await act(async () => { await store.selectConversation("missing-child"); });
+      expect(screen.getByRole("alert")).toHaveTextContent("Conversation no longer available");
+      expect(screen.getByText("Captured compiler activity")).toBeVisible();
+    } finally { view.unmount(); store.dispose(); }
+  });
+});
 
 describe("compact shell", () => {
 beforeEach(() => {
@@ -32,7 +162,7 @@ it("consolidates the root title and preserves actions when the sidebar closes", 
   expect(title.closest("header")).toHaveClass("app-toolbar");
   expect(within(title.closest("header")!).getByRole("status")).toHaveTextContent("Queued");
   expect(screen.getAllByText("Queued").filter(element => element.getAttribute("role") === "status")).toHaveLength(1);
-  expect(screen.queryByRole("navigation", { name: "Agent ancestry" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "Conversation ancestry" })).not.toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: "New conversation" })).toHaveLength(1);
   fireEvent.click(screen.getByRole("button", { name: "Hide conversations" }));
   fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
@@ -63,37 +193,34 @@ it("keeps the radio filter selection across sidebar toggles", async () => {
   expect(await screen.findByRole("menuitemradio", { name: "Failed" })).toHaveAttribute("aria-checked", "true");
 });
 
-it("discloses selected agent details with ancestry only while inspecting", async () => {
+it("shows canonical ancestry only for a selected child conversation", async () => {
   const store = createAppStore(createApi());
   render(<App store={store} />);
   await screen.findByRole("heading", { name: "Auth refactor" });
-  act(() => store.selectConversation("c1", "child-1"));
-  expect(screen.getByRole("navigation", { name: "Agent ancestry" })).toBeVisible();
-  const summary = screen.getByText("Inspecting Reviewer").closest("summary")!;
-  expect(summary.closest("details")).not.toHaveAttribute("open");
-  fireEvent.click(within(screen.getByRole("navigation", { name: "Agent ancestry" })).getByRole("button", { name: "Auth refactor" }));
-  expect(screen.queryByRole("navigation", { name: "Agent ancestry" })).not.toBeInTheDocument();
+  await act(async () => { await store.selectConversation("child-1"); });
+  expect(screen.getByRole("navigation", { name: "Conversation ancestry" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Reviewer" })).toBeVisible();
+  expect(screen.queryByText(/Inspecting Reviewer/)).not.toBeInTheDocument();
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Conversation ancestry" })).getByRole("button", { name: "Auth refactor" }));
+  expect(screen.queryByRole("navigation", { name: "Conversation ancestry" })).not.toBeInTheDocument();
 });
 
-it("bounds a long agent label independently of the visible conversation target hint", async () => {
+it("keeps full child titles available in the compact conversation breadcrumb", async () => {
   const label = "Review storage publication and cursor consistency ".repeat(12).trim();
   const api = createApi();
-  const page = await api.listConversations({ cursor: null, limit: 40 });
-  page.items[0]!.agents[1]!.label = label;
-  api.listConversations = vi.fn().mockResolvedValue(page);
+  const page = await api.listChildConversations({ parentId: "c1", cursor: null, limit: 20 });
+  page.items[0]!.title = label;
   const store = createAppStore(api);
   render(<App store={store} />);
   await screen.findByRole("heading", { name: "Auth refactor" });
-  act(() => store.selectConversation("c1", "child-1"));
-  const labelElement = screen.getByText(`Inspecting ${label}`);
-  expect(labelElement).toHaveClass("selected-agent-label");
-  expect(labelElement).toHaveAttribute("title", `Inspecting ${label}`);
-  const summary = labelElement.closest("summary")!;
-  expect(summary).toHaveAccessibleName(`Inspecting ${label} Messages go to the conversation.`);
-  expect(summary.closest("details")).not.toHaveAttribute("open");
-  expect(within(summary).getByText("Messages go to the conversation.")).toBeVisible();
-  fireEvent.click(summary);
-  expect(summary.closest("details")).toHaveAttribute("open");
+  await act(async () => { await store.selectConversation("child-1"); });
+  const title = screen.getByRole("heading", { name: label });
+  expect(title).toHaveClass("shell-title");
+  expect(title).toHaveAttribute("title", label);
+  const breadcrumb = within(screen.getByRole("navigation", { name: "Conversation ancestry" })).getByRole("button", { name: label });
+  expect(breadcrumb).toHaveAttribute("title", label);
+  expect(breadcrumb).toHaveAttribute("aria-current", "location");
+  expect(screen.getByText("Recorded child activity is read-only.")).toBeVisible();
 });
 
 it.each([false, true])("hands root breadcrumb focus to the timeline without changing the draft or preview (%s)", async (preview) => {
@@ -103,11 +230,11 @@ it.each([false, true])("hands root breadcrumb focus to the timeline without chan
   const message = await screen.findByRole("textbox", { name: "Message" });
   fireEvent.change(message, { target: { value: "Keep **raw draft**" } });
   if (preview) fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
-  act(() => store.selectConversation("c1", "child-1"));
-  const root = within(screen.getByRole("navigation", { name: "Agent ancestry" })).getByRole("button", { name: "Auth refactor" });
+  await act(async () => { await store.selectConversation("child-1"); });
+  const root = within(screen.getByRole("navigation", { name: "Conversation ancestry" })).getByRole("button", { name: "Auth refactor" });
   root.focus();
   fireEvent.click(root);
-  await waitFor(() => expect(screen.queryByRole("navigation", { name: "Agent ancestry" })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole("navigation", { name: "Conversation ancestry" })).not.toBeInTheDocument());
   await waitFor(() => expect(screen.getByRole("heading", { name: "Timeline" })).toHaveFocus());
   expect(message).toHaveValue("Keep **raw draft**");
   expect(screen.queryByRole("region", { name: "Message preview" }) !== null).toBe(preview);
@@ -160,6 +287,12 @@ async function openChooser(overrides: Partial<AppApi> = {}, strict = false, insp
 }
 
 function createApi(overrides: Partial<AppApi> = {}): AppApi {
+  const root = createdConversation({ id: "c1", title: "Auth refactor", projectRoot: null, workspaceId: null,
+    hasChildren: true, currentRunId: "run-1", provider: "codex", runStatus: "queued", rollupStatus: "active" });
+  const child = createdConversation({ ...root, id: "child-1", title: "Reviewer", parentId: "c1",
+    hasChildren: false, summary: "Reviewing", provider: "claude", runStatus: "running",
+    capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false,
+      unavailableReason: "Recorded child activity is read-only." } });
   return {
     getBootstrap: vi.fn().mockResolvedValue({
       providers: [
@@ -181,57 +314,12 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
         },
       ],
     }),
-    listConversations: vi.fn().mockResolvedValue({
-      items: [
-        {
-          id: "c1",
-          title: "Auth refactor",
-          routingProfile: "bestFit",
-          workspaceId: null,
-          archived: false,
-          projectRoot: null,
-          currentRunId: "run-1",
-          provider: "codex",
-          runStatus: "queued",
-          rollupStatus: "active",
-          agents: [
-            {
-              id: "root-1",
-              parentId: null,
-              provider: "codex",
-              label: "Root agent",
-              summary: null,
-              status: "queued",
-            },
-            {
-              id: "child-1",
-              parentId: "root-1",
-              provider: "claude",
-              label: "Reviewer",
-              summary: "Reviewing",
-              status: "running",
-            },
-          ],
-          agentsTruncated: false,
-        },
-      ],
-      nextCursor: null,
-    }),
-    loadConversation: vi.fn().mockResolvedValue({
-      id: "c1",
-      title: "Auth refactor",
-      routingProfile: "bestFit",
-      workspaceId: null,
-      archived: false,
-      projectRoot: null,
-      currentRunId: "run-1",
-      provider: "codex",
-      runStatus: "queued",
-      rollupStatus: "active",
-      agents: [],
-      agentsTruncated: false,
-    }),
-    loadAgentTree: vi.fn().mockResolvedValue({ runId: null, items: [], nextCursor: null }),
+    listConversations: vi.fn().mockResolvedValue({ items: [root], nextCursor: null }),
+    loadConversation: vi.fn(async ({ conversationId }) => conversationId === child.id ? child : root),
+    listChildConversations: vi.fn(async ({ parentId }) => ({ items: parentId === root.id ? [child] : [], nextCursor: null })),
+    loadConversationPath: vi.fn(async ({ conversationId }) => ({
+      items: conversationId === child.id ? [root, child] : [root], truncated: false, ownerConversationId: root.id,
+    })),
     loadTimeline: vi.fn().mockResolvedValue({
       items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
     }),
@@ -253,7 +341,6 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
       routing: null,
       handoff: null,
       activeDescendantCount: 1,
-      agentsTruncated: false,
     }),
     inspectProject: vi.fn().mockResolvedValue({ isGit: true }),
     pickProjectDirectory: vi.fn().mockResolvedValue("/tmp/synthetic-project"),
@@ -441,7 +528,7 @@ describe("App", () => {
     const store = createAppStore(api);
     render(<App store={store} />);
     await screen.findByRole("textbox", { name: "Message" });
-    return { api, store, select: (id: string) => act(() => store.selectConversation(id)) };
+    return { api, store, select: (id: string) => act(() => { void store.selectConversation(id); }) };
   }
 
   it("preserves independent raw Markdown drafts across switching and refresh", async () => {
@@ -701,7 +788,7 @@ describe("App", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Without a folder" }));
     await waitFor(() => expect(dialog).not.toBeInTheDocument());
     expect(store.getSnapshot().conversationsById.saved.routingProfile).toBe("balanced");
-    act(() => store.selectConversation("saved"));
+    act(() => { void store.selectConversation("saved"); });
     expect(screen.getByRole("option", { name: "Auto · Balanced" })).toBeInTheDocument();
   });
 
@@ -842,11 +929,11 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Show inspector" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
     expect(api.loadDiagnostics).not.toHaveBeenCalled();
-    act(() => store.selectConversation("c2"));
+    act(() => { void store.selectConversation("c2"); });
     expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
     expect(screen.getByRole("complementary", { name: "Inspector" })).toBeVisible();
-    act(() => store.selectConversation("c1"));
+    act(() => { void store.selectConversation("c1"); });
     expect(screen.getByRole("button", { name: "Hide inspector" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("complementary", { name: "Inspector" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Hide inspector" }));

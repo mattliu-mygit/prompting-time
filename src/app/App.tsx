@@ -4,7 +4,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Ellipsis, ListFilter, PanelLeft, PanelRight, Plus, Search } from "lucide-react";
 import type { CreateConversationRequest, ProviderInstallation } from "../bridge/types";
 import { ConversationTree } from "../features/conversations/ConversationTree";
-import { AgentNavigation, agentPath, knownAgents } from "../features/conversations/AgentNavigation";
+import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
@@ -160,25 +160,11 @@ function CommandCenter({ store }: { store: AppStore }) {
   const selected = snapshot.selectedConversationId
     ? snapshot.conversationsById[snapshot.selectedConversationId]
     : null;
-  const selectedConversation = selected ? {
-    ...selected,
-    agents: selected.agentIds.flatMap((id) => {
-      const agent = snapshot.agentsById[id];
-      return agent ? [agent] : [];
-    }),
-  } : null;
+  const selectedConversation = selected;
+  const parentConversation = selected?.parentId ? snapshot.conversationsById[selected.parentId] : undefined;
   const selectedVersion = selected
     ? snapshot.conversationVersions[selected.id] ?? 0
     : 0;
-  const navigableAgents = knownAgents(snapshot);
-  const selectedAgents = navigableAgents.filter(item => item.conversationId === selected?.id).map(item => item.agent);
-  const selectedAgent = selectedAgents.find(agent => agent.id === snapshot.selectedAgentId);
-  const path = agentPath(selectedAgents, snapshot.selectedAgentId);
-  const parentAgent = selectedAgent?.parentId && !path.incomplete
-    ? selectedAgents.find(agent => agent.id === selectedAgent.parentId)
-    : undefined;
-  const agentWindow = snapshot.agentWindow?.conversationId === selected?.id
-    && snapshot.agentWindow?.runId === selected?.currentRunId ? snapshot.agentWindow : null;
   const filterLabel = `Filter conversations: ${statusOptions.find(option => option.value === snapshot.statusFilter)?.label}`;
 
   function closeInspector() {
@@ -218,8 +204,8 @@ function CommandCenter({ store }: { store: AppStore }) {
     setInspectorOpen((open) => !open);
   }
 
-  function selectConversation(conversationId: string, agentId?: string) {
-    store.selectConversation(conversationId, agentId);
+  function selectConversation(conversationId: string) {
+    void store.selectConversation(conversationId);
     if (window.matchMedia("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
 
@@ -279,7 +265,7 @@ function CommandCenter({ store }: { store: AppStore }) {
           >
             <PanelRight size={18} aria-hidden="true" />
           </button>
-          <DropdownMenu.Root open={openMenu === "more"} onOpenChange={(open) => setOpenMenu(open ? "more" : null)}>
+          {selectedConversation?.capabilities.canArchive ? <DropdownMenu.Root open={openMenu === "more"} onOpenChange={(open) => setOpenMenu(open ? "more" : null)}>
             <DropdownMenu.Trigger asChild>
               <button ref={archiveTrigger} type="button" className="icon-button" aria-label="More" title="More"><Ellipsis size={18} aria-hidden="true" /></button>
             </DropdownMenu.Trigger>
@@ -295,7 +281,7 @@ function CommandCenter({ store }: { store: AppStore }) {
                 <DropdownMenu.Item className="shell-menu-item" disabled={!selectedConversation} onSelect={() => { pendingArchive.current = selectedConversation?.id ?? null; }}>Archive conversation</DropdownMenu.Item>
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
-          </DropdownMenu.Root>
+          </DropdownMenu.Root> : null}
         </div>
       </header>
 
@@ -331,12 +317,12 @@ function CommandCenter({ store }: { store: AppStore }) {
             <ConversationTree
               conversations={conversations}
               selectedId={snapshot.selectedConversationId}
-              selectedAgentId={snapshot.selectedAgentId}
-              statusFilter={snapshot.statusFilter}
-              agentWindow={snapshot.agentWindow}
-              onLoadAgentPage={(conversationId, restart) => {
-                void store.loadAgentPage(conversationId, restart);
-              }}
+              conversationsById={snapshot.conversationsById}
+              childPagesById={snapshot.childPagesById}
+              expandedById={snapshot.expandedById}
+              selectedPath={snapshot.selectedPath}
+              onToggle={store.toggleConversation}
+              onLoadChildPage={(id, restart) => { void store.loadChildPage(id, restart); }}
               onSelect={selectConversation}
             />
           </aside>
@@ -345,37 +331,20 @@ function CommandCenter({ store }: { store: AppStore }) {
         <main className="workspace-pane" aria-label="Conversation workspace" inert={narrowInspector && inspectorOpen}>
           {selectedConversation ? (
             <>
-              <AgentNavigation
-                title={selectedConversation.title}
-                agents={selectedAgents}
-                selectedId={snapshot.selectedAgentId}
+              <ConversationNavigation
+                conversation={selectedConversation}
+                conversationsById={snapshot.conversationsById}
+                path={snapshot.selectedPath}
                 onSelect={(id) => {
-                  selectConversation(selectedConversation.id, id);
-                  if (id === undefined) document.getElementById("timeline-heading")?.focus({ preventScroll: true });
+                  selectConversation(id);
+                  queueMicrotask(() => document.getElementById("timeline-heading")?.focus({ preventScroll: true }));
                 }}
-                onLoadMore={selectedConversation.agentsTruncated || agentWindow?.nextCursor || agentWindow?.evicted
-                  ? () => { void store.loadAgentPage(selectedConversation.id, agentWindow?.evicted && !agentWindow.nextCursor); }
-                  : undefined}
-                loading={agentWindow?.loading}
               />
-              {selectedAgent ? <details className="selected-agent-summary" aria-label="Selected agent">
-                <summary>
-                  <span className="selected-agent-disclosure">
-                    <span className="selected-agent-label" title={`Inspecting ${selectedAgent.label}`}>Inspecting {selectedAgent.label}</span>{" "}
-                    <small>Messages go to the conversation.</small>
-                  </span>
-                </summary>
-                <p>{selectedAgent.status}{selectedAgent.summary ? ` · ${selectedAgent.summary}` : ""}</p>
-              </details> : null}
               <Timeline
                 key={`timeline-${selectedConversation.id}`}
-                conversationId={selectedConversation.id}
+                conversation={selectedConversation}
                 viewStates={timelineViews}
                 refreshVersion={selectedVersion}
-                agents={selectedConversation.agents}
-                agentsTruncated={selectedConversation.agentsTruncated}
-                agentWindow={snapshot.agentWindow?.conversationId === selectedConversation.id ? snapshot.agentWindow : null}
-                onLoadAgentPage={(restart) => { void store.loadAgentPage(selectedConversation.id, restart); }}
                 actions={store.actions}
               />
               <Composer
@@ -453,24 +422,23 @@ function CommandCenter({ store }: { store: AppStore }) {
             onOpenChange={setPaletteOpen}
             conversations={Object.values(snapshot.conversationsById).filter(({ archived }) => !archived)}
             selectedId={snapshot.selectedConversationId}
-            agents={navigableAgents}
-            onSelectAgent={selectConversation}
             onSelectConversation={(id) => {
               selectConversation(id);
-              setMessageFocusRequested(true);
+              if (snapshot.conversationsById[id]?.capabilities.canSend) setMessageFocusRequested(true);
             }}
             commands={[
               { id: "new", label: "New conversation", run: openNewConversation },
-              { id: "parent-agent", label: "Go to parent agent", disabled: !parentAgent, run: () => {
-                if (selected && parentAgent) selectConversation(selected.id, parentAgent.id);
+              { id: "parent-conversation", label: "Go to parent conversation", disabled: !parentConversation, run: () => {
+                if (parentConversation) selectConversation(parentConversation.id);
               } },
               { id: "sidebar", label: sidebarOpen ? "Hide conversations" : "Show conversations", run: toggleSidebar },
               { id: "inspector", label: inspectorOpen ? "Hide inspector" : "Show inspector", run: toggleInspector },
-              { id: "message", label: "Focus message", disabled: !selectedConversation || snapshot.submissionsById[selectedConversation.id]?.pending === true, run: () => setMessageFocusRequested(true) },
+              { id: "message", label: "Focus message", disabled: !selectedConversation?.capabilities.canSend || snapshot.submissionsById[selectedConversation.id]?.pending === true, run: () => setMessageFocusRequested(true) },
             ]}
           />
         </Suspense>
       ) : null}
+      {snapshot.error ? <p role="alert" className="inline-error lifecycle-error">{snapshot.error}</p> : null}
       {lifecycleError && !creatingConversation && !archiveTarget ? <p role="alert" className="inline-error lifecycle-error">{lifecycleError}</p> : null}
       {creatingConversation ? (
         <NewConversationDialog

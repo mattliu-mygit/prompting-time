@@ -20,6 +20,10 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+#[path = "support/conversation_approvals.rs"]
+mod conversation_approvals;
+use conversation_approvals::load_subtree_approvals;
+
 // Protocol fixtures contain only invented data. The executable exercises the real owned transport.
 struct Fixture {
     directory: TempDir,
@@ -303,7 +307,8 @@ task('task_notification','child','agent',status='completed')
 result()
 "#,
     );
-    let app = fixture.app(Store::open_in_memory().await.unwrap());
+    let store = Store::open_in_memory().await.unwrap();
+    let app = fixture.app(store.clone());
     let conversation = app
         .create_conversation(ConversationRequest::projectless("Terminal first child"))
         .await
@@ -317,13 +322,20 @@ result()
         .unwrap()
         .unwrap()
         .status;
-    let tree = app
+    let tree = store
         .load_agent_page(conversation.id, None, 20)
         .await
         .unwrap();
     let child = tree.items.iter().find(|item| item.depth == 1).unwrap();
+    let child_conversation = app
+        .list_child_conversation_overviews(conversation.id, None, 20)
+        .await
+        .unwrap()
+        .items
+        .remove(0)
+        .conversation;
     let timeline = app
-        .load_timeline_snapshot(conversation.id, None, 30)
+        .load_timeline_snapshot(child_conversation.id, None, 30)
         .await
         .unwrap();
     let mut outputs = Vec::new();
@@ -360,7 +372,8 @@ task('task_notification','task-a','agent-a',status='completed')
 result()
 "#,
     );
-    let app = fixture.app(Store::open_in_memory().await.unwrap());
+    let store = Store::open_in_memory().await.unwrap();
+    let app = fixture.app(store.clone());
     let conversation = app
         .create_conversation(ConversationRequest::projectless("Invented tree"))
         .await
@@ -377,7 +390,7 @@ result()
             .status,
         RunStatus::Completed
     );
-    let tree = app
+    let tree = store
         .load_agent_page(conversation.id, None, 20)
         .await
         .unwrap();
@@ -386,6 +399,35 @@ result()
     let grandchild = tree.items.iter().find(|item| item.depth == 2).unwrap();
     assert_eq!(grandchild.agent.parent_id, Some(child.agent.id));
     assert_eq!((child.depth, grandchild.depth), (1, 2));
+    let child_conversation = app
+        .list_child_conversation_overviews(conversation.id, None, 20)
+        .await
+        .unwrap()
+        .items
+        .remove(0)
+        .conversation;
+    let grandchild_conversation = app
+        .list_child_conversation_overviews(child_conversation.id, None, 20)
+        .await
+        .unwrap()
+        .items
+        .remove(0)
+        .conversation;
+    let path = app
+        .load_conversation_path(grandchild_conversation.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        path.items
+            .iter()
+            .map(|item| item.conversation.id)
+            .collect::<Vec<_>>(),
+        vec![
+            conversation.id,
+            child_conversation.id,
+            grandchild_conversation.id
+        ]
+    );
     assert!(
         tree.items
             .iter()
@@ -871,11 +913,7 @@ async fn live_app_turn(
     let mut exact_writes = 0;
     let mut agent_approvals = 0;
     let outcome = loop {
-        for approval in app
-            .load_approvals(conversation_id, None, true, 30)
-            .await?
-            .items
-        {
+        for approval in load_subtree_approvals(app, conversation_id, true).await? {
             if !answered.insert(approval.id) {
                 continue;
             }
@@ -1055,10 +1093,11 @@ async fn live_app_recursive_claude_tasks_have_completed_canonical_ancestry() {
         Ok("1")
     );
     let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let store = Store::open(&directory.path().join("app.sqlite"))
+        .await
+        .unwrap();
     let app = PromptingTime::new(
-        Store::open(&directory.path().join("app.sqlite"))
-            .await
-            .unwrap(),
+        store.clone(),
         Router::default(),
         WorkspaceManager::new(directory.path()),
         vec![Arc::new(ClaudeAdapter::new("claude".into()))],
@@ -1069,7 +1108,7 @@ async fn live_app_recursive_claude_tasks_have_completed_canonical_ancestry() {
         live_app_turn(&app, conversation.id, ProviderId::Claude,
             "Use Agent exactly once to launch an orchestrating child. Tell that child to use Agent exactly once to launch a grandchild which replies GRANDCHILD, then report its reply. This must be a depth-two delegation: root -> child -> grandchild. Do not launch the grandchild yourself. Use no tools other than Agent. Do not read or write files.",
             None, true).await?;
-        Ok::<_, Box<dyn std::error::Error>>(app.load_agent_page(conversation.id, None, 20).await?)
+        Ok::<_, Box<dyn std::error::Error>>(store.load_agent_page(conversation.id, None, 20).await?)
     }).await;
     app.shutdown_with_grace(Duration::from_secs(5))
         .await

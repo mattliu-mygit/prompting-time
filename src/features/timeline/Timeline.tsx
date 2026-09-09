@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
-  AgentSnapshot,
+  ConversationSummary,
   ApprovalDetailSnapshot,
   ApprovalSnapshot,
   ProviderId,
   TimelineItem,
 } from "../../bridge/types";
-import type { AgentWindowSnapshot, ConversationActions } from "../../app/store";
+import type { ConversationActions } from "../../app/store";
 import { ApprovalCard } from "../inspector/ApprovalCard";
 import { TimelineEntry } from "./TimelineEntry";
 
@@ -14,7 +14,6 @@ const PAGE_SIZE = 80;
 const APPROVAL_PAGE_SIZE = 30;
 const MAX_APPROVALS = APPROVAL_PAGE_SIZE * 4;
 const MAX_OLDER_PAGES = 4;
-const AGENT_PAGE_SIZE = 20;
 
 export type TimelineViewState = {
   newestItems: TimelineItem[];
@@ -30,27 +29,15 @@ export type TimelineViewState = {
 };
 
 type TimelineProps = {
-  conversationId: string;
+  conversation: ConversationSummary;
   refreshVersion: number;
-  agents: readonly AgentSnapshot[];
-  agentsTruncated?: boolean;
-  agentWindow?: AgentWindowSnapshot | null;
-  onLoadAgentPage?(restart: boolean): void;
   actions: ConversationActions;
   viewStates?: Map<string, TimelineViewState>;
 };
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
-const statusNames: Record<AgentSnapshot["status"], string> = {
-  queued: "Queued",
-  running: "Running",
-  waiting: "Waiting",
-  completed: "Completed",
-  interrupted: "Interrupted",
-  failed: "Failed",
-};
-
-export function Timeline({ conversationId, refreshVersion, agents, agentsTruncated = false, agentWindow = null, onLoadAgentPage = () => {}, actions, viewStates }: TimelineProps) {
+export function Timeline({ conversation, refreshVersion, actions, viewStates }: TimelineProps) {
+  const conversationId = conversation.id;
   const [newestItems, setNewestItems] = useState<TimelineItem[]>([]);
   const [olderPages, setOlderPages] = useState<TimelineItem[][]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -93,7 +80,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   const [showJump, setShowJump] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [expandedOperations, setExpandedOperations] = useState<ReadonlySet<string>>(() => new Set());
-  const rootStatus = agents.find(({ parentId }) => parentId === null)?.status;
+  const runStatus = conversation.runStatus;
   const retainedView = useRef({ newestItems, olderPages, cursor, historyEvicted, expandedGroups, expandedOperations });
   const viewCommitted = useRef(false);
   useLayoutEffect(() => {
@@ -128,7 +115,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   }, [conversationId, viewStates]);
 
   useEffect(() => {
-    if (rootStatus !== "completed" && rootStatus !== "interrupted" && rootStatus !== "failed") return;
+    if (runStatus !== "completed" && runStatus !== "interrupted" && runStatus !== "failed") return;
     approvalRequestGeneration.current += 1;
     approvalPagerToken.current += 1;
     approvalPagerInFlight.current = false;
@@ -139,7 +126,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     setApprovals([]);
     setApprovalHistoryEvicted(false);
     setLoadingApprovals(false);
-  }, [rootStatus]);
+  }, [runStatus]);
 
   const items = useMemo(
     () => mergeTimeline(olderPages.flat(), newestItems).filter((item) => item.presentation !== "telemetry"),
@@ -522,8 +509,6 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     return exact;
   }
 
-  const agentActivity = useMemo(() => buildAgentActivity(agents), [agents]);
-
   return (
     <section className="timeline-region" aria-labelledby="timeline-heading">
       <h2 className="sr-only" ref={heading} id="timeline-heading" tabIndex={-1}>Timeline</h2>
@@ -541,38 +526,29 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
             {loadingOlder ? "Loading older activity…" : "Load older activity"}
           </button>
         ) : null}
-        {!loading && items.length === 0 ? <p className="empty-note">No activity yet. Start with a message below.</p> : null}
+        {!loading && items.length === 0 ? <p className="empty-note">{conversation.capabilities.canSend ? "No activity yet. Start with a message below." : "No recorded activity is available. Captured activity may be incomplete."}</p> : null}
         <ol className="timeline-list">
           {groups.map((group) => {
             const first = group[0]!;
             if (!isGroupActivity(first)) return <li key={first.id} data-timeline-id={first.id}>
-              <TimelineEntry item={first} actions={actions} expanded={expandedOperations.has(first.id)} onToggle={() => toggleOperation(first.id)} agentPath={agents.some(({ id }) => id === first.agentId) ? canonicalAgentPath(first.agentId, agents) : undefined} />
+              <TimelineEntry item={first} actions={actions} expanded={expandedOperations.has(first.id)} onToggle={() => toggleOperation(first.id)} agentPath={conversation.title} />
             </li>;
             const expandedAnchor = group.find(({ id }) => expandedGroups.has(id) || expandedOperations.has(id));
             const expanded = expandedAnchor !== undefined;
             const completed = first.operation !== null;
             const label = completed ? `${group.length} completed ${group.length === 1 ? "operation" : "operations"}` : group.some(({ kind }) => kind === "tool") ? "tool activity" : "progress";
-            const attribution = `${providerNames[first.provider]} · ${canonicalAgentPath(first.agentId, agents)}`;
+            const attribution = `${providerNames[first.provider]} · ${conversation.title}`;
             // Keep the disclosed subtree mounted when older activity joins its front.
             return <li key={expandedAnchor?.id ?? first.id} className="activity-group">
               <button type="button" className="activity-toggle" data-timeline-id={expanded ? undefined : first.id} aria-expanded={expanded} onClick={() => toggleGroup(group)} aria-label={`${expanded ? "Hide" : "Show"} ${label} · ${attribution}`}>
                 <span aria-hidden="true">{expanded ? "▾" : "▸"}</span><span>{completed ? label : label === "tool activity" ? "Tool activity" : "Progress"}</span><small>{attribution}</small>
               </button>
               {expanded ? <><p className="activity-fragment-note">Activity in the loaded history.</p><ol className="activity-entries">
-                {group.map((item) => <li key={item.id} data-timeline-id={item.id}><TimelineEntry item={item} actions={actions} grouped expanded={expandedOperations.has(item.id)} onToggle={() => toggleOperation(item.id)} agentPath={canonicalAgentPath(item.agentId, agents)} /></li>)}
+                {group.map((item) => <li key={item.id} data-timeline-id={item.id}><TimelineEntry item={item} actions={actions} grouped expanded={expandedOperations.has(item.id)} onToggle={() => toggleOperation(item.id)} agentPath={conversation.title} /></li>)}
               </ol></> : null}
             </li>;
           })}
         </ol>
-        {agentActivity.branches.length > 0 || agentsTruncated ? (
-          <AgentActivity
-            branches={agentActivity.branches}
-            total={agentActivity.total}
-            truncated={agentsTruncated}
-            agentWindow={agentWindow}
-            onLoadAgentPage={onLoadAgentPage}
-          />
-        ) : null}
         {approvals.length > 0 ? (
           <section className="approval-list" aria-labelledby="approvals-heading">
             <h3 id="approvals-heading">Needs your response</h3>
@@ -580,7 +556,6 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
               <ApprovalCard
                 key={approval.id}
                 approval={approval}
-                agentPath={canonicalAgentPath(approval.agentId, agents)}
                 actions={actions}
                 onReconcile={(detail) => reconcileApprovals(approval.id, detail)}
               />
@@ -624,174 +599,6 @@ function groupActivity(items: readonly TimelineItem[]) {
   return groups;
 }
 
-
-type AgentBranch = { agent: AgentSnapshot; children: AgentBranch[] };
-
-function buildAgentActivity(agents: readonly AgentSnapshot[]) {
-  const branches = new Map(agents.map((agent) => [agent.id, { agent, children: [] as AgentBranch[] }]));
-  const roots: AgentBranch[] = [];
-  let total = 0;
-  branches.forEach((branch) => {
-    if (branch.agent.parentId !== null) total += 1;
-    if (branch.agent.parentId && branches.has(branch.agent.parentId)) {
-      branches.get(branch.agent.parentId)!.children.push(branch);
-    } else if (branch.agent.parentId !== null) {
-      roots.push(branch);
-    }
-  });
-  branches.forEach((branch) => {
-    if (branch.agent.parentId !== null) return;
-    for (const child of branch.children) roots.push(child);
-  });
-  return { branches: roots, total };
-}
-
-function AgentActivity({ branches, total, truncated, agentWindow, onLoadAgentPage }: {
-  branches: AgentBranch[];
-  total: number;
-  truncated: boolean;
-  agentWindow: AgentWindowSnapshot | null;
-  onLoadAgentPage(restart: boolean): void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [visibleOffset, setVisibleOffset] = useState(0);
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const visiblePage = useMemo(
-    () => getVisibleAgentPage(branches, expanded, visibleOffset, AGENT_PAGE_SIZE),
-    [branches, expanded, visibleOffset],
-  );
-
-  useEffect(() => {
-    if (open && visibleOffset > 0 && visiblePage.items.length === 0) setVisibleOffset(0);
-  }, [open, visibleOffset, visiblePage.items.length]);
-
-  function toggleAgent(id: string) {
-    setExpanded((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  return (
-    <section className="agent-activity" aria-labelledby="agents-heading">
-      <div className="agent-activity-heading">
-        <h3 id="agents-heading">Agent activity</h3>
-        <button type="button" className="secondary-button" aria-expanded={open} onClick={() => {
-          const next = !open;
-          setOpen(next);
-          if (next && truncated && !agentWindow) onLoadAgentPage(true);
-        }}>
-          {open ? "Hide" : "Show"} agent activity ({total})
-        </button>
-      </div>
-      {open ? (
-        <>
-          {visiblePage.items.map(({ branch, depth }) => (
-            <AgentCard
-              key={branch.agent.id}
-              branch={branch}
-              depth={depth}
-              expanded={expanded.has(branch.agent.id)}
-              onToggle={toggleAgent}
-            />
-          ))}
-          <div className="agent-pagination">
-            {visibleOffset > 0 ? (
-              <button type="button" className="secondary-button" onClick={() => setVisibleOffset((value) => Math.max(0, value - AGENT_PAGE_SIZE))}>
-                Show previous agents
-              </button>
-            ) : null}
-            {visiblePage.hasMore ? (
-              <button type="button" className="secondary-button" onClick={() => setVisibleOffset((value) => value + AGENT_PAGE_SIZE)}>
-                Show more agents
-              </button>
-            ) : null}
-          </div>
-          {agentWindow?.error ? (
-            <div className="inline-error">
-              <p role="alert">{agentWindow.error}</p>
-              <button type="button" className="secondary-button" onClick={() => onLoadAgentPage(true)}>
-                Retry agent activity
-              </button>
-            </div>
-          ) : null}
-          {agentWindow?.loading ? <p role="status">Loading more agent activity…</p> : null}
-          {agentWindow?.nextCursor ? <button type="button" className="secondary-button" disabled={agentWindow.loading} onClick={() => onLoadAgentPage(false)}>Load more agent activity</button> : null}
-          {agentWindow?.evicted ? <button type="button" className="secondary-button" disabled={agentWindow.loading} onClick={() => onLoadAgentPage(true)}>Reload newest agent activity</button> : null}
-          {visibleOffset > 0 || visiblePage.hasMore ? (
-            <p className="truncation-note">Agent cards are paged to keep this view responsive.</p>
-          ) : null}
-        </>
-      ) : null}
-    </section>
-  );
-}
-
-function AgentCard({
-  branch,
-  depth,
-  expanded,
-  onToggle,
-}: {
-  branch: AgentBranch;
-  depth: number;
-  expanded: boolean;
-  onToggle(id: string): void;
-}) {
-  const provider = providerNames[branch.agent.provider];
-  const status = statusNames[branch.agent.status];
-  return (
-    <article
-      className="agent-card"
-      aria-label={`${branch.agent.label}, ${provider}, ${status}`}
-      data-depth={depth + 1}
-      style={{ "--agent-depth": Math.min(depth, 8) } as React.CSSProperties}
-    >
-      <header>
-        <strong>{branch.agent.label}</strong>
-        <span>{provider} · {status}</span>
-        {branch.children.length > 0 ? (
-          <button type="button" className="disclosure-button" aria-expanded={expanded} aria-label={`${expanded ? "Collapse" : "Expand"} ${branch.agent.label}`} onClick={() => onToggle(branch.agent.id)}>
-            {expanded ? "−" : "+"}
-          </button>
-        ) : null}
-      </header>
-      {branch.agent.summary ? <p>{branch.agent.summary}</p> : null}
-    </article>
-  );
-}
-
-function getVisibleAgentPage(
-  branches: readonly AgentBranch[],
-  expanded: ReadonlySet<string>,
-  offset: number,
-  limit: number,
-) {
-  const items: Array<{ branch: AgentBranch; depth: number }> = [];
-  const stack: Array<{ branches: readonly AgentBranch[]; depth: number; index: number }> = [
-    { branches, depth: 0, index: 0 },
-  ];
-  let visibleIndex = 0;
-  while (stack.length > 0) {
-    const frame = stack.at(-1)!;
-    if (frame.index >= frame.branches.length) {
-      stack.pop();
-      continue;
-    }
-    const branch = frame.branches[frame.index++]!;
-    if (visibleIndex >= offset) {
-      if (items.length === limit) return { items, hasMore: true };
-      items.push({ branch, depth: frame.depth });
-    }
-    visibleIndex += 1;
-    if (expanded.has(branch.agent.id) && branch.children.length > 0) {
-      stack.push({ branches: branch.children, depth: frame.depth + 1, index: 0 });
-    }
-  }
-  return { items, hasMore: false };
-}
 
 function mergeTimeline(current: readonly TimelineItem[], incoming: readonly TimelineItem[]): TimelineItem[] {
   const byId = new Map(current.map((item) => [item.id, item]));
@@ -852,19 +659,6 @@ function compareSequence(left: string, right: string) {
   const a = BigInt(left);
   const b = BigInt(right);
   return a < b ? -1 : a > b ? 1 : 0;
-}
-
-function canonicalAgentPath(agentId: string, agents: readonly AgentSnapshot[]) {
-  const byId = new Map(agents.map((agent) => [agent.id, agent]));
-  const labels: string[] = [];
-  const seen = new Set<string>();
-  let current = byId.get(agentId);
-  while (current && !seen.has(current.id)) {
-    seen.add(current.id);
-    labels.unshift(current.label);
-    current = current.parentId ? byId.get(current.parentId) : undefined;
-  }
-  return labels.join("/") || "Agent";
 }
 
 function messageFor(reason: unknown) {

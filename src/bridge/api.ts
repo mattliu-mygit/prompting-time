@@ -3,7 +3,6 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AppEvent,
-  AgentTreePage,
   ApprovalDetailSnapshot,
   ApprovalPage,
   ApprovalQuestionPage,
@@ -11,6 +10,7 @@ import type {
   BootstrapSnapshot,
   CommandError,
   ConversationPage,
+  ConversationPath,
   ConversationSummary,
   CreateConversationRequest,
   InspectWorkspaceRequest,
@@ -20,7 +20,7 @@ import type {
   InterruptRunRequest,
   ListConversationsRequest,
   LoadConversationRequest,
-  LoadAgentTreeRequest,
+  ListChildConversationsRequest,
   LoadApprovalDetailRequest,
   LoadApprovalQuestionsRequest,
   LoadApprovalsRequest,
@@ -115,8 +115,12 @@ export function loadDiagnostics(request: LoadTimelineRequest): Promise<Diagnosti
   return call("load_diagnostics", { request });
 }
 
-export function loadAgentTree(request: LoadAgentTreeRequest): Promise<AgentTreePage> {
-  return call("load_agent_tree", { request });
+export function listChildConversations(request: ListChildConversationsRequest): Promise<ConversationPage> {
+  return call("list_child_conversations", { request });
+}
+
+export function loadConversationPath(request: LoadConversationRequest): Promise<ConversationPath> {
+  return call("load_conversation_path", { request });
 }
 
 export function loadEventDetail(request: LoadEventDetailRequest): Promise<EventDetailSnapshot> {

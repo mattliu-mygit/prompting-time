@@ -51,6 +51,7 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
   actionsRef.current = actions;
 
   function refreshRunAudits(reset: boolean) {
+    if (!conversation.capabilities.canSend) return;
     runListRefreshQueued.current = true;
     runListResetQueued.current ||= reset;
     drainRunAuditRefreshes();
@@ -216,7 +217,7 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
         {refreshAvailable ? <small>New conversation activity is available. Refresh to update workspace details.</small> : null}
         {error ? <p role="alert" className="inline-error">{error}</p> : null}
       </div>
-      <InspectorSection id="run-history" title="Provider run history" collapsed={collapsed.has("run-history")} onToggle={toggle}>
+      {conversation.capabilities.canSend ? <InspectorSection id="run-history" title="Provider run history" collapsed={collapsed.has("run-history")} onToggle={toggle}>
         {runAudits.length ? (
           <ol className="run-audit-list">
             {runAudits.map((run, index) => (
@@ -242,8 +243,8 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
             {selectedRun.handoffTruncated ? <p className="truncation-note">The stored handoff exceeds the bounded audit view.</p> : null}
           </div>
         ) : null}
-      </InspectorSection>
-      <InspectorSection id="routing" title="Routing" collapsed={collapsed.has("routing")} onToggle={toggle}>
+      </InspectorSection> : null}
+      {conversation.capabilities.canRoute ? <InspectorSection id="routing" title="Routing" collapsed={collapsed.has("routing")} onToggle={toggle}>
         {snapshot.routing ? (
           <>
             <p><strong>{providerNames[snapshot.routing.provider]}</strong> · {humanize(snapshot.routing.profile)} · {humanize(snapshot.routing.taskKind)}</p>
@@ -269,7 +270,7 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
             </ol>
           </>
         ) : <p>No route has been selected yet.</p>}
-      </InspectorSection>
+      </InspectorSection> : null}
 
       <InspectorSection id="workspace" title="Workspace" collapsed={collapsed.has("workspace")} onToggle={toggle}>
         <dl className="inspector-list">
@@ -289,14 +290,13 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
         {snapshot.workspace.truncated ? <p className="truncation-note">Changed-file summary is truncated.</p> : null}
       </InspectorSection>
 
-      <InspectorSection id="agents" title="Active agents" collapsed={collapsed.has("agents")} onToggle={toggle}>
+      {conversation.capabilities.canSend ? <InspectorSection id="children" title="Active child conversations" collapsed={collapsed.has("children")} onToggle={toggle}>
         <p>{snapshot.activeDescendantCount} active descendants</p>
-        {snapshot.agentsTruncated ? <p className="truncation-note">The sidebar agent preview is truncated; expand the conversation to page through all agents.</p> : null}
-      </InspectorSection>
+      </InspectorSection> : null}
 
-      <InspectorSection id="handoff" title="Context handoff" collapsed={collapsed.has("handoff")} onToggle={toggle}>
+      {conversation.capabilities.canRoute ? <InspectorSection id="handoff" title="Context handoff" collapsed={collapsed.has("handoff")} onToggle={toggle}>
         {snapshot.handoff ? <pre className="handoff-content">{snapshot.handoff}</pre> : <p>No cross-provider handoff for this run.</p>}
-      </InspectorSection>
+      </InspectorSection> : null}
 
       <InspectorSection id="providers" title="Provider versions" collapsed={collapsed.has("providers")} onToggle={toggle}>
         <ul className="provider-list">

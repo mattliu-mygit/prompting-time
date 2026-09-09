@@ -19,7 +19,7 @@ type ApprovalCardProps = {
 
 const providerNames = { codex: "Codex", claude: "Claude" } as const;
 
-export function ApprovalCard({ approval, agentPath = "Agent", actions, onReconcile }: ApprovalCardProps) {
+export function ApprovalCard({ approval, agentPath = "Conversation", actions, onReconcile }: ApprovalCardProps) {
   const [detail, setDetail] = useState<ApprovalDetailSnapshot | null>(null);
   const [questions, setQuestions] = useState<ApprovalQuestionPreview[]>([]);
   const [questionCursor, setQuestionCursor] = useState<string | null>(null);
@@ -196,7 +196,7 @@ export function ApprovalCard({ approval, agentPath = "Agent", actions, onReconci
         <span className="approval-scope">{approval.scope}</span>
       </header>
       <dl className="approval-meta">
-        <div><dt>Requesting agent</dt><dd>{requestingAgentPath}</dd></div>
+        <div><dt>Requesting conversation</dt><dd>{requestingAgentPath}</dd></div>
         <div><dt>Scope</dt><dd>{approval.scope}</dd></div>
       </dl>
       {!disclosed ? (

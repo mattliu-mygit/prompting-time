@@ -9,6 +9,146 @@ use prompting_time_core::router::Router;
 use prompting_time_core::store::Store;
 use prompting_time_core::workspace::WorkspaceManager;
 
+#[path = "support/conversation_approvals.rs"]
+mod conversation_approvals;
+use conversation_approvals::load_subtree_approvals;
+
+#[tokio::test]
+async fn fixture_subtree_approvals_include_exact_root_child_and_grandchild_owners() {
+    use prompting_time_core::domain::ApprovalResolution;
+    use prompting_time_core::store::{ConversationBinding, ProviderEventRecord};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open_in_memory().await.unwrap();
+    let app = PromptingTime::new(
+        store.clone(),
+        Router::default(),
+        WorkspaceManager::new(directory.path()),
+        vec![],
+    )
+    .unwrap();
+    let conversation = app
+        .create_conversation(ConversationRequest::projectless("approval scopes"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Codex)
+        .await
+        .unwrap();
+    store.bind_native_session(run.id, "root").await.unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    for (parent, child) in [("root", "child"), ("child", "grandchild")] {
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::child_agent(
+                    format!("spawn-{child}"),
+                    parent,
+                    vec![child.into()],
+                    vec![],
+                    "spawn",
+                    "running",
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let child = app
+        .list_child_conversation_overviews(conversation.id, None, 20)
+        .await
+        .unwrap()
+        .items[0]
+        .conversation
+        .id;
+    let grandchild = app
+        .list_child_conversation_overviews(child, None, 20)
+        .await
+        .unwrap()
+        .items[0]
+        .conversation
+        .id;
+    let mut agents = vec![root.id];
+    for id in [child, grandchild] {
+        let ConversationBinding::Observed { agent_id, .. } =
+            store.conversation_binding(id).await.unwrap()
+        else {
+            panic!("observed binding");
+        };
+        store
+            .append_run_event(run.id, agent_id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        agents.push(agent_id);
+    }
+    let mut expected_history = Vec::new();
+    for ordinal in 0..21 {
+        let request = format!("history-{ordinal}");
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    &request,
+                    "invented write",
+                    "fixture",
+                ),
+            )
+            .await
+            .unwrap();
+        let approval = store
+            .record_response_intent(run.id, root.id, &request, ApprovalResolution::Denied)
+            .await
+            .unwrap();
+        store
+            .acknowledge_response_intent(run.id, root.id, &request)
+            .await
+            .unwrap();
+        expected_history.push((approval.id, approval.run_id, approval.agent_id));
+    }
+    let mut expected = Vec::new();
+    for (index, agent) in agents.iter().enumerate() {
+        let request = format!("control-{index}");
+        store
+            .append_run_event(
+                run.id,
+                *agent,
+                ProviderEventRecord::approval_requested(
+                    ProviderId::Codex,
+                    &request,
+                    "invented write",
+                    "fixture",
+                ),
+            )
+            .await
+            .unwrap();
+        let approval = store.load_approval(run.id, &request).await.unwrap();
+        expected.push((approval.id, approval.run_id, approval.agent_id));
+    }
+    let approvals = load_subtree_approvals(&app, conversation.id, true)
+        .await
+        .unwrap();
+    let mut actual = approvals
+        .iter()
+        .map(|approval| (approval.id, approval.run_id, approval.agent_id))
+        .collect::<Vec<_>>();
+    actual.sort_by_key(|row| row.0.to_string());
+    expected.sort_by_key(|row| row.0.to_string());
+    assert_eq!(actual, expected);
+    let mut history = load_subtree_approvals(&app, conversation.id, false)
+        .await
+        .unwrap()
+        .iter()
+        .map(|approval| (approval.id, approval.run_id, approval.agent_id))
+        .collect::<Vec<_>>();
+    history.sort_by_key(|row| row.0.to_string());
+    expected_history.sort_by_key(|row| row.0.to_string());
+    assert_eq!(history, expected_history);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "uses the installed Codex CLI and authenticated account"]
 async fn live_codex_app_native_child_approval_and_denial() {
@@ -49,10 +189,10 @@ async fn live_codex_app_native_child_approval_and_denial() {
             let mut answered = std::collections::HashSet::new();
             let mut exact = Vec::new();
             let outcome = loop {
-                for approval in app.load_approvals(conversation.id,None,true,20).await?.items {
+                for approval in load_subtree_approvals(&app,conversation.id,true).await? {
                     if !answered.insert(approval.id) { continue; }
                     let detail = app.load_approval_detail(approval.id).await?;
-                    let tree = app.load_agent_page(conversation.id,None,20).await?;
+                    let tree = store.load_agent_page(conversation.id,None,20).await?;
                     let child = tree.items.iter().find(|node| node.agent.id == approval.agent_id && node.depth == 1);
                     let matches = child.is_some() && !detail.truncated && matches!(&detail.details,
                         Some(ApprovalRequestDetails::CommandExecution { command:Some(value), .. }) if expected.contains(value));
@@ -70,14 +210,14 @@ async fn live_codex_app_native_child_approval_and_denial() {
                     changed = changes.recv() => { changed?; },
                 }
             };
-            let tree = app.load_agent_page(conversation.id,None,20).await?;
-            let approvals = app.load_approvals(conversation.id,None,false,20).await?;
+            let tree = store.load_agent_page(conversation.id,None,20).await?;
+            let approvals = load_subtree_approvals(&app,conversation.id,false).await?;
             let acknowledged = if let Some(id) = exact.first() {
                 let approval = store.load_approval_by_id(*id).await?;
                 approval.status == if allow { ApprovalStatus::Approved } else { ApprovalStatus::Denied }
                     && approval.response_intent.is_some_and(|intent| intent.status == ApprovalResponseIntentStatus::Acknowledged)
             } else { false };
-            evidence.push((allow, outcome.status, exact.len(), answered.len(), approvals.items.len(), acknowledged, tree.items.iter().map(|node| (node.depth,node.agent.status)).collect::<Vec<_>>(), std::fs::read_to_string(&target).ok()));
+            evidence.push((allow, outcome.status, exact.len(), answered.len(), approvals.len(), acknowledged, tree.items.iter().map(|node| (node.depth,node.agent.status)).collect::<Vec<_>>(), std::fs::read_to_string(&target).ok()));
         }
         Ok::<_,Box<dyn std::error::Error>>(evidence)
     }).await;
@@ -140,7 +280,7 @@ async fn live_codex_app_recursive_ancestry_and_activity_completion() {
         }).await?;
         let mut answered = std::collections::HashSet::new();
         let outcome = loop {
-            for approval in app.load_approvals(conversation.id, None, true, 20).await?.items {
+            for approval in load_subtree_approvals(&app, conversation.id, true).await? {
                 if answered.insert(approval.id) {
                     app.respond_to_approval_id(approval.id, ApprovalResponse::Denied).await?;
                 }
@@ -150,7 +290,7 @@ async fn live_codex_app_recursive_ancestry_and_activity_completion() {
                 changed = changes.recv() => { changed?; },
             }
         };
-        let tree = app.load_agent_page(conversation.id, None, 20).await?;
+        let tree = store.load_agent_page(conversation.id, None, 20).await?;
         Ok::<_, Box<dyn std::error::Error>>((outcome.status, tree))
     }).await;
     // Assertions and panic paths run only after the owned provider has shut down.

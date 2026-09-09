@@ -1,20 +1,34 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useState, type ComponentProps } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { type ComponentProps } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary, ProviderInstallation } from "../../bridge/types";
 import { BridgeError } from "../../bridge/api";
-import { createAppStore, type ConversationActions } from "../../app/store";
+import { createAppStore, type AppStore, type ConversationActions } from "../../app/store";
 import { Composer as StoreComposer } from "./Composer";
 
-function Composer(props: Omit<ComponentProps<typeof StoreComposer>, "store">) {
-  const [store] = useState(() => createAppStore({
-    ...props.actions,
-    getBootstrap: vi.fn(), listConversations: vi.fn(), loadConversation: vi.fn(),
-    loadAgentTree: vi.fn(), listenToAppEvents: vi.fn(), listRunAudits: vi.fn(),
+let testStore: AppStore;
+let currentActions: ConversationActions;
+
+beforeEach(async () => {
+  currentActions = actions();
+  testStore = createAppStore({
+    ...currentActions,
+    submitMessage: request => currentActions.submitMessage(request),
+    steerRun: request => currentActions.steerRun(request),
+    getBootstrap: vi.fn().mockResolvedValue({ providers, startupDiagnostic: null }),
+    listConversations: vi.fn().mockResolvedValue({ items: [conversation(), conversation({ id: "conversation-2" })], nextCursor: null }),
+    loadConversation: vi.fn(), listChildConversations: vi.fn(), loadConversationPath: vi.fn(),
+    listenToAppEvents: vi.fn().mockResolvedValue(() => {}), listRunAudits: vi.fn(),
     loadRunAudit: vi.fn(), createConversation: vi.fn(), archiveConversation: vi.fn(),
     inspectProject: vi.fn(), pickProjectDirectory: vi.fn(),
-  }));
-  return <StoreComposer {...props} store={store} />;
+  });
+  await testStore.initialize();
+});
+afterEach(() => testStore.dispose());
+
+function Composer(props: Omit<ComponentProps<typeof StoreComposer>, "store">) {
+  currentActions = props.actions;
+  return <StoreComposer {...props} store={testStore} />;
 }
 
 const providers: ProviderInstallation[] = [
@@ -28,7 +42,7 @@ function conversation(overrides: Partial<ConversationSummary> = {}): Conversatio
     parentId: null, hasChildren: false, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     projectRoot: null, routingProfile: "balanced", currentRunId: null, provider: null, runStatus: null,
-    rollupStatus: null, agents: [], agentsTruncated: false, ...overrides,
+    rollupStatus: null, ...overrides,
   };
 }
 
@@ -43,6 +57,31 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 describe("Composer", () => {
+  it("restores provider choice, preview and draft across a recorded child visit", () => {
+    const api = actions();
+    const view = render(<Composer key="parent" conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "**Parent draft**" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), { target: { value: "claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
+    view.rerender(<Composer key="child" conversation={conversation({ id: "reviewer", parentId: "conversation-1", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    view.rerender(<Composer key="parent" conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue("claude");
+    expect(screen.getByRole("region", { name: "Message preview" })).toHaveTextContent("Parent draft");
+    fireEvent.click(screen.getByRole("button", { name: "Edit Markdown" }));
+    expect(screen.getByLabelText("Message")).toHaveValue("**Parent draft**");
+  });
+  it("explains recorded children without exposing parent controls", () => {
+    const api = actions();
+    render(<Composer conversation={conversation({ id: "reviewer", parentId: "conversation-1", currentRunId: "parent-run", provider: "codex", runStatus: "running", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    expect(screen.getByText("Recorded activity only.")).toBeVisible();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByText("Recorded activity only."), { key: "Enter" });
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    expect(api.steerRun).not.toHaveBeenCalled();
+    expect(api.interruptRun).not.toHaveBeenCalled();
+  });
   it("explains the supported keyboard action without implying a queue", () => {
     const api = actions();
     const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
@@ -518,6 +557,6 @@ describe("Composer", () => {
   it("treats active descendants as an active turn boundary", () => {
     render(<Composer conversation={conversation({ currentRunId: "run-1", provider: "codex", runStatus: "completed", rollupStatus: "active" })} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
     expect(screen.getByRole("combobox", { name: "Provider" })).toBeDisabled();
-    expect(screen.getByText(/Active child agents must finish/i)).toBeVisible();
+    expect(screen.getByText(/Active child conversations must finish/i)).toBeVisible();
   });
 });

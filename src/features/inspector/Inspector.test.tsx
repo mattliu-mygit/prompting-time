@@ -38,7 +38,6 @@ function actions(overrides: Partial<AppActions> = {}): AppActions {
       },
       handoff: "Imported context: preserve the API boundary.",
       activeDescendantCount: 7,
-      agentsTruncated: false,
     }),
     listRunAudits: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadRunAudit: vi.fn(),
@@ -57,7 +56,7 @@ const conversation: ConversationSummary = {
   capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
   id: "conversation-1", title: "Work", workspaceId: "workspace-1", archived: false,
   projectRoot: "/repo", routingProfile: "balanced", currentRunId: "run-1", provider: "codex", runStatus: "running",
-  rollupStatus: "active", agents: [], agentsTruncated: false,
+  rollupStatus: "active",
 };
 
 const providers: ProviderInstallation[] = [
@@ -66,6 +65,14 @@ const providers: ProviderInstallation[] = [
 ];
 
 describe("ApprovalCard", () => {
+  it("keeps inherited workspace but hides unavailable child control metadata", async () => {
+    const api = actions({ loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }) });
+    render(<Inspector conversation={{ ...conversation, id: "reviewer", parentId: "conversation-1", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } }} providers={providers} refreshVersion={0} actions={api} />);
+    expect(await screen.findByText("/app-support/worktrees/conversation-1")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: /Provider run history|Routing|Context handoff|Active child conversations/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/active descendants/)).not.toBeInTheDocument();
+    expect(api.listRunAudits).not.toHaveBeenCalled();
+  });
   it("recovers an initial detail failure through an accessible focused retry", async () => {
     const api = actions({
       loadApprovalDetail: vi.fn()
@@ -130,6 +137,7 @@ describe("ApprovalCard", () => {
     render(<ApprovalCard approval={approval} agentPath="Root/Reviewer" actions={api} onReconcile={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
     expect(await screen.findByText("cargo test")).toBeVisible();
+    expect(screen.getByText("Requesting conversation")).toBeVisible();
     expect(screen.getByText("Root/Reviewer")).toBeVisible();
     const allow = screen.getByRole("button", { name: "Allow Run command" });
     fireEvent.click(allow);

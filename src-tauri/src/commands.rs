@@ -9,10 +9,9 @@ use prompting_time_core::app::{
     TimelineSnapshot as CoreTimelineSnapshot,
 };
 use prompting_time_core::domain::{
-    AgentNode, AgentStatus as CoreAgentStatus, ApprovalId,
-    ApprovalRequestDetails as CoreApprovalRequestDetails, ApprovalStatus as CoreApprovalStatus,
-    ConversationId, FileChangeKind as CoreFileChangeKind, MessageRole as CoreMessageRole,
-    RequestedFileSystemAccess as CoreFileSystemAccess,
+    ApprovalId, ApprovalRequestDetails as CoreApprovalRequestDetails,
+    ApprovalStatus as CoreApprovalStatus, ConversationId, FileChangeKind as CoreFileChangeKind,
+    MessageRole as CoreMessageRole, RequestedFileSystemAccess as CoreFileSystemAccess,
     RequestedFileSystemPath as CoreFileSystemPath, RequestedSpecialPath as CoreSpecialPath,
     RollupStatus as CoreRollupStatus, RunId, RunStatus as CoreRunStatus, TimelineEventId,
     TimelineEventKind as CoreTimelineEventKind,
@@ -145,23 +144,6 @@ pub async fn load_diagnostics(
     Ok(state
         .service()?
         .load_diagnostics(conversation_id, request.cursor, request.limit)
-        .await?
-        .into())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn load_agent_tree(
-    state: State<'_, Arc<AppState>>,
-    request: LoadAgentTreeRequest,
-) -> Result<AgentTreePage, CommandError> {
-    Ok(state
-        .service()?
-        .load_agent_page(
-            parse_conversation_id(&request.conversation_id)?,
-            request.cursor,
-            request.limit,
-        )
         .await?
         .into())
 }
@@ -398,7 +380,6 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             load_conversation_path,
             load_timeline,
             load_diagnostics,
-            load_agent_tree,
             load_event_detail,
             load_approvals,
             load_approval_detail,
@@ -554,7 +535,33 @@ mod tests {
         assert!(json["capabilities"]["canInterrupt"].is_boolean());
         assert!(json["capabilities"]["canArchive"].is_boolean());
         assert!(json["capabilities"]["canRoute"].is_boolean());
+        assert!(json.get("agents").is_none());
+        assert!(json.get("agentsTruncated").is_none());
         app.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn unified_conversation_bindings_have_no_parallel_agent_navigation_surface() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("types.ts");
+        export_typescript(&path).unwrap();
+        let generated = std::fs::read_to_string(path).unwrap();
+        for removed in [
+            "loadAgentTree",
+            "AgentSnapshot",
+            "AgentTreePage",
+            "AgentTreeItem",
+            "LoadAgentTreeRequest",
+            "agentsTruncated",
+            "export type AgentStatus",
+        ] {
+            assert!(
+                !generated.contains(removed),
+                "obsolete product surface {removed}"
+            );
+        }
+        assert!(generated.contains("listChildConversations"));
+        assert!(generated.contains("loadConversationPath"));
     }
 
     #[tokio::test]

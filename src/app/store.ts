@@ -1,8 +1,7 @@
 import { createContext, useContext, useSyncExternalStore } from "react";
 import type {
-  AgentSnapshot,
-  AgentStatus,
-  AgentTreePage,
+  ConversationPath,
+  RunStatus,
   AppEvent,
   ApprovalDetailSnapshot,
   ApprovalPage,
@@ -24,24 +23,21 @@ import type {
 } from "../bridge/types";
 
 const PAGE_SIZE = 200;
-const AGENT_LOAD_BATCH_SIZE = 8;
-const AGENT_PAGE_SIZE = 20;
-const MAX_AGENT_PAGES = 4;
+const REFRESH_BATCH_SIZE = 8;
+const CHILD_PAGE_SIZE = 20;
+const MAX_RETAINED_CHILDREN = 80;
 const MAX_PAGES = 10_000;
 const MAX_SEQUENCE = (1n << 64n) - 1n;
 
-export type EffectiveStatus = "idle" | AgentStatus;
+export type EffectiveStatus = "idle" | RunStatus;
 export type StatusFilter = "all" | EffectiveStatus;
 
 export type AppApi = {
   getBootstrap(): Promise<BootstrapSnapshot>;
   listConversations(request: { cursor: string | null; limit: number }): Promise<ConversationPage>;
   loadConversation(request: { conversationId: string }): Promise<ConversationSummary>;
-  loadAgentTree(request: {
-    conversationId: string;
-    cursor: string | null;
-    limit: number;
-  }): Promise<AgentTreePage>;
+  listChildConversations(request: { parentId: string; cursor: string | null; limit: number }): Promise<ConversationPage>;
+  loadConversationPath(request: { conversationId: string }): Promise<ConversationPath>;
   listenToAppEvents(handler: (event: AppEvent) => void): Promise<() => void>;
   loadTimeline(request: { conversationId: string; cursor: string | null; limit: number }): Promise<TimelinePage>;
   loadDiagnostics(request: { conversationId: string; cursor: string | null; limit: number }): Promise<DiagnosticsPage>;
@@ -86,37 +82,34 @@ type DraftSubmission = Readonly<{
   error: string | null;
 }>;
 
-export type NormalizedConversation = Omit<ConversationSummary, "agents"> & {
-  summaryAgentsTruncated: boolean;
-  summaryAgentIds: readonly string[];
-  agentIds: readonly string[];
-};
-
-export type AgentWindowSnapshot = Readonly<{
-  conversationId: string;
-  runId: string;
-  pages: readonly (readonly string[])[];
+export type ChildPageSnapshot = Readonly<{
+  pages: readonly Readonly<{ cursor: string | null; ids: readonly string[]; order: number }>[];
   nextCursor: string | null;
   loading: boolean;
   error: string | null;
   evicted: boolean;
 }>;
 
+export type ComposerView = Readonly<{ choice: "auto" | ProviderId; preview: boolean }>;
+export type SelectedPath = Readonly<{ ids: readonly string[]; truncated: boolean }>;
+
 export type AppSnapshot = Readonly<{
   phase: "idle" | "loading" | "ready" | "error";
   error: string | null;
   bootstrap: BootstrapSnapshot | null;
-  conversationsById: Readonly<Record<string, NormalizedConversation>>;
+  conversationsById: Readonly<Record<string, ConversationSummary>>;
   conversationIds: readonly string[];
-  agentsById: Readonly<Record<string, AgentSnapshot>>;
-  agentWindow: AgentWindowSnapshot | null;
+  childPagesById: Readonly<Record<string, ChildPageSnapshot>>;
+  expandedById: Readonly<Record<string, boolean>>;
+  executionOwners: Readonly<Record<string, string>>;
+  selectedPath: SelectedPath | null;
   selectedConversationId: string | null;
-  selectedAgentId: string | null;
   statusFilter: StatusFilter;
   queuedCount: number;
   lastSequence: string | null;
   conversationVersions: Readonly<Record<string, number>>;
   draftsById: Readonly<Record<string, Readonly<{ text: string }>>>;
+  composerViewsById: Readonly<Record<string, ComposerView>>;
   submissionsById: Readonly<Record<string, DraftSubmission>>;
 }>;
 
@@ -126,12 +119,14 @@ export type AppStore = {
   initialize(): Promise<void>;
   retry(): Promise<void>;
   dispose(): void;
-  loadAgentPage(conversationId: string, restart?: boolean): Promise<void>;
+  loadChildPage(parentId: string, restart?: boolean): Promise<void>;
+  toggleConversation(conversationId: string): void;
   createConversation(request: CreateConversationRequest): Promise<void>;
   archiveConversation(conversationId: string): Promise<void>;
   inspectProject(path: string): Promise<ProjectPathSnapshot>;
   pickProjectDirectory(): Promise<string | null>;
-  selectConversation(conversationId: string, agentId?: string): void;
+  selectConversation(conversationId: string): Promise<void>;
+  setComposerView(conversationId: string, patch: Partial<ComposerView>): void;
   setStatusFilter(filter: StatusFilter): void;
   refreshConversation(conversationId: string): void;
   setDraft(conversationId: string, text: string): void;
@@ -146,15 +141,17 @@ const emptySnapshot: AppSnapshot = freezeSnapshot({
   bootstrap: null,
   conversationsById: {},
   conversationIds: [],
-  agentsById: {},
-  agentWindow: null,
+  childPagesById: {},
+  expandedById: {},
+  executionOwners: {},
+  selectedPath: null,
   selectedConversationId: null,
-  selectedAgentId: null,
   statusFilter: "all",
   queuedCount: 0,
   lastSequence: null,
   conversationVersions: {},
   draftsById: {},
+  composerViewsById: {},
   submissionsById: {},
 });
 
@@ -172,10 +169,11 @@ export function createAppStore(api: AppApi): AppStore {
   let targetedRefreshPromise: Promise<void> | null = null;
   const targetedConversationVersions = new Map<string, number>();
   const pendingConversationRefreshes = new Set<string>();
-  let agentLoadGeneration = 0;
-  let agentLoadPromise: Promise<void> | null = null;
-  let agentLoadConversation: string | null = null;
-  let queuedAgentRestart: string | null = null;
+  let childLoadPromise: Promise<void> | null = null;
+  const pendingChildLoads = new Map<string, boolean>();
+  const childGenerations = new Map<string, number>();
+  let pageOrder = 0;
+  let selectionGeneration = 0;
   let inspectPromise: Promise<InspectorSnapshot> | null = null;
   let queuedInspectRequest: { conversationId: string } | null = null;
   let queuedInspectWaiters: Array<{
@@ -222,7 +220,8 @@ export function createAppStore(api: AppApi): AppStore {
   async function submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null) {
     const draft = snapshot.draftsById[conversationId];
     const previous = snapshot.submissionsById[conversationId];
-    if (disposed || !draft?.text.trim() || previous?.pending) return false;
+    const conversation = snapshot.conversationsById[conversationId];
+    if (disposed || !conversation?.capabilities.canSend || !draft?.text.trim() || previous?.pending) return false;
     const command = runId ? null : previous?.command
       && previous.command.text === draft.text
       && previous.command.provider === providerOverride
@@ -269,10 +268,7 @@ export function createAppStore(api: AppApi): AppStore {
       }),
       loadAllConversations(api),
     ]);
-    const activeConversations = conversations.filter(({ archived }) => !archived);
-    const base = normalizeConversations(activeConversations);
-    const retained = retainAgentState(snapshot, base.normalized, base.agentsById);
-    const { normalized, agentsById, agentWindow } = retained;
+    const activeConversations = conversations.filter(({ archived, parentId }) => !archived && parentId === null);
     if (disposed) return;
     if (revisionAtStart !== eventRevision) {
       refreshRequested = true;
@@ -280,19 +276,18 @@ export function createAppStore(api: AppApi): AppStore {
     }
 
     const conversationIds = activeConversations.map(({ id }) => id);
-    const selectedConversationId = snapshot.selectedConversationId
-      && normalized[snapshot.selectedConversationId]
-      ? snapshot.selectedConversationId
-      : activeConversations[0]?.id ?? null;
-    const selectedConversation = selectedConversationId
-      ? normalized[selectedConversationId]
-      : null;
-    const selectedAgentId = selectedConversation
-      ? selectedConversation.agentIds.includes(snapshot.selectedAgentId ?? "")
-        ? snapshot.selectedAgentId
-        : null
-      : snapshot.selectedAgentId;
-
+    const rootIds = new Set(conversationIds);
+    const normalized = normalizeConversations(activeConversations);
+    const executionOwners = Object.fromEntries(conversationIds.map(id => [id, id]));
+    for (const conversation of Object.values(snapshot.conversationsById)) {
+      const owner = snapshot.executionOwners[conversation.id];
+      if (conversation.parentId !== null && owner && rootIds.has(owner)) {
+        normalized[conversation.id] = conversation;
+        executionOwners[conversation.id] = owner;
+      }
+    }
+    const selectedConversationId = snapshot.selectedConversationId && normalized[snapshot.selectedConversationId]
+      ? snapshot.selectedConversationId : conversationIds[0] ?? null;
     const conversationVersions = successfulSynchronizations === 0
       ? snapshot.conversationVersions
       : incrementAllConversationVersions(snapshot);
@@ -304,14 +299,20 @@ export function createAppStore(api: AppApi): AppStore {
       bootstrap,
       conversationsById: normalized,
       conversationIds,
-      agentsById,
-      agentWindow,
+      executionOwners,
       selectedConversationId,
-      selectedAgentId,
+      selectedPath: selectedConversationId === snapshot.selectedConversationId ? snapshot.selectedPath : null,
       queuedCount: countQueued(normalized),
       conversationVersions,
     });
-    if (agentWindow) void loadAgentPage(agentWindow.conversationId, true);
+    pruneNavigation();
+    if (snapshot.selectedConversationId && snapshot.conversationsById[snapshot.selectedConversationId]?.parentId !== null) {
+      requestConversationRefresh(snapshot.selectedConversationId);
+    }
+    for (const id of Object.keys(snapshot.childPagesById)) {
+      if (snapshot.expandedById[id] && isVisibleConversation(snapshot, id)) void loadChildPage(id, true);
+    }
+    revealSelectedRoot();
   }
 
   function requestRefresh(): Promise<void> {
@@ -361,20 +362,15 @@ export function createAppStore(api: AppApi): AppStore {
 
   async function drainTargetedRefreshes() {
     while (pendingConversationRefreshes.size > 0 && !disposed) {
-      const ids = [...pendingConversationRefreshes].slice(0, AGENT_LOAD_BATCH_SIZE);
+      const ids = [...pendingConversationRefreshes].slice(0, REFRESH_BATCH_SIZE);
       const versions = new Map(ids.map((id) => [id, targetedConversationVersions.get(id) ?? 0]));
       ids.forEach((id) => pendingConversationRefreshes.delete(id));
       const epoch = fullRefreshEpoch;
-      let refreshed: Array<{
-        id: string;
-        normalized: Record<string, NormalizedConversation>;
-        agentsById: Record<string, AgentSnapshot>;
-      }>;
+      let refreshed: Array<{ id: string; conversation: ConversationSummary }>;
       try {
         refreshed = await Promise.all(ids.map(async (id) => {
           const conversation = await api.loadConversation({ conversationId: id });
-          const result = normalizeConversations([conversation]);
-          return { id, ...result };
+          return { id, conversation };
         }));
       } catch {
         void requestRefresh();
@@ -383,135 +379,81 @@ export function createAppStore(api: AppApi): AppStore {
       if (disposed || epoch !== fullRefreshEpoch) continue;
       refreshed.forEach((result) => {
         if (versions.get(result.id) !== targetedConversationVersions.get(result.id)) return;
-        mergeConversation(result.id, result.normalized, result.agentsById);
+        mergeConversation(result.conversation);
       });
     }
   }
 
-  function mergeConversation(
-    conversationId: string,
-    normalized: Record<string, NormalizedConversation>,
-    refreshedAgents: Record<string, AgentSnapshot>,
-  ) {
-    const refreshedConversation = normalized[conversationId];
-    if (!refreshedConversation) return;
-    if (refreshedConversation.archived) {
-      removeConversation(conversationId);
+  function mergeConversation(conversation: ConversationSummary) {
+    if (conversation.archived) {
+      removeConversation(conversation.id);
       return;
     }
-    const previousConversation = snapshot.conversationsById[conversationId];
-    const sameRun = previousConversation?.currentRunId === refreshedConversation.currentRunId;
-    const retainedIds = sameRun ? previousConversation.agentIds : [];
-    const agentIds = uniqueAgentIds([
-      ...refreshedConversation.summaryAgentIds,
-      ...retainedIds,
-    ]);
-    const retainedWindow = sameRun && snapshot.agentWindow?.conversationId === conversationId
-      ? { ...snapshot.agentWindow, loading: false }
-      : snapshot.agentWindow?.conversationId === conversationId
-        ? null
-        : snapshot.agentWindow;
-    if (snapshot.agentWindow?.conversationId === conversationId) agentLoadGeneration += 1;
-    const conversation = Object.freeze({
-      ...refreshedConversation,
-      agentsTruncated: retainedWindow?.conversationId === conversationId
-        ? retainedWindow.nextCursor !== null || retainedWindow.evicted
-        : refreshedConversation.summaryAgentsTruncated,
-      agentIds: Object.freeze(agentIds),
-    });
-    const conversationsById = { ...snapshot.conversationsById, [conversationId]: conversation };
-    const agentsById = { ...snapshot.agentsById };
-    previousConversation?.agentIds.forEach((id) => {
-      if (!agentIds.includes(id)) delete agentsById[id];
-    });
-    Object.assign(agentsById, refreshedAgents);
-    const conversationIds = [
-      conversationId,
-      ...snapshot.conversationIds.filter((id) => id !== conversationId),
-    ];
-    const selectedConversationId = snapshot.selectedConversationId
-      ?? (conversation.archived ? null : conversationId);
-    const selectedAgentId = selectedConversationId === conversationId
-      && snapshot.selectedAgentId
-      && !conversation.agentIds.includes(snapshot.selectedAgentId)
-      ? null
-      : snapshot.selectedAgentId;
+    const owner = conversation.parentId === null ? conversation.id : snapshot.executionOwners[conversation.id];
+    if (!owner || (conversation.parentId !== null && !snapshot.conversationsById[owner])) return;
+    const conversationsById = { ...snapshot.conversationsById, [conversation.id]: Object.freeze(conversation) };
     publish({
       ...snapshot,
       conversationsById,
-      conversationIds,
-      agentsById,
-      agentWindow: retainedWindow,
-      selectedConversationId,
-      selectedAgentId,
+      executionOwners: { ...snapshot.executionOwners, [conversation.id]: owner },
+      conversationIds: conversation.parentId === null
+        ? [conversation.id, ...snapshot.conversationIds.filter(id => id !== conversation.id)] : snapshot.conversationIds,
+      selectedConversationId: snapshot.selectedConversationId ?? conversation.id,
       queuedCount: countQueued(conversationsById),
       conversationVersions: {
         ...snapshot.conversationVersions,
-        [conversationId]: (snapshot.conversationVersions[conversationId] ?? 0) + 1,
+        [conversation.id]: (snapshot.conversationVersions[conversation.id] ?? 0) + 1,
       },
     });
-    if (sameRun && retainedWindow?.conversationId === conversationId) {
-      void loadAgentPage(conversationId, true);
+    if (snapshot.expandedById[conversation.id] && isVisibleConversation(snapshot, conversation.id)
+      && (conversation.hasChildren || snapshot.childPagesById[conversation.id])) {
+      void loadChildPage(conversation.id, true);
     }
+    revealSelectedRoot();
   }
 
   function removeConversation(conversationId: string) {
-    targetedConversationVersions.delete(conversationId);
-    pendingConversationRefreshes.delete(conversationId);
-    const removed = snapshot.conversationsById[conversationId];
-    if (!removed) return;
+    const removedIds = new Set(Object.keys(snapshot.conversationsById).filter(id =>
+      id === conversationId || snapshot.executionOwners[id] === conversationId));
+    if (!removedIds.size) return;
+    eventRevision += 1;
+    selectionGeneration += 1;
     const conversationsById = { ...snapshot.conversationsById };
-    delete conversationsById[conversationId];
-    const agentsById = { ...snapshot.agentsById };
-    removed.agentIds.forEach((id) => delete agentsById[id]);
-    const conversationIds = snapshot.conversationIds.filter((id) => id !== conversationId);
+    const childPagesById = { ...snapshot.childPagesById };
+    const executionOwners = { ...snapshot.executionOwners };
+    const expandedById = { ...snapshot.expandedById };
     const conversationVersions = { ...snapshot.conversationVersions };
-    delete conversationVersions[conversationId];
-    const selectionRemoved = snapshot.selectedConversationId === conversationId;
-    if (snapshot.agentWindow?.conversationId === conversationId) agentLoadGeneration += 1;
+    for (const id of removedIds) {
+      delete conversationsById[id];
+      delete childPagesById[id];
+      delete executionOwners[id];
+      delete expandedById[id];
+      delete conversationVersions[id];
+      childGenerations.set(id, (childGenerations.get(id) ?? 0) + 1);
+      pendingChildLoads.delete(id);
+      targetedConversationVersions.delete(id);
+      pendingConversationRefreshes.delete(id);
+    }
+    const conversationIds = snapshot.conversationIds.filter(id => !removedIds.has(id));
+    const selectionRemoved = removedIds.has(snapshot.selectedConversationId ?? "");
     publish({
-      ...snapshot,
-      conversationsById,
-      conversationIds,
-      agentsById,
-      agentWindow: snapshot.agentWindow?.conversationId === conversationId ? null : snapshot.agentWindow,
+      ...snapshot, conversationsById, conversationIds, childPagesById, executionOwners, expandedById, conversationVersions,
       selectedConversationId: selectionRemoved ? conversationIds[0] ?? null : snapshot.selectedConversationId,
-      selectedAgentId: selectionRemoved ? null : snapshot.selectedAgentId,
+      selectedPath: selectionRemoved ? null : snapshot.selectedPath,
       queuedCount: countQueued(conversationsById),
-      conversationVersions,
     });
   }
 
   async function createConversation(request: CreateConversationRequest) {
     const conversation = await api.createConversation(request);
     if (disposed) return;
-    const { normalized, agentsById: createdAgents } = normalizeConversations([conversation]);
-    const created = normalized[conversation.id];
-    if (!created || created.archived) throw new Error("Prompting Time created an unavailable conversation.");
-    const previousWindow = snapshot.agentWindow;
-    let conversationsById = { ...snapshot.conversationsById, [conversation.id]: created };
-    let agentsById = { ...snapshot.agentsById, ...createdAgents };
-    if (previousWindow) {
-      ({ conversationsById, agentsById } = pruneConversationAgents(
-        snapshot, conversationsById, agentsById, previousWindow.conversationId,
-      ));
-      agentLoadGeneration += 1;
-    }
-    publish({
-      ...snapshot,
-      conversationsById,
-      conversationIds: [conversation.id, ...snapshot.conversationIds.filter((id) => id !== conversation.id)],
-      agentsById,
-      agentWindow: null,
-      selectedConversationId: conversation.id,
-      selectedAgentId: null,
-      queuedCount: countQueued(conversationsById),
-      conversationVersions: { ...snapshot.conversationVersions, [conversation.id]: 0 },
-    });
+    if (conversation.archived || conversation.parentId !== null) throw new Error("Prompting Time created an unavailable conversation.");
+    mergeConversation(conversation);
+    await selectConversation(conversation.id);
   }
 
   async function archiveConversation(conversationId: string) {
-    if (!snapshot.conversationsById[conversationId]) return;
+    if (!snapshot.conversationsById[conversationId]?.capabilities.canArchive) return;
     await api.archiveConversation({ conversationId });
     if (!disposed) removeConversation(conversationId);
   }
@@ -547,6 +489,13 @@ export function createAppStore(api: AppApi): AppStore {
       void requestRefresh();
     } else {
       requestConversationRefresh(event.conversationId);
+      for (const conversation of Object.values(snapshot.conversationsById)) {
+        if (conversation.id === event.conversationId || snapshot.executionOwners[conversation.id] !== event.conversationId) continue;
+        if (event.kind === "runChanged" && conversation.currentRunId !== event.runId) continue;
+        if (conversation.id === snapshot.selectedConversationId || isVisibleConversation(snapshot, conversation.id)) {
+          requestConversationRefresh(conversation.id);
+        }
+      }
     }
   }
 
@@ -579,162 +528,184 @@ export function createAppStore(api: AppApi): AppStore {
     return initializePromise;
   }
 
-  function loadAgentPage(conversationId: string, restart = false): Promise<void> {
-    if (agentLoadPromise) {
-      if (restart || agentLoadConversation !== conversationId) queuedAgentRestart = conversationId;
-      return agentLoadPromise;
-    }
-    agentLoadConversation = conversationId;
-    agentLoadPromise = (async () => {
-      await performAgentPage(conversationId, restart);
-      while (queuedAgentRestart) {
-        const nextConversation = queuedAgentRestart;
-        queuedAgentRestart = null;
-        agentLoadConversation = nextConversation;
-        await performAgentPage(nextConversation, true);
-      }
-    })().finally(() => {
-      agentLoadPromise = null;
-      agentLoadConversation = null;
-      if (queuedAgentRestart) void loadAgentPage(queuedAgentRestart, true);
-    });
-    return agentLoadPromise;
+  function revealSelectedRoot() {
+    const id = snapshot.selectedConversationId;
+    const conversation = id ? snapshot.conversationsById[id] : undefined;
+    if (!id || !conversation || conversation.parentId !== null || !conversation.hasChildren
+      || Object.hasOwn(snapshot.expandedById, id)) return;
+    update({ expandedById: { ...snapshot.expandedById, [id]: true } });
+    void loadChildPage(id, true);
   }
 
-  async function performAgentPage(conversationId: string, restart: boolean) {
-    if (disposed) return;
+  function toggleConversation(conversationId: string) {
     const conversation = snapshot.conversationsById[conversationId];
-    if (!conversation?.currentRunId || conversation.archived) return;
-    const currentWindow = snapshot.agentWindow;
-    const startsNewWindow = restart
-      || currentWindow?.conversationId !== conversationId
-      || currentWindow.runId !== conversation.currentRunId;
-    if (!startsNewWindow && (currentWindow.loading || currentWindow.nextCursor === null)) return;
+    if (!conversation) return;
+    const open = !snapshot.expandedById[conversationId];
+    update({ expandedById: { ...snapshot.expandedById, [conversationId]: open } });
+    if (open) void loadChildPage(conversationId, true);
+  }
 
-    const cursor = startsNewWindow ? null : currentWindow.nextCursor;
-    const generation = ++agentLoadGeneration;
+  async function selectConversation(conversationId: string) {
+    const generation = ++selectionGeneration;
+    let path = loadedConversationPath(snapshot, conversationId);
+    if (path.truncated || !snapshot.conversationsById[conversationId]) {
+      const epoch = fullRefreshEpoch;
+      try {
+        const result = await api.loadConversationPath({ conversationId });
+        if (disposed || generation !== selectionGeneration || epoch !== fullRefreshEpoch) return;
+        if (!result.items.some(item => item.id === conversationId) || !snapshot.conversationsById[result.ownerConversationId]) return;
+        const conversationsById = { ...snapshot.conversationsById, ...normalizeConversations(result.items) };
+        const executionOwners = { ...snapshot.executionOwners };
+        result.items.forEach(item => { executionOwners[item.id] = result.ownerConversationId; });
+        update({ conversationsById, executionOwners });
+        path = { ids: result.items.map(item => item.id), truncated: result.truncated };
+      } catch (reason) {
+        if (generation === selectionGeneration && epoch === fullRefreshEpoch && !disposed) {
+          update({ error: reason instanceof Error ? reason.message : "Conversation unavailable." });
+        }
+        return;
+      }
+    }
+    const expandedById = { ...snapshot.expandedById };
+    path.ids.slice(0, -1).forEach(id => { expandedById[id] = true; });
+    update({ selectedConversationId: conversationId, selectedPath: path, expandedById, error: null });
+    pruneNavigation();
+    revealSelectedRoot();
+    for (const id of path.ids.slice(0, -1)) {
+      if (snapshot.conversationsById[id]?.hasChildren && !snapshot.childPagesById[id]
+        && isVisibleConversation(snapshot, id)) void loadChildPage(id, true);
+    }
+  }
+
+  function setComposerView(conversationId: string, patch: Partial<ComposerView>) {
+    if (disposed) return;
+    const current = snapshot.composerViewsById[conversationId] ?? { choice: "auto", preview: false };
+    const next = { ...current, ...patch };
+    if (next.choice === current.choice && next.preview === current.preview) return;
+    update({ composerViewsById: { ...snapshot.composerViewsById, [conversationId]: Object.freeze(next) } });
+  }
+
+  function loadChildPage(parentId: string, restart = false): Promise<void> {
+    if (disposed || !snapshot.conversationsById[parentId]) return Promise.resolve();
+    if (!pendingChildLoads.has(parentId) || restart) pendingChildLoads.set(parentId, restart);
+    if (childLoadPromise) return childLoadPromise;
+    childLoadPromise = (async () => {
+      while (pendingChildLoads.size > 0 && !disposed) {
+        const [id, resets] = pendingChildLoads.entries().next().value!;
+        pendingChildLoads.delete(id);
+        await performChildPage(id, resets);
+      }
+    })().finally(() => { childLoadPromise = null; });
+    return childLoadPromise;
+  }
+
+  async function performChildPage(parentId: string, restart: boolean) {
+    const parent = snapshot.conversationsById[parentId];
+    if (!parent || parent.archived) return;
+    const previous = snapshot.childPagesById[parentId];
+    if (!restart && previous && (previous.loading || previous.nextCursor === null)) return;
+    let cursor = restart ? null : previous?.nextCursor ?? null;
+    const generation = (childGenerations.get(parentId) ?? 0) + 1;
+    childGenerations.set(parentId, generation);
     const epoch = fullRefreshEpoch;
-    let conversationsById = { ...snapshot.conversationsById };
-    let agentsById = { ...snapshot.agentsById };
-    if (startsNewWindow) {
-      if (currentWindow) {
-        ({ conversationsById, agentsById } = pruneConversationAgents(
-          snapshot,
-          conversationsById,
-          agentsById,
-          currentWindow.conversationId,
-        ));
-      }
-      ({ conversationsById, agentsById } = pruneConversationAgents(
-        snapshot,
-        conversationsById,
-        agentsById,
-        conversationId,
-      ));
-    }
-    publish({
-      ...snapshot,
-      conversationsById,
-      agentsById,
-      agentWindow: {
-        conversationId,
-        runId: conversation.currentRunId,
-        pages: startsNewWindow ? [] : currentWindow.pages,
-        nextCursor: cursor,
-        loading: true,
-        error: null,
-        evicted: startsNewWindow ? false : currentWindow.evicted,
-      },
-    });
-
+    const window: ChildPageSnapshot = {
+      pages: previous?.pages ?? [], nextCursor: previous?.nextCursor ?? null,
+      loading: true, error: null, evicted: previous?.evicted ?? false,
+    };
+    update({ childPagesById: { ...snapshot.childPagesById, [parentId]: window } });
     try {
-      const page = await api.loadAgentTree({
-        conversationId,
-        cursor,
-        limit: AGENT_PAGE_SIZE,
-      });
-      if (disposed || generation !== agentLoadGeneration || epoch !== fullRefreshEpoch) return;
-      const latestConversation = snapshot.conversationsById[conversationId];
-      const latestWindow = snapshot.agentWindow;
-      if (
-        !latestConversation
-        || latestConversation.currentRunId !== conversation.currentRunId
-        || latestWindow?.conversationId !== conversationId
-        || latestWindow.runId !== conversation.currentRunId
-      ) return;
-      if (page.runId !== conversation.currentRunId) {
-        update({
-          agentWindow: {
-            ...latestWindow,
-            loading: false,
-            error: "Agent activity changed while loading. Reload the conversation.",
-          },
-        });
-        requestConversationRefresh(conversationId);
-        return;
-      }
-      if (page.nextCursor !== null && page.nextCursor === cursor) {
-        update({
-          agentWindow: {
-            ...latestWindow,
-            loading: false,
-            error: "Agent pagination did not advance.",
-          },
-        });
-        return;
-      }
-
-      const nextAgents = { ...snapshot.agentsById };
-      const pageIds: string[] = [];
-      page.items.forEach(({ agent }) => {
-        nextAgents[agent.id] = Object.freeze({ ...agent });
-        if (!pageIds.includes(agent.id)) pageIds.push(agent.id);
-      });
-      const allPages = [...latestWindow.pages, Object.freeze(pageIds)];
-      const evicted = latestWindow.evicted || allPages.length > MAX_AGENT_PAGES;
-      const pages = allPages.slice(-MAX_AGENT_PAGES);
-      const retainedIds = uniqueAgentIds([
-        ...latestConversation.summaryAgentIds,
-        ...selectedAgentPath(snapshot, conversationId),
-        ...pages.flat(),
-      ]);
-      latestConversation.agentIds.forEach((id) => {
-        if (!retainedIds.includes(id)) delete nextAgents[id];
-      });
-      const nextConversation = Object.freeze({
-        ...latestConversation,
-        agentsTruncated: page.nextCursor !== null || evicted,
-        agentIds: Object.freeze(retainedIds),
-      });
-      publish({
-        ...snapshot,
-        conversationsById: {
-          ...snapshot.conversationsById,
-          [conversationId]: nextConversation,
-        },
-        agentsById: nextAgents,
-        agentWindow: {
-          conversationId,
-          runId: conversation.currentRunId,
-          pages,
-          nextCursor: page.nextCursor,
-          loading: false,
-          error: null,
-          evicted,
-        },
-      });
-    } catch (reason) {
-      if (disposed || generation !== agentLoadGeneration) return;
-      const latestWindow = snapshot.agentWindow;
-      if (latestWindow?.conversationId !== conversationId) return;
+      const previousIds = new Set(previous?.pages.flatMap(page => page.ids));
+      const targetCount = restart ? Math.min(previousIds.size, MAX_RETAINED_CHILDREN) : 0;
+      const items: ConversationSummary[] = [];
+      const refreshedPages: ChildPageSnapshot["pages"][number][] = [];
+      const seenCursors = new Set<string>();
+      // Refresh the visible window atomically from the newest cursor. Reusing an old
+      // later-page cursor after discovering new children would leave a silent gap.
+      do {
+        const page = await api.listChildConversations({ parentId, cursor, limit: CHILD_PAGE_SIZE });
+        if (disposed || epoch !== fullRefreshEpoch || generation !== childGenerations.get(parentId)
+          || !snapshot.conversationsById[parentId]) return;
+        if (page.items.some(item => item.parentId !== parentId || item.archived)) throw new Error("Child conversation ownership changed while loading.");
+        if (page.nextCursor !== null && (page.nextCursor === cursor || seenCursors.has(page.nextCursor))) {
+          throw new Error("Conversation pagination did not advance.");
+        }
+        if (page.nextCursor !== null) seenCursors.add(page.nextCursor);
+        items.push(...page.items);
+        refreshedPages.push({ cursor, ids: page.items.map(item => item.id), order: ++pageOrder });
+        cursor = page.nextCursor;
+        if (refreshedPages.length >= MAX_RETAINED_CHILDREN && cursor !== null && items.length < targetCount) {
+          throw new Error("Conversation pagination exceeded its safety bound.");
+        }
+      } while (cursor !== null && items.length < targetCount);
+      const latest = snapshot.childPagesById[parentId]!;
+      const pages = restart ? refreshedPages : [...latest.pages, ...refreshedPages];
+      const executionOwners = { ...snapshot.executionOwners };
+      items.forEach(item => { executionOwners[item.id] = snapshot.executionOwners[parentId] ?? parentId; });
+      const refreshedIds = new Set(items.map(item => item.id));
+      const displaced = restart && [...previousIds].some(id => !refreshedIds.has(id));
       update({
-        agentWindow: {
-          ...latestWindow,
-          loading: false,
-          error: reason instanceof Error ? reason.message : "Prompting Time could not load agents.",
-        },
+        conversationsById: { ...snapshot.conversationsById, ...normalizeConversations(items) },
+        executionOwners,
+        childPagesById: { ...snapshot.childPagesById, [parentId]: {
+          pages, nextCursor: cursor, loading: false, error: null, evicted: latest.evicted || displaced,
+        } },
       });
+      pruneNavigation();
+    } catch (reason) {
+      if (disposed || epoch !== fullRefreshEpoch || generation !== childGenerations.get(parentId)
+        || !snapshot.childPagesById[parentId]) return;
+      update({ childPagesById: { ...snapshot.childPagesById, [parentId]: {
+        ...snapshot.childPagesById[parentId]!, loading: false,
+        error: reason instanceof Error ? reason.message : "Prompting Time could not load conversations.",
+      } } });
     }
+  }
+
+  function pruneNavigation() {
+    const childPagesById = { ...snapshot.childPagesById };
+    const pinned = new Set(snapshot.selectedPath?.ids ?? []);
+    if (snapshot.selectedConversationId) pinned.add(snapshot.selectedConversationId);
+    const retained = () => {
+      const ids = new Set([...snapshot.conversationIds, ...pinned]);
+      const addPath = (id: string) => {
+        const seen = new Set<string>();
+        let current: string | null = id;
+        while (current && !seen.has(current) && snapshot.conversationsById[current]) {
+          seen.add(current); ids.add(current);
+          current = snapshot.conversationsById[current]!.parentId;
+        }
+      };
+      Object.entries(childPagesById).forEach(([id, window]) => {
+        if (!snapshot.conversationsById[id] || !snapshot.conversationsById[snapshot.executionOwners[id] ?? id]) return;
+        if (window.pages.length) addPath(id);
+        window.pages.forEach(page => page.ids.forEach(addPath));
+      });
+      return ids;
+    };
+    let ids = retained();
+    const candidates = Object.entries(childPagesById).flatMap(([parentId, window]) =>
+      window.pages.map(page => ({ parentId, page }))).sort((left, right) =>
+      Number(Boolean(snapshot.expandedById[left.parentId])) - Number(Boolean(snapshot.expandedById[right.parentId]))
+      || left.page.order - right.page.order);
+    for (const { parentId, page } of candidates) {
+      if ([...ids].filter(id => snapshot.conversationsById[id]?.parentId !== null).length <= MAX_RETAINED_CHILDREN) break;
+      const window = childPagesById[parentId]!;
+      childPagesById[parentId] = { ...window, pages: window.pages.filter(item => item !== page), evicted: true };
+      ids = retained();
+    }
+    const conversationsById = Object.fromEntries([...ids].flatMap(id => {
+      const conversation = snapshot.conversationsById[id];
+      return conversation ? [[id, conversation]] : [];
+    }));
+    const executionOwners = Object.fromEntries([...ids].map(id => [id, snapshot.executionOwners[id] ?? id]));
+    const expandedById = Object.fromEntries(Object.entries(snapshot.expandedById).filter(([id]) => ids.has(id)));
+    for (const id of Object.keys(childPagesById)) {
+      if (ids.has(id)) continue;
+      delete childPagesById[id];
+      childGenerations.set(id, (childGenerations.get(id) ?? 0) + 1);
+      pendingChildLoads.delete(id);
+    }
+    update({ conversationsById, childPagesById, executionOwners, expandedById });
   }
 
   function inspectWorkspace(request: { conversationId: string }): Promise<InspectorSnapshot> {
@@ -767,7 +738,10 @@ export function createAppStore(api: AppApi): AppStore {
     setDraft,
     resetDraftCommand,
     submitDraft,
-    loadAgentPage,
+    loadChildPage,
+    toggleConversation,
+    selectConversation,
+    setComposerView,
     createConversation,
     archiveConversation,
     inspectProject: (path) => api.inspectProject({ path }),
@@ -788,37 +762,7 @@ export function createAppStore(api: AppApi): AppStore {
       unlisten?.();
       unlisten = null;
       listeners.clear();
-      update({ draftsById: {}, submissionsById: {} });
-    },
-    selectConversation(conversationId, agentId) {
-      const conversation = snapshot.conversationsById[conversationId];
-      if (!conversation) return;
-      const selectedAgentId = agentId && conversation.agentIds.includes(agentId) ? agentId : null;
-      let conversationsById = { ...snapshot.conversationsById };
-      let agentsById = { ...snapshot.agentsById };
-      const previousSelectedConversationId = snapshot.selectedConversationId;
-      if (
-        previousSelectedConversationId
-        && snapshot.agentWindow?.conversationId !== previousSelectedConversationId
-      ) {
-        ({ conversationsById, agentsById } = pruneConversationAgents(
-          {
-            ...snapshot,
-            selectedConversationId: conversationId,
-            selectedAgentId,
-          },
-          conversationsById,
-          agentsById,
-          previousSelectedConversationId,
-        ));
-      }
-      publish({
-        ...snapshot,
-        conversationsById,
-        agentsById,
-        selectedConversationId: conversationId,
-        selectedAgentId,
-      });
+      update({ draftsById: {}, composerViewsById: {}, submissionsById: {} });
     },
     setStatusFilter(statusFilter) {
       if (snapshot.statusFilter !== statusFilter) update({ statusFilter });
@@ -847,7 +791,7 @@ export function createAppStore(api: AppApi): AppStore {
 
 function incrementAllConversationVersions(snapshot: AppSnapshot): Record<string, number> {
   return Object.fromEntries(
-    snapshot.conversationIds.map((id) => [id, (snapshot.conversationVersions[id] ?? 0) + 1]),
+    Object.keys(snapshot.conversationsById).map((id) => [id, (snapshot.conversationVersions[id] ?? 0) + 1]),
   );
 }
 
@@ -866,138 +810,28 @@ async function loadAllConversations(api: AppApi): Promise<ConversationSummary[]>
   throw new Error("Conversation pagination exceeded its safety bound.");
 }
 
-function normalizeConversations(
-  conversations: ConversationSummary[],
-): {
-  normalized: Record<string, NormalizedConversation>;
-  agentsById: Record<string, AgentSnapshot>;
-} {
-  const normalized: Record<string, NormalizedConversation> = {};
-  const agentsById: Record<string, AgentSnapshot> = {};
-  conversations.forEach((conversation) => {
-    const agentIds: string[] = [];
-    conversation.agents.forEach((agent) => {
-      if (agentsById[agent.id]) return;
-      agentsById[agent.id] = Object.freeze({ ...agent });
-      agentIds.push(agent.id);
-    });
-    normalized[conversation.id] = Object.freeze({
-      id: conversation.id,
-      parentId: conversation.parentId,
-      title: conversation.title,
-      hasChildren: conversation.hasChildren,
-      summary: conversation.summary,
-      capabilities: conversation.capabilities,
-      routingProfile: conversation.routingProfile,
-      workspaceId: conversation.workspaceId,
-      archived: conversation.archived,
-      projectRoot: conversation.projectRoot,
-      currentRunId: conversation.currentRunId,
-      provider: conversation.provider,
-      runStatus: conversation.runStatus,
-      rollupStatus: conversation.rollupStatus,
-      agentsTruncated: conversation.agentsTruncated,
-      summaryAgentsTruncated: conversation.agentsTruncated,
-      summaryAgentIds: Object.freeze([...agentIds]),
-      agentIds: Object.freeze(agentIds),
-    });
-  });
-  return { normalized, agentsById };
+function normalizeConversations(conversations: readonly ConversationSummary[]): Record<string, ConversationSummary> {
+  return Object.fromEntries(conversations.map(conversation => [conversation.id, Object.freeze({ ...conversation })]));
 }
 
-function retainAgentState(
-  previous: AppSnapshot,
-  normalized: Record<string, NormalizedConversation>,
-  summaryAgents: Record<string, AgentSnapshot>,
-) {
-  const conversations = { ...normalized };
-  const agentsById = { ...summaryAgents };
-  const previousWindow = previous.agentWindow;
-  const windowConversation = previousWindow
-    ? conversations[previousWindow.conversationId]
-    : null;
-  const agentWindow = previousWindow
-    && windowConversation?.currentRunId === previousWindow.runId
-    && !windowConversation.archived
-    ? { ...previousWindow, loading: false, error: null }
-    : null;
-
-  const retainForConversation = (conversationId: string, ids: readonly string[]) => {
-    const conversation = conversations[conversationId];
-    const oldConversation = previous.conversationsById[conversationId];
-    if (!conversation || oldConversation?.currentRunId !== conversation.currentRunId) return;
-    const retainedIds = ids.filter((id) => previous.agentsById[id] !== undefined);
-    retainedIds.forEach((id) => {
-      if (!agentsById[id]) agentsById[id] = previous.agentsById[id]!;
-    });
-    const agentIds = uniqueAgentIds([...conversation.summaryAgentIds, ...retainedIds]);
-    conversations[conversationId] = Object.freeze({
-      ...conversation,
-      agentsTruncated: agentWindow?.conversationId === conversationId
-        ? agentWindow.nextCursor !== null || agentWindow.evicted
-        : conversation.summaryAgentsTruncated,
-      agentIds: Object.freeze(agentIds),
-    });
-  };
-
-  if (agentWindow) {
-    retainForConversation(
-      agentWindow.conversationId,
-      previous.conversationsById[agentWindow.conversationId]?.agentIds ?? [],
-    );
-  }
-  if (previous.selectedConversationId) {
-    retainForConversation(
-      previous.selectedConversationId,
-      selectedAgentPath(previous, previous.selectedConversationId),
-    );
-  }
-  return { normalized: conversations, agentsById, agentWindow };
-}
-
-function pruneConversationAgents(
-  snapshot: AppSnapshot,
-  conversationsById: Record<string, NormalizedConversation>,
-  agentsById: Record<string, AgentSnapshot>,
-  conversationId: string,
-) {
-  const conversation = conversationsById[conversationId];
-  if (!conversation) return { conversationsById, agentsById };
-  const retainedIds = uniqueAgentIds([
-    ...conversation.summaryAgentIds,
-    ...selectedAgentPath(snapshot, conversationId),
-  ]);
-  conversation.agentIds.forEach((id) => {
-    if (!retainedIds.includes(id)) delete agentsById[id];
-  });
-  return {
-    conversationsById: {
-      ...conversationsById,
-      [conversationId]: Object.freeze({
-        ...conversation,
-        agentsTruncated: conversation.summaryAgentsTruncated,
-        agentIds: Object.freeze(retainedIds),
-      }),
-    },
-    agentsById,
-  };
-}
-
-function selectedAgentPath(snapshot: AppSnapshot, conversationId: string): string[] {
-  if (snapshot.selectedConversationId !== conversationId || !snapshot.selectedAgentId) return [];
-  const path: string[] = [];
+export function loadedConversationPath(snapshot: AppSnapshot, id: string): SelectedPath {
+  const ids: string[] = [];
   const seen = new Set<string>();
-  let current: AgentSnapshot | undefined = snapshot.agentsById[snapshot.selectedAgentId];
-  while (current && !seen.has(current.id)) {
-    seen.add(current.id);
-    path.unshift(current.id);
-    current = current.parentId ? snapshot.agentsById[current.parentId] : undefined;
+  let current: string | null = id;
+  while (current !== null) {
+    if (ids.length === 64) return { ids: ids.reverse(), truncated: true };
+    const conversation: ConversationSummary | undefined = snapshot.conversationsById[current];
+    if (!conversation || seen.has(current)) return { ids: ids.reverse(), truncated: true };
+    seen.add(current);
+    ids.push(current);
+    current = conversation.parentId;
   }
-  return path;
+  return { ids: ids.reverse(), truncated: false };
 }
 
-function uniqueAgentIds(ids: readonly string[]): string[] {
-  return [...new Set(ids)];
+function isVisibleConversation(snapshot: AppSnapshot, id: string): boolean {
+  const path = loadedConversationPath(snapshot, id);
+  return !path.truncated && path.ids.slice(0, -1).every(parentId => snapshot.expandedById[parentId]);
 }
 
 function parseSequence(sequence: string | null): bigint | null {
@@ -1011,10 +845,10 @@ function parseSequence(sequence: string | null): bigint | null {
 }
 
 function countQueued(
-  conversations: Readonly<Record<string, NormalizedConversation>>,
+  conversations: Readonly<Record<string, ConversationSummary>>,
 ): number {
   return Object.values(conversations).filter(
-    (conversation) => !conversation.archived
+    (conversation) => !conversation.archived && conversation.parentId === null
       && effectiveConversationStatus(conversation) === "queued",
   ).length;
 }
@@ -1024,11 +858,13 @@ function freezeSnapshot(snapshot: AppSnapshot): AppSnapshot {
     ...snapshot,
     conversationIds: Object.freeze([...snapshot.conversationIds]),
     conversationsById: Object.freeze(snapshot.conversationsById),
-    agentsById: Object.freeze(snapshot.agentsById),
-    agentWindow: snapshot.agentWindow ? Object.freeze({
-      ...snapshot.agentWindow,
-      pages: Object.freeze(snapshot.agentWindow.pages.map((page) => Object.freeze([...page]))),
-    }) : null,
+    childPagesById: Object.freeze(Object.fromEntries(Object.entries(snapshot.childPagesById).map(([id, window]) => [id, Object.freeze({
+      ...window, pages: Object.freeze(window.pages.map(page => Object.freeze({ ...page, ids: Object.freeze([...page.ids]) }))),
+    })]))),
+    expandedById: Object.freeze(snapshot.expandedById),
+    executionOwners: Object.freeze(snapshot.executionOwners),
+    selectedPath: snapshot.selectedPath ? Object.freeze({ ...snapshot.selectedPath, ids: Object.freeze([...snapshot.selectedPath.ids]) }) : null,
+    composerViewsById: Object.freeze(snapshot.composerViewsById),
     conversationVersions: Object.freeze(snapshot.conversationVersions),
     draftsById: Object.freeze(snapshot.draftsById),
     submissionsById: Object.freeze(snapshot.submissionsById),
@@ -1057,13 +893,7 @@ export function selectVisibleConversations(snapshot: AppSnapshot): ConversationS
       snapshot.statusFilter !== "all"
       && effectiveConversationStatus(conversation) !== snapshot.statusFilter
     ) return [];
-    return [{
-      ...conversation,
-      agents: conversation.agentIds.flatMap((agentId) => {
-        const agent = snapshot.agentsById[agentId];
-        return agent ? [agent] : [];
-      }),
-    }];
+    return [conversation];
   });
 }
 

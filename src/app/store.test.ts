@@ -1,9 +1,8 @@
 import { waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
-  AgentSnapshot,
   BootstrapSnapshot,
-  AgentTreePage,
+  ConversationPath,
   AppEvent,
   ConversationPage,
   ConversationSummary,
@@ -38,6 +37,7 @@ describe("in-session drafts", () => {
     });
     api.steerRun = vi.fn(() => pending);
     const store = createAppStore(api);
+    await store.initialize();
     store.setDraft("c1", "original");
     const sending = store.submitDraft("c1", null, runId);
     store.setDraft("c1", "newer");
@@ -53,6 +53,7 @@ describe("in-session drafts", () => {
     let reject!: (reason: Error) => void;
     api.steerRun = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; }));
     const store = createAppStore(api);
+    await store.initialize();
     store.setDraft("c1", "direction");
     const sending = store.submitDraft("c1", null, "run-c1");
     store.dispose();
@@ -63,19 +64,11 @@ describe("in-session drafts", () => {
   });
 });
 
-function agent(
-  id: string,
-  parentId: string | null,
-  status: AgentSnapshot["status"] = "running",
-): AgentSnapshot {
-  return {
-    id,
-    parentId,
-    provider: "codex",
-    label: id,
-    summary: null,
-    status,
-  };
+function child(id: string, parentId: string, status: ConversationSummary["runStatus"] = "running"): ConversationSummary {
+  return conversation(id, { parentId, currentRunId: "run-c1", runStatus: status,
+    rollupStatus: status === "waiting" ? "needsAttention" : status === "completed" ? "completed" : "active",
+    capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false,
+      unavailableReason: "Recorded child activity is read-only." } });
 }
 
 function inspectorSnapshot(executionPath: string): InspectorSnapshot {
@@ -88,7 +81,6 @@ function inspectorSnapshot(executionPath: string): InspectorSnapshot {
     routing: null,
     handoff: null,
     activeDescendantCount: 0,
-    agentsTruncated: false,
   };
 }
 
@@ -109,8 +101,6 @@ function conversation(
     provider: "codex",
     runStatus: "running",
     rollupStatus: "active",
-    agents: [agent(`root-${id}`, null)],
-    agentsTruncated: false,
     ...overrides,
   };
 }
@@ -162,7 +152,7 @@ function createFakeApi() {
   const calls = {
     listen: 0,
     conversations: 0,
-    agentCursors: [] as Array<string | null>,
+    childCursors: [] as Array<string | null>,
   };
 
   const api: AppApi = {
@@ -186,7 +176,6 @@ function createFakeApi() {
             conversation("c1", {
               title: firstTitle,
               projectRoot: "/work/alpha",
-              agentsTruncated: true,
             }),
           ],
           nextCursor: "conversations-2",
@@ -208,36 +197,28 @@ function createFakeApi() {
         return conversation("c1", {
           title: firstTitle,
           projectRoot: "/work/alpha",
-          agentsTruncated: true,
         });
       }
+      if (conversationId === "researcher") return child("researcher", "reviewer", "waiting");
+      if (conversationId === "reviewer" || conversationId === "sibling") return child(conversationId, "c1");
       return conversation("c2", {
         title: "Queued idea",
         runStatus: "queued",
         rollupStatus: "active",
       });
     }),
-    loadAgentTree: vi.fn(async ({ conversationId, cursor }) => {
-      calls.agentCursors.push(cursor);
-      if (conversationId !== "c1") {
-        return { runId: `run-${conversationId}`, items: [], nextCursor: null };
-      }
-      if (cursor === null) {
-        return {
-          runId: "run-c1",
-          items: [
-            { agent: agent("root-c1", null), depth: 0 },
-            { agent: agent("reviewer", "root-c1"), depth: 1 },
-          ],
-          nextCursor: "agents-2",
-        };
-      }
-      return {
-        runId: "run-c1",
-        items: [{ agent: agent("researcher", "reviewer", "waiting"), depth: 2 }],
-        nextCursor: null,
-      };
+    listChildConversations: vi.fn(async ({ parentId, cursor }) => {
+      calls.childCursors.push(cursor);
+      if (parentId === "reviewer") return { items: [child("researcher", "reviewer", "waiting")], nextCursor: null };
+      if (parentId !== "c1") return { items: [], nextCursor: null };
+      return cursor === null
+        ? { items: [{ ...child("reviewer", "c1"), hasChildren: true }], nextCursor: "children-2" }
+        : { items: [child("sibling", "c1")], nextCursor: null };
     }),
+    loadConversationPath: vi.fn(async ({ conversationId }) => ({
+      items: [conversation("c1"), child(conversationId, "c1")],
+      truncated: false, ownerConversationId: "c1",
+    })),
     loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadTimeline: vi.fn().mockResolvedValue({
       items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
@@ -352,7 +333,7 @@ describe("app store", () => {
     const fake = createFakeApi();
     fake.api.listConversations = vi.fn().mockResolvedValue({ items: [], nextCursor: null });
     fake.api.createConversation = vi.fn().mockResolvedValue(conversation("new", {
-      currentRunId: null, provider: null, runStatus: null, rollupStatus: null, agents: [],
+      currentRunId: null, provider: null, runStatus: null, rollupStatus: null,
     }));
     const store = createAppStore(fake.api);
     await store.initialize();
@@ -394,76 +375,6 @@ describe("app store", () => {
     expect(store.getSnapshot().selectedConversationId).toBe("c2");
   });
 
-  it("keeps truncated agent trees lazy during initial synchronization", async () => {
-    const fake = createFakeApi();
-    const store = createAppStore(fake.api);
-
-    await store.initialize();
-
-    const snapshot = store.getSnapshot();
-    expect(snapshot.conversationIds).toEqual(["c1", "c2"]);
-    expect(snapshot.conversationsById.c1?.agentIds).toEqual(["root-c1"]);
-    expect(snapshot.agentsById.researcher).toBeUndefined();
-    expect(fake.calls.agentCursors).toEqual([]);
-    expect(Object.isFrozen(snapshot)).toBe(true);
-    expect(Object.isFrozen(snapshot.conversationIds)).toBe(true);
-    expect(Object.isFrozen(snapshot.conversationsById.c1?.agentIds)).toBe(true);
-  });
-
-  it("loads one agent page only after explicit disclosure", async () => {
-    const fake = createFakeApi();
-    const store = createAppStore(fake.api);
-    await store.initialize();
-
-    await store.loadAgentPage("c1");
-
-    expect(fake.calls.agentCursors).toEqual([null]);
-    expect(store.getSnapshot().conversationsById.c1?.agentIds).toEqual([
-      "root-c1",
-      "reviewer",
-    ]);
-    expect(store.getSnapshot().agentWindow).toMatchObject({
-      conversationId: "c1",
-      runId: "run-c1",
-      nextCursor: "agents-2",
-      evicted: false,
-    });
-
-    await store.loadAgentPage("c1");
-
-    expect(fake.calls.agentCursors).toEqual([null, "agents-2"]);
-    expect(store.getSnapshot().conversationsById.c1?.agentIds).toEqual([
-      "root-c1",
-      "reviewer",
-      "researcher",
-    ]);
-    expect(store.getSnapshot().conversationsById.c1?.agentsTruncated).toBe(false);
-  });
-
-  it("coalesces agent restarts behind one in-flight page and converges on latest", async () => {
-    const fake = createFakeApi();
-    const resolvers: Array<(value: AgentTreePage) => void> = [];
-    let inFlight = 0;
-    let maxInFlight = 0;
-    fake.api.loadAgentTree = vi.fn(() => new Promise<AgentTreePage>((resolve) => {
-      inFlight += 1;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      resolvers.push((value) => { inFlight -= 1; resolve(value); });
-    }));
-    const store = createAppStore(fake.api);
-    await store.initialize();
-    const first = store.loadAgentPage("c1", true);
-    void store.loadAgentPage("c1", true);
-    void store.loadAgentPage("c1", true);
-    expect(fake.api.loadAgentTree).toHaveBeenCalledTimes(1);
-    resolvers.shift()?.({ runId: "run-c1", items: [{ agent: agent("stale", "root-c1"), depth: 1 }], nextCursor: null });
-    await waitFor(() => expect(fake.api.loadAgentTree).toHaveBeenCalledTimes(2));
-    resolvers.shift()?.({ runId: "run-c1", items: [{ agent: agent("latest", "root-c1"), depth: 1 }], nextCursor: null });
-    await first;
-    expect(maxInFlight).toBe(1);
-    expect(store.getSnapshot().agentsById.latest).toBeDefined();
-  });
-
   it("globally serializes workspace inspection and coalesces to the latest selection", async () => {
     const fake = createFakeApi();
     const requests: string[] = [];
@@ -488,169 +399,6 @@ describe("app store", () => {
     await expect(second).resolves.toMatchObject({ executionPath: "C" });
     await expect(third).resolves.toMatchObject({ executionPath: "C" });
     expect(maxInFlight).toBe(1);
-  });
-
-  it("retains a loaded selected path when the bounded agent window evicts older pages", async () => {
-    const fake = createFakeApi();
-    let page = 0;
-    fake.api.loadAgentTree = vi.fn(async ({ cursor }) => {
-      page += 1;
-      if (cursor === null) {
-        return {
-          runId: "run-c1",
-          items: [
-            { agent: agent("root-c1", null), depth: 0 },
-            { agent: agent("reviewer", "root-c1"), depth: 1 },
-            { agent: agent("researcher", "reviewer"), depth: 2 },
-          ],
-          nextCursor: "agents-2",
-        };
-      }
-      return {
-        runId: "run-c1",
-        items: [{ agent: agent(`later-${page}`, "root-c1"), depth: 1 }],
-        nextCursor: `agents-${page + 1}`,
-      };
-    });
-    const store = createAppStore(fake.api);
-    await store.initialize();
-    await store.loadAgentPage("c1");
-    store.selectConversation("c1", "researcher");
-
-    for (let index = 0; index < 4; index += 1) await store.loadAgentPage("c1");
-
-    const snapshot = store.getSnapshot();
-    expect(snapshot.agentWindow?.evicted).toBe(true);
-    expect(snapshot.selectedAgentId).toBe("researcher");
-    expect(snapshot.conversationsById.c1?.agentIds).toEqual(expect.arrayContaining([
-      "root-c1",
-      "reviewer",
-      "researcher",
-    ]));
-    expect(snapshot.conversationsById.c1?.agentIds.length).toBeLessThanOrEqual(8);
-  });
-
-  it("releases a pinned path after selection moves away from its evicted window", async () => {
-    const fake = createFakeApi();
-    const store = createAppStore(fake.api);
-    await store.initialize();
-    await store.loadAgentPage("c1");
-    store.selectConversation("c1", "reviewer");
-    await store.loadAgentPage("c2");
-
-    store.selectConversation("c2");
-
-    expect(store.getSnapshot().conversationsById.c1?.agentIds).toEqual(["root-c1"]);
-    expect(store.getSnapshot().agentsById.reviewer).toBeUndefined();
-  });
-
-  it("refreshes the first disclosed agent page across same-run targeted refreshes", async () => {
-    const fake = createFakeApi();
-    let reviewerStatus: AgentSnapshot["status"] = "running";
-    vi.mocked(fake.api.loadAgentTree).mockImplementation(async ({ cursor }) => {
-      fake.calls.agentCursors.push(cursor);
-      return {
-        runId: "run-c1",
-        items: [
-          { agent: agent("root-c1", null), depth: 0 },
-          { agent: agent("reviewer", "root-c1", reviewerStatus), depth: 1 },
-        ],
-        nextCursor: "agents-2",
-      };
-    });
-    const store = createAppStore(fake.api);
-    await store.initialize();
-    await store.loadAgentPage("c1");
-    store.selectConversation("c1", "reviewer");
-    reviewerStatus = "completed";
-
-    fake.emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
-
-    await waitFor(() => expect(store.getSnapshot().agentsById.reviewer?.status).toBe("completed"));
-    expect(store.getSnapshot().selectedAgentId).toBe("reviewer");
-    expect(store.getSnapshot().conversationsById.c1?.agentIds).toContain("reviewer");
-    expect(fake.calls.agentCursors).toEqual([null, null]);
-  });
-
-  it("refreshes the first disclosed agent page across a same-run full refresh", async () => {
-    const fake = createFakeApi();
-    let reviewerStatus: AgentSnapshot["status"] = "running";
-    vi.mocked(fake.api.loadAgentTree).mockImplementation(async ({ cursor }) => {
-      fake.calls.agentCursors.push(cursor);
-      return {
-        runId: "run-c1",
-        items: [
-          { agent: agent("root-c1", null), depth: 0 },
-          { agent: agent("reviewer", "root-c1", reviewerStatus), depth: 1 },
-        ],
-        nextCursor: "agents-2",
-      };
-    });
-    const store = createAppStore(fake.api);
-    await store.initialize();
-    await store.loadAgentPage("c1");
-    store.selectConversation("c1", "reviewer");
-    const initialListCalls = fake.calls.conversations;
-    reviewerStatus = "completed";
-
-    fake.emit({ kind: "reloadRequired", sequence: "1" });
-
-    await waitFor(() => expect(store.getSnapshot().agentsById.reviewer?.status).toBe("completed"));
-    expect(fake.calls.conversations).toBeGreaterThan(initialListCalls);
-    expect(store.getSnapshot().selectedAgentId).toBe("reviewer");
-    expect(store.getSnapshot().conversationsById.c1?.agentIds).toContain("reviewer");
-    expect(fake.calls.agentCursors).toEqual([null, null]);
-  });
-
-  it("retries an initially failed agent page without losing explicit disclosure", async () => {
-    const fake = createFakeApi();
-    vi.mocked(fake.api.loadAgentTree)
-      .mockRejectedValueOnce(new Error("Agent service unavailable."))
-      .mockResolvedValueOnce({
-        runId: "run-c1",
-        items: [
-          { agent: agent("root-c1", null), depth: 0 },
-          { agent: agent("reviewer", "root-c1"), depth: 1 },
-        ],
-        nextCursor: "agents-2",
-      });
-    const store = createAppStore(fake.api);
-    await store.initialize();
-
-    await store.loadAgentPage("c1");
-    expect(store.getSnapshot().agentWindow).toMatchObject({
-      pages: [],
-      error: "Agent service unavailable.",
-    });
-
-    await store.loadAgentPage("c1", true);
-
-    expect(fake.api.loadAgentTree).toHaveBeenCalledTimes(2);
-    expect(store.getSnapshot().agentWindow).toMatchObject({
-      pages: [["root-c1", "reviewer"]],
-      error: null,
-    });
-    expect(store.getSnapshot().conversationsById.c1?.agentIds).toContain("reviewer");
-  });
-
-  it("drops a loaded agent window and selection when the current run changes", async () => {
-    const fake = createFakeApi();
-    const store = createAppStore(fake.api);
-    await store.initialize();
-    await store.loadAgentPage("c1");
-    store.selectConversation("c1", "reviewer");
-    vi.mocked(fake.api.loadConversation).mockResolvedValue(conversation("c1", {
-      currentRunId: "run-new",
-      agents: [agent("root-new", null)],
-      agentsTruncated: false,
-    }));
-
-    fake.emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
-
-    await waitFor(() => expect(store.getSnapshot().conversationsById.c1?.currentRunId).toBe("run-new"));
-    expect(store.getSnapshot().selectedAgentId).toBeNull();
-    expect(store.getSnapshot().agentWindow).toBeNull();
-    expect(store.getSnapshot().agentsById.reviewer).toBeUndefined();
   });
 
   it("subscribes once and replaces, rather than mutating, state when events arrive", async () => {
@@ -718,21 +466,6 @@ describe("app store", () => {
     await initializing;
 
     expect(unlisten).toHaveBeenCalledOnce();
-  });
-
-  it("does not claim a stale-run agent summary is complete", async () => {
-    const fake = createFakeApi();
-    fake.api.loadAgentTree = vi.fn().mockResolvedValue({
-      runId: "newer-run",
-      items: [],
-      nextCursor: null,
-    });
-    const store = createAppStore(fake.api);
-
-    await store.initialize();
-
-    expect(store.getSnapshot().conversationsById.c1?.agentsTruncated).toBe(true);
-    expect(store.getSnapshot().conversationsById.c1?.agentIds).toEqual(["root-c1"]);
   });
 
   it("accepts the explicit maximum-sequence rollover handshake and continues at one", async () => {
@@ -834,7 +567,8 @@ describe("app store", () => {
         };
       }),
       loadConversation: vi.fn(async () => all[200]!),
-      loadAgentTree: vi.fn().mockResolvedValue({ runId: null, items: [], nextCursor: null }),
+      listChildConversations: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+      loadConversationPath: vi.fn(),
       listenToAppEvents: vi.fn(async (nextHandler) => {
         handler = nextHandler;
         return () => {};
@@ -861,13 +595,11 @@ describe("app store", () => {
 
   it("coalesces streaming invalidations into a targeted refresh", async () => {
     let handler!: (event: AppEvent) => void;
-    const relevant = conversation("c1", { agentsTruncated: true });
-    const unrelated = conversation("c2", { agentsTruncated: true });
-    const archived = conversation("c3", { archived: true, agentsTruncated: true });
-    const loadAgentTree = vi.fn(async ({ conversationId }: { conversationId: string }) => ({
-      runId: `run-${conversationId}`,
-      items: [{ agent: agent(`root-${conversationId}`, null), depth: 0 }],
-      nextCursor: null,
+    const relevant = conversation("c1", { hasChildren: false });
+    const unrelated = conversation("c2", { hasChildren: false });
+    const archived = conversation("c3", { archived: true });
+    const listChildConversations = vi.fn(async ({ parentId }: { parentId: string }) => ({
+      items: parentId === "c1" ? [child("reviewer", "c1")] : [], nextCursor: null,
     }));
     const listConversations = vi.fn().mockResolvedValue({
       items: [relevant, unrelated, archived],
@@ -879,7 +611,8 @@ describe("app store", () => {
       getBootstrap: vi.fn().mockResolvedValue({ providers: [] }),
       listConversations,
       loadConversation,
-      loadAgentTree,
+      listChildConversations,
+      loadConversationPath: vi.fn(),
       listenToAppEvents: vi.fn(async (nextHandler) => {
         handler = nextHandler;
         return () => {};
@@ -887,10 +620,10 @@ describe("app store", () => {
     };
     const store = createAppStore(api);
     await store.initialize();
-    expect(loadAgentTree.mock.calls.map(([request]) => request.conversationId)).not.toContain("c3");
+    expect(listChildConversations.mock.calls.map(([request]) => request.parentId)).not.toContain("c3");
     listConversations.mockClear();
     loadConversation.mockClear();
-    loadAgentTree.mockClear();
+    listChildConversations.mockClear();
 
     for (let sequence = 1; sequence <= 50; sequence += 1) {
       handler({
@@ -906,7 +639,7 @@ describe("app store", () => {
     });
     expect(listConversations).not.toHaveBeenCalled();
     expect(loadConversation).toHaveBeenCalledTimes(1);
-    expect(loadAgentTree).not.toHaveBeenCalled();
+    expect(listChildConversations).not.toHaveBeenCalled();
     expect(store.getSnapshot().conversationVersions.c1).toBe(1);
   });
 
@@ -938,7 +671,8 @@ describe("app store", () => {
         }
         return future;
       }),
-      loadAgentTree: vi.fn().mockResolvedValue({ runId: null, items: [], nextCursor: null }),
+      listChildConversations: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+      loadConversationPath: vi.fn(),
       listenToAppEvents: vi.fn(async (nextHandler) => {
         handler = nextHandler;
         return () => {};
@@ -968,5 +702,297 @@ describe("app store", () => {
       expect(store.getSnapshot().conversationsById.c1?.title).toBe("Future targeted result");
     });
     expect(store.getSnapshot().lastSequence).toBe("3");
+  });
+});
+
+describe("durable child conversation navigation", () => {
+  it("loads direct children explicitly, with independent pages for deeper branches", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    expect(fake.api.listChildConversations).not.toHaveBeenCalled();
+    store.toggleConversation("c1");
+    await waitFor(() => expect(store.getSnapshot().conversationsById.reviewer).toBeDefined());
+    expect(fake.api.listChildConversations).toHaveBeenCalledWith({ parentId: "c1", cursor: null, limit: 20 });
+    expect(store.getSnapshot().conversationsById.researcher).toBeUndefined();
+    await store.loadChildPage("c1");
+    expect(store.getSnapshot().conversationsById.sibling?.parentId).toBe("c1");
+    store.toggleConversation("reviewer");
+    await waitFor(() => expect(store.getSnapshot().conversationsById.researcher?.parentId).toBe("reviewer"));
+    expect(Object.isFrozen(store.getSnapshot().childPagesById.c1?.pages)).toBe(true);
+  });
+
+  it("auto-reveals the selected root's first child once and preserves explicit collapse", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    fake.api.loadConversation = vi.fn(async () => conversation("c1", { hasChildren: true }));
+    fake.emit({ kind: "runChanged", sequence: "1", conversationId: "c1", runId: "run-c1" });
+    await waitFor(() => expect(store.getSnapshot().conversationsById.reviewer).toBeDefined());
+    expect(store.getSnapshot().expandedById.c1).toBe(true);
+    store.toggleConversation("c1");
+    await store.selectConversation("c2");
+    await store.selectConversation("c1");
+    vi.mocked(fake.api.listChildConversations).mockClear();
+    fake.emit({ kind: "runChanged", sequence: "2", conversationId: "c1", runId: "run-c1" });
+    await waitFor(() => expect(store.getSnapshot().conversationVersions.c1).toBe(2));
+    expect(store.getSnapshot().expandedById.c1).toBe(false);
+    expect(fake.api.listChildConversations).not.toHaveBeenCalled();
+  });
+
+  it("refreshes an open empty branch when children arrive and keeps closed branches lazy", async () => {
+    const fake = createFakeApi();
+    fake.api.listChildConversations = vi.fn().mockResolvedValue({ items: [], nextCursor: null });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    store.toggleConversation("c1");
+    await waitFor(() => expect(store.getSnapshot().childPagesById.c1?.loading).toBe(false));
+    vi.mocked(fake.api.listChildConversations).mockResolvedValue({ items: [child("late", "c1")], nextCursor: null });
+    fake.emit({ kind: "runChanged", sequence: "1", conversationId: "c1", runId: "run-c1" });
+    await waitFor(() => expect(store.getSnapshot().conversationsById.late).toBeDefined());
+    expect(vi.mocked(fake.api.listChildConversations).mock.calls.every(([request]) => request.parentId === "c1")).toBe(true);
+  });
+
+  it("coalesces child restarts behind one in-flight read", async () => {
+    const fake = createFakeApi();
+    const resolvers: Array<(value: ConversationPage) => void> = [];
+    fake.api.listChildConversations = vi.fn(() => new Promise<ConversationPage>(resolve => resolvers.push(resolve)));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    const first = store.loadChildPage("c1", true);
+    void store.loadChildPage("c1", true);
+    void store.loadChildPage("c1", true);
+    expect(fake.api.listChildConversations).toHaveBeenCalledTimes(1);
+    resolvers.shift()!({ items: [child("stale", "c1")], nextCursor: null });
+    await waitFor(() => expect(fake.api.listChildConversations).toHaveBeenCalledTimes(2));
+    resolvers.shift()!({ items: [child("latest", "c1")], nextCursor: null });
+    await first;
+    expect(store.getSnapshot().conversationsById.latest).toBeDefined();
+    expect(store.getSnapshot().conversationsById.stale).toBeUndefined();
+  });
+
+  it("preserves a manually paged open branch across run updates with coherent newest-first cursors", async () => {
+    const fake = createFakeApi();
+    let children = Array.from({ length: 60 }, (_, index) => child(`sibling-${index}`, "c1"));
+    fake.api.listChildConversations = vi.fn(async ({ parentId, cursor, limit }) => {
+      if (parentId !== "c1") return { items: [], nextCursor: null };
+      const offset = cursor ? children.findIndex(item => item.id === cursor) + 1 : 0;
+      const items = children.slice(offset, offset + limit);
+      return { items, nextCursor: offset + items.length < children.length ? items.at(-1)!.id : null };
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    store.toggleConversation("c1");
+    await waitFor(() => expect(store.getSnapshot().childPagesById.c1?.loading).toBe(false));
+    await store.loadChildPage("c1");
+    store.toggleConversation("sibling-30");
+    await waitFor(() => expect(store.getSnapshot().childPagesById["sibling-30"]?.loading).toBe(false));
+    const previousIds = store.getSnapshot().childPagesById.c1!.pages.flatMap(page => page.ids);
+
+    fake.emit({ kind: "runChanged", sequence: "1", conversationId: "c1", runId: "run-c1" });
+    await waitFor(() => expect(store.getSnapshot().conversationVersions.c1).toBe(1));
+    await waitFor(() => expect(store.getSnapshot().childPagesById.c1?.loading).toBe(false));
+    expect(store.getSnapshot().childPagesById.c1!.pages.flatMap(page => page.ids)).toEqual(previousIds);
+    expect(store.getSnapshot().expandedById["sibling-30"]).toBe(true);
+    expect(store.getSnapshot().childPagesById.c1?.evicted).toBe(false);
+
+    children = [child("newest", "c1"), ...children];
+    await store.loadChildPage("c1", true);
+    expect(store.getSnapshot().childPagesById.c1!.pages.flatMap(page => page.ids)).toEqual(children.slice(0, 40).map(item => item.id));
+    expect(store.getSnapshot().childPagesById.c1?.evicted).toBe(true);
+    await store.loadChildPage("c1");
+    expect(store.getSnapshot().childPagesById.c1!.pages.flatMap(page => page.ids)).toEqual(children.slice(0, 60).map(item => item.id));
+  });
+
+  it("keeps an existing paged window intact if a refresh fails partway through", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadChildPage("c1");
+    await store.loadChildPage("c1");
+    const previous = store.getSnapshot().childPagesById.c1!;
+    const load = fake.api.listChildConversations;
+    fake.api.listChildConversations = vi.fn(async request => {
+      if (request.cursor !== null) throw new Error("Later page unavailable");
+      return load(request);
+    });
+    await store.loadChildPage("c1", true);
+    expect(store.getSnapshot().childPagesById.c1?.pages).toEqual(previous.pages);
+    expect(store.getSnapshot().childPagesById.c1?.nextCursor).toEqual(previous.nextCursor);
+    expect(store.getSnapshot().childPagesById.c1?.error).toBe("Later page unavailable");
+  });
+
+  it("reloads a closed cached branch when it is opened again", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    store.toggleConversation("c1");
+    await waitFor(() => expect(store.getSnapshot().childPagesById.c1?.loading).toBe(false));
+    store.toggleConversation("c1");
+    vi.mocked(fake.api.listChildConversations).mockResolvedValue({ items: [child("later", "c1")], nextCursor: null });
+    store.toggleConversation("c1");
+    await waitFor(() => expect(store.getSnapshot().conversationsById.later).toBeDefined());
+  });
+
+  it("refreshes a selected hidden child's history without reading its hidden child pages", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    store.toggleConversation("c1");
+    await waitFor(() => expect(store.getSnapshot().conversationsById.reviewer).toBeDefined());
+    store.toggleConversation("reviewer");
+    await waitFor(() => expect(store.getSnapshot().conversationsById.researcher).toBeDefined());
+    await store.selectConversation("reviewer");
+    store.toggleConversation("c1");
+    vi.mocked(fake.api.listChildConversations).mockClear();
+    fake.emit({ kind: "runChanged", sequence: "1", conversationId: "c1", runId: "run-c1" });
+    await waitFor(() => expect(store.getSnapshot().conversationVersions.reviewer).toBe(1));
+    expect(fake.api.listChildConversations).not.toHaveBeenCalled();
+    expect(store.getSnapshot().selectedConversationId).toBe("reviewer");
+  });
+
+  it("loads missing child windows for visible ancestors revealed by path selection", async () => {
+    const fake = createFakeApi();
+    fake.api.loadConversationPath = vi.fn(async () => ({ items: [
+      conversation("c1", { hasChildren: true }),
+      { ...child("reviewer", "c1"), hasChildren: true }, child("researcher", "reviewer"),
+    ], truncated: false, ownerConversationId: "c1" }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.selectConversation("researcher");
+    await waitFor(() => expect(store.getSnapshot().childPagesById.reviewer?.loading).toBe(false));
+    expect(store.getSnapshot().childPagesById.c1?.pages).toHaveLength(1);
+    expect(store.getSnapshot().selectedConversationId).toBe("researcher");
+  });
+
+  it("keeps the selected child's bound run through a parent turn and a root-only full refresh", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadChildPage("c1");
+    await store.selectConversation("reviewer");
+    fake.api.loadConversation = vi.fn(async ({ conversationId }) => conversationId === "c1"
+      ? conversation("c1", { currentRunId: "run-new" }) : child("reviewer", "c1", "completed"));
+    fake.emit({ kind: "runChanged", sequence: "1", conversationId: "c1", runId: "run-new" });
+    await waitFor(() => expect(store.getSnapshot().conversationsById.c1?.currentRunId).toBe("run-new"));
+    expect(store.getSnapshot().selectedConversationId).toBe("reviewer");
+    expect(store.getSnapshot().conversationsById.reviewer?.currentRunId).toBe("run-c1");
+    await store.retry();
+    await waitFor(() => expect(store.getSnapshot().conversationsById.reviewer?.runStatus).toBe("completed"));
+    expect(store.getSnapshot().selectedConversationId).toBe("reviewer");
+    expect(store.getSnapshot().conversationIds).toEqual(["c1", "c2"]);
+  });
+
+  it("retries failed child pages without changing selection or disclosure", async () => {
+    const fake = createFakeApi();
+    fake.api.listChildConversations = vi.fn().mockRejectedValueOnce(new Error("Unavailable"))
+      .mockResolvedValue({ items: [child("reviewer", "c1")], nextCursor: null });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    store.toggleConversation("c1");
+    await waitFor(() => expect(store.getSnapshot().childPagesById.c1?.error).toBe("Unavailable"));
+    await store.loadChildPage("c1", true);
+    expect(store.getSnapshot().expandedById.c1).toBe(true);
+    expect(store.getSnapshot().selectedConversationId).toBe("c1");
+    expect(store.getSnapshot().childPagesById.c1?.error).toBeNull();
+  });
+
+  it("bounds descendants across branches while preserving the selected loaded path", async () => {
+    const fake = createFakeApi();
+    let page = 0;
+    fake.api.listChildConversations = vi.fn(async ({ parentId, cursor }) => {
+      if (parentId === "reviewer") return { items: [child("researcher", "reviewer")], nextCursor: null };
+      page += 1;
+      return { items: cursor === null ? [child("reviewer", "c1")] :
+        Array.from({ length: 20 }, (_, index) => child(`later-${page}-${index}`, "c1")), nextCursor: `next-${page}` };
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadChildPage("c1");
+    await store.loadChildPage("reviewer");
+    await store.selectConversation("researcher");
+    for (let index = 0; index < 6; index++) await store.loadChildPage("c1");
+    const snapshot = store.getSnapshot();
+    expect(snapshot.selectedConversationId).toBe("researcher");
+    expect(snapshot.selectedPath?.ids).toEqual(["c1", "reviewer", "researcher"]);
+    expect(Object.values(snapshot.conversationsById).filter(item => item.parentId !== null).length).toBeLessThanOrEqual(80);
+    expect(snapshot.childPagesById.c1?.evicted).toBe(true);
+    await store.selectConversation("c2");
+    expect(store.getSnapshot().conversationsById.researcher).toBeUndefined();
+  });
+
+  it("does not retain omitted ancestry beyond the 80-node budget across deep selections", async () => {
+    const fake = createFakeApi();
+    const chain = Array.from({ length: 110 }, (_, index) => child(`deep-${index}`, index ? `deep-${index - 1}` : "c1"));
+    fake.api.loadConversationPath = vi.fn(async ({ conversationId }): Promise<ConversationPath> => {
+      const index = chain.findIndex(item => item.id === conversationId);
+      return { items: chain.slice(Math.max(0, index - 63), index + 1), truncated: index >= 63, ownerConversationId: "c1" };
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.selectConversation("deep-79");
+    await store.selectConversation("deep-99");
+    expect(store.getSnapshot().selectedPath?.truncated).toBe(true);
+    expect(Object.values(store.getSnapshot().conversationsById).filter(item => item.parentId !== null).length).toBeLessThanOrEqual(80);
+  });
+
+  it("fences child pages and truncated selected paths when their root is archived", async () => {
+    const fake = createFakeApi();
+    let finish!: (page: ConversationPage) => void;
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.selectConversation("detached-child");
+    fake.api.listChildConversations = vi.fn(() => new Promise<ConversationPage>(resolve => { finish = resolve; }));
+    const loading = store.loadChildPage("c1", true);
+    await store.archiveConversation("c1");
+    finish({ items: [child("stale", "c1")], nextCursor: null });
+    await loading;
+    expect(store.getSnapshot().selectedConversationId).toBe("c2");
+    expect(store.getSnapshot().conversationsById["detached-child"]).toBeUndefined();
+    expect(store.getSnapshot().conversationsById.stale).toBeUndefined();
+    expect(store.getSnapshot().childPagesById.c1).toBeUndefined();
+  });
+
+  it("does not republish an archived root from a full refresh that began before archive", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadChildPage("c1");
+    await store.selectConversation("reviewer");
+    let finish!: (bootstrap: BootstrapSnapshot) => void;
+    vi.mocked(fake.api.getBootstrap).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const refreshing = store.retry();
+    await waitFor(() => expect(fake.calls.conversations).toBe(4));
+    await store.archiveConversation("c1");
+    fake.api.listConversations = vi.fn().mockResolvedValue({ items: [conversation("c2")], nextCursor: null });
+    finish({ providers: [] });
+    await refreshing;
+    expect(store.getSnapshot().conversationIds).toEqual(["c2"]);
+    expect(store.getSnapshot().selectedConversationId).toBe("c2");
+    expect(store.getSnapshot().conversationsById.reviewer).toBeUndefined();
+  });
+
+  it("ignores path failures from before an authoritative full refresh", async () => {
+    const fake = createFakeApi();
+    let reject!: (reason: Error) => void;
+    fake.api.loadConversationPath = vi.fn(() => new Promise<ConversationPath>((_resolve, fail) => { reject = fail; }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    const selecting = store.selectConversation("missing");
+    await store.retry();
+    reject(new Error("Stale path failure"));
+    await selecting;
+    expect(store.getSnapshot().error).toBeNull();
+    expect(store.getSnapshot().selectedConversationId).toBe("c1");
+  });
+
+  it("rejects a child page attributed to another parent", async () => {
+    const fake = createFakeApi();
+    fake.api.listChildConversations = vi.fn().mockResolvedValue({ items: [child("wrong", "c2")], nextCursor: null });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadChildPage("c1");
+    expect(store.getSnapshot().childPagesById.c1?.error).toMatch(/ownership/);
+    expect(store.getSnapshot().conversationsById.wrong).toBeUndefined();
   });
 });

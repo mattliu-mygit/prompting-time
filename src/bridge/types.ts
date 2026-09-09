@@ -12,7 +12,6 @@ export const commands = {
 	loadConversationPath: (request: LoadConversationRequest) => typedError<ConversationPath, CommandError>(__TAURI_INVOKE("load_conversation_path", { request })),
 	loadTimeline: (request: LoadTimelineRequest) => typedError<TimelinePage, CommandError>(__TAURI_INVOKE("load_timeline", { request })),
 	loadDiagnostics: (request: LoadTimelineRequest) => typedError<DiagnosticsPage, CommandError>(__TAURI_INVOKE("load_diagnostics", { request })),
-	loadAgentTree: (request: LoadAgentTreeRequest) => typedError<AgentTreePage, CommandError>(__TAURI_INVOKE("load_agent_tree", { request })),
 	loadEventDetail: (request: LoadEventDetailRequest) => typedError<EventDetailSnapshot, CommandError>(__TAURI_INVOKE("load_event_detail", { request })),
 	loadApprovals: (request: LoadApprovalsRequest) => typedError<ApprovalPage, CommandError>(__TAURI_INVOKE("load_approvals", { request })),
 	loadApprovalDetail: (request: LoadApprovalDetailRequest) => typedError<ApprovalDetailSnapshot, CommandError>(__TAURI_INVOKE("load_approval_detail", { request })),
@@ -30,28 +29,6 @@ export const commands = {
 };
 
 /* Types */
-export type AgentSnapshot = {
-	id: string,
-	parentId: string | null,
-	provider: ProviderId,
-	label: string,
-	summary: string | null,
-	status: AgentStatus,
-};
-
-export type AgentStatus = "queued" | "running" | "waiting" | "completed" | "interrupted" | "failed";
-
-export type AgentTreeItem = {
-	agent: AgentSnapshot,
-	depth: number,
-};
-
-export type AgentTreePage = {
-	runId: string | null,
-	items: AgentTreeItem[],
-	nextCursor: string | null,
-};
-
 export type AppEvent = { kind: "conversationChanged"; sequence: string; conversationId: string } | { kind: "runChanged"; sequence: string; conversationId: string; runId: string } | { kind: "reloadRequired"; sequence: string };
 
 export type ApprovalDetailSnapshot = {
@@ -173,8 +150,6 @@ export type ConversationSummary = {
 	provider: ProviderId | null,
 	runStatus: RunStatus | null,
 	rollupStatus: RollupStatus | null,
-	agents: AgentSnapshot[],
-	agentsTruncated: boolean,
 };
 
 export type ConversationWorkspaceRequest = { kind: "projectless" } | { kind: "isolated"; path: string } | { kind: "direct"; path: string };
@@ -234,7 +209,6 @@ export type InspectorSnapshot = {
 	routing: RoutingSnapshot | null,
 	handoff: string | null,
 	activeDescendantCount: number,
-	agentsTruncated: boolean,
 };
 
 export type InterruptRunRequest = {
@@ -254,12 +228,6 @@ export type ListConversationsRequest = {
 };
 
 export type ListRunAuditsRequest = {
-	conversationId: string,
-	cursor: string | null,
-	limit: number,
-};
-
-export type LoadAgentTreeRequest = {
 	conversationId: string,
 	cursor: string | null,
 	limit: number,

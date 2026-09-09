@@ -113,8 +113,6 @@ impl From<ConversationOverview> for ConversationSummary {
             provider: value.run.as_ref().map(|run| run.provider.into()),
             run_status: value.run.as_ref().map(|run| run.status.into()),
             rollup_status: value.rollup_status.map(Into::into),
-            agents: value.agents.into_iter().map(Into::into).collect(),
-            agents_truncated: value.agents_truncated,
         }
     }
 }
@@ -134,49 +132,6 @@ impl From<prompting_time_core::store::ConversationPath<ConversationOverview>> fo
             items: value.items.into_iter().map(Into::into).collect(),
             truncated: value.truncated,
             owner_conversation_id: value.owner_conversation_id.to_string(),
-        }
-    }
-}
-
-impl From<AgentNode> for AgentSnapshot {
-    fn from(value: AgentNode) -> Self {
-        Self {
-            id: value.id.to_string(),
-            parent_id: value.parent_id.map(|id| id.to_string()),
-            provider: value.provider.into(),
-            label: value.label,
-            summary: value.summary,
-            status: value.status.into(),
-        }
-    }
-}
-
-impl From<prompting_time_core::store::AgentPage> for AgentTreePage {
-    fn from(value: prompting_time_core::store::AgentPage) -> Self {
-        Self {
-            run_id: value.run_id.map(|id| id.to_string()),
-            items: value
-                .items
-                .into_iter()
-                .map(|record| AgentTreeItem {
-                    agent: record.agent.into(),
-                    depth: record.depth,
-                })
-                .collect(),
-            next_cursor: value.next_cursor,
-        }
-    }
-}
-
-impl From<CoreAgentStatus> for AgentStatus {
-    fn from(value: CoreAgentStatus) -> Self {
-        match value {
-            CoreAgentStatus::Queued => Self::Queued,
-            CoreAgentStatus::Running => Self::Running,
-            CoreAgentStatus::Waiting => Self::Waiting,
-            CoreAgentStatus::Completed => Self::Completed,
-            CoreAgentStatus::Interrupted => Self::Interrupted,
-            CoreAgentStatus::Failed => Self::Failed,
         }
     }
 }
@@ -639,7 +594,6 @@ impl From<CoreInspectorSnapshot> for InspectorSnapshot {
             handoff: value.handoff,
             active_descendant_count: u32::try_from(value.active_descendant_count)
                 .unwrap_or(u32::MAX),
-            agents_truncated: value.agents_truncated,
         }
     }
 }

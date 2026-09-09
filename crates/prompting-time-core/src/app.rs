@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    AgentNode, AgentStatus, Approval, ApprovalId, ApprovalStatus, Conversation, ConversationId,
-    MessageRole, ProviderRun, RollupStatus, RunId, Workspace, WorkspaceId,
+    AgentStatus, Approval, ApprovalId, ApprovalStatus, Conversation, ConversationId, MessageRole,
+    ProviderRun, RollupStatus, RunId, Workspace, WorkspaceId,
 };
 use crate::handoff::{
     ChildAgentOutcome, ChildAgentStatus, DurableDecision, HandoffBuilder, HandoffCapsule,
@@ -28,9 +28,9 @@ use crate::runtime::{
     RuntimeError,
 };
 use crate::store::{
-    AgentPage, ApprovalPage, ConversationBinding, ConversationPath, ConversationSettings,
-    EventDetail, MAX_CANONICAL_MESSAGE_BYTES, NewSubmission, Page, ProviderEventRecord,
-    SidebarDetails, Store, StoreChange, StoreError, TimelineRecord, validate_conversation_settings,
+    ApprovalPage, ConversationBinding, ConversationPath, ConversationSettings, EventDetail,
+    MAX_CANONICAL_MESSAGE_BYTES, NewSubmission, Page, ProviderEventRecord, SidebarDetails, Store,
+    StoreChange, StoreError, TimelineRecord, validate_conversation_settings,
 };
 use crate::workspace::{
     CleanupEligibility, WorkspaceError, WorkspaceManager, WorkspaceRequest, WorkspaceSnapshot,
@@ -93,8 +93,6 @@ pub struct ConversationOverview {
     pub project_root: Option<PathBuf>,
     pub run: Option<RunOverview>,
     pub rollup_status: Option<RollupStatus>,
-    pub agents: Vec<AgentNode>,
-    pub agents_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,7 +188,6 @@ pub struct InspectorSnapshot {
     pub routing: Option<RoutingDecision>,
     pub handoff: Option<String>,
     pub active_descendant_count: usize,
-    pub agents_truncated: bool,
 }
 
 pub struct PromptingTime {
@@ -292,8 +289,6 @@ impl PromptingTime {
             project_root: workspace.project_root,
             run: None,
             rollup_status: None,
-            agents: Vec::new(),
-            agents_truncated: false,
         })
     }
 
@@ -729,18 +724,6 @@ impl PromptingTime {
             .map_err(Into::into)
     }
 
-    pub async fn load_agent_page(
-        &self,
-        conversation_id: ConversationId,
-        cursor: Option<String>,
-        limit: u32,
-    ) -> Result<AgentPage, AppError> {
-        self.store
-            .load_agent_page(conversation_id, cursor, limit)
-            .await
-            .map_err(Into::into)
-    }
-
     pub async fn load_run_audits(
         &self,
         conversation_id: ConversationId,
@@ -817,7 +800,6 @@ impl PromptingTime {
                 routing: None,
                 handoff: None,
                 active_descendant_count: 0,
-                agents_truncated: false,
             });
         }
         let lease = self.workspace_manager.lease(&workspace).await?;
@@ -860,7 +842,6 @@ impl PromptingTime {
             routing,
             handoff,
             active_descendant_count: details.active_descendant_count,
-            agents_truncated: details.agents_truncated,
         })
     }
 
@@ -1178,17 +1159,12 @@ fn overview(conversation: Conversation, details: SidebarDetails) -> Conversation
     ConversationOverview {
         conversation,
         has_children: details.has_children,
-        summary: details
-            .agents
-            .first()
-            .and_then(|agent| agent.summary.clone()),
+        summary: details.summary,
         capabilities: details.binding.into(),
         routing_profile: details.routing_profile,
         project_root: details.project_root,
         run: details.run.map(Into::into),
         rollup_status: details.rollup_status,
-        agents: details.agents,
-        agents_truncated: details.agents_truncated,
     }
 }
 

@@ -43,7 +43,7 @@ describe("CommandPalette", () => {
   it("has accessible dialog, search, grouped results, and current conversation semantics", async () => {
     render(<CommandPalette
       open onOpenChange={vi.fn()}
-      conversations={[{ id: "one", title: "Compiler", projectRoot: "/projects/compiler" }]}
+      conversations={[{ id: "one", parentId: null, title: "Compiler", projectRoot: "/projects/compiler" }]}
       selectedId="one" onSelectConversation={vi.fn()}
       commands={[{ id: "new", label: "New conversation", run: vi.fn() }]}
     />);
@@ -53,22 +53,23 @@ describe("CommandPalette", () => {
     expect(result.violations.map(({ id }) => id)).toEqual([]);
   });
 
-  it("searches duplicate agent names with conversation context and selects after closing", async () => {
-    const onSelectAgent = vi.fn();
-    const props = { onOpenChange: vi.fn(), conversations: [], selectedId: null, onSelectConversation: vi.fn(), commands: [], onSelectAgent,
-      agents: [
-        { conversationId: "a", conversationTitle: "Compiler", agent: { id: "one", label: "Reviewer" } },
-        { conversationId: "b", conversationTitle: "Runtime", agent: { id: "two", label: "Reviewer" } },
+  it("searches duplicate child titles with parent context and selects their exact conversation after closing", async () => {
+    const onSelectConversation = vi.fn();
+    const props = { onOpenChange: vi.fn(), selectedId: null, onSelectConversation, commands: [],
+      conversations: [
+        { id: "a", parentId: null, title: "Compiler", projectRoot: null },
+        { id: "b", parentId: null, title: "Runtime", projectRoot: null },
+        { id: "one", parentId: "a", title: "Reviewer", projectRoot: null },
+        { id: "two", parentId: "b", title: "Reviewer", projectRoot: null },
       ],
     };
     const view = render(<CommandPalette {...props} open />);
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "Reviewer Runtime" } });
-    await waitFor(() => expect(screen.getByRole("option", { name: /Reviewer Runtime/ })).toBeVisible());
-    expect(screen.queryByRole("option", { name: /Reviewer Compiler/ })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("option", { name: /Reviewer Runtime/ }));
-    expect(onSelectAgent).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("option", { name: /Reviewer.*Runtime/ })).toBeVisible());
+    expect(screen.queryByRole("option", { name: /Reviewer.*Compiler/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /Reviewer.*Runtime/ }));
+    expect(onSelectConversation).not.toHaveBeenCalled();
     view.rerender(<CommandPalette {...props} open={false} />);
-    await waitFor(() => expect(onSelectAgent).toHaveBeenCalledWith("b", "two"));
-    expect(props.onSelectConversation).not.toHaveBeenCalled();
+    await waitFor(() => expect(onSelectConversation).toHaveBeenCalledExactlyOnceWith("two"));
   });
 });

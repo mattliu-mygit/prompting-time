@@ -72,8 +72,6 @@ pub struct ConversationSummary {
     pub provider: Option<ProviderId>,
     pub run_status: Option<RunStatus>,
     pub rollup_status: Option<RollupStatus>,
-    pub agents: Vec<AgentSnapshot>,
-    pub agents_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
@@ -96,57 +94,12 @@ pub struct ConversationPath {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub enum AgentStatus {
-    Queued,
-    Running,
-    Waiting,
-    Completed,
-    Interrupted,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
 pub enum RollupStatus {
     NeedsAttention,
     Active,
     Failed,
     Interrupted,
     Completed,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSnapshot {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub provider: ProviderId,
-    pub label: String,
-    pub summary: Option<String>,
-    pub status: AgentStatus,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct LoadAgentTreeRequest {
-    pub conversation_id: String,
-    pub cursor: Option<String>,
-    pub limit: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentTreeItem {
-    pub agent: AgentSnapshot,
-    pub depth: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentTreePage {
-    pub run_id: Option<String>,
-    pub items: Vec<AgentTreeItem>,
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
@@ -790,7 +743,6 @@ pub struct InspectorSnapshot {
     pub routing: Option<RoutingSnapshot>,
     pub handoff: Option<String>,
     pub active_descendant_count: u32,
-    pub agents_truncated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]

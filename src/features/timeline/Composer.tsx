@@ -41,10 +41,13 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const text = snapshot.draftsById[conversation.id]?.text ?? "";
   const submission = snapshot.submissionsById[conversation.id];
-  const [preview, setPreview] = useState(false);
+  const composerView = snapshot.composerViewsById[conversation.id];
+  const preview = composerView?.preview ?? false;
+  const setPreview = (preview: boolean) => store.setComposerView(conversation.id, { preview });
   const [helpOpen, setHelpOpen] = useState(false);
   const helpId = useId();
-  const [choice, setChoice] = useState<ProviderChoice>(() => submission?.providerOverride ?? "auto");
+  const choice = composerView?.choice ?? submission?.providerOverride ?? "auto";
+  const setChoice = (choice: ProviderChoice) => store.setComposerView(conversation.id, { choice });
   const [pendingInterruption, setPendingInterruption] = useState<PendingInterruption | null>(null);
   const [interruptRequestedFor, setInterruptRequestedFor] = useState<string | null>(null);
   const [localSubmitting, setSubmitting] = useState(false);
@@ -66,15 +69,15 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   const interruptionPending = conversation.currentRunId !== null
     && conversation.currentRunId === interruptRequestedFor;
   const currentProvider = providers.find(({ id }) => id === conversation.provider);
-  const canSteer = conversation.runStatus === "running"
+  const canSteer = conversation.capabilities.canSend && conversation.runStatus === "running"
     && !interruptionPending
     && currentProvider?.capabilities.includes("steering") === true;
-  const canInterrupt = currentProvider?.capabilities.includes("interruption") === true;
+  const canInterrupt = conversation.capabilities.canInterrupt && currentProvider?.capabilities.includes("interruption") === true;
   const interruptionDialogOpen = pendingInterruption !== null;
-  const canSubmit = !submitting && !!text.trim() && (!active || canSteer) && !interruptionDialogOpen;
+  const canSubmit = conversation.capabilities.canSend && !submitting && !!text.trim() && (!active || canSteer) && !interruptionDialogOpen;
 
   useLayoutEffect(() => {
-    if (!focusRequested || submitting || interruptionDialogOpen) return;
+    if (!conversation.capabilities.canSend || !focusRequested || submitting || interruptionDialogOpen) return;
     if (preview) {
       setPreview(false);
       return;
@@ -164,6 +167,7 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   }
 
   function selectProvider(next: ProviderChoice) {
+    if (!conversation.capabilities.canSend || !conversation.capabilities.canRoute) return;
     if (
       active
       && conversation.currentRunId
@@ -209,7 +213,8 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
 
   async function confirmSwitch() {
     if (
-      !pendingInterruption
+      !conversation.capabilities.canSend
+      || !pendingInterruption
       || !rootTurnActive
       || conversation.currentRunId !== pendingInterruption.runId
       || conversation.provider !== pendingInterruption.provider
@@ -264,6 +269,12 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   const retrying = submission?.command != null && error !== null;
   const activeName = conversation.provider ? providerNames[conversation.provider] : "provider";
 
+  if (!conversation.capabilities.canSend) return (
+    <section className="composer composer-read-only" aria-label="Message composer">
+      <p className="composer-explanation">{conversation.capabilities.unavailableReason ?? "This conversation is read-only."}</p>
+    </section>
+  );
+
   return (
     <>
       <section className="composer" aria-label="Message composer" aria-busy={submitting} inert={interruptionDialogOpen}>
@@ -293,11 +304,11 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
         <p className="composer-explanation">{interruptionPending
           ? `Waiting for ${activeName} to stop before another turn.`
           : descendantOnlyActive
-          ? "Active child agents must finish before another turn or provider switch."
+          ? "Active child conversations must finish before another turn or provider switch."
           : `${activeName} cannot be steered in this state. Interrupt it or wait for the turn to finish.`}</p>
       ) : null}
       <div className="composer-actions">
-        <label className="composer-provider">
+        {conversation.capabilities.canRoute ? <label className="composer-provider">
           <span className="sr-only">Provider</span>
           <select
             ref={providerSelect}
@@ -312,7 +323,7 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
               </option>
             ))}
           </select>
-        </label>
+        </label> : null}
         <button
           type="button"
           className="composer-help"
@@ -332,13 +343,13 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
             setPreview(!preview);
           }}
         >{preview ? "Edit" : "Preview"}</button>
-        {rootTurnActive && !interruptionPending ? (
+        {conversation.capabilities.canInterrupt && rootTurnActive && !interruptionPending ? (
           <button
             type="button"
             className="secondary-button"
             disabled={!canInterrupt}
             onClick={() => {
-              if (conversation.currentRunId && conversation.provider) {
+              if (canInterrupt && conversation.currentRunId && conversation.provider) {
                 setPendingInterruption({
                   choice: "interrupt",
                   provider: conversation.provider,
