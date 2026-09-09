@@ -42,6 +42,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "codex_children.rs"]
 mod children;
+#[path = "codex_operations.rs"]
+mod operations;
 
 #[derive(Clone)]
 pub struct CodexAdapter {
@@ -2474,7 +2476,34 @@ async fn handle_child_notification(
                 }
                 items.insert(item, changes);
             }
-            // Native child transcript and generic tool output are outside this boundary.
+            if matches!(method, "item/started" | "item/completed") {
+                if let Some(ProviderEvent::NativeItemActivity {
+                    native_item_id,
+                    native_turn_id,
+                    operation,
+                    description,
+                    mutation,
+                    ..
+                }) = normalize_item_with_phase(params, method == "item/completed")?
+                {
+                    deliver_or_buffer_turn_event(
+                        state,
+                        root,
+                        Ok(ProviderEvent::NativeItemActivity {
+                            native_item_id,
+                            native_turn_id,
+                            native_agent_id: Some(thread.to_owned()),
+                            operation,
+                            description,
+                            mutation,
+                        }),
+                        false,
+                        sender,
+                    )
+                    .await?;
+                }
+            }
+            // Child messages/reasoning stay outside tool display capture.
             return Ok(());
         }
     };
@@ -2522,7 +2551,8 @@ async fn handle_notification(
     }
     if let Some(root) = children::activity_owner(method, &params, state)? {
         required_string(&params, &["turnId"], "notification-turn-id")?;
-        let event = normalize_item(&params)?.ok_or_else(|| protocol("child-activity-missing"))?;
+        let event = normalize_item_with_phase(&params, method == "item/completed")?
+            .ok_or_else(|| protocol("child-activity-missing"))?;
         if !children::resolve_activity(&root, method, &params, &event, sender, state).await? {
             let turn = state.turns.get_mut(&root).expect("verified activity root");
             if turn.children.observe_activity(&event)? {
@@ -2636,11 +2666,13 @@ async fn handle_notification(
                 })
             })
         }
-        "item/started" | "item/completed" => match normalize_item(&params) {
-            Ok(Some(event)) => Ok(event),
-            Ok(None) => return Ok(()),
-            Err(error) => Err(error),
-        },
+        "item/started" | "item/completed" => {
+            match normalize_item_with_phase(&params, method == "item/completed") {
+                Ok(Some(event)) => Ok(event),
+                Ok(None) => return Ok(()),
+                Err(error) => Err(error),
+            }
+        }
         "turn/completed" => match params
             .get("turn")
             .and_then(|turn| turn.get("status"))
@@ -2728,10 +2760,21 @@ async fn handle_notification(
     Ok(())
 }
 
+#[cfg(test)]
 fn normalize_item(params: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
+    normalize_item_with_phase(params, false)
+}
+
+fn normalize_item_with_phase(
+    params: &Value,
+    completed: bool,
+) -> Result<Option<ProviderEvent>, ProviderError> {
     let item = params.get("item").ok_or_else(|| protocol("item-missing"))?;
     let native_item_id = required_string(item, &["id"], "item-id")?;
     let item_type = required_string(item, &["type"], "item-type")?;
+    if native_item_id.len() > 256 || item_type.len() > 256 {
+        return Err(protocol("tool-identity-bounds"));
+    }
     if item_type == "collabAgentToolCall" {
         let parent_native_thread_id =
             required_string(item, &["senderThreadId"], "child-parent-id")?;
@@ -2806,7 +2849,10 @@ fn normalize_item(params: &Value) -> Result<Option<ProviderEvent>, ProviderError
             activity,
         }));
     }
-    if matches!(item_type.as_str(), "agentMessage" | "userMessage") {
+    if matches!(
+        item_type.as_str(),
+        "agentMessage" | "userMessage" | "reasoning"
+    ) {
         return Ok(None);
     }
     let mutation = match item_type.as_str() {
@@ -2814,16 +2860,17 @@ fn normalize_item(params: &Value) -> Result<Option<ProviderEvent>, ProviderError
         "commandExecution" | "mcpToolCall" | "dynamicToolCall" => MutationState::Unknown,
         _ => MutationState::NoneObserved,
     };
-    let status = item
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("observed");
+    let native_turn_id = required_string(params, &["turnId"], "notification-turn-id")?;
+    if native_turn_id.len() > 256 {
+        return Err(protocol("tool-turn-identity-bounds"));
+    }
+    let operation = operations::extract(item, completed).expect("non-message tool item");
     Ok(Some(ProviderEvent::NativeItemActivity {
         native_item_id,
-        native_turn_id: None,
+        native_turn_id: Some(native_turn_id),
         native_agent_id: None,
-        operation: None,
-        description: format!("{item_type}: {status}"),
+        description: operation.title.clone(),
+        operation: Some(operation),
         mutation,
     }))
 }
@@ -3188,6 +3235,39 @@ mod tests {
     }
 
     #[test]
+    fn tool_operation_command_snapshot_selects_real_evidence() {
+        let event = normalize_item(&json!({"threadId":"root","turnId":"turn-1","item": {
+            "id":"command-1","type":"commandExecution","command":"cargo test","cwd":"/invented",
+            "commandActions":[],"status":"completed","aggregatedOutput":"1 test passed\n",
+            "exitCode":0,"durationMs":12,"private":"PRIVATE_REASONING_MARKER"
+        }}))
+        .unwrap()
+        .unwrap();
+        let ProviderEvent::NativeItemActivity {
+            operation: Some(operation),
+            native_turn_id,
+            ..
+        } = event
+        else {
+            panic!("missing operation")
+        };
+        assert_eq!(native_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(operation.title, "Run cargo test");
+        assert_eq!(operation.output.as_deref(), Some("1 test passed\n"));
+        assert_eq!(
+            operation.status,
+            crate::tool_operation::ToolOperationStatus::Succeeded
+        );
+        assert_eq!(operation.exit_code, Some(0));
+        assert_eq!(operation.duration_ms, Some(12));
+        assert!(
+            !serde_json::to_string(&operation)
+                .unwrap()
+                .contains("PRIVATE_REASONING_MARKER")
+        );
+    }
+
+    #[test]
     fn completed_subagent_activity_is_a_known_success_observation() {
         let event = normalize_item(&json!({"threadId":"root", "item": {
             "id":"activity", "type":"subAgentActivity", "agentThreadId":"child",
@@ -3285,12 +3365,29 @@ mod tests {
             handle_notification("item/fileChange/patchUpdated", params, &sender, &mut state)
                 .await
                 .unwrap();
+            handle_notification("item/completed", json!({"threadId":thread,"turnId":format!("{thread}-turn"),"item":{"id":"shared-command","type":"commandExecution","command":"check","status":"completed","aggregatedOutput":thread,"exitCode":0}}), &sender, &mut state).await.unwrap();
+            handle_notification("item/completed", json!({"threadId":thread,"turnId":"stale-turn","item":{"id":"wrong-command","type":"commandExecution","command":"wrong","status":"completed"}}), &sender, &mut state).await.unwrap();
             handle_server_request(json!({"method":"item/fileChange/requestApproval","params":{"threadId":thread,"turnId":format!("{thread}-turn"),"itemId":"shared-item","startedAtMs":1}}), RpcId::Number(50 + index as i64), &sender, &mut state).await.unwrap();
         }
         let mut paths = Vec::new();
-        for receiver in &mut receivers {
+        let mut operation_owners = Vec::new();
+        for (root_index, receiver) in receivers.iter_mut().enumerate() {
             while let Ok(event) = receiver.try_recv() {
                 let details = match event.unwrap() {
+                    ProviderEvent::NativeItemActivity {
+                        native_agent_id,
+                        native_turn_id,
+                        operation: Some(operation),
+                        ..
+                    } => {
+                        operation_owners.push((
+                            root_index,
+                            native_agent_id,
+                            native_turn_id,
+                            operation.output,
+                        ));
+                        None
+                    }
                     ProviderEvent::ApprovalRequested { details, .. }
                     | ProviderEvent::NativeChild {
                         event: super::NativeChildEvent::ApprovalRequested { details, .. },
@@ -3303,6 +3400,31 @@ mod tests {
                 }
             }
         }
+        operation_owners.sort();
+        assert_eq!(
+            operation_owners,
+            vec![
+                (0, None, Some("root-a-turn".into()), Some("root-a".into())),
+                (
+                    0,
+                    Some("child-a".into()),
+                    Some("child-a-turn".into()),
+                    Some("child-a".into())
+                ),
+                (
+                    0,
+                    Some("sibling".into()),
+                    Some("sibling-turn".into()),
+                    Some("sibling".into())
+                ),
+                (
+                    1,
+                    Some("child-b".into()),
+                    Some("child-b-turn".into()),
+                    Some("child-b".into())
+                ),
+            ]
+        );
         assert!(
             respond_to_server_request(
                 &sender,

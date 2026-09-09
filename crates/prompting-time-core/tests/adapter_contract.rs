@@ -1377,6 +1377,8 @@ IFS= read -r line
 printf '%s' "$line" | grep -q '"id":"input-6"'
 printf '%s' "$line" | grep -q '"question-a":{{"answers":\["alpha"\]}}'
 printf '%s' "$line" | grep -q '"question-b":{{"answers":\["invented-token","second"\]}}'
+printf '{{"method":"item/completed","params":{{"threadId":"thread-7","turnId":"turn-9","item":{{"type":"commandExecution","id":"command-item-3","command":"printf READY","cwd":"/invented/project","status":"completed","aggregatedOutput":"READY","exitCode":0,"durationMs":12}}}}}}\n'
+printf '{{"method":"item/completed","params":{{"threadId":"thread-7","turnId":"turn-9","item":{{"type":"reasoning","id":"reasoning-item","content":"PRIVATE_REASONING_MARKER"}}}}}}\n'
 printf '{{"method":"turn/completed","params":{{"threadId":"thread-7","turn":{{"id":"turn-9","items":[],"status":"completed"}}}}}}\n'
 sleep 30
 "#
@@ -1404,8 +1406,10 @@ sleep 30
     );
     assert!(matches!(
         turn.recv().await.unwrap().unwrap(),
-        ProviderEvent::NativeItemActivity { native_item_id, mutation: prompting_time_core::domain::MutationState::Unknown, .. }
-            if native_item_id == "command-item-3"
+        ProviderEvent::NativeItemActivity { native_item_id, native_turn_id, operation: Some(operation), mutation: prompting_time_core::domain::MutationState::Unknown, .. }
+            if native_item_id == "command-item-3" && native_turn_id.as_deref() == Some("turn-9")
+                && operation.title == "Run printf READY" && operation.input.as_deref() == Some("printf READY")
+                && operation.context.as_deref() == Some("/invented/project") && operation.status == prompting_time_core::tool_operation::ToolOperationStatus::Running
     ));
     assert!(matches!(
         turn.recv().await.unwrap().unwrap(),
@@ -1512,6 +1516,17 @@ sleep 30
         )
         .await
         .unwrap();
+    let completed = turn.recv().await.unwrap().unwrap();
+    assert!(
+        matches!(&completed, ProviderEvent::NativeItemActivity { native_item_id, native_turn_id, operation: Some(operation), .. }
+        if native_item_id == "command-item-3" && native_turn_id.as_deref() == Some("turn-9") && operation.output.as_deref() == Some("READY")
+            && operation.status == prompting_time_core::tool_operation::ToolOperationStatus::Succeeded && operation.exit_code == Some(0) && operation.duration_ms == Some(12))
+    );
+    assert!(
+        !serde_json::to_string(&completed)
+            .unwrap()
+            .contains("PRIVATE_REASONING_MARKER")
+    );
     assert_eq!(
         turn.recv().await.unwrap().unwrap(),
         ProviderEvent::TurnCompleted
