@@ -36,12 +36,13 @@ export function AgentNavigation({ title, agents, selectedId, onSelect, onLoadMor
   onSelect(id?: string): void; onLoadMore?(): void; loading?: boolean;
 }) {
   const path = agentPath(agents, selectedId);
+  if (selectedId === null) return null;
   return <nav className="agent-navigation" aria-label="Agent ancestry">
     <ol>
-      <li><button type="button" aria-current={selectedId === null ? "location" : undefined} onClick={() => onSelect(undefined)}>{title}</button></li>
+      <li><button type="button" title={title} onClick={() => onSelect(undefined)}>{title}</button></li>
       {path.incomplete ? <li><span>Agent path incomplete</span></li> : null}
       {path.nodes.map(agent => <li key={agent.id}>
-        <button type="button" aria-current={agent.id === selectedId ? "location" : undefined} onClick={() => onSelect(agent.id)}>{agent.label}</button>
+        <button type="button" title={agent.label} aria-current={agent.id === selectedId ? "location" : undefined} onClick={() => onSelect(agent.id)}>{agent.label}</button>
       </li>)}
     </ol>
     {onLoadMore ? <button type="button" disabled={loading} onClick={onLoadMore}>{loading ? "Loading agents…" : "Load more agents"}</button> : null}

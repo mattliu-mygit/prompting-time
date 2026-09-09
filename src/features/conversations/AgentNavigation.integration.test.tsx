@@ -33,14 +33,18 @@ it("navigates palette, parent and root through App without changing draft or sen
   fireEvent.change(message, { target: { value: "Keep **draft**" } });
   async function openPalette() {
     fireEvent.click(screen.getByRole("button", { name: /Search/ }));
-    return screen.findByRole("combobox");
+    return screen.findByRole("combobox", { name: "Search conversations and commands" });
   }
   await openPalette();
   expect(screen.getByRole("option", { name: "Go to parent agent" })).toHaveAttribute("aria-disabled", "true");
   fireEvent.change(screen.getByRole("combobox"), { target: { value: "Researcher" } });
   fireEvent.click(screen.getByRole("option", { name: "Researcher Compiler" }));
   await waitFor(() => expect(store.getSnapshot().selectedAgentId).toBe("grandchild"));
-  expect(screen.getByRole("region", { name: "Selected agent" })).toHaveTextContent("Checked schema");
+  const details = screen.getByText("Inspecting Researcher").closest("details")!;
+  expect(details).not.toHaveAttribute("open");
+  fireEvent.click(screen.getByText("Inspecting Researcher"));
+  expect(details).toHaveAttribute("open");
+  expect(screen.getByText(/completed · Checked schema/)).toBeVisible();
   await openPalette();
   fireEvent.click(screen.getByRole("option", { name: "Go to parent agent" }));
   await waitFor(() => expect(store.getSnapshot().selectedAgentId).toBe("child"));

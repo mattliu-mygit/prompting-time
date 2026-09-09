@@ -185,12 +185,11 @@ describe("Timeline", () => {
     height.mockRestore();
   });
 
-  it("uses selected run state for its quiet status and keeps activity disclosure through older-page joins", async () => {
+  it("keeps activity disclosure through older-page joins", async () => {
     const api = actions({ loadTimeline: vi.fn()
       .mockResolvedValueOnce(timelinePage([event({ id: "t2", sequence: "2", kind: "tool", content: "newer tool", truncated: true })], "older"))
       .mockResolvedValueOnce(timelinePage([event({ id: "t1", sequence: "1", kind: "tool", content: "older tool" })], null)) });
-    const view = render(<Timeline conversationId="conversation-1" currentRunId="current" runStatus="waiting" refreshVersion={0} agents={[{ ...agents[0]!, status: "completed" }]} actions={api} />);
-    expect(screen.getByText("Waiting")).toHaveAttribute("role", "status");
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[{ ...agents[0]!, status: "completed" }]} actions={api} />);
     fireEvent.click(await screen.findByRole("button", { name: /Show tool activity/i }));
     fireEvent.click(screen.getByRole("button", { name: "Show tool output" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();

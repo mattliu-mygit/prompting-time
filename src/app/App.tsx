@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Ellipsis, ListFilter, PanelLeft, PanelRight, Plus, Search } from "lucide-react";
 import type { CreateConversationRequest, ProviderInstallation } from "../bridge/types";
 import { ConversationTree } from "../features/conversations/ConversationTree";
 import { AgentNavigation, agentPath, knownAgents } from "../features/conversations/AgentNavigation";
@@ -58,6 +60,11 @@ function CommandCenter({ store }: { store: AppStore }) {
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [composerModalOpen, setComposerModalOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState<boolean | null>(null);
+  const [openMenu, setOpenMenu] = useState<"more" | "filter" | null>(null);
+  const pendingArchive = useRef<string | null>(null);
+  const pendingPalette = useRef(false);
+  const searchTrigger = useRef<HTMLButtonElement>(null);
+  const movedActionFocus = useRef<"search" | "new" | null>(null);
   const [messageFocusRequested, setMessageFocusRequested] = useState(false);
   const inspectorTrigger = useRef<HTMLButtonElement>(null);
   const inspectorClose = useRef<HTMLButtonElement>(null);
@@ -69,7 +76,12 @@ function CommandCenter({ store }: { store: AppStore }) {
   const paletteAvailable = snapshot.phase === "ready" && !lifecycleModalOpen
     && !composerModalOpen && !(narrowInspector && inspectorOpen);
 
-  useHotkeys(["meta+k", "ctrl+k"], () => setPaletteOpen((open) => !open), {
+  useHotkeys(["meta+k", "ctrl+k"], () => {
+    if (openMenu) {
+      pendingPalette.current = true;
+      setOpenMenu(null);
+    } else setPaletteOpen((open) => !open);
+  }, {
     enabled: paletteOpen === true || paletteAvailable,
     enableOnFormTags: true,
     enableOnContentEditable: true,
@@ -80,6 +92,12 @@ function CommandCenter({ store }: { store: AppStore }) {
   useEffect(() => {
     void store.initialize();
   }, [store]);
+
+  useEffect(() => {
+    if (movedActionFocus.current === "new") newConversationTrigger.current?.focus();
+    if (movedActionFocus.current === "search") searchTrigger.current?.focus();
+    movedActionFocus.current = null;
+  }, [sidebarOpen]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
@@ -161,6 +179,7 @@ function CommandCenter({ store }: { store: AppStore }) {
     : undefined;
   const agentWindow = snapshot.agentWindow?.conversationId === selected?.id
     && snapshot.agentWindow?.runId === selected?.currentRunId ? snapshot.agentWindow : null;
+  const filterLabel = `Filter conversations: ${statusOptions.find(option => option.value === snapshot.statusFilter)?.label}`;
 
   function closeInspector() {
     setInspectorOpen(false);
@@ -172,8 +191,27 @@ function CommandCenter({ store }: { store: AppStore }) {
     setCreatingConversation(true);
   }
 
+  const conversationActions = <>
+    <button ref={searchTrigger} type="button" className="icon-button" aria-label="Search" title="Search (⌘K / Ctrl K)" onClick={() => setPaletteOpen(true)} disabled={!paletteAvailable}>
+      <Search size={18} aria-hidden="true" />
+    </button>
+    <button ref={newConversationTrigger} type="button" className="icon-button" aria-label="New conversation" title="New conversation" onClick={openNewConversation}>
+      <Plus size={18} aria-hidden="true" />
+    </button>
+  </>;
+
   function toggleSidebar() {
+    const focused = document.activeElement;
+    if (focused === newConversationTrigger.current) movedActionFocus.current = "new";
+    else if (focused === searchTrigger.current || focused?.closest("#conversation-pane")) movedActionFocus.current = "search";
     setSidebarOpen((open) => !open);
+  }
+
+  function finishMenuClose() {
+    if (!pendingPalette.current) return;
+    pendingPalette.current = false;
+    // Let Radix restore the surviving trigger before the palette captures it.
+    queueMicrotask(() => setPaletteOpen(true));
   }
 
   function toggleInspector() {
@@ -211,62 +249,85 @@ function CommandCenter({ store }: { store: AppStore }) {
   return (
     <div className="app-shell" inert={composerModalOpen}>
       <header className="app-toolbar" inert={lifecycleModalOpen || (narrowInspector && inspectorOpen)}>
-        <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">PT</span>
-          <span>Prompting Time</span>
+        <button
+          type="button"
+          className="icon-button sidebar-toggle"
+          aria-label={sidebarOpen ? "Hide conversations" : "Show conversations"}
+          title={sidebarOpen ? "Hide conversations" : "Show conversations"}
+          aria-expanded={sidebarOpen}
+          aria-controls="conversation-pane"
+          onClick={toggleSidebar}
+        >
+          <PanelLeft size={18} aria-hidden="true" />
+        </button>
+        <h1 className="shell-title" title={selectedConversation?.title ?? "Prompting Time"}>{selectedConversation?.title ?? "Prompting Time"}</h1>
+        <div className="shell-status">
+          {selectedConversation?.provider ? <span className="provider-badge">{providerNames[selectedConversation.provider]}</span> : null}
+          {selectedConversation?.currentRunId && selectedConversation.runStatus ? <span className={`run-status ${selectedConversation.runStatus}`} role="status">{selectedConversation.runStatus === "running" ? "Working" : statusOptions.find(option => option.value === selectedConversation.runStatus)?.label}</span> : null}
         </div>
         <div className="toolbar-actions">
-          <button type="button" className="toolbar-button palette-trigger" onClick={() => setPaletteOpen(true)} disabled={!paletteAvailable}>
-            Search <kbd aria-hidden="true">⌘K / Ctrl K</kbd>
-          </button>
-          <button ref={newConversationTrigger} type="button" className="toolbar-button" onClick={openNewConversation}>
-            New conversation
-          </button>
-          <button
-            type="button"
-            className="toolbar-button sidebar-toggle"
-            aria-expanded={sidebarOpen}
-            aria-controls="conversation-pane"
-            onClick={toggleSidebar}
-          >
-            {sidebarOpen ? "Hide conversations" : "Show conversations"}
-          </button>
+          {!sidebarOpen ? conversationActions : null}
           <button
             ref={inspectorTrigger}
             type="button"
-            className="toolbar-button"
+            className="icon-button"
+            aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}
+            title={inspectorOpen ? "Hide inspector" : "Show inspector"}
             aria-expanded={inspectorOpen}
             aria-controls="inspector-pane"
             onClick={toggleInspector}
           >
-            {inspectorOpen ? "Hide inspector" : "Show inspector"}
+            <PanelRight size={18} aria-hidden="true" />
           </button>
+          <DropdownMenu.Root open={openMenu === "more"} onOpenChange={(open) => setOpenMenu(open ? "more" : null)}>
+            <DropdownMenu.Trigger asChild>
+              <button ref={archiveTrigger} type="button" className="icon-button" aria-label="More" title="More"><Ellipsis size={18} aria-hidden="true" /></button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="shell-menu" align="end" sideOffset={6} onCloseAutoFocus={(event) => {
+                if (pendingArchive.current) {
+                  event.preventDefault();
+                  setLifecycleError(null);
+                  setArchiveTarget(pendingArchive.current);
+                  pendingArchive.current = null;
+                } else finishMenuClose();
+              }}>
+                <DropdownMenu.Item className="shell-menu-item" disabled={!selectedConversation} onSelect={() => { pendingArchive.current = selectedConversation?.id ?? null; }}>Archive conversation</DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
         </div>
       </header>
 
       <div className="command-center" inert={lifecycleModalOpen}>
         {sidebarOpen ? (
           <aside id="conversation-pane" className="sidebar-pane" aria-label="Conversations" inert={narrowInspector && inspectorOpen}>
-            <div className="pane-heading">
-              <div>
-                <p className="eyebrow">Workspace</p>
-                <h1>Conversations</h1>
+            <div className="sidebar-toolbar">
+              <h2>Conversations</h2>
+              <div className="toolbar-actions">
+                {conversationActions}
+                <DropdownMenu.Root open={openMenu === "filter"} onOpenChange={(open) => setOpenMenu(open ? "filter" : null)}>
+                  <DropdownMenu.Trigger asChild>
+                    <button type="button" className="icon-button" data-active={snapshot.statusFilter !== "all"} aria-label={filterLabel} title={filterLabel}>
+                      <ListFilter size={18} aria-hidden="true" />
+                    </button>
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.Content className="shell-menu" align="end" sideOffset={6} onCloseAutoFocus={finishMenuClose}>
+                      <DropdownMenu.RadioGroup value={snapshot.statusFilter} onValueChange={(value) => store.setStatusFilter(value as StatusFilter)}>
+                        {statusOptions.map(option => (
+                          <DropdownMenu.RadioItem key={option.value} className="shell-menu-item" value={option.value}>
+                            <DropdownMenu.ItemIndicator aria-hidden="true">✓ </DropdownMenu.ItemIndicator>
+                            {option.label}
+                          </DropdownMenu.RadioItem>
+                        ))}
+                      </DropdownMenu.RadioGroup>
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Root>
               </div>
-              {snapshot.queuedCount > 0 ? (
-                <span className="queue-count">{snapshot.queuedCount} queued</span>
-              ) : null}
             </div>
-            <label className="filter-control">
-              <span>Filter conversations</span>
-              <select
-                value={snapshot.statusFilter}
-                onChange={(event) => store.setStatusFilter(event.target.value as StatusFilter)}
-              >
-                {statusOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </label>
+            {snapshot.queuedCount > 0 ? <span className="queue-count">{snapshot.queuedCount} queued</span> : null}
             <ConversationTree
               conversations={conversations}
               selectedId={snapshot.selectedConversationId}
@@ -284,20 +345,6 @@ function CommandCenter({ store }: { store: AppStore }) {
         <main className="workspace-pane" aria-label="Conversation workspace" inert={narrowInspector && inspectorOpen}>
           {selectedConversation ? (
             <>
-              <div className="workspace-heading">
-                <div>
-                  <h1>{selectedConversation.title}</h1>
-                </div>
-                {selectedConversation.provider ? (
-                  <span className="provider-badge">{providerNames[selectedConversation.provider]}</span>
-                ) : null}
-                <button ref={archiveTrigger} type="button" className="secondary-button" onClick={() => {
-                  setLifecycleError(null);
-                  setArchiveTarget(selectedConversation.id);
-                }}>
-                  Archive conversation
-                </button>
-              </div>
               <AgentNavigation
                 title={selectedConversation.title}
                 agents={selectedAgents}
@@ -308,16 +355,14 @@ function CommandCenter({ store }: { store: AppStore }) {
                   : undefined}
                 loading={agentWindow?.loading}
               />
-              {selectedAgent ? <section className="selected-agent-summary" aria-label="Selected agent">
-                <p>Inspecting {selectedAgent.label} · {selectedAgent.status}{selectedAgent.summary ? ` · ${selectedAgent.summary}` : ""}</p>
-                <small>Messages go to the conversation.</small>
-              </section> : null}
+              {selectedAgent ? <details className="selected-agent-summary" aria-label="Selected agent">
+                <summary>Inspecting {selectedAgent.label} <small>· Messages go to the conversation.</small></summary>
+                <p>{selectedAgent.status}{selectedAgent.summary ? ` · ${selectedAgent.summary}` : ""}</p>
+              </details> : null}
               <Timeline
                 key={`timeline-${selectedConversation.id}`}
                 conversationId={selectedConversation.id}
                 viewStates={timelineViews}
-                currentRunId={selectedConversation.currentRunId}
-                runStatus={selectedConversation.runStatus}
                 refreshVersion={selectedVersion}
                 agents={selectedConversation.agents}
                 agentsTruncated={selectedConversation.agentsTruncated}
@@ -341,7 +386,6 @@ function CommandCenter({ store }: { store: AppStore }) {
             </>
           ) : (
             <section className="empty-workspace">
-              <p className="eyebrow">Prompting Time</p>
               <h1>No conversation selected</h1>
               <p>Choose a conversation from the sidebar to open its command center.</p>
             </section>

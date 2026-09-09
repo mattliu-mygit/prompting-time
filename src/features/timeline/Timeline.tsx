@@ -4,7 +4,6 @@ import type {
   ApprovalDetailSnapshot,
   ApprovalSnapshot,
   ProviderId,
-  RunStatus,
   TimelineItem,
 } from "../../bridge/types";
 import type { AgentWindowSnapshot, ConversationActions } from "../../app/store";
@@ -36,8 +35,6 @@ type TimelineProps = {
   agentWindow?: AgentWindowSnapshot | null;
   onLoadAgentPage?(restart: boolean): void;
   actions: ConversationActions;
-  currentRunId?: string | null;
-  runStatus?: RunStatus | null;
   viewStates?: Map<string, TimelineViewState>;
 };
 
@@ -51,7 +48,7 @@ const statusNames: Record<AgentSnapshot["status"], string> = {
   failed: "Failed",
 };
 
-export function Timeline({ conversationId, refreshVersion, agents, agentsTruncated = false, agentWindow = null, onLoadAgentPage = () => {}, actions, currentRunId = null, runStatus = null, viewStates }: TimelineProps) {
+export function Timeline({ conversationId, refreshVersion, agents, agentsTruncated = false, agentWindow = null, onLoadAgentPage = () => {}, actions, viewStates }: TimelineProps) {
   const [newestItems, setNewestItems] = useState<TimelineItem[]>([]);
   const [olderPages, setOlderPages] = useState<TimelineItem[][]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -464,11 +461,8 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
 
   return (
     <section className="timeline-region" aria-labelledby="timeline-heading">
-      <div className="timeline-heading-row">
-        <h2 ref={heading} id="timeline-heading" tabIndex={-1}>Timeline</h2>
-        {currentRunId && runStatus ? <span className={`run-status ${runStatus}`} role="status">{runStatus === "running" ? "Working" : statusNames[runStatus]}</span> : null}
-        {loading ? <span role="status">Loading activity…</span> : null}
-      </div>
+      <h2 className="sr-only" ref={heading} id="timeline-heading" tabIndex={-1}>Timeline</h2>
+      {loading ? <span role="status">Loading activity…</span> : null}
       {error ? <p role="alert" className="inline-error">{error}</p> : null}
       <div ref={scrollBox} className="timeline-scroll" tabIndex={0} aria-label="Conversation activity" onScroll={onScroll}>
         {historyEvicted ? (

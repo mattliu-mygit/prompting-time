@@ -16,6 +16,89 @@ function createdConversation(overrides: Partial<ConversationSummary> = {}): Conv
   };
 }
 
+describe("compact shell", () => {
+beforeEach(() => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+});
+afterEach(() => { vi.unstubAllGlobals(); Reflect.deleteProperty(Element.prototype, "scrollIntoView"); });
+
+it("consolidates the root title and preserves actions when the sidebar closes", async () => {
+  render(<App store={createAppStore(createApi())} />);
+  const title = await screen.findByRole("heading", { name: "Auth refactor" });
+  expect(title.closest("header")).toHaveClass("app-toolbar");
+  expect(within(title.closest("header")!).getByRole("status")).toHaveTextContent("Queued");
+  expect(screen.getAllByText("Queued").filter(element => element.getAttribute("role") === "status")).toHaveLength(1);
+  expect(screen.queryByRole("navigation", { name: "Agent ancestry" })).not.toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "New conversation" })).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Hide conversations" }));
+  fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "New conversation" })).toHaveFocus());
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  expect(await screen.findByRole("combobox", { name: "Search conversations and commands" })).toBeVisible();
+});
+
+it("opens archive from More and restores the surviving trigger on cancel", async () => {
+  render(<App store={createAppStore(createApi())} />);
+  const more = await screen.findByRole("button", { name: "More" });
+  fireEvent.keyDown(more, { key: "Enter" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Archive conversation" }));
+  const dialog = await screen.findByRole("dialog", { name: "Archive Auth refactor" });
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Keep conversation" }));
+  await waitFor(() => expect(more).toHaveFocus());
+});
+
+it("keeps the radio filter selection across sidebar toggles", async () => {
+  render(<App store={createAppStore(createApi())} />);
+  fireEvent.keyDown(await screen.findByRole("button", { name: "Filter conversations: All statuses" }), { key: "Enter" });
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: "Failed" }));
+  fireEvent.click(screen.getByRole("button", { name: "Hide conversations" }));
+  fireEvent.click(screen.getByRole("button", { name: "Show conversations" }));
+  fireEvent.keyDown(screen.getByRole("button", { name: "Filter conversations: Failed" }), { key: "Enter" });
+  expect(await screen.findByRole("menuitemradio", { name: "Failed" })).toHaveAttribute("aria-checked", "true");
+});
+
+it("discloses selected agent details with ancestry only while inspecting", async () => {
+  const store = createAppStore(createApi());
+  render(<App store={store} />);
+  await screen.findByRole("heading", { name: "Auth refactor" });
+  act(() => store.selectConversation("c1", "child-1"));
+  expect(screen.getByRole("navigation", { name: "Agent ancestry" })).toBeVisible();
+  const summary = screen.getByText("Inspecting Reviewer");
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(summary.closest("details")).not.toHaveAttribute("open");
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Agent ancestry" })).getByRole("button", { name: "Auth refactor" }));
+  expect(screen.queryByRole("navigation", { name: "Agent ancestry" })).not.toBeInTheDocument();
+});
+
+it.each(["More", "Filter conversations: All statuses"])("hands off %s to the palette and restores its surviving trigger", async (name) => {
+  render(<App store={createAppStore(createApi())} />);
+  const trigger = await screen.findByRole("button", { name });
+  trigger.focus();
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  const menu = await screen.findByRole("menu");
+  fireEvent.keyDown(menu, { key: "k", code: "KeyK", metaKey: true });
+  const search = await screen.findByRole("combobox", { name: "Search conversations and commands" });
+  await waitFor(() => expect(search).toHaveFocus());
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  fireEvent.keyDown(search, { key: "Escape" });
+  await waitFor(() => expect(trigger).toHaveFocus());
+});
+
+it("moves focus with Search when a palette command toggles the sidebar", async () => {
+  render(<App store={createAppStore(createApi())} />);
+  const trigger = await screen.findByRole("button", { name: "Search" });
+  trigger.focus();
+  fireEvent.click(trigger);
+  fireEvent.click(await screen.findByRole("option", { name: "Hide conversations" }));
+  await waitFor(() => expect(screen.queryByRole("complementary", { name: "Conversations" })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Search" })).toHaveFocus());
+});
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: Error) => void;
@@ -606,8 +689,9 @@ describe("App", () => {
     render(<App store={store} />);
     await screen.findByRole("heading", { name: "Timeline" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Archive conversation" }));
-    expect(screen.getByRole("dialog", { name: "Archive Auth refactor" })).toBeVisible();
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive conversation" }));
+    expect(await screen.findByRole("dialog", { name: "Archive Auth refactor" })).toBeVisible();
     expect(archiveConversation).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Confirm archive" }));
 
@@ -618,9 +702,10 @@ describe("App", () => {
   it("keeps lifecycle dialogs keyboard-modal and restores their trigger", async () => {
     const store = createAppStore(createApi());
     render(<App store={store} />);
-    const trigger = await screen.findByRole("button", { name: "Archive conversation" });
-    fireEvent.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "Archive Auth refactor" });
+    const trigger = await screen.findByRole("button", { name: "More" });
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive conversation" }));
+    const dialog = await screen.findByRole("dialog", { name: "Archive Auth refactor" });
     expect(document.querySelector(".command-center")).toHaveAttribute("inert");
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(trigger).toHaveFocus());
@@ -692,9 +777,8 @@ describe("App", () => {
     render(<App store={store} />);
     await screen.findByRole("treeitem", { name: /Auth refactor/ });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), {
-      target: { value: "completed" },
-    });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Filter conversations: All statuses" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Completed" }));
     expect(screen.queryByRole("treeitem", { name: /Auth refactor/ })).not.toBeInTheDocument();
 
     const sidebarButton = screen.getByRole("button", { name: "Hide conversations" });
