@@ -65,7 +65,7 @@ export function ToolOperation({ item, actions, agentPath, grouped = false, expan
             {(["input", "context", "error", "output"] as const).map(field => {
               const value = captured[field];
               if (value === null) return field === "output" ? <p key={field}>Output wasn't captured</p> : null;
-              if (field === "output" && value === "") return <p key={field}>Output was empty</p>;
+              if (field === "output" && value === "") return <p key={field}>{captured.truncated ? "No output retained; captured detail was truncated" : "Output was empty"}</p>;
               return <section key={field} className="tool-operation-field" aria-label={field}>
                 <div><span>{field === "input" ? "Command / input" : field[0].toUpperCase() + field.slice(1)}</span><CopyButton content={value} label={`Copy ${field}${captured.truncated ? " preview" : ""}`} /></div>
                 <pre>{value}</pre>

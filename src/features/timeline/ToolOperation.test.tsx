@@ -33,16 +33,21 @@ describe("Tool operation", () => {
     expect(screen.getByText("Details weren't captured")).toBeVisible();
   });
 
-  it.each([null, ""])("distinguishes output %s and copies only captured fields", async (output) => {
+  it.each([
+    { output: null, truncated: true, explanation: "Output wasn't captured" },
+    { output: "", truncated: true, explanation: "No output retained; captured detail was truncated" },
+    { output: "", truncated: false, explanation: "Output was empty" },
+  ])("distinguishes output $output truncated=$truncated and copies only captured fields", async ({ output, truncated, explanation }) => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    render(<TimelineEntry item={item} actions={{ loadEventDetail: vi.fn().mockResolvedValue({ ...detail, operation: { ...detail.operation!, output, truncated: true } }) }} />);
+    render(<TimelineEntry item={item} actions={{ loadEventDetail: vi.fn().mockResolvedValue({ ...detail, operation: { ...detail.operation!, output, truncated } }) }} />);
     fireEvent.click(screen.getByRole("button", { name: "Show details" }));
-    expect(await screen.findByText(output === null ? "Output wasn't captured" : "Output was empty")).toBeVisible();
+    expect(await screen.findByText(explanation)).toBeVisible();
     expect(screen.queryByRole("button", { name: /Copy output/ })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Copy input preview" }));
+    fireEvent.click(screen.getByRole("button", { name: truncated ? "Copy input preview" : "Copy input" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith("cargo test"));
-    expect(screen.getByText("Captured detail is truncated.")).toBeVisible();
+    if (truncated) expect(screen.getByText("Captured detail is truncated.")).toBeVisible();
+    else expect(screen.queryByText("Captured detail is truncated.")).not.toBeInTheDocument();
   });
 
   it("keeps detail open across revisions and ignores a stale response after collapse", async () => {

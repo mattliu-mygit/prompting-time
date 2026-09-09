@@ -248,7 +248,13 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
             const historyGeneration = historyRequestGeneration.current;
             const retainedCursors = [...olderPageCursors.current];
             for (const retainedCursor of retainedCursors) {
-              const retained = await loadTimelinePage({ conversationId: targetConversation, cursor: retainedCursor, limit: PAGE_SIZE });
+              const retained = await loadTimelinePage({ conversationId: targetConversation, cursor: retainedCursor, limit: PAGE_SIZE }).catch(reason => {
+                if (generation === requestGeneration.current && targetConversation === requestedConversation.current
+                  && historyGeneration === historyRequestGeneration.current) setError(messageFor(reason));
+                return null;
+              });
+              // History display failure must not discard freshly read approvals.
+              if (!retained) break;
               if (generation !== requestGeneration.current || targetConversation !== requestedConversation.current
                 || historyGeneration !== historyRequestGeneration.current) break;
               const index = olderPageCursors.current.indexOf(retainedCursor);

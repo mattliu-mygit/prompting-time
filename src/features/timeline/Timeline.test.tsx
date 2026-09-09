@@ -224,6 +224,23 @@ describe("Timeline", () => {
     expect(screen.getAllByText("Running")).toHaveLength(1);
   });
 
+  it("publishes a new actionable approval even when a retained history refresh rejects", async () => {
+    let refresh = false;
+    const loadTimeline = vi.fn(({ cursor }) => {
+      if (cursor) return refresh ? Promise.reject(new Error("Older history unavailable")) : Promise.resolve(timelinePage([operation("1", "running")], null));
+      return Promise.resolve({ ...timelinePage([event({ id: "90", sequence: "90", content: "newest" })], "retained-window"), approvals: refresh ? [{ id: "new-approval", runId: "run-1", agentId: "root", provider: "codex" as const, operation: "Run checks", scope: "One action", status: "pending" as const, responsePending: false, agentPath: ["Root"], agentPathTruncated: false }] : [] });
+    });
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={agents} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    await screen.findByText("Running");
+    refresh = true;
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={agents} actions={api} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Older history unavailable");
+    expect(screen.getByRole("button", { name: "Review Run checks" })).toBeEnabled();
+    expect(screen.getByText("Running")).toBeVisible();
+  });
+
   it.each([
     { kind: "lifecycle", presentation: "normal", truncated: false, compact: true },
     { kind: "lifecycle", presentation: "failure", truncated: false, compact: false },
