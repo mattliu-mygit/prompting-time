@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConversationSummary, ProviderInstallation } from "../../bridge/types";
+import type { ConversationSummary, ProviderInstallation, TimelineItem } from "../../bridge/types";
 import { BridgeError } from "../../bridge/api";
 import { createAppStore, type AppStore, type ConversationActions } from "../../app/store";
 import { Composer as StoreComposer } from "./Composer";
+import { Timeline } from "./Timeline";
 
 let testStore: AppStore;
 let currentActions: ConversationActions;
@@ -57,6 +58,36 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 describe("Composer", () => {
+  it.each(["empty", "lifecycle", "tool", "message"] as const)("keeps the child completeness caveat visible with %s history", async kind => {
+    const child = conversation({ id: "reviewer", parentId: "conversation-1", capabilities: {
+      canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only.",
+    } });
+    const items: TimelineItem[] = kind === "empty" ? [] : [{ id: "captured", sequence: "1", conversationId: child.id,
+      runId: "run-1", agentId: "child-execution", kind, role: kind === "message" ? "assistant" : null,
+      presentation: "normal", provider: "codex", content: "Captured activity", contentBytes: "17", truncated: false, operation: null }];
+    const api = actions({ loadTimeline: vi.fn().mockResolvedValue({
+      items, nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    }) });
+    render(<><Timeline conversation={child} refreshVersion={0} actions={api} />
+      <Composer conversation={child} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} /></>);
+    await waitFor(() => expect(screen.queryByText("Loading activity…")).not.toBeInTheDocument());
+    const composer = within(screen.getByRole("region", { name: "Message composer" }));
+    expect(composer.getByText("Captured activity may be incomplete.")).toBeVisible();
+    expect(screen.getAllByText("Captured activity may be incomplete.")).toHaveLength(1);
+    expect(composer.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(composer.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(composer.queryByRole("button")).not.toBeInTheDocument();
+    if (kind === "message") expect(screen.getByText("Captured activity")).toBeVisible();
+    if (kind === "empty") expect(screen.getByText("No recorded activity is available.")).toBeVisible();
+  });
+
+  it("does not present the recorded-child completeness caveat on a managed root", () => {
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    expect(screen.queryByText("Captured activity may be incomplete.")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Send" })).toBeVisible();
+  });
+
   it("restores provider choice, preview and draft across a recorded child visit", () => {
     const api = actions();
     const view = render(<Composer key="parent" conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);

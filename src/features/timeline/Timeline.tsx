@@ -526,7 +526,7 @@ export function Timeline({ conversation, refreshVersion, actions, viewStates }: 
             {loadingOlder ? "Loading older activity…" : "Load older activity"}
           </button>
         ) : null}
-        {!loading && items.length === 0 ? <p className="empty-note">{conversation.capabilities.canSend ? "No activity yet. Start with a message below." : "No recorded activity is available. Captured activity may be incomplete."}</p> : null}
+        {!loading && items.length === 0 ? <p className="empty-note">{conversation.capabilities.canSend ? "No activity yet. Start with a message below." : "No recorded activity is available."}</p> : null}
         <ol className="timeline-list">
           {groups.map((group) => {
             const first = group[0]!;

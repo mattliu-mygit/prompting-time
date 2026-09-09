@@ -271,7 +271,7 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
 
   if (!conversation.capabilities.canSend) return (
     <section className="composer composer-read-only" aria-label="Message composer">
-      <p className="composer-explanation">{conversation.capabilities.unavailableReason ?? "This conversation is read-only."}</p>
+      <p className="composer-explanation">{conversation.capabilities.unavailableReason ?? "This conversation is read-only."}<span> Captured activity may be incomplete.</span></p>
     </section>
   );
 

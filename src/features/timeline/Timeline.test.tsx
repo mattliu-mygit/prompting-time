@@ -63,7 +63,8 @@ describe("Timeline", () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([], null)) });
     const child: ConversationSummary = { id: "reviewer", title: "Reviewer", parentId: "conversation-1", hasChildren: true, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "claude", runStatus: "completed", rollupStatus: "completed", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } };
     render(<Timeline conversation={child} refreshVersion={0} actions={api} />);
-    expect(await screen.findByText(/captured activity may be incomplete/i)).toBeVisible();
+    expect(await screen.findByText("No recorded activity is available.")).toBeVisible();
+    expect(screen.queryByText(/captured activity may be incomplete/i)).not.toBeInTheDocument();
     expect(api.loadTimeline).toHaveBeenCalledWith({ conversationId: "reviewer", cursor: null, limit: 80 });
     expect(screen.queryByText(/Start with a message|Agent activity/)).not.toBeInTheDocument();
   });
