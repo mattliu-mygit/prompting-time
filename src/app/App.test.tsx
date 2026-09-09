@@ -94,6 +94,25 @@ it("bounds a long agent label independently of the visible conversation target h
   expect(summary.closest("details")).toHaveAttribute("open");
 });
 
+it.each([false, true])("hands root breadcrumb focus to the timeline without changing the draft or preview (%s)", async (preview) => {
+  const api = createApi();
+  const store = createAppStore(api);
+  render(<App store={store} />);
+  const message = await screen.findByRole("textbox", { name: "Message" });
+  fireEvent.change(message, { target: { value: "Keep **raw draft**" } });
+  if (preview) fireEvent.click(screen.getByRole("button", { name: "Preview Markdown" }));
+  act(() => store.selectConversation("c1", "child-1"));
+  const root = within(screen.getByRole("navigation", { name: "Agent ancestry" })).getByRole("button", { name: "Auth refactor" });
+  root.focus();
+  fireEvent.click(root);
+  await waitFor(() => expect(screen.queryByRole("navigation", { name: "Agent ancestry" })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Timeline" })).toHaveFocus());
+  expect(message).toHaveValue("Keep **raw draft**");
+  expect(screen.queryByRole("region", { name: "Message preview" }) !== null).toBe(preview);
+  expect(api.submitMessage).not.toHaveBeenCalled();
+  expect(api.steerRun).not.toHaveBeenCalled();
+});
+
 it.each(["More", "Filter conversations: All statuses"])("hands off %s to the palette and restores its surviving trigger", async (name) => {
   render(<App store={createAppStore(createApi())} />);
   const trigger = await screen.findByRole("button", { name });

@@ -349,7 +349,10 @@ function CommandCenter({ store }: { store: AppStore }) {
                 title={selectedConversation.title}
                 agents={selectedAgents}
                 selectedId={snapshot.selectedAgentId}
-                onSelect={(id) => selectConversation(selectedConversation.id, id)}
+                onSelect={(id) => {
+                  selectConversation(selectedConversation.id, id);
+                  if (id === undefined) document.getElementById("timeline-heading")?.focus({ preventScroll: true });
+                }}
                 onLoadMore={selectedConversation.agentsTruncated || agentWindow?.nextCursor || agentWindow?.evicted
                   ? () => { void store.loadAgentPage(selectedConversation.id, agentWindow?.evicted && !agentWindow.nextCursor); }
                   : undefined}
