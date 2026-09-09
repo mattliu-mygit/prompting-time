@@ -324,8 +324,8 @@ a child allocates no worktree and transfers no control or permission ownership.
 
 Each generation has visible indentation and a parent guide. Deep visual indentation
 is capped to preserve readable names and usable controls; semantic ancestry remains
-explicit. The selected conversation reveals its first child level when children
-first appear unless explicitly collapsed. Deeper disclosure is independent, and
+explicit. The selected root reveals its first child level when children
+first appear unless explicitly collapsed. Deeper disclosure is explicit, and
 explicit descendant navigation reveals ancestors. Choices survive switches and
 sidebar hide/show within the session, not app restarts. Bounded child paging keeps
 closed branches lazy, refreshes open branches when children arrive, and offers
