@@ -94,9 +94,6 @@ impl ToolOperation {
     /// Incoming fields are snapshots, never chunks. Absent fields do not erase evidence.
     pub fn merge(mut self, incoming: Self) -> Self {
         let incoming = incoming.bounded();
-        let preserve_failure = self.conflicted
-            || (self.status == ToolOperationStatus::Failed
-                && incoming.status != ToolOperationStatus::Failed);
         let delayed_start = self.status != ToolOperationStatus::Running
             && incoming.status == ToolOperationStatus::Running;
         self.conflicted |= incoming.conflicted
@@ -115,13 +112,15 @@ impl ToolOperation {
             if incoming.output.is_some() {
                 self.output = incoming.output;
             }
-            if incoming.error.is_some() && (!preserve_failure || self.error.is_none()) {
+            // Preserve established failure evidence, while allowing empty/absent
+            // fields to gain evidence even after terminal status has conflicted.
+            if incoming.error.is_some() && self.error.as_ref().is_none_or(String::is_empty) {
                 self.error = incoming.error;
             }
             if incoming.duration_ms.is_some() {
                 self.duration_ms = incoming.duration_ms;
             }
-            if incoming.exit_code.is_some() && (!preserve_failure || self.exit_code.is_none()) {
+            if incoming.exit_code.is_some() && self.exit_code.is_none_or(|code| code == 0) {
                 self.exit_code = incoming.exit_code;
             }
         }
@@ -225,6 +224,36 @@ mod tests {
         assert_eq!(merged.error.as_deref(), Some("actual failure"));
         assert_eq!(merged.exit_code, Some(1));
         assert!(!merged.conflicted);
+    }
+
+    #[test]
+    fn repeated_failed_snapshot_cannot_erase_established_failure() {
+        let mut failed = ToolOperation::new("Run", ToolOperationStatus::Failed);
+        failed.error = Some("broken".into());
+        failed.exit_code = Some(1);
+        let mut incoming = ToolOperation::new("Run", ToolOperationStatus::Failed);
+        incoming.error = Some(String::new());
+        incoming.exit_code = Some(0);
+        let merged = failed.merge(incoming);
+        assert_eq!(merged.status, ToolOperationStatus::Failed);
+        assert_eq!(merged.error.as_deref(), Some("broken"));
+        assert_eq!(merged.exit_code, Some(1));
+    }
+
+    #[test]
+    fn later_failed_evidence_enriches_an_already_conflicted_operation() {
+        let mut success = ToolOperation::new("Run", ToolOperationStatus::Succeeded);
+        success.error = Some(String::new());
+        success.exit_code = Some(0);
+        let conflict = success.merge(ToolOperation::new("Run", ToolOperationStatus::Unknown));
+        let mut failure = ToolOperation::new("Run", ToolOperationStatus::Failed);
+        failure.error = Some("broken".into());
+        failure.exit_code = Some(1);
+        let merged = conflict.merge(failure);
+        assert_eq!(merged.status, ToolOperationStatus::Unknown);
+        assert!(merged.conflicted);
+        assert_eq!(merged.error.as_deref(), Some("broken"));
+        assert_eq!(merged.exit_code, Some(1));
     }
 
     #[test]
