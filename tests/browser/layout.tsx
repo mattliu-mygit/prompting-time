@@ -9,13 +9,14 @@ import "../../src/styles/app.css";
 
 // Invented data only. This entry point never uses the native bridge or providers.
 const chatMode = new URLSearchParams(location.search).get("chat");
+const longLabels = new URLSearchParams(location.search).get("labels") === "long";
 const syntheticStatus = composerScenario === "send" || composerScenario === "failure" || composerScenario === "pending" ? "completed"
   : chatMode === "failure" ? "failed"
   : chatMode === "approval" ? "waiting"
   : chatMode === "reading" ? "completed" : "running";
 const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, index) => ({
   id: `conversation-${index}`,
-  title: `Synthetic conversation ${index}`,
+  title: longLabels && index === 0 ? "Synthetic conversation with an intentionally long title for checking the compact header" : `Synthetic conversation ${index}`,
   routingProfile: "balanced",
   workspaceId: null,
   archived: false,
@@ -26,7 +27,7 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
   rollupStatus: syntheticStatus === "failed" ? "failed" : syntheticStatus === "waiting" ? "needsAttention" : syntheticStatus === "completed" ? "completed" : "active",
   agents: [
     { id: `root-${index}`, parentId: null, provider: "codex", label: "Root agent", summary: null, status: syntheticStatus },
-    { id: `child-${index}`, parentId: `root-${index}`, provider: "codex", label: `Synthetic child ${index}`, summary: "Reviewing invented work", status: syntheticStatus },
+    { id: `child-${index}`, parentId: `root-${index}`, provider: "codex", label: longLabels && index === 0 ? `Synthetic child ${"reviewing a long description of invented work ".repeat(12)}` : `Synthetic child ${index}`, summary: "Reviewing invented work", status: syntheticStatus },
     ...(chatScenario ? [{ id: `grandchild-${index}`, parentId: `child-${index}`, provider: "codex", label: "Synthetic test agent", summary: "Checking invented test results", status: syntheticStatus } satisfies AgentSnapshot] : []),
   ],
   agentsTruncated: false,

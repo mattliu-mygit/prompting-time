@@ -73,6 +73,11 @@ standard display scaling, controls and sidebar labels use 14px, and secondary te
 is at least 13px. The new-window default is 1440 × 900; smaller windows remain
 supported, with the inspector opening as an overlay when it would crowd the chat.
 
+A single compact header holds the conversation title, provider, current status,
+and pane controls. **More → Archive conversation** keeps archival out of the main
+reading area. The sidebar puts **Search**, **New conversation**, and the status
+filter beside its heading; Search and New move into the header when it is hidden.
+
 On macOS, **⌘+** (or **⌘=**) zooms the whole app in, **⌘−** zooms out, and
 **⌘0** resets to 100%. Zoom ranges from 75% to 200% in 25-point steps and is
 remembered on this device across launches. These shortcuts also work while typing.
@@ -94,6 +99,9 @@ The composer edits Markdown source with an optional preview. **Enter** submits;
 **Shift+Enter** inserts a newline. The input grows with the draft, then scrolls within
 its height limit. Successful submission clears the draft and restores input focus;
 failure keeps the draft available. Submitted text preserves Markdown whitespace.
+Provider selection and message actions share one footer below the input.
+**Composer help** reveals routing guidance and keyboard hints; errors and reasons
+that sending is blocked remain visible without opening help.
 
 Unsent drafts stay with each conversation when you switch away and back. They are
 kept in memory only and are discarded when the app closes; no draft autosave files
@@ -113,8 +121,9 @@ conversation names/projects and known agents, not message contents.
 Composition input and held Enter keys do not accidentally submit messages.
 
 Known agents also appear in Search with their conversation context. Selecting one
-shows its breadcrumb and summary; use an ancestor or Go to parent to navigate
-back. The composer still addresses the conversation, not the inspected child.
+shows a compact ancestor path and an expandable summary; use an ancestor or Go to
+parent to navigate back. The root conversation does not repeat its title in a
+breadcrumb. The composer still addresses the conversation, not the inspected child.
 
 **Send**, **Steer**, and **Interrupt** stay tied to the provider's supported state.
 The composer does not silently queue a message when steering is unavailable.

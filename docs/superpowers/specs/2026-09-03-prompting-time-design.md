@@ -43,6 +43,15 @@ The main window uses a three-pane command-center layout:
 - The center pane prioritizes the selected conversation: readable assistant responses, compact user messages, expandable tool activity, approvals, and the composer. Provider identity stays visible without dominating the text.
 - The right inspector shows routing rationale, workspace and worktree state, changed files, active agents, and explicitly disclosed diagnostics. It is collapsible for focus and smaller windows.
 
+One 48–56px application header holds the selected conversation title, actual
+provider and run status, pane toggles, and a More menu for archival. There is no
+second workspace title row or visible Timeline heading. The sidebar heading shares
+a row with Search, New conversation, and a status filter; Search and New move to
+the header when the sidebar is hidden. The filter retains its current selection
+while toggling the sidebar. Menu cancellation restores the trigger, and menu-to-
+dialog or palette transitions restore focus only to controls that remain mounted.
+Shared dropdown primitives and icons avoid separate custom menu machinery.
+
 The inspector starts closed, leaving the conversation primary. Explicitly opening
 or closing it retains that choice while switching conversations. At smaller widths,
 it overlays the workspace instead of squeezing the reading column; its background
@@ -94,11 +103,16 @@ not a durable bookmark. Cached reading content does not make cached approvals
 actionable; current approval state must still be read from the service.
 
 Recursive agent navigation uses the existing agent identities and selection state.
-Breadcrumbs identify the selected agent and known ancestors; the palette also
+Only an inspected agent adds a compact, horizontally bounded ancestor path and
+an expandable summary. Collapsed labels stay on one line; full details remain
+available without increasing the global header height. The message-target hint
+remains visible when the summary is closed. The root conversation needs no
+duplicate breadcrumb. Breadcrumbs identify known ancestors; the palette also
 finds known current-run agents and provides a parent action. Missing ancestry is
 shown as incomplete, never invented. Navigation inspects an agent without changing
 the conversation's composer target, draft, or provider route. It does not establish
-direct messaging support for child agents.
+direct messaging support for child agents. Returning through the conversation
+breadcrumb moves focus to the timeline without scrolling or leaving Markdown preview.
 
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
 content scroll within their panes instead of pushing the composer below the window. Selecting a
@@ -159,6 +173,13 @@ clears it and returns focus to the input. The input grows with content and wrapp
 then scrolls internally at a bounded height; preview is similarly bounded. A message
 queue, message branch editing, attachment support, and artifact or diff viewers are
 separate work.
+
+At rest the composer contains the message field and one footer with provider,
+help, preview and submission controls, plus interruption when supported. Routine
+routing guidance and keyboard hints appear below the footer only when help is
+expanded. Failures and blocking explanations remain visible independently. This
+consolidation preserves text sizes, minimum control targets, and the readable
+message-column width; it does not change routing or submission semantics.
 
 ### Conversation creation
 

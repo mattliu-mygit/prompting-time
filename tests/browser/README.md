@@ -32,7 +32,7 @@ The fixture also supports folder-first creation entirely in browser memory. Open
 New conversation and verify Choose folder creates an empty `project` conversation
 with Best fit selected and focus in Message. Without a folder creates `New
 conversation`. Expand Advanced to inspect Git execution and routing overrides;
-Cancel/Escape return focus to the toolbar trigger. Collapsed options are excluded
+Cancel/Escape return focus to the New conversation trigger. Collapsed options are excluded
 from keyboard navigation.
 
 Reload the fixture with `?folder=cancel`, `?folder=error`, or `?folder=non-git` to
@@ -153,8 +153,42 @@ Use the nested agents in the same fixture to navigate from child to grandchild
 and back through the breadcrumb and palette. Verify the selected agent is clearly
 identified, duplicate labels include conversation context, and navigation leaves
 the composer draft and provider choice unchanged. Check Escape focus restoration,
-normal arrow-key text editing, and long-path wrapping at minimum window width.
+normal arrow-key text editing, and bounded horizontal paths at minimum window width.
 These checks inspect agents; they do not establish direct child messaging support.
+
+## Compact shell and composer
+
+Use `?chat=reading` on the root conversation at 100% zoom, at 960 × 600 and
+1440 × 900. The single app header should be 48–56px, the timeline should start
+near its top edge, and the empty composer should contain a field and one footer:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-compact-layout.ts")).checkCompactLayout()'
+```
+
+Open Composer help using Space and close it using Enter. While expanded, run
+`checkComposerHelpLayout()` from the same module: help must appear below every
+footer action, not force Send onto a separate row. Verify Preview/Edit preserves
+the raw draft and restores input focus. Errors and blocked-send explanations
+must remain visible with help closed.
+
+Use `?chat=reading&labels=long` to check an invented long title and selected agent
+label. The header must remain one row, the collapsed agent summary must stay
+32px, and the full label/summary must remain available through disclosure.
+Activate the conversation breadcrumb with Enter: the ancestry disappears and
+focus moves to Timeline, without scrolling or changing the draft/preview.
+
+Exercise Filter by keyboard, select Completed, hide/show the sidebar, and verify
+the radio selection persists. Search and New must appear only once, moving to the
+header while the sidebar is hidden. Open More → Archive and cancel: focus returns
+to More. Open Command-K from More and cancel: no stale menu item receives focus.
+From Search, use the palette to hide the sidebar, then reopen it from header
+Search; focus should return to the moved trigger. Repeat creation cancellation
+and successful synthetic creation from both placements.
+
+At 125% scale, repeat narrow inspector opening: it must paint above the inert
+sidebar and keep keyboard focus inside. Browser scale checks are geometry
+evidence only, not proof of native WebView zoom or macOS keyboard behavior.
 
 ## Comfortable readability
 
