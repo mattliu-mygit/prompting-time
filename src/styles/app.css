@@ -571,32 +571,15 @@ button:disabled {
   margin-right: auto;
 }
 .composer-help {
-  display: contents;
-}
-.composer-help summary {
   display: flex;
   align-items: center;
   justify-content: center;
   min-width: var(--control-target);
   min-height: var(--control-target);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--color-text-muted);
-  list-style: none;
-}
-.composer-help summary::-webkit-details-marker {
-  display: none;
-}
-.composer-help summary:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-.composer-help-content {
-  order: 1;
-  flex-basis: 100%;
-}
-.composer-help:not([open]) > .composer-help-content {
-  display: none;
 }
 .composer-help-content p {
   margin: var(--space-1) 0;

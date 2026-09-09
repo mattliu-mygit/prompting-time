@@ -44,10 +44,11 @@ describe("Composer", () => {
   it("explains the supported keyboard action without implying a queue", () => {
     const api = actions();
     const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
-    const help = screen.getByText("Composer help").closest("details")!;
-    expect(help).not.toHaveAttribute("open");
+    const help = screen.getByRole("button", { name: "Composer help" });
+    expect(help).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("Enter to send · Shift + Enter for newline · ⌘ / Ctrl + Enter also sends")).not.toBeVisible();
     fireEvent.click(screen.getByText("Composer help"));
+    expect(help).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Enter to send · Shift + Enter for newline · ⌘ / Ctrl + Enter also sends")).toBeVisible();
     expect(api.submitMessage).not.toHaveBeenCalled();
     view.rerender(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
@@ -65,6 +66,13 @@ describe("Composer", () => {
     expect(screen.getByText("Prompting Time will explain the selected route.")).not.toBeVisible();
     fireEvent.click(screen.getByText("Composer help"));
     expect(screen.getByText("Prompting Time will explain the selected route.")).toBeVisible();
+    const content = screen.getByText("Prompting Time will explain the selected route.").parentElement!;
+    const footer = provider.closest(".composer-actions")!;
+    expect(footer).not.toContainElement(content);
+    expect(footer.nextElementSibling).toBe(content);
+    expect(screen.getByRole("button", { name: "Composer help" })).toHaveAttribute("aria-controls", content.id);
+    fireEvent.click(screen.getByRole("button", { name: "Composer help" }));
+    expect(content).not.toBeVisible();
   });
   it.each([{}, { metaKey: true }, { ctrlKey: true }])("sends on Enter with %j", async (modifiers) => {
     const api = actions();

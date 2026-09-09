@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { CircleHelp } from "lucide-react";
 import type {
@@ -42,6 +42,8 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   const text = snapshot.draftsById[conversation.id]?.text ?? "";
   const submission = snapshot.submissionsById[conversation.id];
   const [preview, setPreview] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpId = useId();
   const [choice, setChoice] = useState<ProviderChoice>(() => submission?.providerOverride ?? "auto");
   const [pendingInterruption, setPendingInterruption] = useState<PendingInterruption | null>(null);
   const [interruptRequestedFor, setInterruptRequestedFor] = useState<string | null>(null);
@@ -311,13 +313,14 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
             ))}
           </select>
         </label>
-        <details className="composer-help">
-          <summary title="Composer help"><CircleHelp size={16} aria-hidden="true" /><span className="sr-only">Composer help</span></summary>
-          <div className="composer-help-content">
-            <p className="route-note">{choice === "auto" ? "Prompting Time will explain the selected route." : `Pinned to ${providerNames[choice]}.`}</p>
-            {!active || canSteer ? <p className="composer-shortcut">Enter to {canSteer ? "steer" : "send"} · Shift + Enter for newline · ⌘ / Ctrl + Enter also {canSteer ? "steers" : "sends"}</p> : null}
-          </div>
-        </details>
+        <button
+          type="button"
+          className="composer-help"
+          title="Composer help"
+          aria-expanded={helpOpen}
+          aria-controls={helpId}
+          onClick={() => setHelpOpen(!helpOpen)}
+        ><CircleHelp size={16} aria-hidden="true" /><span className="sr-only">Composer help</span></button>
         <button
           type="button"
           className="disclosure-link"
@@ -356,7 +359,10 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
           {submitting ? "Working…" : canSteer ? `Steer ${activeName}` : retrying ? "Retry send" : "Send"}
         </button>
       </div>
-
+      <div id={helpId} className="composer-help-content" hidden={!helpOpen}>
+        <p className="route-note">{choice === "auto" ? "Prompting Time will explain the selected route." : `Pinned to ${providerNames[choice]}.`}</p>
+        {!active || canSteer ? <p className="composer-shortcut">Enter to {canSteer ? "steer" : "send"} · Shift + Enter for newline · ⌘ / Ctrl + Enter also {canSteer ? "steers" : "sends"}</p> : null}
+      </div>
       </section>
       {pendingInterruption ? createPortal((
         <div className="dialog-backdrop">
