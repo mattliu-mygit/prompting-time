@@ -26,7 +26,7 @@ function appendMessage(conversationId: string, text: string) {
   messages.push({
     id: `composer-message-${messages.length}`, conversationId, runId: `run-${owner}`, agentId: `root-${owner}`,
     sequence: String(2000 + messages.length), kind: "message", role: "user", provider: "codex",
-    presentation: "normal", content: text, contentBytes: String(new TextEncoder().encode(text).length), truncated: false,
+    presentation: "normal", content: text, operation: null, contentBytes: String(new TextEncoder().encode(text).length), truncated: false,
   });
 }
 

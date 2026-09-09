@@ -5,7 +5,7 @@ import { Diagnostics } from "./Diagnostics";
 
 function event(id: string, sequence = "1"): TimelineItem {
   return { id, sequence, conversationId: "conversation", runId: "run", agentId: "root", provider: "codex",
-    kind: "diagnostic", presentation: "telemetry", role: null, content: `preview ${id}`, contentBytes: "1000", truncated: true };
+    kind: "diagnostic", presentation: "telemetry", role: null, content: `preview ${id}`, operation: null, contentBytes: "1000", truncated: true };
 }
 
 describe("Diagnostics", () => {
@@ -30,16 +30,16 @@ describe("Diagnostics", () => {
   });
 
   it("discards pending event detail when diagnostics closes and reopens", async () => {
-    let finish!: (result: { id: string; content: string; contentBytes: string; truncated: boolean }) => void;
+    let finish!: (result: { id: string; content: string; operation: null, contentBytes: string; truncated: boolean }) => void;
     const actions = { loadDiagnostics: vi.fn().mockResolvedValue({ items: [event("one")], nextCursor: null }),
-      loadEventDetail: vi.fn(() => new Promise<{ id: string; content: string; contentBytes: string; truncated: boolean }>((resolve) => { finish = resolve; })) };
+      loadEventDetail: vi.fn(() => new Promise<{ id: string; content: string; operation: null, contentBytes: string; truncated: boolean }>((resolve) => { finish = resolve; })) };
     render(<Diagnostics conversationId="conversation" actions={actions} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand diagnostics" }));
     fireEvent.click(await screen.findByRole("button", { name: "Show full provider activity" }));
     fireEvent.click(screen.getByRole("button", { name: "Collapse diagnostics" }));
     fireEvent.click(screen.getByRole("button", { name: "Expand diagnostics" }));
     await screen.findByText("preview one");
-    await act(async () => finish({ id: "one", content: "stale exact detail", contentBytes: "18", truncated: false }));
+    await act(async () => finish({ id: "one", content: "stale exact detail", operation: null, contentBytes: "18", truncated: false }));
     expect(screen.queryByText("stale exact detail")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show full provider activity" })).toHaveAttribute("aria-expanded", "false");
     await waitFor(() => expect(actions.loadDiagnostics).toHaveBeenCalledTimes(2));

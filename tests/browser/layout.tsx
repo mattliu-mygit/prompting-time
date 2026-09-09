@@ -60,7 +60,7 @@ const api: AppApi = {
       id: `event-${index}`, conversationId, runId: "run-0", agentId: "root-0",
       sequence: String(index + 1), kind: "message", role: "assistant", provider: "codex",
       presentation: "normal",
-      content: `Synthetic message ${index}. This is invented layout content.`, contentBytes: "60", truncated: false,
+      content: `Synthetic message ${index}. This is invented layout content.`, operation: null, contentBytes: "60", truncated: false,
     })),
     nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
   }),

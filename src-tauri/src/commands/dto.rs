@@ -163,6 +163,7 @@ pub enum MessageRole {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineItem {
+    pub operation: Option<ToolOperationSummary>,
     pub id: String,
     pub conversation_id: String,
     pub run_id: String,
@@ -203,10 +204,49 @@ pub struct LoadEventDetailRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct EventDetailSnapshot {
+    pub operation: Option<ToolOperationDetailSnapshot>,
     pub id: String,
     pub content: String,
     pub content_bytes: String,
     pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolOperationStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Interrupted,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOperationSummary {
+    pub status: ToolOperationStatus,
+    pub has_details: bool,
+    pub detail_revision: String,
+    pub duration_ms: Option<String>,
+    pub exit_code: Option<i32>,
+    pub truncated: bool,
+    pub conflicted: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOperationDetailSnapshot {
+    pub title: String,
+    pub status: ToolOperationStatus,
+    pub input: Option<String>,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub context: Option<String>,
+    pub duration_ms: Option<String>,
+    pub exit_code: Option<i32>,
+    pub truncated: bool,
+    pub conflicted: bool,
+    pub detail_revision: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

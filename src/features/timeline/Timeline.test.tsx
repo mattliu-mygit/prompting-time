@@ -15,7 +15,7 @@ function event(overrides: Partial<TimelineItem> & Pick<TimelineItem, "id" | "seq
     presentation: "normal",
     role: "assistant",
     content: "Done",
-    contentBytes: "4",
+    operation: null, contentBytes: "4",
     truncated: false,
     provider: "codex",
     ...overrides,
@@ -39,7 +39,7 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
     loadEventDetail: vi.fn().mockResolvedValue({
       id: "tool-1",
       content: "Complete bounded tool output",
-      contentBytes: "28",
+      operation: null, contentBytes: "28",
       truncated: false,
     }),
     loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
@@ -265,7 +265,7 @@ describe("Timeline", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([
       event({ id: "preview", sequence: "1", content: "preview", truncated: true }),
-    ], null)), loadEventDetail: vi.fn().mockResolvedValue({ id: "preview", content: "complete message", contentBytes: "16", truncated: false }) });
+    ], null)), loadEventDetail: vi.fn().mockResolvedValue({ id: "preview", content: "complete message", operation: null, contentBytes: "16", truncated: false }) });
     render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
     fireEvent.click(await screen.findByRole("button", { name: "Copy preview" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("preview"));
@@ -661,7 +661,7 @@ describe("Timeline", () => {
       event({ id: "lifecycle", sequence: "5", kind: "lifecycle", role: null, content: "Long lifecycle preview", truncated: true }),
     ];
     const loadEventDetail = vi.fn(({ eventId }: { eventId: string }) => Promise.resolve({
-      id: eventId, content: `Full ${eventId} detail`, contentBytes: "2000", truncated: false,
+      id: eventId, content: `Full ${eventId} detail`, operation: null, contentBytes: "2000", truncated: false,
     }));
     const api = actions({
       loadTimeline: vi.fn().mockResolvedValue({ items, nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
@@ -693,11 +693,11 @@ describe("Timeline", () => {
 
   it("invalidates expanded detail when streamed content grows under the same event ID", async () => {
     const loadTimeline = vi.fn()
-      .mockResolvedValueOnce(timelinePage([event({ id: "stream", sequence: "1", content: "preview one", contentBytes: "100", truncated: true })], null))
-      .mockResolvedValueOnce(timelinePage([event({ id: "stream", sequence: "1", content: "preview two", contentBytes: "200", truncated: true })], null));
+      .mockResolvedValueOnce(timelinePage([event({ id: "stream", sequence: "1", content: "preview one", operation: null, contentBytes: "100", truncated: true })], null))
+      .mockResolvedValueOnce(timelinePage([event({ id: "stream", sequence: "1", content: "preview two", operation: null, contentBytes: "200", truncated: true })], null));
     const loadEventDetail = vi.fn()
-      .mockResolvedValueOnce({ id: "stream", content: "full one", contentBytes: "100", truncated: false })
-      .mockResolvedValueOnce({ id: "stream", content: "full two", contentBytes: "200", truncated: false });
+      .mockResolvedValueOnce({ id: "stream", content: "full one", operation: null, contentBytes: "100", truncated: false })
+      .mockResolvedValueOnce({ id: "stream", content: "full two", operation: null, contentBytes: "200", truncated: false });
     const api = actions({ loadTimeline, loadEventDetail });
     const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
     fireEvent.click(await screen.findByRole("button", { name: "Show full message" }));

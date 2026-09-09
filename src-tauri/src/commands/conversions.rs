@@ -197,6 +197,7 @@ impl From<CoreMessageRole> for MessageRole {
 impl From<TimelineRecord> for TimelineItem {
     fn from(value: TimelineRecord) -> Self {
         Self {
+            operation: value.operation.map(Into::into),
             id: value.event.id.to_string(),
             conversation_id: value.event.conversation_id.to_string(),
             run_id: value.event.run_id.to_string(),
@@ -248,10 +249,59 @@ impl From<CoreTimelineSnapshot> for TimelinePage {
 impl From<CoreEventDetail> for EventDetailSnapshot {
     fn from(value: CoreEventDetail) -> Self {
         Self {
+            operation: value.operation.map(Into::into),
             id: value.id.to_string(),
             content: value.content,
             content_bytes: value.content_bytes.to_string(),
             truncated: value.truncated,
+        }
+    }
+}
+
+impl From<prompting_time_core::tool_operation::ToolOperationStatus> for ToolOperationStatus {
+    fn from(value: prompting_time_core::tool_operation::ToolOperationStatus) -> Self {
+        use prompting_time_core::tool_operation::ToolOperationStatus as Core;
+        match value {
+            Core::Running => Self::Running,
+            Core::Succeeded => Self::Succeeded,
+            Core::Failed => Self::Failed,
+            Core::Interrupted => Self::Interrupted,
+            Core::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<prompting_time_core::tool_operation::ToolOperationSummary> for ToolOperationSummary {
+    fn from(value: prompting_time_core::tool_operation::ToolOperationSummary) -> Self {
+        Self {
+            status: value.status.into(),
+            has_details: value.has_details,
+            detail_revision: value.detail_revision.to_string(),
+            duration_ms: value.duration_ms.map(|value| value.to_string()),
+            exit_code: value.exit_code,
+            truncated: value.truncated,
+            conflicted: value.conflicted,
+        }
+    }
+}
+
+impl From<prompting_time_core::tool_operation::ToolOperationDetail>
+    for ToolOperationDetailSnapshot
+{
+    fn from(value: prompting_time_core::tool_operation::ToolOperationDetail) -> Self {
+        let operation = value.operation.bounded();
+        Self {
+            title: operation.title,
+            status: operation.status.into(),
+            input: operation.input,
+            output: operation.output,
+            error: operation.error,
+            context: operation.context,
+            duration_ms: operation.duration_ms.map(|value| value.to_string()),
+            exit_code: operation.exit_code,
+            truncated: operation.truncated,
+            conflicted: operation.conflicted,
+            detail_revision: value.revision.to_string(),
         }
     }
 }

@@ -28,7 +28,7 @@ function item(conversationId: string, sequence: number, content: string, extra: 
   return {
     id: `${conversationId}-chat-${sequence}`, conversationId, runId: `run-${owner}`, agentId: `root-${owner}`,
     sequence: String(sequence), kind: "message", role: "assistant", provider: "codex",
-    presentation: "normal", content, contentBytes: String(encoder.encode(content).length), truncated: false,
+    presentation: "normal", content, operation: null, contentBytes: String(encoder.encode(content).length), truncated: false,
     ...extra,
   };
 }

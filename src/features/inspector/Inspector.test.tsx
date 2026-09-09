@@ -328,11 +328,11 @@ describe("Inspector", () => {
   it("pages diagnostics chronologically with four retained pages and lazy detail", async () => {
     const item = (sequence: number): TimelineItem => ({ id: `d${sequence}`, sequence: String(sequence), conversationId: conversation.id,
       runId: "run-1", agentId: "root", provider: "codex", kind: "diagnostic", presentation: "telemetry", role: null,
-      content: `notification ${sequence}`, contentBytes: "2000", truncated: true });
+      content: `notification ${sequence}`, operation: null, contentBytes: "2000", truncated: true });
     const api = actions({ loadDiagnostics: vi.fn(({ cursor }) => {
       const end = cursor === null ? 150 : Number(cursor);
       return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => item(end - 29 + index)), nextCursor: end > 30 ? String(end - 30) : null });
-    }), loadEventDetail: vi.fn().mockResolvedValue({ id: "d150", content: "exact notification", contentBytes: "18", truncated: false }) });
+    }), loadEventDetail: vi.fn().mockResolvedValue({ id: "d150", content: "exact notification", operation: null, contentBytes: "18", truncated: false }) });
     render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
     fireEvent.click(await screen.findByRole("button", { name: "Expand diagnostics" }));
     await screen.findByText("notification 150");

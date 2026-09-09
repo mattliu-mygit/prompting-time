@@ -7,4 +7,5 @@ pub mod providers;
 pub mod router;
 pub mod runtime;
 pub mod store;
+pub mod tool_operation;
 pub mod workspace;

@@ -228,6 +228,9 @@ pub enum ProviderEvent {
     },
     NativeItemActivity {
         native_item_id: String,
+        native_turn_id: Option<String>,
+        native_agent_id: Option<String>,
+        operation: Option<crate::tool_operation::ToolOperation>,
         description: String,
         mutation: MutationState,
     },
@@ -311,7 +314,39 @@ impl ProviderTurn {
     }
 
     pub async fn recv(&mut self) -> Option<Result<ProviderEvent, ProviderError>> {
-        self.events.recv().await
+        self.events.recv().await.map(|event| {
+            event.and_then(|mut event| {
+                if let ProviderEvent::NativeItemActivity {
+                    native_item_id,
+                    native_turn_id,
+                    native_agent_id,
+                    operation,
+                    description,
+                    ..
+                } = &mut event
+                {
+                    if [
+                        Some(native_item_id.as_str()),
+                        native_turn_id.as_deref(),
+                        native_agent_id.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|id| id.is_empty() || id.len() > 256)
+                    {
+                        return Err(ProviderError::Protocol {
+                            category: "tool-identity-bounds".into(),
+                        });
+                    }
+                    if let Some(value) = operation.take() {
+                        let bounded = value.bounded();
+                        *description = bounded.title.clone();
+                        *operation = Some(bounded);
+                    }
+                }
+                Ok(event)
+            })
+        })
     }
 
     pub async fn shutdown(&mut self) -> Result<(), ProviderError> {
@@ -564,6 +599,44 @@ fn sanitize_diagnostic(diagnostic: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn operation_ingress_bounds_detail_and_rejects_oversized_identity_before_buffering() {
+        use super::*;
+        use crate::tool_operation::{MAX_OPERATION_BYTES, ToolOperation, ToolOperationStatus};
+        let (sender, events) = mpsc::channel(2);
+        let mut operation = ToolOperation::new("界".repeat(5000), ToolOperationStatus::Running);
+        operation.output = Some("x".repeat(500_000));
+        let mut event = ProviderEvent::NativeItemActivity {
+            native_item_id: "item".into(),
+            native_turn_id: None,
+            native_agent_id: None,
+            operation: Some(operation),
+            description: "legacy".into(),
+            mutation: MutationState::NoneObserved,
+        };
+        sender.send(Ok(event.clone())).await.unwrap();
+        if let ProviderEvent::NativeItemActivity { native_item_id, .. } = &mut event {
+            *native_item_id = "x".repeat(257);
+        }
+        sender.send(Ok(event)).await.unwrap();
+        let mut turn = ProviderTurn {
+            events,
+            owner: None,
+        };
+        let Some(Ok(ProviderEvent::NativeItemActivity {
+            operation: Some(operation),
+            description,
+            ..
+        })) = turn.recv().await
+        else {
+            panic!("operation");
+        };
+        assert!(operation.display_bytes() <= MAX_OPERATION_BYTES);
+        assert!(operation.truncated);
+        assert!(description.len() <= 1024);
+        assert!(turn.recv().await.unwrap().is_err());
+    }
+
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};

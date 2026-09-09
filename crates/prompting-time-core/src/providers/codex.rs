@@ -2820,6 +2820,9 @@ fn normalize_item(params: &Value) -> Result<Option<ProviderEvent>, ProviderError
         .unwrap_or("observed");
     Ok(Some(ProviderEvent::NativeItemActivity {
         native_item_id,
+        native_turn_id: None,
+        native_agent_id: None,
+        operation: None,
         description: format!("{item_type}: {status}"),
         mutation,
     }))

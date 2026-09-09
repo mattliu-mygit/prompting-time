@@ -179,6 +179,7 @@ export type DiagnosticsPage = {
 };
 
 export type EventDetailSnapshot = {
+	operation: ToolOperationDetailSnapshot | null,
 	id: string,
 	content: string,
 	contentBytes: string,
@@ -399,6 +400,7 @@ export type SubmitMessageRequest = {
 export type TaskKind = "implementation" | "review" | "research" | "general";
 
 export type TimelineItem = {
+	operation: ToolOperationSummary | null,
 	id: string,
 	conversationId: string,
 	runId: string,
@@ -424,6 +426,32 @@ export type TimelinePage = {
 };
 
 export type TimelinePresentation = "normal" | "notice" | "failure" | "telemetry";
+
+export type ToolOperationDetailSnapshot = {
+	title: string,
+	status: ToolOperationStatus,
+	input: string | null,
+	output: string | null,
+	error: string | null,
+	context: string | null,
+	durationMs: string | null,
+	exitCode: number | null,
+	truncated: boolean,
+	conflicted: boolean,
+	detailRevision: string,
+};
+
+export type ToolOperationStatus = "running" | "succeeded" | "failed" | "interrupted" | "unknown";
+
+export type ToolOperationSummary = {
+	status: ToolOperationStatus,
+	hasDetails: boolean,
+	detailRevision: string,
+	durationMs: string | null,
+	exitCode: number | null,
+	truncated: boolean,
+	conflicted: boolean,
+};
 
 export type UserInputOption = {
 	label: string,

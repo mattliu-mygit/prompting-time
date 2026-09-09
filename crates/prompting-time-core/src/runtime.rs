@@ -2744,8 +2744,10 @@ async fn execute_attempt(
                 .await;
         }
         if !approval_responding(&job.active) && !deferred_events.is_empty() {
-            while let Some(event) = deferred_events.pop_back() {
-                buffered.push_front(event);
+            // Acknowledgement removes the staged prefix below. Replay after that
+            // prefix so it cannot discard deferred child lifecycle or operation data.
+            for (offset, event) in deferred_events.drain(..).enumerate() {
+                buffered.insert(staged_buffered + offset, event);
             }
             deferred_event_bytes = 0;
         }
@@ -2833,6 +2835,9 @@ async fn execute_attempt(
                             earlier.is_terminal() || matches!((earlier, &event),
                                 (ProviderEvent::NativeChild { owner: earlier, event: NativeChildEvent::Completed | NativeChildEvent::Interrupted | NativeChildEvent::Failed }, ProviderEvent::NativeChild { owner, .. })
                                     if earlier.native_thread_id == owner.native_thread_id)
+                                || matches!((earlier, &event),
+                                    (ProviderEvent::NativeChild { owner: earlier, event: NativeChildEvent::Completed | NativeChildEvent::Interrupted | NativeChildEvent::Failed }, ProviderEvent::NativeItemActivity { native_agent_id: Some(owner), .. })
+                                    if &earlier.native_thread_id == owner)
                         });
                         let waiting_terminal = (event.is_terminal() || child_terminal_owner.is_some())
                             && approval_responding(&job.active)
@@ -2948,13 +2953,15 @@ async fn execute_attempt(
                             } => ProviderEventRecord::tool(description.clone(), *observed),
                             ProviderEvent::NativeItemActivity {
                                 native_item_id,
+                                native_turn_id,
+                                native_agent_id,
+                                operation,
                                 description,
                                 mutation: observed,
-                            } => ProviderEventRecord::native_item(
-                                native_item_id.clone(),
-                                description.clone(),
-                                *observed,
-                            ),
+                            } => ProviderEventRecord::NativeItem {
+                                native_item_id: native_item_id.clone(), native_turn_id: native_turn_id.clone(),
+                                native_agent_id: native_agent_id.clone(), operation: operation.clone(), content: description.clone(), mutation: *observed,
+                            },
                             ProviderEvent::ChildAgentActivity {
                                 native_item_id,
                                 parent_native_thread_id,
@@ -2996,11 +3003,15 @@ async fn execute_attempt(
                                 ).await;
                             }
                         };
-                        let child_wait = job.active.attempt.lock().unwrap().as_ref().is_some_and(|attempt| attempt.pending_child.is_some());
-                        if child_wait {
+                        let pending_child = job.active.attempt.lock().unwrap().as_ref().and_then(|attempt| attempt.pending_child.clone());
+                        let waiting_child_operation = pending_child.as_ref().is_some_and(|(_, owner)| {
+                            matches!(&event, ProviderEvent::NativeItemActivity { native_agent_id: Some(id), .. } if id == &owner.native_thread_id)
+                        });
+                        if pending_child.is_some() && !waiting_child_operation {
                             let result = store.append_owned_run_event(attempt.run_id, attempt.root_id, &attempt.dispatch_owner_id, record).await;
                             drop(gate);
                             if let Err(error) = result {
+                                if discard_stale_operation(store, &attempt, &event, &error).await? { continue; }
                                 return finalize_attempt(store, &job.active, &attempt, turn, &mut buffered, AttemptFinish::RuntimeError(error.into())).await;
                             }
                             continue;
@@ -3016,6 +3027,7 @@ async fn execute_attempt(
                         drop(gate);
                         match stage {
                             Err(error) => {
+                                if discard_stale_operation(store, &attempt, &event, &error).await? { continue; }
                                 return finalize_attempt(
                                     store,
                                     &job.active,
@@ -3289,19 +3301,40 @@ async fn execute_attempt(
             }
             ProviderEvent::NativeItemActivity {
                 native_item_id,
+                native_turn_id,
+                native_agent_id,
+                operation,
                 description,
                 mutation: observed,
             } if started => {
                 mutation = merge_mutation(mutation, observed);
+                let child_operation = native_agent_id.is_some();
                 if let Err(error) = store
                     .append_owned_run_event(
                         attempt.run_id,
                         attempt.root_id,
                         &attempt.dispatch_owner_id,
-                        ProviderEventRecord::native_item(native_item_id, description, observed),
+                        ProviderEventRecord::NativeItem {
+                            native_item_id,
+                            native_turn_id,
+                            native_agent_id,
+                            operation,
+                            content: description,
+                            mutation: observed,
+                        },
                     )
                     .await
                 {
+                    if child_operation && matches!(error, StoreError::NativeAgentIdentityConflict) {
+                        store
+                            .retain_discarded_operation_mutation(
+                                attempt.run_id,
+                                &attempt.dispatch_owner_id,
+                                observed,
+                            )
+                            .await?;
+                        continue;
+                    }
                     return finalize_attempt(
                         store,
                         &job.active,
@@ -3710,6 +3743,31 @@ async fn interrupt_before_start(
         .await?;
     set_status(active, attempt.run_id, RunStatus::Interrupted);
     Ok(AttemptResult::Interrupted)
+}
+
+async fn discard_stale_operation(
+    store: &Store,
+    attempt: &AttemptSpec,
+    event: &ProviderEvent,
+    error: &StoreError,
+) -> Result<bool, RuntimeError> {
+    if matches!(error, StoreError::NativeAgentIdentityConflict)
+        && let ProviderEvent::NativeItemActivity {
+            native_agent_id: Some(_),
+            mutation,
+            ..
+        } = event
+    {
+        store
+            .retain_discarded_operation_mutation(
+                attempt.run_id,
+                &attempt.dispatch_owner_id,
+                *mutation,
+            )
+            .await?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 async fn interrupt_attempt(
@@ -5284,7 +5342,12 @@ mod tests {
 
     #[tokio::test]
     async fn native_child_followup_deferral_allows_sibling_progress_before_answer_ack() {
-        native_child_answer_ordering(true, false).await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            native_child_answer_ordering(true, false),
+        )
+        .await
+        .expect("child operations and deferred lifecycle must finish");
     }
 
     #[tokio::test]
@@ -5574,6 +5637,44 @@ mod tests {
         };
         barrier.ready.notified().await;
         if followup && !hold_attempt_gate {
+            for status in [
+                crate::tool_operation::ToolOperationStatus::Running,
+                crate::tool_operation::ToolOperationStatus::Succeeded,
+            ] {
+                sender
+                    .send(Ok(ProviderEvent::NativeItemActivity {
+                        native_item_id: "child-operation".into(),
+                        native_turn_id: Some(native.native_turn_id.clone()),
+                        native_agent_id: Some(native.native_thread_id.clone()),
+                        operation: Some(crate::tool_operation::ToolOperation::new(
+                            "Child command",
+                            status,
+                        )),
+                        description: "legacy".into(),
+                        mutation: MutationState::NoneObserved,
+                    }))
+                    .await
+                    .unwrap();
+            }
+            let staged = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if store.pending_recovery().await.unwrap().iter().any(|run| {
+                        run.staged_events
+                            .iter()
+                            .filter(|event| event.content == "Child command")
+                            .count()
+                            == 2
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            if staged.is_err() {
+                barrier.release.notify_one();
+            }
+            staged.expect("child operation snapshots must stage before acknowledgement");
             sender
                 .send(Ok(ProviderEvent::ApprovalRequested {
                     request_id: "earlier-root-control".into(),
@@ -5603,6 +5704,22 @@ mod tests {
                 }))
                 .await
                 .unwrap();
+            if !hold_attempt_gate {
+                sender
+                    .send(Ok(ProviderEvent::NativeItemActivity {
+                        native_item_id: "next-operation".into(),
+                        native_turn_id: Some(followup_owner.native_turn_id.clone()),
+                        native_agent_id: Some(followup_owner.native_thread_id.clone()),
+                        operation: Some(crate::tool_operation::ToolOperation::new(
+                            "Next child command",
+                            crate::tool_operation::ToolOperationStatus::Succeeded,
+                        )),
+                        description: "legacy".into(),
+                        mutation: MutationState::NoneObserved,
+                    }))
+                    .await
+                    .unwrap();
+            }
             sender
                 .send(Ok(ProviderEvent::NativeChild {
                     owner: followup_owner.clone(),
@@ -5818,6 +5935,23 @@ mod tests {
             .load_approval(handle.run_id(), "native-question")
             .await
             .unwrap();
+        if followup && !hold_attempt_gate {
+            let rows = store
+                .load_recent_timeline(conversation.id, None, 100)
+                .await
+                .unwrap();
+            let operations = rows
+                .items
+                .iter()
+                .filter(|row| row.operation.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(operations.len(), 2);
+            assert_eq!(operations[0].event.agent_id, approval.agent_id);
+            assert_eq!(
+                operations[0].operation.as_ref().unwrap().status,
+                crate::tool_operation::ToolOperationStatus::Succeeded
+            );
+        }
         assert_eq!(
             approval.response_intent.unwrap().status,
             ApprovalResponseIntentStatus::Acknowledged
@@ -6322,6 +6456,27 @@ mod tests {
         };
         response_barrier.started.notified().await;
         let sender = adapter.sender.lock().unwrap().as_ref().unwrap().clone();
+        for status in [
+            crate::tool_operation::ToolOperationStatus::Running,
+            crate::tool_operation::ToolOperationStatus::Succeeded,
+        ] {
+            let mut operation =
+                crate::tool_operation::ToolOperation::new("Run staged fixture", status);
+            if status == crate::tool_operation::ToolOperationStatus::Succeeded {
+                operation.output = Some("READY\n".into());
+            }
+            sender
+                .send(Ok(ProviderEvent::NativeItemActivity {
+                    native_item_id: "operation".into(),
+                    native_turn_id: Some("turn".into()),
+                    native_agent_id: None,
+                    operation: Some(operation),
+                    description: "legacy".into(),
+                    mutation: MutationState::NoneObserved,
+                }))
+                .await
+                .unwrap();
+        }
         sender
             .send(Ok(ProviderEvent::Progress {
                 content: "staged before acknowledgement".to_owned(),
@@ -6370,10 +6525,57 @@ mod tests {
                 StoreError::ApprovalResponseAlreadyAcknowledged
             ))
         ));
+        sender
+            .send(Ok(ProviderEvent::NativeItemActivity {
+                native_item_id: "late".into(),
+                native_turn_id: Some("ended".into()),
+                native_agent_id: Some("stale-child".into()),
+                operation: Some(crate::tool_operation::ToolOperation::new(
+                    "Stale child",
+                    crate::tool_operation::ToolOperationStatus::Succeeded,
+                )),
+                description: "late display".into(),
+                mutation: MutationState::Unknown,
+            }))
+            .await
+            .unwrap();
         sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
         adapter.sender.lock().unwrap().take();
         drop(sender);
         assert_eq!(handle.wait().await.unwrap().status, RunStatus::Completed);
+        let operations = store
+            .load_recent_timeline(conversation.id, None, 20)
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|row| row.operation.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0].operation.as_ref().unwrap().status,
+            crate::tool_operation::ToolOperationStatus::Succeeded
+        );
+        assert_eq!(
+            store
+                .load_event_detail(operations[0].event.id)
+                .await
+                .unwrap()
+                .operation
+                .unwrap()
+                .operation
+                .output
+                .as_deref(),
+            Some("READY\n")
+        );
+        assert_eq!(
+            store
+                .load_run(handle.run_id())
+                .await
+                .unwrap()
+                .mutation_state,
+            MutationState::Unknown
+        );
         let timeline = store
             .load_timeline(conversation.id, None, 20)
             .await

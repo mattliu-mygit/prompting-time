@@ -1,3 +1,5 @@
+use crate::tool_operation::{ToolOperation, ToolOperationDetail, ToolOperationSummary};
+mod operations;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -285,6 +287,9 @@ pub enum ProviderEventRecord {
     },
     NativeItem {
         native_item_id: String,
+        native_turn_id: Option<String>,
+        native_agent_id: Option<String>,
+        operation: Option<ToolOperation>,
         content: String,
         mutation: MutationState,
     },
@@ -378,6 +383,9 @@ impl ProviderEventRecord {
     ) -> Self {
         Self::NativeItem {
             native_item_id: native_item_id.into(),
+            native_turn_id: None,
+            native_agent_id: None,
+            operation: None,
             content: content.into(),
             mutation,
         }
@@ -597,11 +605,17 @@ impl ProviderEventRecord {
             }
             Self::NativeItem {
                 native_item_id,
+                native_turn_id,
+                native_agent_id,
+                operation,
                 mutation,
                 ..
             } => Some(
                 serde_json::json!({
                     "nativeItemId": native_item_id,
+                    "nativeTurnId": native_turn_id,
+                    "nativeAgentId": native_agent_id,
+                    "operation": operation,
                     "mutation": mutation,
                 })
                 .to_string(),
@@ -703,6 +717,7 @@ pub struct SidebarDetails {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineRecord {
+    pub operation: Option<ToolOperationSummary>,
     pub event: TimelineEvent,
     pub provider: ProviderId,
     pub presentation: TimelinePresentation,
@@ -720,6 +735,7 @@ pub enum TimelinePresentation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventDetail {
+    pub operation: Option<ToolOperationDetail>,
     pub id: TimelineEventId,
     pub content: String,
     pub content_bytes: usize,
@@ -2238,6 +2254,7 @@ impl Store {
         expected_owner_id: Option<&str>,
         fallback: Option<(NewFallbackAttempt, Option<(&str, Duration)>)>,
     ) -> Result<(TimelineEvent, Option<(ProviderRun, AgentNode)>), StoreError> {
+        let record = operations::normalize(record)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(expected_owner_id) = expected_owner_id {
             require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
@@ -2269,6 +2286,7 @@ impl Store {
                     .id
             }
         };
+        let agent_id = operations::owner(&mut transaction, &run, agent_id, &record).await?;
         let agent_row = sqlx::query_as::<_, AgentNodeRow>(
             "SELECT id, run_id, parent_id, provider, provider_native_id, provider_native_path, label, summary, status, created_at \
              FROM agent_nodes WHERE id = ? AND run_id = ?",
@@ -2446,6 +2464,34 @@ impl Store {
         };
         let event_id = TimelineEventId::new();
         let now = now_millis();
+
+        if matches!(
+            &record,
+            ProviderEventRecord::NativeItem {
+                operation: Some(_),
+                ..
+            }
+        ) {
+            let event = operations::persist(
+                &mut transaction,
+                TimelineEvent {
+                    id: event_id,
+                    conversation_id: run.conversation_id,
+                    run_id,
+                    agent_id: event_agent_id,
+                    sequence: 0,
+                    kind,
+                    role: None,
+                    content: String::new(),
+                },
+                payload_json.as_deref().expect("native item payload"),
+                now,
+            )
+            .await?;
+            transaction.commit().await?;
+            self.notify_change(run.conversation_id, run_id);
+            return Ok((event, None));
+        }
 
         if let Some(native_item_id) = native_item_id
             && let Some((existing_id, sequence, existing_content)) =
@@ -2809,6 +2855,7 @@ impl Store {
         record: ProviderEventRecord,
         expected_owner_id: Option<&str>,
     ) -> Result<StageWaitingEventOutcome, StoreError> {
+        let record = operations::normalize(record)?;
         let canonical_record = record.clone();
         let native_item_id = match &record {
             ProviderEventRecord::NativeMessage { native_item_id, .. } => {
@@ -2858,6 +2905,8 @@ impl Store {
             id: run_id.to_string(),
         })?
         .into_domain()?;
+        let agent_id =
+            operations::owner(&mut transaction, &run, agent_id, &canonical_record).await?;
         let agent = sqlx::query_as::<_, AgentNodeRow>(
             "SELECT id, run_id, parent_id, provider, provider_native_id, provider_native_path, label, summary, status, created_at \
              FROM agent_nodes WHERE id = ? AND run_id = ?",
@@ -2871,7 +2920,16 @@ impl Store {
             id: agent_id.to_string(),
         })?
         .into_domain()?;
-        if run.status != RunStatus::Waiting || agent.status != AgentStatus::Waiting {
+        if run.status != RunStatus::Waiting
+            || !(agent.status == AgentStatus::Waiting
+                || (matches!(
+                    &canonical_record,
+                    ProviderEventRecord::NativeItem {
+                        native_agent_id: Some(_),
+                        ..
+                    }
+                ) && agent.status == AgentStatus::Running))
+        {
             return Err(StoreError::InvalidEventState {
                 event: "stage waiting event",
                 status: if run.status != RunStatus::Waiting {
@@ -4192,7 +4250,9 @@ impl Store {
         // malformed or legacy payloads remain visible notices. No payload crosses this read.
         let mut query = QueryBuilder::<Sqlite>::new(
             "WITH projected AS (SELECT events.*, \
-                CASE WHEN kind <> 'diagnostic' THEN 'normal' \
+                CASE WHEN operation_json IS NOT NULL AND json_extract(operation_json, '$.conflicted') = 1 THEN 'notice' \
+                     WHEN operation_json IS NOT NULL AND json_extract(operation_json, '$.status') = 'failed' THEN 'failure' \
+                     WHEN kind <> 'diagnostic' THEN 'normal' \
                      WHEN NOT json_valid(payload_json) THEN 'notice' \
                      WHEN json_type(payload_json, '$.failure') = 'true' \
                        OR (json_type(payload_json, '$.errorCategory') = 'text' \
@@ -4209,8 +4269,19 @@ impl Store {
         query.push_bind(MAX_MESSAGE_PREVIEW_BYTES as i64);
         query.push(" ELSE ");
         query.push_bind(MAX_TIMELINE_PREVIEW_BYTES as i64);
-        query.push(" END) AS content, length(CAST(projected.content AS BLOB)) AS content_bytes, provider_runs.provider \
+        query.push(" END) AS content, length(CAST(projected.content AS BLOB)) AS content_bytes, provider_runs.provider, \
+                    CASE WHEN operation_turn.ended = 1 THEN 'completed' ELSE provider_runs.status END AS run_status, \
+                    CASE WHEN operation_turn.ended = 1 THEN 'completed' ELSE agent_nodes.status END AS agent_status, \
+                    CASE WHEN operation_json IS NULL THEN NULL ELSE json_object( \
+                        'status', json_extract(operation_json, '$.status'), \
+                        'hasDetails', json(CASE WHEN json_type(operation_json, '$.input') = 'text' OR json_type(operation_json, '$.output') = 'text' OR json_type(operation_json, '$.error') = 'text' OR json_type(operation_json, '$.context') = 'text' THEN 'true' ELSE 'false' END), \
+                        'detailRevision', operation_revision, 'durationMs', json_extract(operation_json, '$.durationMs'), \
+                        'exitCode', json_extract(operation_json, '$.exitCode'), \
+                        'truncated', json(CASE WHEN json_extract(operation_json, '$.truncated') THEN 'true' ELSE 'false' END), \
+                        'conflicted', json(CASE WHEN json_extract(operation_json, '$.conflicted') THEN 'true' ELSE 'false' END)) END AS operation_summary \
                     FROM projected JOIN provider_runs ON provider_runs.id = projected.run_id \
+                    JOIN agent_nodes ON agent_nodes.id = projected.agent_id \
+                    LEFT JOIN native_child_turns operation_turn ON operation_turn.agent_id = projected.agent_id AND operation_turn.native_turn_id = projected.native_turn_id \
                     WHERE projected.presentation ");
         query.push(if diagnostics {
             "= 'telemetry'"
@@ -4609,9 +4680,12 @@ impl Store {
         &self,
         event_id: TimelineEventId,
     ) -> Result<EventDetail, StoreError> {
-        let (content, content_bytes): (String, i64) = sqlx::query_as(
-            "SELECT substr(content, 1, 262144), length(CAST(content AS BLOB)) \
-             FROM events WHERE id = ?",
+        let (content, content_bytes, operation_json, revision, run_status, agent_status): (String, i64, Option<String>, i64, String, String) = sqlx::query_as(
+            "SELECT substr(events.content, 1, 262144), length(CAST(events.content AS BLOB)), events.operation_json, events.operation_revision, \
+             CASE WHEN operation_turn.ended = 1 THEN 'completed' ELSE provider_runs.status END, \
+             CASE WHEN operation_turn.ended = 1 THEN 'completed' ELSE agent_nodes.status END \
+             FROM events JOIN provider_runs ON provider_runs.id = events.run_id JOIN agent_nodes ON agent_nodes.id = events.agent_id \
+             LEFT JOIN native_child_turns operation_turn ON operation_turn.agent_id = events.agent_id AND operation_turn.native_turn_id = events.native_turn_id WHERE events.id = ?",
         )
         .bind(event_id.to_string())
         .fetch_optional(&self.pool)
@@ -4627,6 +4701,7 @@ impl Store {
             })?;
         let content = truncate_utf8(content, MAX_EVENT_DETAIL_BYTES);
         Ok(EventDetail {
+            operation: operations::detail(operation_json, revision, &run_status, &agent_status)?,
             id: event_id,
             truncated: content_bytes > content.len(),
             content,
@@ -6097,6 +6172,32 @@ async fn drain_staged_events_in_transaction(
     let now = now_millis();
     let mut drained = Vec::with_capacity(staged.len());
     for event in staged {
+        if event.overflowed_kind.is_none()
+            && event.payload_json.as_deref().is_some_and(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .is_some_and(|value| value["operation"].is_object())
+            })
+        {
+            let persisted = operations::persist(
+                transaction,
+                TimelineEvent {
+                    id: event.id,
+                    conversation_id: event.conversation_id,
+                    run_id: event.run_id,
+                    agent_id: event.agent_id,
+                    sequence: 0,
+                    kind: TimelineEventKind::Tool,
+                    role: None,
+                    content: String::new(),
+                },
+                event.payload_json.as_deref().expect("operation payload"),
+                now,
+            )
+            .await?;
+            drained.push(persisted);
+            continue;
+        }
         let canonical_assistant = event.agent_id == root_id
             && event.kind == TimelineEventKind::Message
             && event.overflowed_kind.is_none();
@@ -7290,6 +7391,9 @@ struct TimelineEventRow {
 
 #[derive(FromRow)]
 struct TimelineRecordRow {
+    operation_summary: Option<String>,
+    run_status: String,
+    agent_status: String,
     id: String,
     conversation_id: String,
     run_id: String,
@@ -7331,6 +7435,23 @@ impl TimelineRecordRow {
         let content = truncate_utf8(self.content, preview_bytes);
         let content_truncated = content_bytes > content.len();
         Ok(TimelineRecord {
+            operation: self
+                .operation_summary
+                .map(|json| {
+                    let mut summary: ToolOperationSummary =
+                        serde_json::from_str(&json).map_err(invalid_data("tool summary"))?;
+                    let status = operations::projected_status(
+                        summary.status,
+                        &self.run_status,
+                        &self.agent_status,
+                    );
+                    summary.detail_revision = summary
+                        .detail_revision
+                        .saturating_add(u64::from(status != summary.status));
+                    summary.status = status;
+                    Ok::<_, StoreError>(summary)
+                })
+                .transpose()?,
             event: TimelineEventRow {
                 id: self.id,
                 conversation_id: self.conversation_id,
@@ -12983,3 +13104,5 @@ mod tests {
         assert_eq!(event_count, expected_event_count);
     }
 }
+#[cfg(test)]
+mod tool_operation_tests;

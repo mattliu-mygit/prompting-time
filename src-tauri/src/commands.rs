@@ -508,6 +508,7 @@ mod tests {
     #[test]
     fn ordinary_timeline_items_have_no_provider_native_fields() {
         let json = serde_json::to_value(TimelineItem {
+            operation: None,
             id: "event-1".to_owned(),
             conversation_id: "conversation-1".to_owned(),
             run_id: "run-1".to_owned(),
@@ -701,5 +702,33 @@ mod tests {
         let expected = std::fs::read_to_string(expected_path).unwrap();
         let actual = std::fs::read_to_string(generated).unwrap();
         assert_eq!(actual, expected, "regenerate src/bridge/types.ts from Rust");
+    }
+
+    #[test]
+    fn operation_dto_preserves_empty_output_and_excludes_private_identity() {
+        use prompting_time_core::tool_operation::{
+            ToolOperation, ToolOperationDetail, ToolOperationStatus,
+        };
+        let mut operation = ToolOperation::new("Run fixture", ToolOperationStatus::Succeeded);
+        operation.output = Some(String::new());
+        operation.context = Some("invented workspace".into());
+        let summary = ToolOperationSummary::from(operation.summary(2));
+        let detail = ToolOperationDetailSnapshot::from(ToolOperationDetail {
+            operation,
+            revision: 2,
+        });
+        let summary_json = serde_json::to_value(summary).unwrap();
+        let detail_json = serde_json::to_value(detail).unwrap();
+        assert_eq!(summary_json["hasDetails"], true);
+        assert_eq!(summary_json["detailRevision"], "2");
+        assert!(summary_json.get("output").is_none());
+        assert_eq!(detail_json["output"], "");
+        assert!(detail_json["error"].is_null());
+        assert_eq!(detail_json["truncated"], false);
+        for json in [summary_json, detail_json] {
+            let encoded = json.to_string();
+            assert!(!encoded.contains("native"));
+            assert!(!encoded.contains("session"));
+        }
     }
 }

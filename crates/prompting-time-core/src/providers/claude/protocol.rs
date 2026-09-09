@@ -161,6 +161,9 @@ impl Protocol {
                                 MutationState::Unknown
                             };
                         events.push(ProviderEvent::NativeItemActivity {
+                            native_turn_id: None,
+                            native_agent_id: None,
+                            operation: None,
                             native_item_id: id.into(),
                             description: format!("{} finished", tool.name),
                             mutation,
@@ -418,6 +421,9 @@ impl Protocol {
                 .and_then(|tool| tool.parent.as_deref());
         }
         events.push(ProviderEvent::NativeItemActivity {
+            native_turn_id: None,
+            native_agent_id: None,
+            operation: None,
             native_item_id: id.into(),
             description: format!("{name} requested"),
             mutation: MutationState::NoneObserved,
