@@ -247,6 +247,21 @@ button:disabled {
 .selected-agent-summary p { max-height: 8rem; margin: 0; overflow: auto; overflow-wrap: anywhere; }
 .selected-agent-summary small { font-size: inherit; color: var(--color-text-muted); }
 .selected-agent-summary summary { min-height: var(--control-target); align-content: center; cursor: pointer; }
+.selected-agent-disclosure {
+  display: inline-flex;
+  width: calc(100% - 1.25rem);
+  align-items: center;
+  gap: var(--space-2);
+  vertical-align: middle;
+}
+.selected-agent-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.selected-agent-disclosure small { flex: 0 0 auto; white-space: nowrap; }
 
 .pane-heading {
   justify-content: space-between;

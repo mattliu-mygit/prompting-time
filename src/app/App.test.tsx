@@ -67,11 +67,31 @@ it("discloses selected agent details with ancestry only while inspecting", async
   await screen.findByRole("heading", { name: "Auth refactor" });
   act(() => store.selectConversation("c1", "child-1"));
   expect(screen.getByRole("navigation", { name: "Agent ancestry" })).toBeVisible();
-  const summary = screen.getByText("Inspecting Reviewer");
-  expect(summary.tagName).toBe("SUMMARY");
+  const summary = screen.getByText("Inspecting Reviewer").closest("summary")!;
   expect(summary.closest("details")).not.toHaveAttribute("open");
   fireEvent.click(within(screen.getByRole("navigation", { name: "Agent ancestry" })).getByRole("button", { name: "Auth refactor" }));
   expect(screen.queryByRole("navigation", { name: "Agent ancestry" })).not.toBeInTheDocument();
+});
+
+it("bounds a long agent label independently of the visible conversation target hint", async () => {
+  const label = "Review storage publication and cursor consistency ".repeat(12).trim();
+  const api = createApi();
+  const page = await api.listConversations({ cursor: null, limit: 40 });
+  page.items[0]!.agents[1]!.label = label;
+  api.listConversations = vi.fn().mockResolvedValue(page);
+  const store = createAppStore(api);
+  render(<App store={store} />);
+  await screen.findByRole("heading", { name: "Auth refactor" });
+  act(() => store.selectConversation("c1", "child-1"));
+  const labelElement = screen.getByText(`Inspecting ${label}`);
+  expect(labelElement).toHaveClass("selected-agent-label");
+  expect(labelElement).toHaveAttribute("title", `Inspecting ${label}`);
+  const summary = labelElement.closest("summary")!;
+  expect(summary).toHaveAccessibleName(`Inspecting ${label} Messages go to the conversation.`);
+  expect(summary.closest("details")).not.toHaveAttribute("open");
+  expect(within(summary).getByText("Messages go to the conversation.")).toBeVisible();
+  fireEvent.click(summary);
+  expect(summary.closest("details")).toHaveAttribute("open");
 });
 
 it.each(["More", "Filter conversations: All statuses"])("hands off %s to the palette and restores its surviving trigger", async (name) => {

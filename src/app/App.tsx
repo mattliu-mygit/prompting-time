@@ -356,7 +356,12 @@ function CommandCenter({ store }: { store: AppStore }) {
                 loading={agentWindow?.loading}
               />
               {selectedAgent ? <details className="selected-agent-summary" aria-label="Selected agent">
-                <summary>Inspecting {selectedAgent.label} <small>· Messages go to the conversation.</small></summary>
+                <summary>
+                  <span className="selected-agent-disclosure">
+                    <span className="selected-agent-label" title={`Inspecting ${selectedAgent.label}`}>Inspecting {selectedAgent.label}</span>{" "}
+                    <small>Messages go to the conversation.</small>
+                  </span>
+                </summary>
                 <p>{selectedAgent.status}{selectedAgent.summary ? ` · ${selectedAgent.summary}` : ""}</p>
               </details> : null}
               <Timeline
