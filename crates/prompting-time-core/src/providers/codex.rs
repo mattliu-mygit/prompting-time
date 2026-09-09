@@ -2476,8 +2476,8 @@ async fn handle_child_notification(
                 }
                 items.insert(item, changes);
             }
-            if matches!(method, "item/started" | "item/completed") {
-                if let Some(ProviderEvent::NativeItemActivity {
+            if matches!(method, "item/started" | "item/completed")
+                && let Some(ProviderEvent::NativeItemActivity {
                     native_item_id,
                     native_turn_id,
                     operation,
@@ -2485,23 +2485,22 @@ async fn handle_child_notification(
                     mutation,
                     ..
                 }) = normalize_item_with_phase(params, method == "item/completed")?
-                {
-                    deliver_or_buffer_turn_event(
-                        state,
-                        root,
-                        Ok(ProviderEvent::NativeItemActivity {
-                            native_item_id,
-                            native_turn_id,
-                            native_agent_id: Some(thread.to_owned()),
-                            operation,
-                            description,
-                            mutation,
-                        }),
-                        false,
-                        sender,
-                    )
-                    .await?;
-                }
+            {
+                deliver_or_buffer_turn_event(
+                    state,
+                    root,
+                    Ok(ProviderEvent::NativeItemActivity {
+                        native_item_id,
+                        native_turn_id,
+                        native_agent_id: Some(thread.to_owned()),
+                        operation,
+                        description,
+                        mutation,
+                    }),
+                    false,
+                    sender,
+                )
+                .await?;
             }
             // Child messages/reasoning stay outside tool display capture.
             return Ok(());
