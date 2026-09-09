@@ -1,5 +1,7 @@
 use crate::tool_operation::{ToolOperation, ToolOperationDetail, ToolOperationSummary};
+mod conversations;
 mod operations;
+pub use conversations::ConversationBinding;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -1054,6 +1056,7 @@ impl Store {
         let title = normalize_conversation_title(new_conversation.title)?;
         let conversation = Conversation {
             id: conversation_id,
+            parent_id: None,
             title,
             workspace_id: None,
             archived: false,
@@ -1143,6 +1146,7 @@ impl Store {
         self.notify_conversation_change(conversation_id);
         Ok(Conversation {
             id: conversation_id,
+            parent_id: None,
             title,
             workspace_id: Some(workspace.id),
             archived: false,
@@ -1154,7 +1158,7 @@ impl Store {
         conversation_id: ConversationId,
     ) -> Result<Conversation, StoreError> {
         sqlx::query_as::<_, ConversationRow>(
-            "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at \
+            "SELECT id, parent_id, substr(title, 1, 256) AS title, workspace_id, status, updated_at \
              FROM conversations WHERE id = ?",
         )
         .bind(conversation_id.to_string())
@@ -4039,8 +4043,8 @@ impl Store {
         validate_page_limit(limit)?;
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT id, substr(title, 1, 256) AS title, workspace_id, status, updated_at \
-             FROM conversations WHERE 1 = 1",
+            "SELECT id, parent_id, substr(title, 1, 256) AS title, workspace_id, status, updated_at \
+             FROM conversations WHERE parent_id IS NULL",
         );
         if active_only {
             query.push(" AND status <> 'archived'");
@@ -6879,6 +6883,7 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
 #[derive(FromRow)]
 struct ConversationRow {
     id: String,
+    parent_id: Option<String>,
     title: String,
     workspace_id: Option<String>,
     status: String,
@@ -6909,6 +6914,10 @@ impl ConversationRow {
         Ok(ConversationRecord {
             conversation: Conversation {
                 id: parse_uuid("conversation", &self.id)?.into(),
+                parent_id: self
+                    .parent_id
+                    .map(|id| parse_uuid("conversation parent", &id).map(Into::into))
+                    .transpose()?,
                 title: normalize_legacy_conversation_title(self.title),
                 workspace_id,
                 archived,
@@ -13106,3 +13115,6 @@ mod tests {
 }
 #[cfg(test)]
 mod tool_operation_tests;
+
+#[cfg(test)]
+mod conversation_tests;

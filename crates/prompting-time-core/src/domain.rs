@@ -302,6 +302,7 @@ impl RollupStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
     pub id: ConversationId,
+    pub parent_id: Option<ConversationId>,
     pub title: String,
     pub workspace_id: Option<WorkspaceId>,
     pub archived: bool,
