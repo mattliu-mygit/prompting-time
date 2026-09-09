@@ -192,6 +192,24 @@ evidence only, not proof of native WebView zoom or macOS keyboard behavior.
 
 ## Comfortable readability
 
+For message density, use `?chat=density` at 960 × 600 and 1440 × 900, at 100% scale.
+It contains two invented exchanges with routine run updates. Before copy feedback
+is open, run:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-message-density.ts")).checkMessageDensity()'
+```
+
+`measureMessageDensity()` in the same module reports geometry without asserting
+the density limits. Check copy is visible without hover, sits beside the sender,
+and works with Enter/Space. Success and rejected clipboard writes must show visible
+status feedback without losing keyboard focus or creating horizontal overflow.
+Repeat with long provider/agent attribution; text must wrap without overlapping
+the copy control. Use `?chat=reading` to retain long-form Markdown/code/table checks,
+`?chat=failure` for visible errors and `?chat=approval` for visible approval requests.
+Truncated lifecycle events must retain explicit full-detail disclosure, rather than
+being treated as ordinary one-line status updates.
+
 Use `?chat=reading` at 1440 × 900 and 960 × 600. With the inspector initially closed,
 run the computed-font/target/layout check:
 

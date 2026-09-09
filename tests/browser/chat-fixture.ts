@@ -54,6 +54,21 @@ export function chatApproval(conversationId: string): ApprovalSnapshot {
 }
 
 export function chatTimeline(conversationId: string, cursor: string | null = null, limit = 80): TimelinePage {
+  if (scenario === "density") {
+    return {
+      items: [
+        item(conversationId, 1, "Hello", { role: "user" }),
+        item(conversationId, 2, "Provider run started", { kind: "lifecycle", role: null }),
+        item(conversationId, 3, "Hello! What would you like to work on?"),
+        item(conversationId, 4, "Provider run completed", { kind: "lifecycle", role: null }),
+        item(conversationId, 5, "Please review the parser tests.", { role: "user" }),
+        item(conversationId, 6, "Provider run started", { kind: "lifecycle", role: null }),
+        item(conversationId, 7, "I’ll inspect the tests and summarize the findings."),
+        item(conversationId, 8, "Provider run completed", { kind: "lifecycle", role: null }),
+      ],
+      nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    };
+  }
   if (scenario === "orientation") {
     const count = 240 + (conversationId === "conversation-0" ? revision : 0);
     const end = cursor === null ? count : Number(cursor);

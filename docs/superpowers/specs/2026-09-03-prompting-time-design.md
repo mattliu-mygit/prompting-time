@@ -131,6 +131,10 @@ lists, links, block quotes, tables, and fenced code. User messages render Markdo
 in subtly filled bubbles. Code can be copied independently and is syntax-highlighted
 within a bounded budget; message copy preserves underlying text and distinguishes a
 preview from an undisclosed full response. Long code and tables scroll internally.
+Message copy sits beside the sender in a visible, keyboard-accessible icon control
+with the same minimum target size and explicit success/failure feedback. Compact
+bubble padding and inter-message gaps reduce vertical overhead without changing
+message typography or internal Markdown paragraph, code, and table spacing.
 Untrusted output cannot execute HTML or code, embed applications, load remote images
 automatically, or activate unsafe URL protocols. Ordinary HTTP(S) links open in the
 default browser through a main-window capability restricted to those two schemes.
@@ -142,7 +146,10 @@ available in canonical data. Expansion retains attribution and explicit bounded-
 controls. Real failures and approval requests remain visible rather than disappearing
 inside a collapsed group. Routine lifecycle updates are quiet status rows, and current
 run status comes from authoritative conversation state rather than the first root in
-an arbitrary agent page.
+an arbitrary agent page. Ordinary, nontruncated lifecycle entries use one muted
+wrapping row with their canonical content and provider/agent attribution. Notices,
+failures, and truncated lifecycle entries retain the full visible detail layout.
+This presentation does not filter events, change grouping, or move timeline anchors.
 
 The Rust read projection separates routine protocol notifications from conversation
 events using stored structured evidence before pagination. Both views read the same

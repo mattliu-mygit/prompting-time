@@ -89,6 +89,11 @@ approval stay visible. Routine protocol notifications live under **Diagnostics**
 the right inspector and load only when you open that section or request another page
 or refresh. They remain in durable history without crowding out chat messages.
 
+Messages use a compact layout with a copy icon beside the sender, smaller bubble
+padding, and tighter gaps. Copy stays visible and keyboard accessible. Routine
+run updates share one muted line, wrapping when needed; failures, notices, and
+truncated details remain visible. Message text and paragraph readability are unchanged.
+
 Scrolling up pauses following streamed output. **Jump to latest** returns to the
 current reply. Long responses and event details remain bounded, with explicit
 disclosure for truncated content; copy controls distinguish previews from complete
