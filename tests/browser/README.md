@@ -190,6 +190,48 @@ At 125% scale, repeat narrow inspector opening: it must paint above the inert
 sidebar and keep keyboard focus inside. Browser scale checks are geometry
 evidence only, not proof of native WebView zoom or macOS keyboard behavior.
 
+## Tool operation history
+
+On `?chat=tools` at 100% scale with details closed, measure directly visible running
+and failed rows at 960 × 600 and 1440 × 900:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-tool-operations.ts")).checkToolOperations()'
+```
+
+The check requires compact rows, unchanged message typography, usable detail
+targets, and no page overflow. Repeat with `&tool-provider=claude`.
+
+Use `?chat=tools` for invented read/search/command operations, a running operation,
+a failed command, empty output, unknown outcome, bounded output, and a legacy
+status-only record. Add `&tool-provider=claude` to exercise Claude attribution with
+the same provider-neutral display contract. At 960 × 600 and 1440 × 900, verify
+completed work groups compactly while running work and failures remain visible.
+Open real details with the keyboard; check absent versus empty output, truncation,
+literal output and copy feedback, and no horizontal viewport overflow.
+Use `&tool-output=discarded` to verify empty retained output with truncation is not
+misrepresented as a genuinely empty result. The fixture omits the native zoom
+installation; use browser/CSS scaling for geometry checks, not the macOS shortcut.
+
+The fixture exposes explicit controls without timers or provider execution:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/tool-operations-fixture.ts")).advanceToolOperation()'
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/tool-operations-fixture.ts")).failToolDetails(true)'
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/tool-operations-fixture.ts")).toolFixtureStats()'
+```
+
+Advance an open running operation and confirm it becomes completed without losing
+its disclosure. Advance again to update its output under the same event ID. With
+detail failures enabled, open an undisclosed operation, verify the error, disable
+the failure, and retry. Hidden rows must not trigger detail reads.
+
+Use `?chat=tool-history` for 180 messages with an operation at sequence 70. Load
+older history, read that operation, type a draft, then advance it. Its status and
+open detail should refresh even though it is outside the newest page, without
+jumping to latest. Repeat while switched to another conversation and return.
+The fixture records at most 32 recent page-request cursors for bounded-read checks.
+
 ## Comfortable readability
 
 For message density, use `?chat=density` at 960 × 600 and 1440 × 900, at 100% scale.

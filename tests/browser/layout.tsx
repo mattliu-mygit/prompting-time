@@ -4,12 +4,14 @@ import { createAppStore, type AppApi } from "../../src/app/store";
 import type { AgentSnapshot, ConversationSummary } from "../../src/bridge/types";
 import { chatApproval, chatDiagnostics, chatScenario, chatTimeline, listenToChatEvents } from "./chat-fixture";
 import { composerMessages, composerScenario, steerComposerRun, submitComposerMessage } from "./composer-fixture";
+import { listenToToolEvents, toolEventDetail, toolProvider, toolScenario, toolTimeline } from "./tool-operations-fixture";
 import "../../src/styles/tokens.css";
 import "../../src/styles/app.css";
 
 // Invented data only. This entry point never uses the native bridge or providers.
 const chatMode = new URLSearchParams(location.search).get("chat");
 const longLabels = new URLSearchParams(location.search).get("labels") === "long";
+const syntheticProvider = toolScenario ? toolProvider : "codex";
 const syntheticStatus = composerScenario === "send" || composerScenario === "failure" || composerScenario === "pending" ? "completed"
   : chatMode === "failure" ? "failed"
   : chatMode === "approval" ? "waiting"
@@ -22,13 +24,13 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
   archived: false,
   projectRoot: null,
   currentRunId: `run-${index}`,
-  provider: "codex",
+  provider: syntheticProvider,
   runStatus: syntheticStatus,
   rollupStatus: syntheticStatus === "failed" ? "failed" : syntheticStatus === "waiting" ? "needsAttention" : syntheticStatus === "completed" ? "completed" : "active",
   agents: [
-    { id: `root-${index}`, parentId: null, provider: "codex", label: longLabels && index === 0 ? `Synthetic root ${"reviewing invented work ".repeat(8)}` : "Root agent", summary: null, status: syntheticStatus },
-    { id: `child-${index}`, parentId: `root-${index}`, provider: "codex", label: longLabels && index === 0 ? `Synthetic child ${"reviewing a long description of invented work ".repeat(12)}` : `Synthetic child ${index}`, summary: "Reviewing invented work", status: syntheticStatus },
-    ...(chatScenario ? [{ id: `grandchild-${index}`, parentId: `child-${index}`, provider: "codex", label: "Synthetic test agent", summary: "Checking invented test results", status: syntheticStatus } satisfies AgentSnapshot] : []),
+    { id: `root-${index}`, parentId: null, provider: syntheticProvider, label: longLabels && index === 0 ? `Synthetic root ${"reviewing invented work ".repeat(8)}` : "Root agent", summary: null, status: syntheticStatus },
+    { id: `child-${index}`, parentId: `root-${index}`, provider: syntheticProvider, label: longLabels && index === 0 ? `Synthetic child ${"reviewing a long description of invented work ".repeat(12)}` : `Synthetic child ${index}`, summary: "Reviewing invented work", status: syntheticStatus },
+    ...(chatScenario ? [{ id: `grandchild-${index}`, parentId: `child-${index}`, provider: syntheticProvider, label: "Synthetic test agent", summary: "Checking invented test results", status: syntheticStatus } satisfies AgentSnapshot] : []),
   ],
   agentsTruncated: false,
 }));
@@ -43,7 +45,7 @@ const api: AppApi = {
   getBootstrap: async () => ({
     providers: [
       { id: "codex", installed: true, available: true, version: "synthetic", diagnostic: null, capabilities: ["steering", "interruption"] },
-      { id: "claude", installed: false, available: false, version: null, diagnostic: "Synthetic unavailable provider", capabilities: [] },
+      { id: "claude", installed: toolScenario, available: toolScenario, version: toolScenario ? "synthetic" : null, diagnostic: toolScenario ? null : "Synthetic unavailable provider", capabilities: [] },
     ],
   }),
   listConversations: async () => ({ items: conversations, nextCursor: null }),
@@ -52,10 +54,11 @@ const api: AppApi = {
     const conversation = conversations.find(({ id }) => id === conversationId)!;
     return { runId: conversation.currentRunId, items: conversation.agents.map((agent, depth) => ({ agent, depth })), nextCursor: null };
   },
-  listenToAppEvents: async (handler) => listenToChatEvents(handler),
+  listenToAppEvents: async (handler) => toolScenario ? listenToToolEvents(handler) : listenToChatEvents(handler),
   loadTimeline: async ({ conversationId, cursor, limit }) => composerScenario ? ({
     items: composerMessages(conversationId), nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
-  }) : chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId, cursor, limit) : ({
+  }) : toolScenario && !conversationId.startsWith("created-") ? toolTimeline(conversationId, cursor, limit)
+    : chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId, cursor, limit) : ({
     items: Array.from({ length: conversationId.startsWith("created-") ? 0 : 80 }, (_, index) => ({
       id: `event-${index}`, conversationId, runId: "run-0", agentId: "root-0",
       sequence: String(index + 1), kind: "message", role: "assistant", provider: "codex",
@@ -80,7 +83,7 @@ const api: AppApi = {
     agentsTruncated: false,
   }),
   listRunAudits: async () => ({ items: [], nextCursor: null }),
-  loadEventDetail: unsupported,
+  loadEventDetail: async ({ eventId }) => toolScenario ? toolEventDetail(eventId) : unsupported(),
   loadApprovalDetail: async ({ approvalId }) => {
     if (!chatScenario) return unsupported();
     const conversationId = approvalId.replace(/-approval$/, "");

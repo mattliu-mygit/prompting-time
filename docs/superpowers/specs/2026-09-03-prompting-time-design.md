@@ -122,7 +122,18 @@ available; confirmation remains bound to the original run.
 
 The UI must not invent child-agent identity. If a provider exposes a child agent, Prompting Time creates an agent node. If it exposes only an anonymous tool operation, the UI displays a tool event under the current agent.
 
-The center timeline keeps the newest 80 events plus at most four explicitly loaded 80-event history pages. Live invalidations are coalesced behind one read per selected conversation; the latest dirty state receives one follow-up read without overlapping an older-page request. Live refresh replaces the newest window by durable event identity while retaining loaded history; any eviction is visible and offers a way back to the newest window. Every truncated event kind remains visibly truncated and fetches its separately bounded detail only after explicit disclosure. Agent activity is collapsed by default and independently requests the selected run's bounded agent pages when opened; it pages the expanded depth-first view 20 cards at a time so a wide or deep provider tree cannot crowd out approvals or the composer. Agent restarts are single-flight with one latest coalesced restart. Pending approvals load 30 summaries initially, page independently on explicit request, and never fetch operation or question detail merely because a card is mounted. The approval view retains at most four pages: loading farther back evicts the newest retained page but preserves the returned cursor until every pending request is reachable, and an explicit control restores the newest page. Live invalidation rebases that bounded window onto the newest approvals by following the refreshed cursor chain, so insertion-driven page shifts cannot skip requests and terminal or missing requests disappear without unbounded fan-out. Explicit approval paging owns an independent busy token so overlapping refresh success or failure cannot strand its retry controls.
+The center timeline keeps the newest 80 events plus at most four explicitly loaded
+80-event history pages. Coalesced live refresh reads the newest window and those
+retained older windows using their original request cursors, so an older operation
+can update without loading the full conversation. Durable event identity and first
+sequence preserve ordering; overlapping refresh, paging, or conversation changes
+cannot reintroduce stale rows. Reading anchors and disclosed operations are retained,
+including on return to a recently visited view. Genuine gaps or history eviction are
+visible and offer a way back to the newest window. Detail reads stay lazy, refresh by
+revision only while disclosed, and never fan out over hidden rows. Every truncated
+event kind remains visibly truncated with separately bounded detail.
+
+Agent activity is collapsed by default and independently requests the selected run's bounded agent pages when opened; it pages the expanded depth-first view 20 cards at a time so a wide or deep provider tree cannot crowd out approvals or the composer. Agent restarts are single-flight with one latest coalesced restart. Pending approvals load 30 summaries initially, page independently on explicit request, and never fetch operation or question detail merely because a card is mounted. The approval view retains at most four pages: loading farther back evicts the newest retained page but preserves the returned cursor until every pending request is reachable, and an explicit control restores the newest page. Live invalidation rebases that bounded window onto the newest approvals by following the refreshed cursor chain, so insertion-driven page shifts cannot skip requests and terminal or missing requests disappear without unbounded fan-out. Explicit approval paging owns an independent busy token so overlapping refresh success or failure cannot strand its retry controls.
 
 ### Reading and participating in a conversation
 
@@ -140,11 +151,27 @@ automatically, or activate unsafe URL protocols. Ordinary HTTP(S) links open in 
 default browser through a main-window capability restricted to those two schemes.
 Local fragments remain in the document; other external URL schemes are inert.
 
-Consecutive tool/progress entries collapse into compact activity, without merging
-across messages, runs, providers, or agents. Summary text describes only evidence
-available in canonical data. Expansion retains attribution and explicit bounded-detail
-controls. Real failures and approval requests remain visible rather than disappearing
-inside a collapsed group. Routine lifecycle updates are quiet status rows, and current
+Newly captured tool invocations have one compact row with an evidence-backed action
+and target. Starting, completing, and enriching an operation update its existing
+app-owned identity without moving its first sequence. Identical commands remain
+distinct invocations. Status distinguishes running, succeeded, failed, interrupted,
+and unknown; duration and exit information appear only when reported. A completed
+run does not establish success for a tool whose result was never observed.
+
+Consecutive successful ordinary tools and progress entries collapse into compact
+activity, without merging across messages, runs, providers, or agents. Summary counts
+describe loaded operations, not the entire run. Expanded groups show compact rows
+with attribution once at the group level. Running, failed, interrupted, unknown,
+and conflicting tools, and approval requests remain directly visible. Show details appears only
+for additional captured information and lazily reads selected input, output, error,
+and context. Missing, empty, and truncated output remain distinguishable; copied
+bounded content is labeled as a preview. Details stay open across updates while
+their operation remains loaded. Legacy status-only rows keep their literal text and
+explain unavailable details; neither output nor identity is guessed from that text.
+Message typography and minimum 32-pixel controls are unchanged. Tool details scroll
+internally and never execute content or force horizontal page scrolling.
+
+Routine lifecycle updates are quiet status rows, and current
 run status comes from authoritative conversation state rather than the first root in
 an arbitrary agent page. Ordinary, nontruncated lifecycle entries use one muted
 wrapping row with their canonical content and provider/agent attribution. Notices,
@@ -304,6 +331,29 @@ SQLite is the local source of truth. It uses WAL mode, versioned migrations, for
 Provider output received while an approval is pending is durably staged in receipt order without changing the Waiting lifecycle. Assistant deltas with the same native item ID aggregate into one durable message before, during, and after staging, including after restart, so a streamed message never becomes a row per token. Each run's staged queue accepts up to 256 complete provider events, with one additional physical row reserved for an overflow marker; the full queue, including that marker reserve, is limited to 8 MiB of content. Events within that capacity retain their full content. The first event that would exceed either limit is replaced by one compact diagnostic marker that records the omitted event kind and makes mutation certainty Unknown; later staged ingress is rejected. Recovery returns at most the 257-row physical limit together with explicit overflow and truncation flags. Once an approval response is accepted by the supervisor, the supervisor owns its complete intent, provider-dispatch, acknowledgement, publication, and cleanup lifecycle independently of the requesting UI future; interruption and shutdown cancel and join that operation. Approval acknowledgement atomically publishes the resumed lifecycle, any privacy-filtered accepted-answer message, and each staged event once, then clears the queue; interruption, failure, or crash performs the same bounded publish before the terminal diagnostic, so restart recovery retains bounded evidence of already-observed activity.
 
 Runtime data is stored under the user's macOS Application Support directory. Conversations, prompts, tool output, provider payloads, machine paths, imported resources, and local configuration never enter the public repository.
+
+Tool operations use the same canonical event store and transactional staging path,
+not a separate activity log. Correlation includes the owning run, materialized agent,
+native turn where available, and invocation identity. Duplicate snapshots are
+idempotent; delayed starts cannot regress terminal evidence. Conflicting terminal
+observations become an explicit unknown outcome without erasing failure evidence.
+Ended runs, agents, or child turns cannot leave a stale running indicator. Unresolved
+child ownership never becomes root activity. Pending child tools are published only
+after verified owner registration and before its terminal state. Display status and
+optional detail retention cannot change mutation certainty or permission decisions.
+
+Adapters retain selected display fields from supported command, file, search, and
+tool calls. Unknown tools retain a conservative label and supported textual result,
+not arbitrary arguments, protocol envelopes, credentials, or hidden reasoning.
+Combined operation detail is limited to 256 KiB with UTF-8-safe truncation; ordinary
+timeline titles are limited to 1 KiB. Summary reads expose neither native identities
+nor full input/output. Details are fetched only by app-owned event ID on disclosure,
+with revision-based refresh. Parsing and pending buffers remain bounded as well as
+stored data. Claude's per-turn display cache caps retained content at 8 MiB; pressure
+truncates optional details explicitly instead of failing an otherwise valid run.
+Existing protocol frame and identity limits remain independent. This change does
+not feed tool detail into provider handoff context or
+promise automatic secret removal from locally retained output.
 
 Confirmed steering and acknowledged non-secret question answers enter the same authoritative
 user-message/event projection used by timeline and handoff. Persistence is owner-fenced and

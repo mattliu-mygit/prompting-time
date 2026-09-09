@@ -83,9 +83,13 @@ On macOS, **⌘+** (or **⌘=**) zooms the whole app in, **⌘−** zooms out, a
 remembered on this device across launches. These shortcuts also work while typing.
 
 The center pane prioritizes the conversation: assistant replies and your messages
-render Markdown, tables, and copyable code blocks. Tool and progress entries are
-grouped into compact, expandable activity. Real failures and requests for
-approval stay visible. Routine protocol notifications live under **Diagnostics** in
+render Markdown, tables, and copyable code blocks. Newly captured tools show an
+actual action and target in one compact row that updates as the operation finishes.
+Consecutive successful work collapses into a summary of the loaded operations;
+running tools, failures, unknown outcomes, and requests for approval stay visible. **Show details**
+reveals captured input, output, error, and context, with explicit empty, missing,
+or truncated output. Older status-only records remain readable but cannot recover
+details that were never captured. Routine protocol notifications live under **Diagnostics** in
 the right inspector and load only when you open that section or request another page
 or refresh. They remain in durable history without crowding out chat messages.
 
