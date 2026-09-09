@@ -643,11 +643,13 @@ export function createAppStore(api: AppApi): AppStore {
       items.forEach(item => { executionOwners[item.id] = snapshot.executionOwners[parentId] ?? parentId; });
       const refreshedIds = new Set(items.map(item => item.id));
       const displaced = restart && [...previousIds].some(id => !refreshedIds.has(id));
+      // Only a fresh scan through the end proves there are no earlier cache gaps.
+      const recovered = restart && cursor === null;
       update({
         conversationsById: { ...snapshot.conversationsById, ...normalizeConversations(items) },
         executionOwners,
         childPagesById: { ...snapshot.childPagesById, [parentId]: {
-          pages, nextCursor: cursor, loading: false, error: null, evicted: latest.evicted || displaced,
+          pages, nextCursor: cursor, loading: false, error: null, evicted: !recovered && (latest.evicted || displaced),
         } },
       });
       pruneNavigation();

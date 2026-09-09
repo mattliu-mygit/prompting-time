@@ -802,6 +802,55 @@ describe("durable child conversation navigation", () => {
     expect(store.getSnapshot().childPagesById.c1?.evicted).toBe(true);
     await store.loadChildPage("c1");
     expect(store.getSnapshot().childPagesById.c1!.pages.flatMap(page => page.ids)).toEqual(children.slice(0, 60).map(item => item.id));
+    await store.loadChildPage("c1");
+    expect(store.getSnapshot().childPagesById.c1?.nextCursor).toBeNull();
+    await store.loadChildPage("c1", true);
+    expect(store.getSnapshot().childPagesById.c1!.pages.flatMap(page => page.ids)).toEqual(children.map(item => item.id));
+    expect(store.getSnapshot().childPagesById.c1?.evicted).toBe(false);
+  });
+
+  it("keeps eviction explicit when a terminal child page still has an earlier cache gap", async () => {
+    const fake = createFakeApi();
+    fake.api.listChildConversations = vi.fn(async ({ parentId, cursor, limit }) => {
+      const total = parentId === "c1" ? 61 : 40;
+      const offset = Number(cursor ?? 0);
+      return { items: Array.from({ length: Math.min(limit, total - offset) }, (_, index) => child(`${parentId}-${offset + index}`, parentId)),
+        nextCursor: offset + limit < total ? String(offset + limit) : null };
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadChildPage("c1");
+    await store.loadChildPage("c2");
+    await store.loadChildPage("c2");
+    await store.loadChildPage("c1");
+    await store.loadChildPage("c1");
+    await store.loadChildPage("c1");
+    const page = store.getSnapshot().childPagesById.c1!;
+    expect(page.nextCursor).toBeNull();
+    expect(page.pages[0]?.cursor).not.toBeNull();
+    expect(page.pages.flatMap(item => item.ids)).not.toContain("c1-0");
+    expect(page.evicted).toBe(true);
+  });
+
+  it("reasserts eviction when the shared budget prunes a complete child reload", async () => {
+    const fake = createFakeApi();
+    fake.api.listChildConversations = vi.fn().mockResolvedValue({
+      items: Array.from({ length: 20 }, (_, index) => child(`sibling-${index}`, "c1")), nextCursor: null,
+    });
+    const chain = Array.from({ length: 63 }, (_, index) => child(`deep-${index}`, index ? `deep-${index - 1}` : "c2"));
+    fake.api.loadConversationPath = vi.fn().mockResolvedValue({
+      items: [conversation("c2"), ...chain], truncated: false, ownerConversationId: "c2",
+    });
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await store.loadChildPage("c1");
+    await store.selectConversation("deep-62");
+    expect(store.getSnapshot().childPagesById.c1?.evicted).toBe(true);
+    await store.loadChildPage("c1", true);
+    expect(store.getSnapshot().childPagesById.c1?.nextCursor).toBeNull();
+    expect(store.getSnapshot().childPagesById.c1?.pages).toEqual([]);
+    expect(store.getSnapshot().childPagesById.c1?.evicted).toBe(true);
+    expect(store.getSnapshot().selectedConversationId).toBe("deep-62");
   });
 
   it("keeps an existing paged window intact if a refresh fails partway through", async () => {
