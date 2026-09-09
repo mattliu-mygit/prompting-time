@@ -12,6 +12,7 @@ import json from "highlight.js/lib/languages/json";
 import css from "highlight.js/lib/languages/css";
 import sql from "highlight.js/lib/languages/sql";
 import xml from "highlight.js/lib/languages/xml";
+import { Copy } from "lucide-react";
 
 const highlighter = createLowlight({ rust, go, javascript, typescript, python, bash, json, css, sql, xml });
 const MAX_HIGHLIGHT_LENGTH = 16_384;
@@ -25,7 +26,7 @@ function highlightNode(node: HighlightNode, index: number): ReactNode {
   </span>;
 }
 
-export function CopyButton({ content, label }: { content: string; label: string }) {
+export function CopyButton({ content, label, iconOnly = false }: { content: string; label: string; iconOnly?: boolean }) {
   const [feedback, setFeedback] = useState<"copied" | "failed" | null>(null);
   const requestGeneration = useRef(0);
   useLayoutEffect(() => {
@@ -42,7 +43,7 @@ export function CopyButton({ content, label }: { content: string; label: string 
     }
   }
   return <span className="copy-control">
-    <button type="button" className="disclosure-link" onClick={() => void copy()}>{label}</button>
+    <button type="button" className={iconOnly ? "disclosure-link icon-button" : "disclosure-link"} aria-label={iconOnly ? label : undefined} title={iconOnly ? label : undefined} onClick={() => void copy()}>{iconOnly ? <Copy size={16} aria-hidden="true" /> : label}</button>
     {feedback ? <span role="status">{feedback === "copied" ? "Copied" : "Could not copy. Try again."}</span> : null}
   </span>;
 }

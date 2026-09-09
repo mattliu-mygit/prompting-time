@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, TimelineItem } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
 import { Timeline, type TimelineViewState } from "./Timeline";
+import { TimelineEntry } from "./TimelineEntry";
 import { StrictMode } from "react";
 
 function event(overrides: Partial<TimelineItem> & Pick<TimelineItem, "id" | "sequence">): TimelineItem {
@@ -60,6 +61,27 @@ const agents: AgentSnapshot[] = [
 ];
 
 describe("Timeline", () => {
+  it.each([
+    { kind: "lifecycle", presentation: "normal", truncated: false, compact: true },
+    { kind: "lifecycle", presentation: "failure", truncated: false, compact: false },
+    { kind: "lifecycle", presentation: "notice", truncated: false, compact: false },
+    { kind: "lifecycle", presentation: "normal", truncated: true, compact: false },
+    { kind: "progress", presentation: "normal", truncated: false, compact: false },
+  ] as const)("classifies $kind/$presentation truncated=$truncated without losing content", ({ kind, presentation, truncated, compact }) => {
+    const api = actions();
+    render(<TimelineEntry item={event({ id: "entry", sequence: "1", kind, presentation, truncated, role: null, content: "Canonical lifecycle text" })} agentPath="Root / Reviewer" actions={api} />);
+    const article = screen.getByRole("article");
+    expect(article.classList.contains("compact-lifecycle")).toBe(compact);
+    expect(article).toHaveTextContent("Codex · Root / Reviewer");
+    expect(article).toHaveTextContent("Canonical lifecycle text");
+    expect(article).toHaveAccessibleName(`Codex ${presentation === "failure" ? "failure" : presentation === "notice" ? "notice" : kind === "progress" ? "progress" : "run lifecycle"}`);
+    expect(api.loadEventDetail).not.toHaveBeenCalled();
+    if (truncated) {
+      expect(screen.getByText("Preview truncated.")).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Show full run lifecycle" }));
+      expect(api.loadEventDetail).toHaveBeenCalledWith({ eventId: "entry" });
+    }
+  });
   it("restores older pages, the visible row offset and expanded groups across keyed conversation mounts", async () => {
     const viewStates = new Map<string, TimelineViewState>();
     let newestReads = 0;
@@ -221,7 +243,12 @@ describe("Timeline", () => {
     expect(within(user).getByRole("listitem")).toHaveTextContent("inspect");
     expect(user.querySelector("pre code")?.textContent).toBe("indented code\n");
     expect(user).not.toHaveTextContent("Codex");
-    fireEvent.click(within(user).getByRole("button", { name: "Copy message" }));
+    const copy = within(user).getByRole("button", { name: "Copy message" });
+    expect(user.querySelector("header")).toContainElement(copy);
+    expect(copy).toHaveAttribute("title", "Copy message");
+    expect(copy.querySelector("svg")).not.toBeNull();
+    expect(user.querySelector(".entry-actions")).toBeNull();
+    fireEvent.click(copy);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(userContent));
     const assistant = screen.getByRole("article", { name: "Codex assistant message" });
     fireEvent.click(within(assistant).getByRole("button", { name: "Copy message" }));

@@ -63,19 +63,25 @@ export function TimelineEntry({ item, actions, agentPath }: {
     : item.kind === "lifecycle" ? "Run lifecycle"
     : item.kind === "tool" ? "Tool activity" : "Provider activity";
   const detailLabel = message ? "full message" : item.kind === "tool" ? "tool output" : `full ${label.toLowerCase()}`;
+  const compactLifecycle = item.kind === "lifecycle" && item.presentation === "normal" && !item.truncated;
+  if (compactLifecycle) return <article className="timeline-activity lifecycle normal compact-lifecycle" aria-label={`${provider} run lifecycle`}>
+    <span>{provider}{agentPath ? ` · ${agentPath}` : ""}</span>{" · "}<span className="literal-content">{content}</span>
+  </article>;
   return <article
     className={message ? `timeline-message ${user ? "user" : "assistant"}` : `timeline-activity ${item.kind} ${item.presentation}`}
     aria-label={message ? user ? "You message" : `${provider} assistant message` : `${provider} ${label.toLowerCase()}`}
   >
-    <header>{user ? <span>You</span> : <><span>{provider}{agentPath ? ` · ${agentPath}` : ""}</span>{message ? null : <span>{label}</span>}</>}</header>
+    <header>
+      {user ? <span>You</span> : <><span>{provider}{agentPath ? ` · ${agentPath}` : ""}</span>{message ? null : <span>{label}</span>}</>}
+      {message ? <CopyButton content={content} label={truncated ? "Copy preview" : "Copy message"} iconOnly /> : null}
+    </header>
     {message ? <MessageContent content={content} /> : item.kind === "tool" && expanded ? <pre>{content}</pre> : <p className="literal-content">{content}</p>}
     {truncated ? <p className="truncation-note">{displayedDetail ? "Bounded detail remains truncated." : "Preview truncated."}</p> : null}
-    <div className="entry-actions">
-      {item.truncated || item.kind === "tool" ? <button type="button" className="disclosure-link" aria-expanded={expanded} onClick={toggleDetail}>
+    {item.truncated || item.kind === "tool" ? <div className="entry-actions">
+      <button type="button" className="disclosure-link" aria-expanded={expanded} onClick={toggleDetail}>
         {expanded ? `Hide ${detailLabel}` : `Show ${detailLabel}`}
-      </button> : null}
-      {message ? <CopyButton content={content} label={truncated ? "Copy preview" : "Copy message"} /> : null}
-    </div>
+      </button>
+    </div> : null}
     {expanded && item.truncated && !detail && !detailError ? <span className="truncation-note">Loading bounded detail…</span> : null}
     {detailError ? <div><p role="alert">{detailError}</p><button type="button" className="disclosure-link" onClick={() => void loadDetail()}>Retry detail</button></div> : null}
   </article>;

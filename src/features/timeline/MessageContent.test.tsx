@@ -5,6 +5,21 @@ import { CopyButton, MessageContent } from "./MessageContent";
 afterEach(() => { vi.useRealTimers(); });
 
 describe("MessageContent", () => {
+  it("keeps icon copy named and shows success and failure outside the button", async () => {
+    const writeText = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("unavailable"));
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<CopyButton content={"  exact source\n"} label="Copy preview" iconOnly />);
+    const button = screen.getByRole("button", { name: "Copy preview" });
+    expect(button).toHaveAttribute("title", "Copy preview");
+    expect(button).toHaveClass("icon-button");
+    expect(button.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    fireEvent.click(button);
+    expect(await screen.findByRole("status")).toHaveTextContent("Copied");
+    expect(button).not.toContainElement(screen.getByRole("status"));
+    expect(writeText).toHaveBeenCalledWith("  exact source\n");
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Could not copy. Try again."));
+  });
   it("opens HTTP(S) links externally and keeps fragments local", () => {
     render(<MessageContent content="[http](http://example.com) [https](https://example.com) [section](#section)" />);
     for (const name of ["http", "https"]) {
