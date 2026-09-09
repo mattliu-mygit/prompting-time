@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::{protocol_error, rejected};
 use crate::domain::MutationState;
-use crate::tool_operation::ToolOperation;
+use crate::tool_operation::{MAX_OPERATION_TITLE_BYTES, ToolOperation};
 #[path = "operations.rs"]
 mod operations;
 use crate::providers::{
@@ -196,7 +196,7 @@ impl Protocol {
                         tool.mutation = mutation;
                         let mut operation = operations::result(&tool.name, block);
                         operation.title = tool.operation.title.clone();
-                        self.update_operation(id, operation)?;
+                        self.update_operation(id, operation);
                         self.emit_operations(&mut events);
                     }
                 }
@@ -426,16 +426,18 @@ impl Protocol {
             }
             tool.name = name.into();
             tool.identified = true;
-            return self.update_operation(id, operations::input(name, &block["input"]));
+            self.update_operation(id, operations::input(name, &block["input"]));
+            return Ok(());
         }
         if self.tools.len() >= MAX_IDENTITIES || parent == Some(id) {
             return Err(protocol_error("tool-capacity-or-cycle"));
         }
-        let operation = operations::input(name, &block["input"]);
+        // Reserve one bounded title for every remaining identity, so pressure
+        // truncates optional detail without preventing later operation rows.
+        let reserve = (MAX_IDENTITIES - self.tools.len() - 1) * MAX_OPERATION_TITLE_BYTES;
+        let available = MAX_TEXT_BYTES.saturating_sub(self.operation_bytes + reserve);
+        let operation = operations::retain(operations::input(name, &block["input"]), available);
         let bytes = self.operation_bytes + operation.display_bytes();
-        if bytes > MAX_TEXT_BYTES {
-            return Err(protocol_error("tool-operation-capacity"));
-        }
         self.tools.insert(
             id.into(),
             Tool {
@@ -465,7 +467,7 @@ impl Protocol {
         Ok(())
     }
 
-    fn update_operation(&mut self, id: &str, incoming: ToolOperation) -> Result<(), ProviderError> {
+    fn update_operation(&mut self, id: &str, incoming: ToolOperation) {
         let tool = self.tools.get_mut(id).expect("known tool");
         let title = (tool.operation.input.is_none() && incoming.input.is_some())
             .then(|| incoming.title.clone());
@@ -474,14 +476,15 @@ impl Protocol {
             merged.title = title;
             merged = merged.bounded();
         }
-        let bytes = self.operation_bytes - tool.operation.display_bytes() + merged.display_bytes();
-        if bytes > MAX_TEXT_BYTES {
-            return Err(protocol_error("tool-operation-capacity"));
-        }
+        let prior_bytes = tool.operation.display_bytes();
+        let reserve = (MAX_IDENTITIES - self.tools.len()) * MAX_OPERATION_TITLE_BYTES;
+        let available = MAX_TEXT_BYTES.saturating_sub(self.operation_bytes - prior_bytes + reserve);
+        let merged = operations::retain(merged, available);
+        let tool = self.tools.get_mut(id).expect("known tool");
+        let bytes = self.operation_bytes - prior_bytes + merged.display_bytes();
         self.operation_bytes = bytes;
         tool.dirty |= tool.operation != merged;
         tool.operation = merged;
-        Ok(())
     }
 
     fn emit_operations(&mut self, events: &mut Vec<ProviderEvent>) {
@@ -667,6 +670,10 @@ impl Protocol {
                     ));
                     task.emitted = Some(NativeAgentStatus::Running);
                 }
+                // Pending snapshots belong to the newly registered Running
+                // owner, before a terminal-first notification closes it.
+                self.emit_operations(events);
+                let task = self.tasks.get_mut(&id).unwrap();
                 if task.emitted.as_ref() != Some(&task.status) {
                     events.push(child_event(&id, &parent, &task.tool, task.status.clone()));
                     task.emitted = Some(task.status.clone());
@@ -1132,27 +1139,113 @@ mod operation_tests {
         let private = protocol.normalize(json!({"type":"assistant","message":{"id":"message","content":[{"type":"thinking","thinking":"PRIVATE"},{"type":"redacted_thinking","data":"PRIVATE"}]}})).unwrap();
         assert!(private.is_empty());
         let long = "é".repeat(crate::tool_operation::MAX_OPERATION_BYTES);
-        let mut rejected = false;
         for index in 0..40 {
-            match protocol.normalize(tool_frame(
-                &format!("tool-{index}"),
-                "Bash",
-                json!({"command":long}),
-                None,
-            )) {
-                Ok(events) => {
-                    let op = operation(&events);
-                    assert!(op.truncated);
-                    assert!(op.display_bytes() <= crate::tool_operation::MAX_OPERATION_BYTES);
-                }
-                Err(_) => {
-                    rejected = true;
-                    break;
-                }
-            }
+            let events = protocol
+                .normalize(tool_frame(
+                    &format!("tool-{index}"),
+                    "Bash",
+                    json!({"command":long}),
+                    None,
+                ))
+                .unwrap();
+            let op = operation(&events);
+            assert!(op.truncated);
+            assert!(op.display_bytes() <= crate::tool_operation::MAX_OPERATION_BYTES);
         }
-        assert!(rejected, "aggregate retained tool detail must be bounded");
         assert!(protocol.operation_bytes <= MAX_TEXT_BYTES);
+    }
+
+    #[test]
+    fn claude_operation_pressure_does_not_fail_execution_or_pending_children() {
+        for pending in [false, true] {
+            let mut protocol = Protocol::new("session".into());
+            if pending {
+                protocol
+                    .normalize(tool_frame("agent", "Agent", json!({}), None))
+                    .unwrap();
+            }
+            let long = "é".repeat(crate::tool_operation::MAX_OPERATION_BYTES / 2);
+            for index in 0..40 {
+                let id = format!("tool-{index}");
+                let parent = pending.then_some("agent");
+                protocol
+                    .normalize(tool_frame(&id, "Bash", json!({"command":"check"}), parent))
+                    .unwrap();
+                let frame = json!({"type":"user","parent_tool_use_id":parent,"message":{"content":[{"type":"tool_result","tool_use_id":id,"content":long}]}});
+                let events = protocol.normalize(frame.clone()).unwrap();
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    ProviderEvent::MutationEvidence {
+                        mutation: MutationState::Unknown
+                    }
+                )));
+                if pending {
+                    assert!(
+                        events.iter().all(|event| !matches!(
+                            event,
+                            ProviderEvent::NativeItemActivity { .. }
+                        ))
+                    );
+                } else {
+                    assert_eq!(operation(&events).status, ToolOperationStatus::Succeeded);
+                }
+                assert!(
+                    protocol.normalize(frame).unwrap().is_empty(),
+                    "duplicate pressure observations stay idempotent"
+                );
+                assert!(protocol.operation_bytes <= MAX_TEXT_BYTES);
+                let allocated: usize = protocol
+                    .tools
+                    .values()
+                    .map(|tool| {
+                        tool.operation.title.capacity()
+                            + [
+                                &tool.operation.input,
+                                &tool.operation.output,
+                                &tool.operation.error,
+                                &tool.operation.context,
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .map(String::capacity)
+                            .sum::<usize>()
+                    })
+                    .sum();
+                assert!(
+                    allocated <= MAX_TEXT_BYTES,
+                    "truncated text must release its allocation"
+                );
+            }
+            let conflict = protocol.normalize(json!({"type":"user","parent_tool_use_id":pending.then_some("agent"),"message":{"content":[{"type":"tool_result","tool_use_id":"tool-39","is_error":true,"content":"broken"}]}})).unwrap();
+            if !pending {
+                assert_eq!(operation(&conflict).status, ToolOperationStatus::Unknown);
+                assert!(operation(&conflict).conflicted);
+                assert_eq!(operation(&conflict).error.as_deref(), Some("broken"));
+            }
+            if pending {
+                let events = protocol.normalize(json!({"type":"system","subtype":"task_notification","task_id":"child","tool_use_id":"agent","status":"completed"})).unwrap();
+                let snapshots: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        ProviderEvent::NativeItemActivity {
+                            native_agent_id,
+                            operation: Some(operation),
+                            ..
+                        } => Some((native_agent_id, operation)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(snapshots.len(), 40);
+                assert!(
+                    snapshots
+                        .iter()
+                        .all(|(owner, _)| owner.as_deref() == Some("child"))
+                );
+                assert!(snapshots.iter().any(|(_, operation)| operation.truncated));
+            }
+            let end = protocol.normalize(json!({"type":"result","session_id":"session","subtype":"success","is_error":false,"result":"done"})).unwrap();
+            assert!(matches!(end.last(), Some(ProviderEvent::TurnCompleted)));
+        }
     }
 
     #[test]

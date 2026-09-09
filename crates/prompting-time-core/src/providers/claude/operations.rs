@@ -3,6 +3,34 @@ use serde_json::Value;
 
 use crate::tool_operation::{MAX_OPERATION_BYTES, ToolOperation, ToolOperationStatus};
 
+/// Optional display retention must never become a provider execution limit.
+pub(super) fn retain(mut operation: ToolOperation, limit: usize) -> ToolOperation {
+    let mut remaining = limit;
+    for field in std::iter::once(&mut operation.title).chain(
+        [
+            &mut operation.error,
+            &mut operation.input,
+            &mut operation.context,
+            &mut operation.output,
+        ]
+        .into_iter()
+        .flatten(),
+    ) {
+        if field.len() > remaining {
+            let mut end = remaining;
+            while !field.is_char_boundary(end) {
+                end -= 1;
+            }
+            field.truncate(end);
+            operation.truncated = true;
+        }
+        remaining -= field.len();
+        // A short retained prefix must not keep the full incoming allocation.
+        field.shrink_to_fit();
+    }
+    operation
+}
+
 fn text(value: &str, truncated: &mut bool) -> String {
     let mut result = String::new();
     append(&mut result, value, truncated);

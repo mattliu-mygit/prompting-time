@@ -293,6 +293,61 @@ result()
 }
 
 #[tokio::test]
+async fn terminal_first_child_identity_persists_pending_operation_output() {
+    let fixture = Fixture::new(
+        r#"
+assistant([{'type':'tool_use','id':'agent','name':'Agent','input':{}}])
+assistant([{'type':'tool_use','id':'child-tool','name':'Read','input':{'file_path':'invented.txt'}}],parent='agent',mid='child-message')
+emit({'type':'user','session_id':session,'parent_tool_use_id':'agent','message':{'content':[{'type':'tool_result','tool_use_id':'child-tool','content':'CHILD_OUTPUT'}]}})
+task('task_notification','child','agent',status='completed')
+result()
+"#,
+    );
+    let app = fixture.app(Store::open_in_memory().await.unwrap());
+    let conversation = app
+        .create_conversation(ConversationRequest::projectless("Terminal first child"))
+        .await
+        .unwrap();
+    let submission = app
+        .submit(app_request(conversation.id, "Read in child", None))
+        .await
+        .unwrap();
+    let status = timeout(Duration::from_secs(10), submission.handle.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .status;
+    let tree = app
+        .load_agent_page(conversation.id, None, 20)
+        .await
+        .unwrap();
+    let child = tree.items.iter().find(|item| item.depth == 1).unwrap();
+    let timeline = app
+        .load_timeline_snapshot(conversation.id, None, 30)
+        .await
+        .unwrap();
+    let mut outputs = Vec::new();
+    for row in timeline
+        .events
+        .items
+        .iter()
+        .filter(|row| row.operation.is_some())
+    {
+        let detail = app.load_event_detail(row.event.id).await.unwrap();
+        if detail
+            .operation
+            .as_ref()
+            .is_some_and(|detail| detail.operation.output.as_deref() == Some("CHILD_OUTPUT"))
+        {
+            outputs.push(row.event.agent_id);
+        }
+    }
+    app.shutdown().await.unwrap();
+    assert_eq!(status, RunStatus::Completed);
+    assert_eq!(outputs, vec![child.agent.id]);
+}
+
+#[tokio::test]
 async fn app_recursive_claude_tasks_project_into_canonical_sidebar_hierarchy() {
     let fixture = Fixture::new(
         r#"
