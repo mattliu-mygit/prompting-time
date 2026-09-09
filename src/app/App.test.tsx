@@ -10,6 +10,8 @@ import type { ConversationSummary } from "../bridge/types";
 function createdConversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
     id: "new-1", title: "synthetic-project", routingProfile: "bestFit", workspaceId: "w-1",
+    parentId: null, hasChildren: false, summary: null,
+    capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     archived: false, projectRoot: "/tmp/synthetic-project", currentRunId: null, provider: null,
     runStatus: null, rollupStatus: null, agents: [], agentsTruncated: false,
     ...overrides,

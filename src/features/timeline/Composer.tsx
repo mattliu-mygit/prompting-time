@@ -231,7 +231,7 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
     setSubmitting(true);
     setError(null);
     try {
-      await actions.interruptRun({ runId: pendingInterruption.runId });
+      await actions.interruptRun({ conversationId: conversation.id, runId: pendingInterruption.runId });
       setInterruptRequestedFor(pendingInterruption.runId);
       if (nextChoice) setChoice(nextChoice);
       restoreFocusRequested.current = true;

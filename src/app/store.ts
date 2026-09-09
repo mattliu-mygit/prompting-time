@@ -50,9 +50,9 @@ export type AppApi = {
   loadApprovalDetail(request: { approvalId: string }): Promise<ApprovalDetailSnapshot>;
   loadApprovalQuestions(request: { approvalId: string; cursor: string | null; limit: number }): Promise<ApprovalQuestionPage>;
   submitMessage(request: { conversationId: string; text: string; providerOverride: ProviderId | null; commandId: string }): Promise<SubmissionSnapshot>;
-  steerRun(request: { runId: string; text: string }): Promise<void>;
+  steerRun(request: { conversationId: string; runId: string; text: string }): Promise<void>;
   respondToApproval(request: RespondToApprovalRequest): Promise<void>;
-  interruptRun(request: { runId: string }): Promise<void>;
+  interruptRun(request: { conversationId: string; runId: string }): Promise<void>;
   inspectWorkspace(request: { conversationId: string }): Promise<InspectorSnapshot>;
   inspectProject(request: { path: string }): Promise<ProjectPathSnapshot>;
   pickProjectDirectory(): Promise<string | null>;
@@ -230,7 +230,7 @@ export function createAppStore(api: AppApi): AppStore {
       : Object.freeze({ id: globalThis.crypto.randomUUID(), text: draft.text, provider: providerOverride });
     setSubmission(conversationId, { pending: true, providerOverride, command, error: null });
     try {
-      if (runId) await api.steerRun({ runId, text: draft.text });
+      if (runId) await api.steerRun({ conversationId, runId, text: draft.text });
       else if (command) await api.submitMessage({
         conversationId,
         text: command.text,
@@ -883,7 +883,11 @@ function normalizeConversations(
     });
     normalized[conversation.id] = Object.freeze({
       id: conversation.id,
+      parentId: conversation.parentId,
       title: conversation.title,
+      hasChildren: conversation.hasChildren,
+      summary: conversation.summary,
+      capabilities: conversation.capabilities,
       routingProfile: conversation.routingProfile,
       workspaceId: conversation.workspaceId,
       archived: conversation.archived,

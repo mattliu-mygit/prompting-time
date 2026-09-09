@@ -86,8 +86,14 @@ async fn operation_from_ended_child_turn_cannot_revive_when_agent_runs_again() {
         )
         .await
         .unwrap();
+    let child_id = store
+        .list_child_conversations(conversation.id, None, 1)
+        .await
+        .unwrap()
+        .items[0]
+        .id;
     let row = store
-        .load_recent_timeline(conversation.id, None, 100)
+        .load_recent_timeline(child_id, None, 100)
         .await
         .unwrap()
         .items
@@ -105,6 +111,129 @@ async fn operation_from_ended_child_turn_cannot_revive_when_agent_runs_again() {
             .operation
             .status,
         ToolOperationStatus::Unknown
+    );
+}
+
+#[tokio::test]
+async fn unified_conversation_child_operation_refresh_preserves_sequence_and_detail_revision() {
+    let store = Store::open_in_memory().await.unwrap();
+    let conversation = store
+        .create_conversation(NewConversation::projectless("child operation"))
+        .await
+        .unwrap();
+    let (run, root) = store
+        .create_run(conversation.id, ProviderId::Claude)
+        .await
+        .unwrap();
+    store.bind_native_session(run.id, "session").await.unwrap();
+    store
+        .append_run_event(run.id, root.id, ProviderEventRecord::started())
+        .await
+        .unwrap();
+    store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::child_agent(
+                "spawn",
+                "session",
+                vec!["child".into()],
+                vec![],
+                "spawn",
+                "running",
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .append_run_event(
+            run.id,
+            root.id,
+            ProviderEventRecord::sub_agent(
+                "start",
+                "child",
+                "root/child",
+                NativeSubAgentActivityKind::Started,
+            ),
+        )
+        .await
+        .unwrap();
+    let child = store
+        .list_child_conversations(conversation.id, None, 1)
+        .await
+        .unwrap()
+        .items[0]
+        .id;
+    let mut record = observation("operation", None, ToolOperationStatus::Running);
+    if let ProviderEventRecord::NativeItem {
+        native_agent_id, ..
+    } = &mut record
+    {
+        *native_agent_id = Some("child".into());
+    }
+    let event = store
+        .append_run_event(run.id, root.id, record.clone())
+        .await
+        .unwrap();
+    let before = store
+        .load_recent_timeline(child, None, 80)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|row| row.event.id == event.id)
+        .unwrap();
+    if let ProviderEventRecord::NativeItem {
+        operation: Some(operation),
+        ..
+    } = &mut record
+    {
+        operation.status = ToolOperationStatus::Succeeded;
+        operation.output = Some("captured result".into());
+    }
+    let updated = store
+        .append_run_event(run.id, root.id, record)
+        .await
+        .unwrap();
+    let after = store
+        .load_recent_timeline(child, None, 80)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|row| row.event.id == event.id)
+        .unwrap();
+    assert_eq!(updated.id, event.id);
+    assert_eq!(before.event.sequence, after.event.sequence);
+    assert_eq!(after.event.conversation_id, child);
+    assert!(
+        after.operation.as_ref().unwrap().detail_revision
+            > before.operation.unwrap().detail_revision
+    );
+    assert_eq!(
+        after.operation.unwrap().status,
+        ToolOperationStatus::Succeeded
+    );
+    assert_eq!(
+        store
+            .load_event_detail(event.id)
+            .await
+            .unwrap()
+            .operation
+            .unwrap()
+            .operation
+            .output
+            .as_deref(),
+        Some("captured result")
+    );
+    assert!(
+        !store
+            .load_recent_timeline(conversation.id, None, 80)
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|row| row.event.id == event.id)
     );
 }
 

@@ -80,6 +80,23 @@ pub async fn list_conversations(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn list_child_conversations(
+    state: State<'_, Arc<AppState>>,
+    request: ListChildConversationsRequest,
+) -> Result<ConversationPage, CommandError> {
+    Ok(state
+        .service()?
+        .list_child_conversation_overviews(
+            parse_conversation_id(&request.parent_id)?,
+            request.cursor,
+            request.limit,
+        )
+        .await?
+        .into())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn load_conversation(
     state: State<'_, Arc<AppState>>,
     request: LoadConversationRequest,
@@ -87,6 +104,19 @@ pub async fn load_conversation(
     Ok(state
         .service()?
         .load_conversation_overview(parse_conversation_id(&request.conversation_id)?)
+        .await?
+        .into())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn load_conversation_path(
+    state: State<'_, Arc<AppState>>,
+    request: LoadConversationRequest,
+) -> Result<ConversationPath, CommandError> {
+    Ok(state
+        .service()?
+        .load_conversation_path(parse_conversation_id(&request.conversation_id)?)
         .await?
         .into())
 }
@@ -245,7 +275,11 @@ pub async fn steer_run(
 ) -> Result<(), CommandError> {
     state
         .service()?
-        .steer(parse_run_id(&request.run_id)?, &request.text)
+        .steer_conversation(
+            parse_conversation_id(&request.conversation_id)?,
+            parse_run_id(&request.run_id)?,
+            &request.text,
+        )
         .await?;
     Ok(())
 }
@@ -274,7 +308,10 @@ pub async fn interrupt_run(
 ) -> Result<(), CommandError> {
     state
         .service()?
-        .interrupt(parse_run_id(&request.run_id)?)
+        .interrupt_conversation(
+            parse_conversation_id(&request.conversation_id)?,
+            parse_run_id(&request.run_id)?,
+        )
         .await?;
     Ok(())
 }
@@ -356,7 +393,9 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
         .commands(tauri_specta::collect_commands![
             bootstrap,
             list_conversations,
+            list_child_conversations,
             load_conversation,
+            load_conversation_path,
             load_timeline,
             load_diagnostics,
             load_agent_tree,
@@ -455,6 +494,191 @@ mod tests {
         assert_eq!(error.code, "invalid-request");
         assert_eq!(error.message, "The conversation identifier is invalid.");
         assert_eq!(error.action, None);
+    }
+
+    #[test]
+    fn unified_conversation_controls_require_the_selected_conversation() {
+        assert!(
+            serde_json::from_value::<SteerRunRequest>(serde_json::json!({
+                "runId": "run", "text": "Continue"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<InterruptRunRequest>(serde_json::json!({
+                "runId": "run"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SteerRunRequest>(serde_json::json!({
+                "conversationId": "selected", "runId": "run", "text": "Continue"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<InterruptRunRequest>(serde_json::json!({
+                "conversationId": "selected", "runId": "run"
+            }))
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_conversation_summary_exposes_shared_navigation_and_capabilities() {
+        use prompting_time_core::{
+            app::PromptingTime, router::Router, store::Store, workspace::WorkspaceManager,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let app = PromptingTime::new(
+            store,
+            Router::default(),
+            WorkspaceManager::new(directory.path()),
+            vec![],
+        )
+        .unwrap();
+        let overview = app
+            .create_conversation_overview(CoreConversationRequest::projectless(
+                "Shared conversation",
+            ))
+            .await
+            .unwrap();
+        let id = overview.conversation.id.to_string();
+        let json = serde_json::to_value(ConversationSummary::from(overview)).unwrap();
+        assert_eq!(json["id"], id);
+        assert!(json.get("parentId").is_some_and(serde_json::Value::is_null));
+        assert_eq!(json["hasChildren"], false);
+        assert!(json.get("summary").is_some_and(serde_json::Value::is_null));
+        assert!(json["capabilities"]["canSend"].is_boolean());
+        assert!(json["capabilities"]["canInterrupt"].is_boolean());
+        assert!(json["capabilities"]["canArchive"].is_boolean());
+        assert!(json["capabilities"]["canRoute"].is_boolean());
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unified_conversation_child_path_keeps_bounded_ancestry_and_omits_native_identity() {
+        use prompting_time_core::{
+            app::PromptingTime,
+            router::Router,
+            store::{ProviderEventRecord, Store},
+            workspace::WorkspaceManager,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(directory.path()),
+            vec![],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(CoreConversationRequest::projectless("Canonical root"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, CoreProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .bind_native_session(run.id, "private-native-root")
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        let mut parent = conversation.id;
+        let mut native_parent = "private-native-root".to_owned();
+        for index in 0..66 {
+            let native_child = format!("private-native-child-{index}");
+            store
+                .append_run_event(
+                    run.id,
+                    root.id,
+                    ProviderEventRecord::child_agent(
+                        format!("spawn-{index}"),
+                        &native_parent,
+                        vec![native_child.clone()],
+                        vec![],
+                        "spawn",
+                        "running",
+                    ),
+                )
+                .await
+                .unwrap();
+            let page = app
+                .list_child_conversation_overviews(parent, None, 1)
+                .await
+                .unwrap();
+            assert_eq!(page.items.len(), 1);
+            let expected_parent = parent;
+            parent = page.items[0].conversation.id;
+            let child = serde_json::to_value(ConversationPage::from(page)).unwrap();
+            assert_eq!(child["items"][0]["parentId"], expected_parent.to_string());
+            assert_eq!(
+                child["items"][0]["capabilities"],
+                serde_json::json!({
+                    "canSend": false, "canInterrupt": false, "canArchive": false, "canRoute": false,
+                    "unavailableReason": "This provider exposes recorded child activity, not an independently controllable chat."
+                })
+            );
+            assert!(!child.to_string().contains("private-native"));
+            native_parent = native_child;
+        }
+        let path = ConversationPath::from(app.load_conversation_path(parent).await.unwrap());
+        assert!(path.truncated);
+        assert_eq!(path.items.len(), 64);
+        assert_eq!(path.owner_conversation_id, conversation.id.to_string());
+        assert_eq!(path.items.last().unwrap().id, parent.to_string());
+        assert!(path.items[0].parent_id.is_some());
+        assert_ne!(path.items[0].id, conversation.id.to_string());
+        for pair in path.items.windows(2) {
+            assert_eq!(pair[1].parent_id.as_deref(), Some(pair[0].id.as_str()));
+            assert!(pair[0].has_children);
+        }
+        assert!(!path.items.last().unwrap().has_children);
+        let json = serde_json::to_value(path).unwrap();
+        assert_eq!(json["ownerConversationId"], conversation.id.to_string());
+        assert!(
+            json["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["title"].as_str().unwrap().len() <= 256)
+        );
+        assert!(!json.to_string().contains("private-native"));
+        app.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn unified_conversation_control_errors_are_specific_without_echoing_execution_ids() {
+        let conversation_id = ConversationId::new();
+        let run_id = RunId::new();
+        let unsupported =
+            CommandError::from(AppError::UnsupportedConversationControl { conversation_id });
+        assert_eq!(unsupported.code, "conversation-control-unavailable");
+        assert_eq!(
+            unsupported.message,
+            "This provider exposes recorded child activity, not an independently controllable chat."
+        );
+        assert_eq!(unsupported.action, None);
+        let mismatch = CommandError::from(AppError::RunConversationMismatch {
+            conversation_id,
+            run_id,
+        });
+        assert_eq!(mismatch.code, "invalid-request");
+        assert_eq!(
+            mismatch.message,
+            "The run does not belong to the selected conversation."
+        );
+        for error in [unsupported, mismatch] {
+            let json = serde_json::to_string(&error).unwrap();
+            assert!(!json.contains(&conversation_id.to_string()));
+            assert!(!json.contains(&run_id.to_string()));
+        }
     }
 
     #[test]

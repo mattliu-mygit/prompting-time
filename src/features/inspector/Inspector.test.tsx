@@ -53,6 +53,8 @@ const approval: ApprovalSnapshot = {
 };
 
 const conversation: ConversationSummary = {
+  parentId: null, hasChildren: false, summary: null,
+  capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
   id: "conversation-1", title: "Work", workspaceId: "workspace-1", archived: false,
   projectRoot: "/repo", routingProfile: "balanced", currentRunId: "run-1", provider: "codex", runStatus: "running",
   rollupStatus: "active", agents: [], agentsTruncated: false,

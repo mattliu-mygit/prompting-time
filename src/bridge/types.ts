@@ -7,7 +7,9 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	bootstrap: () => typedError<BootstrapSnapshot_Serialize, CommandError>(__TAURI_INVOKE("bootstrap")),
 	listConversations: (request: ListConversationsRequest) => typedError<ConversationPage, CommandError>(__TAURI_INVOKE("list_conversations", { request })),
+	listChildConversations: (request: ListChildConversationsRequest) => typedError<ConversationPage, CommandError>(__TAURI_INVOKE("list_child_conversations", { request })),
 	loadConversation: (request: LoadConversationRequest) => typedError<ConversationSummary, CommandError>(__TAURI_INVOKE("load_conversation", { request })),
+	loadConversationPath: (request: LoadConversationRequest) => typedError<ConversationPath, CommandError>(__TAURI_INVOKE("load_conversation_path", { request })),
 	loadTimeline: (request: LoadTimelineRequest) => typedError<TimelinePage, CommandError>(__TAURI_INVOKE("load_timeline", { request })),
 	loadDiagnostics: (request: LoadTimelineRequest) => typedError<DiagnosticsPage, CommandError>(__TAURI_INVOKE("load_diagnostics", { request })),
 	loadAgentTree: (request: LoadAgentTreeRequest) => typedError<AgentTreePage, CommandError>(__TAURI_INVOKE("load_agent_tree", { request })),
@@ -137,14 +139,32 @@ export type CommandError = {
 	action: string | null,
 };
 
+export type ConversationCapabilities = {
+	canSend: boolean,
+	canInterrupt: boolean,
+	canArchive: boolean,
+	canRoute: boolean,
+	unavailableReason: string | null,
+};
+
 export type ConversationPage = {
 	items: ConversationSummary[],
 	nextCursor: string | null,
 };
 
+export type ConversationPath = {
+	items: ConversationSummary[],
+	truncated: boolean,
+	ownerConversationId: string,
+};
+
 export type ConversationSummary = {
 	id: string,
+	parentId: string | null,
 	title: string,
+	hasChildren: boolean,
+	summary: string | null,
+	capabilities: ConversationCapabilities,
 	routingProfile: RoutingProfile,
 	workspaceId: string | null,
 	archived: boolean,
@@ -218,7 +238,14 @@ export type InspectorSnapshot = {
 };
 
 export type InterruptRunRequest = {
+	conversationId: string,
 	runId: string,
+};
+
+export type ListChildConversationsRequest = {
+	parentId: string,
+	cursor: string | null,
+	limit: number,
 };
 
 export type ListConversationsRequest = {
@@ -378,6 +405,7 @@ export type RunStatus = "queued" | "running" | "waiting" | "completed" | "interr
 export type SpecialPath = { kind: "root" } | { kind: "minimal" } | { kind: "project_roots"; subpath: string | null } | { kind: "tmpdir" } | { kind: "slash_tmp" } | { kind: "unknown"; path: string; subpath: string | null };
 
 export type SteerRunRequest = {
+	conversationId: string,
 	runId: string,
 	text: string,
 };

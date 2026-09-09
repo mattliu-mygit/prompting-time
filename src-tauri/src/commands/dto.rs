@@ -43,6 +43,14 @@ pub struct ListConversationsRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct ListChildConversationsRequest {
+    pub parent_id: String,
+    pub cursor: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct LoadConversationRequest {
     pub conversation_id: String,
 }
@@ -51,7 +59,11 @@ pub struct LoadConversationRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSummary {
     pub id: String,
+    pub parent_id: Option<String>,
     pub title: String,
+    pub has_children: bool,
+    pub summary: Option<String>,
+    pub capabilities: ConversationCapabilities,
     pub routing_profile: RoutingProfile,
     pub workspace_id: Option<String>,
     pub archived: bool,
@@ -62,6 +74,24 @@ pub struct ConversationSummary {
     pub rollup_status: Option<RollupStatus>,
     pub agents: Vec<AgentSnapshot>,
     pub agents_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationCapabilities {
+    pub can_send: bool,
+    pub can_interrupt: bool,
+    pub can_archive: bool,
+    pub can_route: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPath {
+    pub items: Vec<ConversationSummary>,
+    pub truncated: bool,
+    pub owner_conversation_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
@@ -324,6 +354,7 @@ pub struct SubmissionSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SteerRunRequest {
+    pub conversation_id: String,
     pub run_id: String,
     pub text: String,
 }
@@ -561,6 +592,7 @@ pub struct ApprovalQuestionPage {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InterruptRunRequest {
+    pub conversation_id: String,
     pub run_id: String,
 }
 
@@ -820,6 +852,7 @@ pub enum AppEvent {
     },
     RunChanged {
         sequence: String,
+        // Original execution owner, which can differ from the displayed child conversation.
         conversation_id: String,
         run_id: String,
     },

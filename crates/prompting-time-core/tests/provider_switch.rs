@@ -230,10 +230,14 @@ async fn accepted_steering_survives_timeline_and_provider_switches() {
     let steering = "Preserve QUARTZ_MARKER_482 compatibility";
     fixture
         .app
-        .steer(first.handle.run_id(), steering)
+        .steer_conversation(conversation.id, first.handle.run_id(), steering)
         .await
         .unwrap();
-    fixture.app.interrupt(first.handle.run_id()).await.unwrap();
+    fixture
+        .app
+        .interrupt_conversation(conversation.id, first.handle.run_id())
+        .await
+        .unwrap();
     first.handle.wait().await.unwrap();
     let messages = fixture
         .store
@@ -309,7 +313,11 @@ async fn acknowledged_questions_survive_provider_handoff() {
         )
         .await
         .unwrap();
-    fixture.app.interrupt(first.handle.run_id()).await.unwrap();
+    fixture
+        .app
+        .interrupt_conversation(conversation.id, first.handle.run_id())
+        .await
+        .unwrap();
     first.handle.wait().await.unwrap();
     let approval = fixture
         .store
@@ -368,6 +376,57 @@ async fn structured_child_answers_keep_provenance_privacy_and_session_tree_bound
         .load_approval(first.handle.run_id(), "question-request")
         .await
         .unwrap();
+    let child = fixture
+        .app
+        .list_child_conversation_overviews(conversation.id, None, 20)
+        .await
+        .unwrap()
+        .items
+        .remove(0)
+        .conversation;
+    let child_approvals = fixture
+        .app
+        .load_approvals(child.id, None, true, 20)
+        .await
+        .unwrap();
+    assert_eq!(child_approvals.items.len(), 1);
+    assert_eq!(child_approvals.items[0].id, approval.id);
+    assert_eq!(child_approvals.items[0].agent_id, approval.agent_id);
+    let parent_inspector = fixture
+        .app
+        .inspect_conversation(conversation.id)
+        .await
+        .unwrap();
+    assert!(parent_inspector.handoff.is_some() && parent_inspector.routing.is_some());
+    assert_eq!(parent_inspector.run.unwrap().id, first.handle.run_id());
+    let child_inspector = fixture.app.inspect_conversation(child.id).await.unwrap();
+    assert_eq!(
+        child_inspector.execution_path,
+        parent_inspector.execution_path
+    );
+    assert!(
+        child_inspector.run.is_none()
+            && child_inspector.handoff.is_none()
+            && child_inspector.routing.is_none()
+    );
+    assert!(
+        fixture
+            .app
+            .load_approvals(conversation.id, None, true, 20)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        fixture
+            .app
+            .load_conversation_overview(conversation.id)
+            .await
+            .unwrap()
+            .rollup_status,
+        Some(prompting_time_core::domain::RollupStatus::NeedsAttention)
+    );
     fixture
         .app
         .respond_to_approval_id(
@@ -395,7 +454,21 @@ async fn structured_child_answers_keep_provenance_privacy_and_session_tree_bound
         assert_eq!(target, "question-child");
         assert_eq!(answers["z-native"], ["PUBLIC_FIRST", "PUBLIC_SECOND"]);
     }
-    fixture.app.interrupt(first.handle.run_id()).await.unwrap();
+    assert!(matches!(
+        fixture
+            .app
+            .respond_to_approval_id(
+                approval.id,
+                ApprovalResponse::Answers(std::collections::BTreeMap::new())
+            )
+            .await,
+        Err(AppError::StaleApproval { .. })
+    ));
+    fixture
+        .app
+        .interrupt_conversation(conversation.id, first.handle.run_id())
+        .await
+        .unwrap();
     first.handle.wait().await.unwrap();
     let timeline = fixture
         .store
@@ -416,6 +489,39 @@ async fn structured_child_answers_keep_provenance_privacy_and_session_tree_bound
         timeline
             .iter()
             .all(|event| !event.content.contains("SECRET"))
+    );
+    let child_timeline = fixture
+        .app
+        .load_timeline_snapshot(child.id, None, 80)
+        .await
+        .unwrap();
+    assert!(child_timeline.events.items.iter().all(
+        |row| row.event.conversation_id == child.id && row.event.agent_id == approval.agent_id
+    ));
+    assert!(
+        child_timeline
+            .events
+            .items
+            .iter()
+            .any(|row| row.event.id == event.id)
+    );
+    assert!(
+        child_timeline
+            .events
+            .items
+            .iter()
+            .all(|row| !row.event.content.contains("SECRET"))
+    );
+    assert!(
+        fixture
+            .app
+            .load_timeline_snapshot(conversation.id, None, 80)
+            .await
+            .unwrap()
+            .events
+            .items
+            .iter()
+            .all(|row| row.event.id != event.id)
     );
     for (command, provider, expected) in [
         ("second", ProviderId::Claude, 1),

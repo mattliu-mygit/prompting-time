@@ -10,6 +10,8 @@ const agents: AgentSnapshot[] = [
   { id: "grandchild", parentId: "child", label: "Researcher", status: "completed", provider: "claude", summary: "Checked schema" },
 ];
 const conversation: NormalizedConversation = {
+  parentId: null, hasChildren: false, summary: null,
+  capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
   id: "c", title: "Compiler", currentRunId: "run", agentIds: ["root", "child"], archived: false,
   routingProfile: "bestFit", workspaceId: null, projectRoot: null, provider: "codex", runStatus: "running",
   rollupStatus: "active", agentsTruncated: true, summaryAgentsTruncated: true, summaryAgentIds: ["root", "child"],

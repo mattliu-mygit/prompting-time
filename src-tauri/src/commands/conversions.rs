@@ -88,7 +88,17 @@ impl From<ConversationOverview> for ConversationSummary {
     fn from(value: ConversationOverview) -> Self {
         Self {
             id: value.conversation.id.to_string(),
+            parent_id: value.conversation.parent_id.map(|id| id.to_string()),
             title: value.conversation.title,
+            has_children: value.has_children,
+            summary: value.summary,
+            capabilities: ConversationCapabilities {
+                can_send: value.capabilities.can_send,
+                can_interrupt: value.capabilities.can_interrupt,
+                can_archive: value.capabilities.can_archive,
+                can_route: value.capabilities.can_route,
+                unavailable_reason: value.capabilities.unavailable_reason,
+            },
             routing_profile: match value.routing_profile {
                 CoreRoutingProfile::Balanced => RoutingProfile::Balanced,
                 CoreRoutingProfile::BestFit => RoutingProfile::BestFit,
@@ -114,6 +124,16 @@ impl From<Page<ConversationOverview>> for ConversationPage {
         Self {
             items: value.items.into_iter().map(Into::into).collect(),
             next_cursor: value.next_cursor,
+        }
+    }
+}
+
+impl From<prompting_time_core::store::ConversationPath<ConversationOverview>> for ConversationPath {
+    fn from(value: prompting_time_core::store::ConversationPath<ConversationOverview>) -> Self {
+        Self {
+            items: value.items.into_iter().map(Into::into).collect(),
+            truncated: value.truncated,
+            owner_conversation_id: value.owner_conversation_id.to_string(),
         }
     }
 }
@@ -819,6 +839,14 @@ impl From<StateError> for CommandError {
 impl From<AppError> for CommandError {
     fn from(error: AppError) -> Self {
         match error {
+            AppError::UnsupportedConversationControl { .. } => Self {
+                code: "conversation-control-unavailable",
+                message: "This provider exposes recorded child activity, not an independently controllable chat.".to_owned(),
+                action: None,
+            },
+            AppError::RunConversationMismatch { .. } => invalid_request(
+                "The run does not belong to the selected conversation.",
+            ),
             AppError::EmptySubmission => invalid_request("The message and command identifier are required."),
             AppError::MessageTooLarge { .. } => invalid_request("The message is too large."),
             AppError::InvalidApprovalQuestion => {

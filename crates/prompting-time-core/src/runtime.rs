@@ -5952,8 +5952,22 @@ mod tests {
             .await
             .unwrap();
         if followup && !hold_attempt_gate {
+            let mut child_id = None;
+            for child in store
+                .list_child_conversations(conversation.id, None, 10)
+                .await
+                .unwrap()
+                .items
+            {
+                if matches!(store.conversation_binding(child.id).await.unwrap(),
+                    crate::store::ConversationBinding::Observed { agent_id, .. } if agent_id == approval.agent_id)
+                {
+                    child_id = Some(child.id);
+                    break;
+                }
+            }
             let rows = store
-                .load_recent_timeline(conversation.id, None, 100)
+                .load_recent_timeline(child_id.unwrap(), None, 100)
                 .await
                 .unwrap();
             let operations = rows

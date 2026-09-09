@@ -1,5 +1,435 @@
 use super::*;
 
+async fn logical_tree(
+    store: &Store,
+) -> (Conversation, ProviderRun, Vec<(ConversationId, AgentId)>) {
+    let (conversation, run, root) = started_tree(store).await;
+    observe(store, &run, &root, "root-native", &["first", "sibling"])
+        .await
+        .unwrap();
+    observe(store, &run, &root, "first", &["grandchild"])
+        .await
+        .unwrap();
+    let mut owners = vec![(conversation.id, root.id)];
+    for native in ["first", "sibling", "grandchild"] {
+        let (id, agent): (String, String) = sqlx::query_as(
+            "SELECT conversations.id, agent_nodes.id FROM conversations JOIN agent_nodes \
+             ON agent_nodes.id = conversations.observed_agent_id WHERE agent_nodes.run_id = ? \
+             AND agent_nodes.provider_native_id = ?",
+        )
+        .bind(run.id.to_string())
+        .bind(native)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let agent = AgentId::from(parse_uuid("agent", &agent).unwrap());
+        store
+            .append_run_event(run.id, agent, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        owners.push((parse_uuid("conversation", &id).unwrap().into(), agent));
+    }
+    (conversation, run, owners)
+}
+
+#[tokio::test]
+async fn unified_conversation_display_scopes_before_paging_and_preserves_raw_ownership() {
+    let store = Store::open_in_memory().await.unwrap();
+    let (conversation, run, owners) = logical_tree(&store).await;
+    let mut changes = store.subscribe_changes();
+    for (id, agent) in &owners {
+        for index in 0..5 {
+            store
+                .append_run_event(
+                    run.id,
+                    *agent,
+                    ProviderEventRecord::message(format!("{id} message {index}")),
+                )
+                .await
+                .unwrap();
+            store
+                .append_run_event(
+                    run.id,
+                    *agent,
+                    ProviderEventRecord::unrecognized(format!("{id} telemetry {index}")),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    for index in 0..90 {
+        store
+            .append_run_event(
+                run.id,
+                owners[0].1,
+                ProviderEventRecord::message(format!("new root message {index}")),
+            )
+            .await
+            .unwrap();
+    }
+    let mut change_count = 0;
+    while let Ok(change) = changes.try_recv() {
+        assert_eq!(
+            change,
+            StoreChange {
+                conversation_id: conversation.id,
+                run_id: Some(run.id)
+            }
+        );
+        change_count += 1;
+    }
+    assert_eq!(
+        change_count, 130,
+        "one execution-owner invalidation per recorded event"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let app = crate::app::PromptingTime::new(
+        store.clone(),
+        crate::router::Router::default(),
+        crate::workspace::WorkspaceManager::new(temp.path()),
+        vec![],
+    )
+    .unwrap();
+    for (id, agent) in &owners {
+        let expected: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE agent_id = ? AND kind <> 'diagnostic' ORDER BY sequence",
+        )
+        .bind(agent.to_string())
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        let mut cursor = None;
+        let mut events = Vec::new();
+        loop {
+            let page = app
+                .load_timeline_snapshot(*id, cursor, 3)
+                .await
+                .unwrap()
+                .events;
+            assert!(
+                page.items
+                    .iter()
+                    .all(|row| row.event.conversation_id == *id)
+            );
+            events.splice(
+                0..0,
+                page.items.into_iter().map(|row| row.event.id.to_string()),
+            );
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(events, expected, "selected {id}");
+        let diagnostics = app.load_diagnostics(*id, None, 80).await.unwrap();
+        assert_eq!(diagnostics.items.len(), 5);
+        assert!(
+            diagnostics
+                .items
+                .iter()
+                .all(|row| row.event.agent_id == *agent && row.event.conversation_id == *id)
+        );
+    }
+    let child_id = owners[1].0;
+    let expected: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM events WHERE agent_id = ? AND kind <> 'diagnostic' ORDER BY sequence",
+    )
+    .bind(owners[1].1.to_string())
+    .fetch_all(&store.pool)
+    .await
+    .unwrap();
+    let child_page = app
+        .load_timeline_snapshot(child_id, None, 80)
+        .await
+        .unwrap();
+    assert_eq!(
+        child_page
+            .events
+            .items
+            .iter()
+            .map(|row| row.event.id.to_string())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let persisted_owners: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT conversation_id FROM events")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted_owners, vec![conversation.id.to_string()]);
+}
+
+#[tokio::test]
+async fn unified_conversation_approval_pages_keep_exact_execution_identity() {
+    let store = Store::open_in_memory().await.unwrap();
+    let (conversation, run, owners) = logical_tree(&store).await;
+    for (_, agent) in &owners {
+        for index in 0..7 {
+            for (status, resolution) in
+                [("pending", None), ("denied", Some("{\"kind\":\"denied\"}"))]
+            {
+                sqlx::query("INSERT INTO approvals (id, conversation_id, run_id, agent_id, provider, \
+                    provider_request_id, operation, scope, status, resolution_json, created_at, updated_at) \
+                    VALUES (?, ?, ?, ?, 'codex', ?, 'review', 'turn', ?, ?, ?, ?)")
+                    .bind(ApprovalId::new().to_string()).bind(conversation.id.to_string())
+                    .bind(run.id.to_string()).bind(agent.to_string()).bind(format!("{agent}-{index}-{status}"))
+                    .bind(status).bind(resolution).bind(index).bind(index)
+                    .execute(&store.pool).await.unwrap();
+            }
+        }
+    }
+    for (id, agent) in owners {
+        for pending in [true, false] {
+            let mut cursor = None;
+            let mut count = 0;
+            loop {
+                let page = store.load_approvals(id, cursor, pending, 3).await.unwrap();
+                assert!(
+                    page.items
+                        .iter()
+                        .all(|approval| approval.agent_id == agent && approval.run_id == run.id)
+                );
+                count += page.items.len();
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(count, 7);
+        }
+    }
+}
+
+#[tokio::test]
+async fn unified_conversation_overviews_use_bound_child_status_after_later_parent_run() {
+    let store = Store::open_in_memory().await.unwrap();
+    let (conversation, run, owners) = logical_tree(&store).await;
+    sqlx::query("UPDATE agent_nodes SET summary = ? WHERE id = ?")
+        .bind("child result ".repeat(500))
+        .bind(owners[1].1.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store
+        .fail_run_if_active(
+            run.id,
+            owners[0].1,
+            ProviderErrorCategory::Protocol,
+            MutationState::NoneObserved,
+            DispatchCertainty::MayHaveDispatched,
+        )
+        .await
+        .unwrap();
+    let (next_run, _) = started_run(&store, conversation.id).await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = crate::app::PromptingTime::new(
+        store.clone(),
+        crate::router::Router::default(),
+        crate::workspace::WorkspaceManager::new(temp.path()),
+        vec![],
+    )
+    .unwrap();
+    let root = app
+        .load_conversation_overview(conversation.id)
+        .await
+        .unwrap();
+    assert!(root.has_children && root.capabilities.can_send && root.capabilities.can_archive);
+    assert_eq!(root.run.unwrap().id, next_run.id);
+    let root_history = app
+        .load_timeline_snapshot(conversation.id, None, 80)
+        .await
+        .unwrap();
+    assert!(
+        root_history
+            .events
+            .items
+            .iter()
+            .any(|row| row.event.run_id == run.id)
+    );
+    assert!(
+        root_history
+            .events
+            .items
+            .iter()
+            .any(|row| row.event.run_id == next_run.id)
+    );
+    let child = app.load_conversation_overview(owners[1].0).await.unwrap();
+    assert_eq!(child.run.unwrap().id, run.id);
+    assert_eq!(child.run.unwrap().status, RunStatus::Failed);
+    assert!(child.has_children);
+    assert_eq!(
+        child.summary.unwrap().len(),
+        MAX_AGENT_SUMMARY_PREVIEW_BYTES
+    );
+    assert!(
+        !child.capabilities.can_send
+            && !child.capabilities.can_interrupt
+            && !child.capabilities.can_archive
+            && !child.capabilities.can_route
+    );
+    assert_eq!(
+        child.capabilities.unavailable_reason.as_deref(),
+        Some(
+            "This provider exposes recorded child activity, not an independently controllable chat."
+        )
+    );
+    let siblings = app
+        .list_child_conversation_overviews(conversation.id, None, 1)
+        .await
+        .unwrap();
+    let next = app
+        .list_child_conversation_overviews(conversation.id, siblings.next_cursor, 1)
+        .await
+        .unwrap();
+    assert_eq!(siblings.items.len() + next.items.len(), 2);
+    assert!(
+        siblings
+            .items
+            .iter()
+            .chain(next.items.iter())
+            .all(|item| item.conversation.parent_id == Some(conversation.id))
+    );
+    let path = app.load_conversation_path(owners[3].0).await.unwrap();
+    assert_eq!(
+        path.items
+            .iter()
+            .map(|item| item.conversation.id)
+            .collect::<Vec<_>>(),
+        vec![conversation.id, owners[1].0, owners[3].0]
+    );
+    assert_eq!(path.owner_conversation_id, conversation.id);
+    assert!(!path.truncated);
+}
+
+#[tokio::test]
+async fn unified_conversation_rollup_includes_own_descendants_but_excludes_siblings() {
+    let store = Store::open_in_memory().await.unwrap();
+    let (_, run, owners) = logical_tree(&store).await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = crate::app::PromptingTime::new(
+        store.clone(),
+        crate::router::Router::default(),
+        crate::workspace::WorkspaceManager::new(temp.path()),
+        vec![],
+    )
+    .unwrap();
+    store
+        .append_run_event(run.id, owners[3].1, ProviderEventRecord::waiting())
+        .await
+        .unwrap();
+    let child = app.load_conversation_overview(owners[1].0).await.unwrap();
+    assert_eq!(
+        child.run.unwrap().status,
+        RunStatus::Running,
+        "own execution stays running"
+    );
+    assert_eq!(
+        child.rollup_status,
+        Some(crate::domain::RollupStatus::NeedsAttention)
+    );
+    assert_eq!(
+        app.load_conversation_overview(owners[2].0)
+            .await
+            .unwrap()
+            .rollup_status,
+        Some(crate::domain::RollupStatus::Active)
+    );
+    store
+        .append_run_event(run.id, owners[3].1, ProviderEventRecord::resumed())
+        .await
+        .unwrap();
+    store
+        .append_run_event(run.id, owners[2].1, ProviderEventRecord::waiting())
+        .await
+        .unwrap();
+    assert_eq!(
+        app.load_conversation_overview(owners[1].0)
+            .await
+            .unwrap()
+            .rollup_status,
+        Some(crate::domain::RollupStatus::Active),
+        "a waiting sibling must not affect this branch"
+    );
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        "EXPLAIN QUERY PLAN WITH RECURSIVE subtree(id, status) AS ( \
+             SELECT id, status FROM agent_nodes WHERE id = ? \
+             UNION ALL SELECT child.id, child.status FROM subtree CROSS JOIN agent_nodes AS child \
+             WHERE child.parent_id = subtree.id AND child.run_id = ? \
+         ) SELECT MAX(CASE status WHEN 'waiting' THEN 5 ELSE 1 END) FROM subtree",
+    )
+    .bind(owners[1].1.to_string())
+    .bind(run.id.to_string())
+    .fetch_all(&store.pool)
+    .await
+    .unwrap();
+    assert!(
+        plan.iter().any(|row| row
+            .3
+            .contains("SEARCH child USING INDEX idx_agents_run_parent")),
+        "{plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|row| row.3.contains("SCAN child")),
+        "{plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn unified_conversation_path_is_contiguous_bounded_and_rejects_archived_ancestry() {
+    let store = Store::open_in_memory().await.unwrap();
+    let (conversation, run, root) = started_tree(&store).await;
+    let mut native = "root-native".to_owned();
+    for depth in 0..70 {
+        let child = format!("native-{depth}");
+        observe(&store, &run, &root, &native, &[&child])
+            .await
+            .unwrap();
+        native = child;
+    }
+    let selected: String = sqlx::query_scalar(
+        "SELECT conversations.id FROM conversations JOIN agent_nodes
+        ON agent_nodes.id = conversations.observed_agent_id WHERE provider_native_id = ?",
+    )
+    .bind(native)
+    .fetch_one(&store.pool)
+    .await
+    .unwrap();
+    let selected = ConversationId::from(parse_uuid("conversation", &selected).unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let app = crate::app::PromptingTime::new(
+        store.clone(),
+        crate::router::Router::default(),
+        crate::workspace::WorkspaceManager::new(temp.path()),
+        vec![],
+    )
+    .unwrap();
+    let path = app.load_conversation_path(selected).await.unwrap();
+    assert_eq!(path.items.len(), 64);
+    assert!(path.truncated);
+    assert_eq!(path.owner_conversation_id, conversation.id);
+    assert_eq!(path.items.last().unwrap().conversation.id, selected);
+    assert!(path.items.first().unwrap().conversation.parent_id.is_some());
+    for pair in path.items.windows(2) {
+        assert_eq!(
+            pair[1].conversation.parent_id,
+            Some(pair[0].conversation.id)
+        );
+    }
+    store
+        .fail_run_if_active(
+            run.id,
+            root.id,
+            ProviderErrorCategory::Protocol,
+            MutationState::NoneObserved,
+            DispatchCertainty::MayHaveDispatched,
+        )
+        .await
+        .unwrap();
+    app.archive(conversation.id).await.unwrap();
+    assert!(matches!(app.load_conversation_path(selected).await,
+        Err(crate::app::AppError::Store(StoreError::ConversationArchived(id))) if id == conversation.id));
+}
+
 async fn started_tree(store: &Store) -> (Conversation, ProviderRun, AgentNode) {
     let conversation = store
         .create_conversation(NewConversation::projectless("owner"))

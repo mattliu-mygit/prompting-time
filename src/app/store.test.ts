@@ -99,6 +99,8 @@ function conversation(
   return {
     id,
     title: `Conversation ${id}`,
+    parentId: null, hasChildren: false, summary: null,
+    capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     routingProfile: "balanced",
     workspaceId: null,
     archived: false,

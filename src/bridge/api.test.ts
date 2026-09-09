@@ -106,12 +106,12 @@ describe("desktop bridge", () => {
       workspace: { kind: "projectless" },
       routingProfile: "balanced",
     });
-    await steerRun({ runId: "run-1", text: "focus on tests" });
+    await steerRun({ conversationId: "c-1", runId: "run-1", text: "focus on tests" });
     await respondToApproval({
       approvalId: "approval-1",
       response: { kind: "approved" },
     });
-    await interruptRun({ runId: "run-1" });
+    await interruptRun({ conversationId: "c-1", runId: "run-1" });
     await archiveConversation({ conversationId: "c-1" });
     await inspectWorkspace({ conversationId: "c-1" });
     await inspectProject({ path: "/repo" });
@@ -160,7 +160,7 @@ describe("desktop bridge", () => {
           },
         },
       ],
-      ["steer_run", { request: { runId: "run-1", text: "focus on tests" } }],
+      ["steer_run", { request: { conversationId: "c-1", runId: "run-1", text: "focus on tests" } }],
       [
         "respond_to_approval",
         {
@@ -170,7 +170,7 @@ describe("desktop bridge", () => {
           },
         },
       ],
-      ["interrupt_run", { request: { runId: "run-1" } }],
+      ["interrupt_run", { request: { conversationId: "c-1", runId: "run-1" } }],
       ["archive_conversation", { request: { conversationId: "c-1" } }],
       ["inspect_workspace", { request: { conversationId: "c-1" } }],
       ["inspect_project", { request: { path: "/repo" } }],

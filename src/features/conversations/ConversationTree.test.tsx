@@ -15,6 +15,8 @@ function node(
 
 function conversationWithThreeLevels(): ConversationSummary {
   return {
+    parentId: null, hasChildren: false, summary: null,
+    capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     id: "c1",
     title: "Auth refactor",
     routingProfile: "balanced",
@@ -36,6 +38,8 @@ function conversationWithThreeLevels(): ConversationSummary {
 
 function queuedProjectless(): ConversationSummary {
   return {
+    parentId: null, hasChildren: false, summary: null,
+    capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     id: "c2",
     title: "Release notes",
     routingProfile: "usageBalance",

@@ -25,6 +25,8 @@ const providers: ProviderInstallation[] = [
 function conversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
     id: "conversation-1", title: "Work", workspaceId: null, archived: false,
+    parentId: null, hasChildren: false, summary: null,
+    capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     projectRoot: null, routingProfile: "balanced", currentRunId: null, provider: null, runStatus: null,
     rollupStatus: null, agents: [], agentsTruncated: false, ...overrides,
   };
@@ -266,7 +268,7 @@ describe("Composer", () => {
       field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
       field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
-    expect(steerRun).toHaveBeenCalledExactlyOnceWith({ runId: "run", text: draft });
+    expect(steerRun).toHaveBeenCalledExactlyOnceWith({ conversationId: "conversation-1", runId: "run", text: draft });
     expect(field).toHaveValue(draft);
     await act(async () => reject(new Error("Steer rejected")));
     expect(screen.getByRole("alert")).toHaveTextContent("Steer rejected");
@@ -297,7 +299,7 @@ describe("Composer", () => {
     const dialog = screen.getByRole("dialog", { name: "Interrupt Codex" });
     expect(api.interruptRun).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Interrupt Codex" }));
-    await waitFor(() => expect(api.interruptRun).toHaveBeenCalledExactlyOnceWith({ runId: "run-1" }));
+    await waitFor(() => expect(api.interruptRun).toHaveBeenCalledExactlyOnceWith({ conversationId: "conversation-1", runId: "run-1" }));
   });
 
   it.each([
@@ -396,7 +398,7 @@ describe("Composer", () => {
     expect(api.interruptRun).not.toHaveBeenCalled();
     expect(api.submitMessage).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Interrupt and switch to Claude" }));
-    await waitFor(() => expect(api.interruptRun).toHaveBeenCalledWith({ runId: "run-1" }));
+    await waitFor(() => expect(api.interruptRun).toHaveBeenCalledWith({ conversationId: "conversation-1", runId: "run-1" }));
     expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue("claude");
     expect(screen.getByRole("combobox", { name: "Provider" })).toBeDisabled();
     expect(screen.getByText(/Waiting for Codex to stop/)).toBeVisible();
@@ -494,7 +496,7 @@ describe("Composer", () => {
     render(<Composer conversation={conversation({ currentRunId: "run-1", provider: "codex", runStatus: "running" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Focus on tests" } });
     fireEvent.click(screen.getByRole("button", { name: "Steer Codex" }));
-    await waitFor(() => expect(api.steerRun).toHaveBeenCalledWith({ runId: "run-1", text: "Focus on tests" }));
+    await waitFor(() => expect(api.steerRun).toHaveBeenCalledWith({ conversationId: "conversation-1", runId: "run-1", text: "Focus on tests" }));
   });
 
   it("explains why a non-steerable active run cannot accept another message", () => {

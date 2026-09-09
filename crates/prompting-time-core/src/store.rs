@@ -1,7 +1,7 @@
 use crate::tool_operation::{ToolOperation, ToolOperationDetail, ToolOperationSummary};
 mod conversations;
 mod operations;
-pub use conversations::ConversationBinding;
+pub use conversations::{ConversationBinding, ConversationPath};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -708,6 +708,8 @@ pub struct Page<T> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SidebarDetails {
     pub conversation_id: ConversationId,
+    pub binding: ConversationBinding,
+    pub has_children: bool,
     pub routing_profile: RoutingProfile,
     pub project_root: Option<PathBuf>,
     pub run: Option<ProviderRun>,
@@ -4118,16 +4120,32 @@ impl Store {
                 separated.push_bind(id.to_string());
             }
         }
+        // The subtree drives each recursive step so SQLite can look up children
+        // by (run_id, parent_id), rather than scanning the owner's run each time.
         query.push(
             ")) \
              SELECT selected.id AS conversation_id, \
+                    conversations.observed_agent_id, latest_runs.conversation_id AS run_conversation_id, \
+                    EXISTS (SELECT 1 FROM conversations AS child WHERE child.parent_id = selected.id AND child.status = 'active') AS has_children, \
                     COALESCE(conversation_settings.routing_profile, 'balanced') AS routing_profile, \
                     workspaces.project_root, \
                     latest_runs.id AS run_id, latest_runs.provider, \
                     latest_runs.fallback_from_run_id, latest_runs.native_session_id, \
-                    latest_runs.status AS run_status, latest_runs.mutation_state, \
+                    CASE WHEN conversations.observed_agent_id IS NOT NULL THEN sidebar_agents.status ELSE latest_runs.status END AS run_status, latest_runs.mutation_state, \
                     latest_runs.dispatch_certainty, latest_runs.created_at AS run_created_at, \
-                    CASE WHEN latest_runs.waiting_agent_count > 0 THEN 'needs_attention' \
+                    CASE WHEN conversations.observed_agent_id IS NOT NULL THEN ( \
+                         WITH RECURSIVE subtree(id, status) AS ( \
+                             SELECT observed_agent.id, observed_agent.status \
+                             UNION ALL \
+                             SELECT child.id, child.status FROM subtree CROSS JOIN agent_nodes AS child \
+                             WHERE child.parent_id = subtree.id AND child.run_id = observed_agent.run_id \
+                         ) SELECT CASE MAX(CASE status WHEN 'waiting' THEN 5 WHEN 'queued' THEN 4 \
+                                                  WHEN 'running' THEN 4 WHEN 'failed' THEN 3 \
+                                                  WHEN 'interrupted' THEN 2 ELSE 1 END) \
+                                       WHEN 5 THEN 'needs_attention' WHEN 4 THEN 'active' \
+                                       WHEN 3 THEN 'failed' WHEN 2 THEN 'interrupted' ELSE 'completed' END FROM subtree \
+                         ) \
+                         WHEN latest_runs.waiting_agent_count > 0 THEN 'needs_attention' \
                          WHEN latest_runs.active_agent_count > 0 THEN 'active' \
                          WHEN latest_runs.failed_agent_count > 0 THEN 'failed' \
                          WHEN latest_runs.interrupted_agent_count > 0 THEN 'interrupted' \
@@ -4144,14 +4162,17 @@ impl Store {
              LEFT JOIN conversations ON conversations.id = selected.id \
              LEFT JOIN conversation_settings \
                     ON conversation_settings.conversation_id = conversations.id \
-             LEFT JOIN workspaces ON workspaces.id = conversations.workspace_id \
-             LEFT JOIN provider_runs AS latest_runs ON latest_runs.id = ( \
+             LEFT JOIN agent_nodes AS observed_agent ON observed_agent.id = conversations.observed_agent_id \
+             LEFT JOIN provider_runs AS latest_runs ON latest_runs.id = COALESCE(observed_agent.run_id, ( \
                  SELECT candidate.id FROM provider_runs AS candidate \
                  WHERE candidate.conversation_id = selected.id \
                  ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT 1 \
-             ) \
+             )) \
+             LEFT JOIN workspaces ON workspaces.conversation_id = COALESCE(latest_runs.conversation_id, conversations.id) \
              LEFT JOIN agent_nodes AS sidebar_agents \
-                    ON sidebar_agents.run_id = latest_runs.id AND sidebar_agents.parent_id IS NULL \
+                    ON sidebar_agents.id = COALESCE(conversations.observed_agent_id, ( \
+                        SELECT root.id FROM agent_nodes AS root WHERE root.run_id = latest_runs.id AND root.parent_id IS NULL LIMIT 1 \
+                    )) \
              ORDER BY selected.id",
         );
         let rows = query
@@ -4165,6 +4186,8 @@ impl Store {
                 *id,
                 SidebarDetails {
                     conversation_id: *id,
+                    binding: ConversationBinding::Managed,
+                    has_children: false,
                     routing_profile: RoutingProfile::Balanced,
                     project_root: None,
                     run: None,
@@ -4186,6 +4209,8 @@ impl Store {
                         detail: "query returned an unrequested conversation".to_owned(),
                     })?;
             details.project_root = row.project_root.clone().map(PathBuf::from);
+            details.binding = row.binding()?;
+            details.has_children = row.has_children;
             details.routing_profile = parse_routing_profile(&row.routing_profile)?;
             if details.run.is_none() {
                 details.run = row.provider_run()?;
@@ -4248,6 +4273,7 @@ impl Store {
         diagnostics: bool,
     ) -> Result<Page<TimelineRecord>, StoreError> {
         validate_page_limit(limit)?;
+        let binding = self.conversation_binding(conversation_id).await?;
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
         // Classify once in SQL so visibility and returned presentation cannot disagree.
         // Only structured evidence distinguishes terminal failures from raw notifications;
@@ -4264,12 +4290,34 @@ impl Store {
                      WHEN json_type(payload_json, '$.method') = 'text' \
                        AND substr(json_extract(payload_json, '$.method'), 1, 1) <> '' THEN 'telemetry' \
                      ELSE 'notice' END AS presentation \
-             FROM events WHERE conversation_id = ",
+             FROM events WHERE ",
         );
-        query.push_bind(conversation_id.to_string());
-        query.push(") SELECT projected.id, projected.conversation_id, projected.run_id, projected.agent_id, \
+        match binding {
+            ConversationBinding::Managed => {
+                query
+                    .push("events.conversation_id = ")
+                    .push_bind(conversation_id.to_string());
+                query.push(" AND EXISTS (SELECT 1 FROM agent_nodes AS owner WHERE owner.id = events.agent_id AND owner.run_id = events.run_id AND owner.parent_id IS NULL)");
+            }
+            ConversationBinding::Observed {
+                run_id, agent_id, ..
+            } => {
+                query
+                    .push("events.agent_id = ")
+                    .push_bind(agent_id.to_string());
+                query
+                    .push(" AND events.run_id = ")
+                    .push_bind(run_id.to_string());
+            }
+        }
+        query
+            .push(") SELECT projected.id, ")
+            .push_bind(conversation_id.to_string());
+        query.push(
+            " AS conversation_id, projected.run_id, projected.agent_id, \
                     projected.sequence, projected.kind, projected.role, projected.presentation, \
-                    substr(projected.content, 1, CASE WHEN projected.kind = 'message' THEN ");
+                    substr(projected.content, 1, CASE WHEN projected.kind = 'message' THEN ",
+        );
         query.push_bind(MAX_MESSAGE_PREVIEW_BYTES as i64);
         query.push(" ELSE ");
         query.push_bind(MAX_TIMELINE_PREVIEW_BYTES as i64);
@@ -4346,6 +4394,7 @@ impl Store {
         limit: u32,
     ) -> Result<ApprovalPage, StoreError> {
         validate_page_limit(limit)?;
+        let binding = self.conversation_binding(conversation_id).await?;
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT approvals.id, approvals.run_id, approvals.agent_id, approvals.provider, \
@@ -4353,9 +4402,26 @@ impl Store {
                     substr(approvals.scope, 1, 512) AS scope, approvals.status, \
                     approvals.response_intent_status, \
                     approvals.created_at \
-             FROM approvals WHERE approvals.conversation_id = ",
+             FROM approvals WHERE ",
         );
-        query.push_bind(conversation_id.to_string());
+        match binding {
+            ConversationBinding::Managed => {
+                query
+                    .push("approvals.conversation_id = ")
+                    .push_bind(conversation_id.to_string());
+                query.push(" AND EXISTS (SELECT 1 FROM agent_nodes AS owner WHERE owner.id = approvals.agent_id AND owner.run_id = approvals.run_id AND owner.parent_id IS NULL)");
+            }
+            ConversationBinding::Observed {
+                run_id, agent_id, ..
+            } => {
+                query
+                    .push("approvals.agent_id = ")
+                    .push_bind(agent_id.to_string());
+                query
+                    .push(" AND approvals.run_id = ")
+                    .push_bind(run_id.to_string());
+            }
+        }
         if pending {
             query.push(" AND approvals.status = 'pending'");
         } else {
@@ -7483,6 +7549,9 @@ impl TimelineRecordRow {
 #[derive(FromRow)]
 struct SidebarDetailRow {
     conversation_id: String,
+    observed_agent_id: Option<String>,
+    run_conversation_id: Option<String>,
+    has_children: bool,
     routing_profile: String,
     project_root: Option<String>,
     run_id: Option<String>,
@@ -7508,13 +7577,28 @@ struct SidebarDetailRow {
 }
 
 impl SidebarDetailRow {
+    fn binding(&self) -> Result<ConversationBinding, StoreError> {
+        match &self.observed_agent_id {
+            None => Ok(ConversationBinding::Managed),
+            Some(agent) => Ok(ConversationBinding::Observed {
+                owner_conversation_id: parse_uuid(
+                    "conversation owner",
+                    &required_sidebar(&self.run_conversation_id, "run owner")?,
+                )?
+                .into(),
+                run_id: parse_uuid("run", &required_sidebar(&self.run_id, "run id")?)?.into(),
+                agent_id: parse_uuid("agent", agent)?.into(),
+            }),
+        }
+    }
+
     fn provider_run(&self) -> Result<Option<ProviderRun>, StoreError> {
         let Some(id) = self.run_id.as_deref() else {
             return Ok(None);
         };
         ProviderRunRow {
             id: id.to_owned(),
-            conversation_id: self.conversation_id.clone(),
+            conversation_id: required_sidebar(&self.run_conversation_id, "run owner")?,
             provider: required_sidebar(&self.provider, "provider")?,
             fallback_from_run_id: self.fallback_from_run_id.clone(),
             native_session_id: self.native_session_id.clone(),

@@ -11,6 +11,8 @@ it("navigates palette, parent and root through App without changing draft or sen
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   const conversation: ConversationSummary = {
+    parentId: null, hasChildren: false, summary: null,
+    capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     id: "c", title: "Compiler", routingProfile: "bestFit", workspaceId: null, archived: false, projectRoot: null,
     currentRunId: "run", provider: "codex", runStatus: "running", rollupStatus: "active", agentsTruncated: false,
     agents: [

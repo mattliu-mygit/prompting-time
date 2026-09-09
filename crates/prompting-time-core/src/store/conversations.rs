@@ -12,6 +12,15 @@ pub enum ConversationBinding {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationPath<T> {
+    pub items: Vec<T>,
+    pub truncated: bool,
+    pub owner_conversation_id: ConversationId,
+}
+
+const MAX_CONVERSATION_PATH_ITEMS: i64 = 64;
+
 #[derive(Deserialize, Serialize)]
 struct ChildCursor {
     parent_id: ConversationId,
@@ -27,6 +36,48 @@ struct ChildConversationRow {
 }
 
 impl Store {
+    /// Returns the nearest contiguous ancestry window, including the selected node.
+    /// Execution owner provenance is independent of whether the root fits in this window.
+    pub async fn load_conversation_path(
+        &self,
+        id: ConversationId,
+    ) -> Result<ConversationPath<Conversation>, StoreError> {
+        let owner_conversation_id = match self.conversation_binding(id).await? {
+            ConversationBinding::Managed => id,
+            ConversationBinding::Observed {
+                owner_conversation_id,
+                ..
+            } => owner_conversation_id,
+        };
+        let mut transaction = self.pool.begin().await?;
+        require_visible_ancestry(&mut transaction, id).await?;
+        let mut rows = sqlx::query_as::<_, ConversationRow>(
+            "WITH RECURSIVE ancestry(id, parent_id, depth) AS ( \
+                 SELECT id, parent_id, 0 FROM conversations WHERE id = ? \
+                 UNION ALL \
+                 SELECT parent.id, parent.parent_id, ancestry.depth + 1 \
+                 FROM conversations AS parent JOIN ancestry ON parent.id = ancestry.parent_id \
+                 WHERE ancestry.depth < ? \
+             ) SELECT conversations.id, conversations.parent_id, substr(title, 1, 256) AS title, \
+                      workspace_id, status, updated_at \
+               FROM ancestry JOIN conversations ON conversations.id = ancestry.id ORDER BY ancestry.depth",
+        ).bind(id.to_string()).bind(MAX_CONVERSATION_PATH_ITEMS)
+            .fetch_all(&mut *transaction).await?;
+        transaction.commit().await?;
+        let truncated = rows.len() > MAX_CONVERSATION_PATH_ITEMS as usize;
+        rows.truncate(MAX_CONVERSATION_PATH_ITEMS as usize);
+        let mut items = rows
+            .into_iter()
+            .map(|row| row.into_record().map(|record| record.conversation))
+            .collect::<Result<Vec<_>, _>>()?;
+        items.reverse();
+        Ok(ConversationPath {
+            items,
+            truncated,
+            owner_conversation_id,
+        })
+    }
+
     pub async fn conversation_binding(
         &self,
         id: ConversationId,
@@ -90,32 +141,7 @@ impl Store {
         // One read transaction keeps ancestor visibility and this page consistent
         // with a concurrently archived root. UNION also terminates on corrupt cycles.
         let mut transaction = self.pool.begin().await?;
-        let (ancestor_count, has_root, archived): (i64, bool, Option<String>) = sqlx::query_as(
-            "WITH RECURSIVE ancestry(id, parent_id, status) AS ( \
-                 SELECT id, parent_id, status FROM conversations WHERE id = ? \
-                 UNION \
-                 SELECT parent.id, parent.parent_id, parent.status FROM conversations AS parent \
-                 JOIN ancestry ON parent.id = ancestry.parent_id \
-             ) SELECT count(*), coalesce(max(parent_id IS NULL), 0), \
-                      min(CASE WHEN status = 'archived' THEN id END) FROM ancestry",
-        )
-        .bind(parent_id.to_string())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if ancestor_count == 0 {
-            return Err(StoreError::NotFound {
-                entity: "conversation",
-                id: parent_id.to_string(),
-            });
-        }
-        if !has_root {
-            return Err(invalid_binding());
-        }
-        if let Some(id) = archived {
-            return Err(StoreError::ConversationArchived(
-                parse_uuid("conversation", &id)?.into(),
-            ));
-        }
+        require_visible_ancestry(&mut transaction, parent_id).await?;
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT id, parent_id, substr(title, 1, 256) AS title, workspace_id, status, \
              updated_at, created_at FROM conversations WHERE status = 'active' AND parent_id = ",
@@ -164,6 +190,39 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Page { items, next_cursor })
     }
+}
+
+async fn require_visible_ancestry(
+    transaction: &mut Transaction<'_, Sqlite>,
+    id: ConversationId,
+) -> Result<(), StoreError> {
+    let (ancestor_count, has_root, archived): (i64, bool, Option<String>) = sqlx::query_as(
+        "WITH RECURSIVE ancestry(id, parent_id, status) AS ( \
+             SELECT id, parent_id, status FROM conversations WHERE id = ? \
+             UNION \
+             SELECT parent.id, parent.parent_id, parent.status FROM conversations AS parent \
+             JOIN ancestry ON parent.id = ancestry.parent_id \
+         ) SELECT count(*), coalesce(max(parent_id IS NULL), 0), \
+                  min(CASE WHEN status = 'archived' THEN id END) FROM ancestry",
+    )
+    .bind(id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if ancestor_count == 0 {
+        return Err(StoreError::NotFound {
+            entity: "conversation",
+            id: id.to_string(),
+        });
+    }
+    if !has_root {
+        return Err(invalid_binding());
+    }
+    if let Some(id) = archived {
+        return Err(StoreError::ConversationArchived(
+            parse_uuid("conversation", &id)?.into(),
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_binding() -> StoreError {

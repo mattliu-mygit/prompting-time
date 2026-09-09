@@ -28,15 +28,17 @@ use crate::runtime::{
     RuntimeError,
 };
 use crate::store::{
-    AgentPage, ApprovalPage, ConversationSettings, EventDetail, MAX_CANONICAL_MESSAGE_BYTES,
-    NewSubmission, Page, ProviderEventRecord, SidebarDetails, Store, StoreChange, StoreError,
-    TimelineRecord, validate_conversation_settings,
+    AgentPage, ApprovalPage, ConversationBinding, ConversationPath, ConversationSettings,
+    EventDetail, MAX_CANONICAL_MESSAGE_BYTES, NewSubmission, Page, ProviderEventRecord,
+    SidebarDetails, Store, StoreChange, StoreError, TimelineRecord, validate_conversation_settings,
 };
 use crate::workspace::{
     CleanupEligibility, WorkspaceError, WorkspaceManager, WorkspaceRequest, WorkspaceSnapshot,
 };
 
 const HANDOFF_BUDGET_CHARS: usize = 32_000;
+const OBSERVED_CONTROL_UNAVAILABLE: &str =
+    "This provider exposes recorded child activity, not an independently controllable chat.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationWorkspace {
@@ -84,12 +86,37 @@ pub struct Submission {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationOverview {
     pub conversation: Conversation,
+    pub has_children: bool,
+    pub summary: Option<String>,
+    pub capabilities: ConversationCapabilities,
     pub routing_profile: RoutingProfile,
     pub project_root: Option<PathBuf>,
     pub run: Option<RunOverview>,
     pub rollup_status: Option<RollupStatus>,
     pub agents: Vec<AgentNode>,
     pub agents_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationCapabilities {
+    pub can_send: bool,
+    pub can_interrupt: bool,
+    pub can_archive: bool,
+    pub can_route: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+impl From<ConversationBinding> for ConversationCapabilities {
+    fn from(binding: ConversationBinding) -> Self {
+        let managed = matches!(binding, ConversationBinding::Managed);
+        Self {
+            can_send: managed,
+            can_interrupt: managed,
+            can_archive: managed,
+            can_route: managed,
+            unavailable_reason: (!managed).then(|| OBSERVED_CONTROL_UNAVAILABLE.to_owned()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,6 +285,9 @@ impl PromptingTime {
         let (conversation, workspace) = self.create_conversation_with_workspace(request).await?;
         Ok(ConversationOverview {
             conversation,
+            has_children: false,
+            summary: None,
+            capabilities: ConversationBinding::Managed.into(),
             routing_profile,
             project_root: workspace.project_root,
             run: None,
@@ -268,6 +298,8 @@ impl PromptingTime {
     }
 
     pub async fn submit(&self, request: SubmitRequest) -> Result<Submission, AppError> {
+        self.require_managed_conversation(request.conversation_id)
+            .await?;
         validate_submit(&request)?;
         let _submission = self.submissions.lock().await;
         let request_hash = submission_hash(&request);
@@ -430,11 +462,46 @@ impl PromptingTime {
         })
     }
 
-    pub async fn steer(&self, run_id: RunId, text: &str) -> Result<(), AppError> {
+    pub async fn steer_conversation(
+        &self,
+        conversation_id: ConversationId,
+        run_id: RunId,
+        text: &str,
+    ) -> Result<(), AppError> {
+        self.require_conversation_run(conversation_id, run_id)
+            .await?;
         self.supervisor
             .steer(run_id, text)
             .await
             .map_err(Into::into)
+    }
+
+    async fn require_managed_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), AppError> {
+        if !matches!(
+            self.store.conversation_binding(conversation_id).await?,
+            ConversationBinding::Managed
+        ) {
+            return Err(AppError::UnsupportedConversationControl { conversation_id });
+        }
+        Ok(())
+    }
+
+    async fn require_conversation_run(
+        &self,
+        conversation_id: ConversationId,
+        run_id: RunId,
+    ) -> Result<(), AppError> {
+        self.require_managed_conversation(conversation_id).await?;
+        if self.store.load_run(run_id).await?.conversation_id != conversation_id {
+            return Err(AppError::RunConversationMismatch {
+                conversation_id,
+                run_id,
+            });
+        }
+        Ok(())
     }
 
     pub async fn respond_to_approval(
@@ -487,11 +554,18 @@ impl PromptingTime {
             .map_err(Into::into)
     }
 
-    pub async fn interrupt(&self, run_id: RunId) -> Result<(), AppError> {
+    pub async fn interrupt_conversation(
+        &self,
+        conversation_id: ConversationId,
+        run_id: RunId,
+    ) -> Result<(), AppError> {
+        self.require_conversation_run(conversation_id, run_id)
+            .await?;
         self.supervisor.interrupt(run_id).await.map_err(Into::into)
     }
 
     pub async fn archive(&self, conversation_id: ConversationId) -> Result<(), AppError> {
+        self.require_managed_conversation(conversation_id).await?;
         self.store
             .archive_conversation(conversation_id)
             .await
@@ -515,22 +589,54 @@ impl PromptingTime {
         limit: u32,
     ) -> Result<Page<ConversationOverview>, AppError> {
         let page = self.store.list_active_conversations(cursor, limit).await?;
-        let ids = page
-            .items
+        Ok(Page {
+            items: self.conversation_overviews(page.items).await?,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    pub async fn list_child_conversation_overviews(
+        &self,
+        parent_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Page<ConversationOverview>, AppError> {
+        let page = self
+            .store
+            .list_child_conversations(parent_id, cursor, limit)
+            .await?;
+        Ok(Page {
+            items: self.conversation_overviews(page.items).await?,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    pub async fn load_conversation_path(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ConversationPath<ConversationOverview>, AppError> {
+        let path = self.store.load_conversation_path(conversation_id).await?;
+        Ok(ConversationPath {
+            items: self.conversation_overviews(path.items).await?,
+            truncated: path.truncated,
+            owner_conversation_id: path.owner_conversation_id,
+        })
+    }
+
+    async fn conversation_overviews(
+        &self,
+        conversations: Vec<Conversation>,
+    ) -> Result<Vec<ConversationOverview>, AppError> {
+        let ids = conversations
             .iter()
             .map(|conversation| conversation.id)
             .collect::<Vec<_>>();
         let details = self.store.load_sidebar_details(&ids).await?;
-        let items = page
-            .items
+        Ok(conversations
             .into_iter()
             .zip(details)
             .map(|(conversation, details)| overview(conversation, details))
-            .collect();
-        Ok(Page {
-            items,
-            next_cursor: page.next_cursor,
-        })
+            .collect())
     }
 
     pub async fn load_conversation_overview(
@@ -662,11 +768,27 @@ impl PromptingTime {
         &self,
         conversation_id: ConversationId,
     ) -> Result<WorkspaceSnapshot, AppError> {
-        let workspace = self.store.load_workspace(conversation_id).await?;
+        let owner_id = self.workspace_owner(conversation_id).await?;
+        let workspace = self.store.load_workspace(owner_id).await?;
         self.workspace_manager
             .snapshot(&workspace)
             .await
             .map_err(Into::into)
+    }
+
+    async fn workspace_owner(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ConversationId, AppError> {
+        Ok(
+            match self.store.conversation_binding(conversation_id).await? {
+                ConversationBinding::Managed => conversation_id,
+                ConversationBinding::Observed {
+                    owner_conversation_id,
+                    ..
+                } => owner_conversation_id,
+            },
+        )
     }
 
     pub async fn is_git_project(&self, path: &std::path::Path) -> Result<bool, AppError> {
@@ -680,10 +802,24 @@ impl PromptingTime {
         &self,
         conversation_id: ConversationId,
     ) -> Result<InspectorSnapshot, AppError> {
-        let workspace = self.store.load_workspace(conversation_id).await?;
+        let owner_id = self.workspace_owner(conversation_id).await?;
+        let workspace = self.store.load_workspace(owner_id).await?;
         let execution_path = workspace.execution_path.clone();
         let owned_worktree = workspace.owned_worktree;
         let snapshot = self.workspace_manager.snapshot(&workspace).await?;
+        if owner_id != conversation_id {
+            return Ok(InspectorSnapshot {
+                workspace: snapshot,
+                execution_path,
+                owned_worktree: false,
+                cleanup: CleanupEligibility::Blocked(crate::workspace::WorkspaceBlocker::NotOwned),
+                run: None,
+                routing: None,
+                handoff: None,
+                active_descendant_count: 0,
+                agents_truncated: false,
+            });
+        }
         let lease = self.workspace_manager.lease(&workspace).await?;
         let cleanup = self.workspace_manager.cleanup_eligibility(&lease).await?;
         let run = self
@@ -1041,6 +1177,12 @@ fn overview(conversation: Conversation, details: SidebarDetails) -> Conversation
     debug_assert_eq!(conversation.id, details.conversation_id);
     ConversationOverview {
         conversation,
+        has_children: details.has_children,
+        summary: details
+            .agents
+            .first()
+            .and_then(|agent| agent.summary.clone()),
+        capabilities: details.binding.into(),
         routing_profile: details.routing_profile,
         project_root: details.project_root,
         run: details.run.map(Into::into),
@@ -1052,6 +1194,15 @@ fn overview(conversation: Conversation, details: SidebarDetails) -> Conversation
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error(
+        "This provider exposes recorded child activity, not an independently controllable chat."
+    )]
+    UnsupportedConversationControl { conversation_id: ConversationId },
+    #[error("run {run_id} does not belong to conversation {conversation_id}")]
+    RunConversationMismatch {
+        conversation_id: ConversationId,
+        run_id: RunId,
+    },
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -1197,6 +1348,8 @@ mod tests {
     }
 
     struct RecoveryAdapter {
+        health_checks: AtomicUsize,
+        controls: AtomicUsize,
         starts: AtomicUsize,
         resumes: AtomicUsize,
         turns: AtomicUsize,
@@ -1206,6 +1359,8 @@ mod tests {
     impl RecoveryAdapter {
         fn new() -> Self {
             Self {
+                health_checks: AtomicUsize::new(0),
+                controls: AtomicUsize::new(0),
                 starts: AtomicUsize::new(0),
                 resumes: AtomicUsize::new(0),
                 turns: AtomicUsize::new(0),
@@ -1217,6 +1372,8 @@ mod tests {
             let gate = Arc::new(Semaphore::new(0));
             (
                 Self {
+                    health_checks: AtomicUsize::new(0),
+                    controls: AtomicUsize::new(0),
                     starts: AtomicUsize::new(0),
                     resumes: AtomicUsize::new(0),
                     turns: AtomicUsize::new(0),
@@ -1247,6 +1404,7 @@ mod tests {
         }
 
         async fn health(&self) -> Result<ProviderHealth, crate::providers::ProviderError> {
+            self.health_checks.fetch_add(1, Ordering::SeqCst);
             Ok(ProviderHealth::Healthy {
                 version: "recovery-fixture".to_owned(),
             })
@@ -1303,6 +1461,7 @@ mod tests {
             _active_turn: &str,
             _text: &str,
         ) -> Result<(), crate::providers::ProviderError> {
+            self.controls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1320,8 +1479,169 @@ mod tests {
             _session: &ProviderSession,
             _active_turn: &str,
         ) -> Result<(), crate::providers::ProviderError> {
+            self.controls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn unified_conversation_controls_reject_observed_and_wrong_owner_before_dispatch() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("owner"))
+            .await
+            .unwrap();
+        let other = app
+            .create_conversation(ConversationRequest::projectless("other"))
+            .await
+            .unwrap();
+        let (run, root) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        store
+            .bind_native_session(run.id, "root-native")
+            .await
+            .unwrap();
+        store
+            .append_run_event(run.id, root.id, ProviderEventRecord::started())
+            .await
+            .unwrap();
+        store
+            .append_run_event(
+                run.id,
+                root.id,
+                ProviderEventRecord::child_agent(
+                    "spawn",
+                    "root-native",
+                    vec!["child-native".into()],
+                    vec![],
+                    "spawn",
+                    "running",
+                ),
+            )
+            .await
+            .unwrap();
+        let child = store
+            .list_child_conversations(conversation.id, None, 1)
+            .await
+            .unwrap()
+            .items
+            .remove(0);
+        let before_run = store.load_run(run.id).await.unwrap();
+        let before_workspace = store.load_workspace(conversation.id).await.unwrap();
+        let before_timeline = store
+            .load_timeline(conversation.id, None, 100)
+            .await
+            .unwrap();
+        let error = app
+            .submit(SubmitRequest {
+                command_id: "child-submit".into(),
+                conversation_id: child.id,
+                content: "send to child".into(),
+                provider_override: Some(ProviderId::Codex),
+            })
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, AppError::UnsupportedConversationControl { conversation_id } if conversation_id == child.id)
+        );
+        for result in [
+            app.archive(child.id).await,
+            app.steer_conversation(child.id, run.id, "steer child")
+                .await,
+            app.interrupt_conversation(child.id, run.id).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(AppError::UnsupportedConversationControl { .. })
+            ));
+        }
+        for result in [
+            app.steer_conversation(other.id, run.id, "wrong owner")
+                .await,
+            app.interrupt_conversation(other.id, run.id).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(AppError::RunConversationMismatch { .. })
+            ));
+        }
+        assert_eq!(adapter.health_checks.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.turns.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.controls.load(Ordering::SeqCst), 0);
+        assert!(
+            store
+                .load_submission("child-submit")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .latest_run_for_conversation(child.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .load_provider_session(child.id, ProviderId::Codex)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store.load_workspace(child.id).await,
+            Err(StoreError::NotFound { .. })
+        ));
+        assert_eq!(store.load_run(run.id).await.unwrap(), before_run);
+        assert_eq!(
+            store.load_workspace(conversation.id).await.unwrap(),
+            before_workspace
+        );
+        assert_eq!(
+            store
+                .load_timeline(conversation.id, None, 100)
+                .await
+                .unwrap(),
+            before_timeline
+        );
+        assert!(!store.load_conversation(child.id).await.unwrap().archived);
+        let inspector = app.inspect_conversation(child.id).await.unwrap();
+        assert_eq!(inspector.execution_path, before_workspace.execution_path);
+        assert!(!inspector.owned_worktree);
+        assert_eq!(
+            inspector.cleanup,
+            CleanupEligibility::Blocked(crate::workspace::WorkspaceBlocker::NotOwned)
+        );
+        assert!(
+            inspector.run.is_none() && inspector.routing.is_none() && inspector.handoff.is_none()
+        );
+        assert_eq!(
+            app.inspect_workspace(child.id).await.unwrap(),
+            app.inspect_workspace(conversation.id).await.unwrap()
+        );
+        assert!(
+            app.load_run_audits(child.id, None, 20)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(app.load_run_audit(child.id, run.id).await.is_err());
     }
 
     fn recovery_submission(conversation_id: ConversationId) -> NewSubmission {
