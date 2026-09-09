@@ -39,7 +39,7 @@ Additional providers, remote execution, learned routing, scheduled tasks, mobile
 
 The main window uses a three-pane command-center layout:
 
-- The left pane lists conversations by project and status. Expanding a conversation reveals its recursive agent tree. Each node shows its provider and current status.
+- The left pane groups root conversations by project and status. Expanding any conversation reveals its child conversations, recursively. Each node shows its own provider and current status.
 - The center pane prioritizes the selected conversation: readable assistant responses, compact user messages, expandable tool activity, approvals, and the composer. Provider identity stays visible without dominating the text.
 - The right inspector shows routing rationale, workspace and worktree state, changed files, active agents, and explicitly disclosed diagnostics. It is collapsible for focus and smaller windows.
 
@@ -66,7 +66,7 @@ placeholder and metadata remain secondary. Shared rem-based sizes preserve scali
 without global zoom. Controls have at least 32px height, icon targets are 32px square,
 and conversation rows have at least 36px height. Long text wraps or scrolls within
 its own region rather than creating horizontal window overflow.
-Conversation and agent names occupy their own row, with provider/status metadata
+Conversation names occupy their own row, with provider/status metadata
 below, so badges do not crowd out nested names.
 
 Users can scale the entire native webview with Command-plus (including unshifted
@@ -77,9 +77,10 @@ and while editing, without changing draft contents. Missing or invalid storage
 falls back to 100%; storage failures do not prevent using zoom. This explicit user
 zoom is separate from the default typography sizes above.
 
-Unsent composer text belongs to its conversation rather than its mounted view.
-Switching conversations and refreshing their snapshots preserves separate drafts
-within the app session. Drafts and pending-send bookkeeping stay in memory only;
+Unsent composer text, provider choice, and Markdown preview belong to their
+conversation rather than its mounted view. Switching conversations and refreshing
+their snapshots preserves separate drafts within the app session. Drafts, composer
+view state, and pending-send bookkeeping stay in memory only;
 app shutdown discards them. Successful send or steering clears the submitted
 version, never a newer edit or another conversation's draft. Switching away and
 back during a request must not bypass in-flight or ambiguous-retry protection.
@@ -87,8 +88,9 @@ back during a request must not bypass in-flight or ambiguous-retry protection.
 A shared searchable palette opens from Search or Command-K (Control-K also works).
 It searches active conversation titles and project paths and exposes existing
 new-conversation, pane-toggle, and focus-message actions. It is not message-content
-search. Conversation selection focuses the chosen composer; cancellation restores
-the prior focus. Existing blocking dialogs and narrow inspector overlays retain
+search. Conversation selection focuses its composer when messaging is available;
+read-only views retain an accessible reading or navigation target. Cancellation
+restores the prior focus. Existing blocking dialogs and narrow inspector overlays retain
 keyboard priority. The palette uses cmdk for filtering and selection, Radix Dialog
 for dialog and focus management, and react-hotkeys-hook for shortcut registration,
 with our existing styling and store actions; no parallel action framework or
@@ -102,17 +104,20 @@ conversation views and the existing per-view history limits. Evicted context is
 not a durable bookmark. Cached reading content does not make cached approvals
 actionable; current approval state must still be read from the service.
 
-Recursive agent navigation uses the existing agent identities and selection state.
-Only an inspected agent adds a compact, horizontally bounded ancestor path and
-an expandable summary. Collapsed labels stay on one line; full details remain
-available without increasing the global header height. The message-target hint
-remains visible when the summary is closed. The root conversation needs no
-duplicate breadcrumb. Breadcrumbs identify known ancestors; the palette also
-finds known current-run agents and provides a parent action. Missing ancestry is
-shown as incomplete, never invented. Navigation inspects an agent without changing
-the conversation's composer target, draft, or provider route. It does not establish
-direct messaging support for child agents. Returning through the conversation
-breadcrumb moves focus to the timeline without scrolling or leaving Markdown preview.
+Roots and descendants use one conversation summary, selection state, timeline,
+composer, and tree-row implementation. Selecting a child opens its own captured
+activity through the ordinary conversation read path. A compact, horizontally
+bounded ancestor path provides explicit parent navigation; the root needs no
+duplicate breadcrumb. The palette finds loaded child conversations. Missing or
+bounded ancestry is marked incomplete, never invented.
+
+Actions depend on the verified execution binding, not the presence of a parent.
+Provider-observed children expose recorded activity and supported approval handling,
+but do not imply independently resumable or controllable sessions. Unsupported
+send, routing, interruption, and archive controls are absent and service-rejected.
+The shared composer targets the selected conversation or explains why messaging is
+unavailable; it never silently submits to the parent. Parent drafts, preview,
+reading anchors, and disclosures remain scoped to the parent's conversation identity.
 
 The shell is constrained to the window height. Long timelines, conversation lists, and inspector
 content scroll within their panes instead of pushing the composer below the window. Selecting a
@@ -120,7 +125,11 @@ child preserves usable navigation and the conversation workspace. An active inte
 has its own Interrupt action even when steering is available or no alternative provider is
 available; confirmation remains bound to the original run.
 
-The UI must not invent child-agent identity. If a provider exposes a child agent, Prompting Time creates an agent node. If it exposes only an anonymous tool operation, the UI displays a tool event under the current agent.
+The UI must not invent child identity or transcripts. Verified provider child
+ancestry creates an internal execution node bound to a durable child Conversation.
+An anonymous tool operation remains an event under its actual owner. A child with
+only lifecycle or tool evidence explicitly explains that message history may be
+incomplete; no greeting, hidden reasoning, or historical transcript is fabricated.
 
 The center timeline keeps the newest 80 events plus at most four explicitly loaded
 80-event history pages. Coalesced live refresh reads the newest window and those
@@ -133,7 +142,17 @@ visible and offer a way back to the newest window. Detail reads stay lazy, refre
 revision only while disclosed, and never fan out over hidden rows. Every truncated
 event kind remains visibly truncated with separately bounded detail.
 
-Agent activity is collapsed by default and independently requests the selected run's bounded agent pages when opened; it pages the expanded depth-first view 20 cards at a time so a wide or deep provider tree cannot crowd out approvals or the composer. Agent restarts are single-flight with one latest coalesced restart. Pending approvals load 30 summaries initially, page independently on explicit request, and never fetch operation or question detail merely because a card is mounted. The approval view retains at most four pages: loading farther back evicts the newest retained page but preserves the returned cursor until every pending request is reachable, and an explicit control restores the newest page. Live invalidation rebases that bounded window onto the newest approvals by following the refreshed cursor chain, so insertion-driven page shifts cannot skip requests and terminal or missing requests disappear without unbounded fan-out. Explicit approval paging owns an independent busy token so overlapping refresh success or failure cannot strand its retry controls.
+Child conversations belong in sidebar navigation, not a duplicate agent-card list
+inside the transcript. Pending approvals load 30 summaries initially, page
+independently on explicit request, and never fetch operation or question detail
+merely because a card is mounted. The approval view retains at most four pages:
+loading farther back evicts the newest retained page but preserves the returned
+cursor until every pending request is reachable, and an explicit control restores
+the newest page. Live invalidation rebases that bounded window onto the newest
+approvals by following the refreshed cursor chain, so insertion-driven page shifts
+cannot skip requests and terminal or missing requests disappear without unbounded
+fan-out. Explicit approval paging owns an independent busy token so overlapping
+refresh success or failure cannot strand its retry controls.
 
 ### Reading and participating in a conversation
 
@@ -259,15 +278,61 @@ Conversations execute independently. The runtime executes at most four root runs
 
 Approval responses and steering share bounded application-wide control admission: at most four operations, with separate single response and steering slots per active attempt. Both may coexist when the provider supports them. Steering and answer payloads are bounded to 64 KiB of UTF-8 text. Excess or duplicate work is rejected before another task or payload is retained. Interrupt and shutdown control paths cannot be starved by ordinary work admission. An admitted operation has an owned execution lifetime independent of its caller; pending work can be cancelled before dispatch, and executing work must settle its outcome before terminal publication allows the next user turn.
 
-The UI submits question answers only from complete canonical question data supplied by a bounded question page or complete approval detail. A complete question whose `options` are null is a canonical free-text question; `isOther` adds free text alongside enumerated choices. Missing or truncated question data blocks the response with an actionable explanation. Approval detail also supplies a bounded canonical requesting-agent label path, independently of which agent-tree pages the user has disclosed; paths beyond the bound are explicitly marked truncated.
+The UI submits question answers only from complete canonical question data supplied by a bounded question page or complete approval detail. A complete question whose `options` are null is a canonical free-text question; `isOther` adds free text alongside enumerated choices. Missing or truncated question data blocks the response with an actionable explanation. Approval detail also supplies a bounded canonical requesting-agent label path, independently of which child-conversation pages the user has disclosed; paths beyond the bound are explicitly marked truncated.
 
-The sidebar distinguishes queued, running, waiting for approval or input, completed, interrupted, and failed work. Conversation summaries keep only their bounded root preview until the user expands one conversation. The sidebar then loads 20 agents per explicit page, retains at most four pages for that one conversation/run, preserves the selected agent's loaded ancestry, and exposes restart or retry controls when history is evicted or loading fails. An already disclosed window refreshes its first bounded page when run state changes so displayed status does not become stale; unopened conversations remain lazy. macOS notifications fire only while the main window is unfocused and only when a root conversation becomes completed, failed, or needs attention. Repeated observations of the same state are deduplicated for every active conversation observed during the process lifetime. Startup primes that state without notifying. If the compact store-change channel lags, notification state is rebuilt from active conversations in bounded 200-row pages so a dropped terminal or needs-attention change is still observed; after a complete scan, entries absent from the active set are pruned. The notification contains only the fixed app title and a fixed status label; conversation titles, prompt text, output, tool details, paths, file names, and provider-native identity are excluded. Permission is requested lazily on the first eligible notification.
+The sidebar distinguishes queued, running, waiting for approval or input,
+completed, interrupted, and failed work. Child pages use stable newest-first
+creation order, independently of the parent's latest run. The sidebar retains at
+most 80 descendant summaries across branches, including its pinned selected path.
+Ancestry reads return the nearest 64 contiguous conversations including the selected
+one, with explicit truncation and independent execution-owner provenance. Disclosure
+never loads full execution history.
 
-### Recursive agent hierarchy
+macOS notifications fire only while the main window is unfocused and only when a
+root conversation becomes completed, failed, or needs attention. Repeated
+observations of the same state are deduplicated for every active conversation
+observed during the process lifetime. Startup primes that state without notifying.
+If the compact store-change channel lags, notification state is rebuilt from
+active roots in bounded 200-row pages so a dropped terminal or needs-attention
+change is still observed; after a complete scan, entries absent from the active
+set are pruned. The notification contains only the fixed app title and a fixed
+status label; conversation titles, prompt text, output, tool details, paths, file
+names, and provider-native identity are excluded. Permission is requested lazily
+on the first eligible notification.
 
-An agent node may emit messages and tool events, request approval or input, and create child nodes. Descendant state rolls up to ancestors: a root conversation remains active while any descendant is running and shows that attention is required when any descendant is waiting on the user.
+### Recursive conversation hierarchy
 
-The hierarchy is provider-neutral in the UI but retains provider-native identifiers and event payloads for diagnosis. Arbitrary depth is supported by the data model; the UI progressively collapses deeper levels rather than imposing a semantic depth limit.
+One durable Conversation represents every navigable chat. Its optional parent is
+the authority for hierarchy; a child may itself orchestrate further children.
+Provider execution nodes remain internal correlation and lifecycle records, each
+immutably bound to one Conversation. Root executions reuse their existing root
+conversation, while verified nonroot executions get children beneath their bound
+parent. Missing parents, cycles, and conflicting or cross-owner bindings fail closed.
+
+Observed child identity retains the existing provider-run scope. Replaying one
+recorded execution reuses its conversation, including after database reopen; the
+same raw native child ID observed in a later parent run creates a separate child
+conversation. Labels do not establish continuity. Completed children remain
+discoverable after later parent turns, and each child's own status comes from its
+bound execution rather than the parent's newest run. Current descendant activity
+and pending attention remain visible from the parent.
+
+Root listing excludes children. Archiving a root hides its subtree without deleting
+its records. Children inherit the actual execution owner's workspace context, not
+its exclusive workspace association, cleanup rights, or provider session. Creating
+a child allocates no worktree and transfers no control or permission ownership.
+
+Each generation has visible indentation and a parent guide. Deep visual indentation
+is capped to preserve readable names and usable controls; semantic ancestry remains
+explicit. The selected conversation reveals its first child level when children
+first appear unless explicitly collapsed. Deeper disclosure is independent, and
+explicit descendant navigation reveals ancestors. Choices survive switches and
+sidebar hide/show within the session, not app restarts. Bounded child paging keeps
+closed branches lazy, refreshes open branches when children arrive, and offers
+retry or reload after failures and eviction. A complete contiguous reload clears
+the eviction notice unless the retention budget evicts records again. Root-owned execution invalidation
+also refreshes an affected visible child; selection is not discarded on a new
+parent run.
 
 ## Architecture
 
@@ -315,10 +380,10 @@ Initialization before the first prompt does not establish a resumable Claude tra
 
 Prompting Time stores one canonical representation of:
 
-- Conversation: a normalized nonblank title of at most 256 UTF-8 bytes, optional project/workspace, routing mode, and lifecycle metadata. Legacy titles are defensively bounded when read, and whitespace-only legacy values display as `Untitled conversation`.
+- Conversation: one reusable root or descendant chat with an optional parent, a normalized nonblank title of at most 256 UTF-8 bytes, optional owned project/workspace, routing mode, and lifecycle metadata. Legacy titles are defensively bounded when read, and whitespace-only legacy values display as `Untitled conversation`.
 - Message: ordered user or assistant content displayed in the shared timeline.
 - Provider run: one provider's execution of a turn, including routing decision, native session identity, status, and context boundary.
-- Agent node: a self-referential execution node with an optional parent, provider identity, and rolled-up status.
+- Agent node: an internal execution node with verified ancestry, provider identity, status, and an immutable conversation binding; not a second product-facing chat model.
 - Event: ordered message, tool, progress, diagnostic, and lifecycle activity attached to a run and agent node.
 - Approval: a durable pending or resolved provider request with the exact decision supplied by the user.
 - Routing decision: eligible providers, chosen provider, profile, reason, and override state.
@@ -326,7 +391,17 @@ Prompting Time stores one canonical representation of:
 
 Provider-native identifiers and narrowly selected protocol fields are retained alongside normalized records where needed for resumption and diagnosis. Raw payload retention is opt-in at each adapter boundary and must exclude hidden reasoning, authentication material, and unrecognized payload content. Provider-native data never replaces the canonical model.
 
-SQLite is the local source of truth. It uses WAL mode, versioned migrations, foreign-key enforcement, bounded queries, and indexes that support status/project filtering and timeline pagination. Ordinary sidebar synchronization filters archived conversations at this query boundary; archived history remains available only through an explicit future archive surface. Durable state transitions are transactional. User and assistant messages occupy the same role-bearing event sequence; the separate message projection exists only for provider handoff context. Upgrades reconstruct historical user events from that projection, replace transitional user-event copies, and deterministically place a user turn before provider events when old independent sequences share a timestamp. Desktop timeline pages expose UTF-8-safe bounded previews and fetch a separately bounded event detail by the app-owned event ID. Agent trees, provider-run audits, and pending or historical approvals use stable independent cursors, so a sidebar cutoff never makes descendants, historical routing, or actionable requests inaccessible. Provider-run audit summaries expose only app-owned run identity, canonical provider and routing reason, and explicit truncation state; a conversation-scoped detail read returns the bounded routing evaluation and UTF-8-safe bounded handoff without exposing native session identity. Approval rows carry their canonical conversation ownership and use conversation-first partial indexes for pending and historical pages. Approval question previews are normalized once in the approval transaction and paged through an indexed app-owned ordinal; ordinary snapshots contain only app-owned IDs and bounded canonical fields, while provider-native request and question identities remain internal and are mapped at provider dispatch. Application startup pages queued roots and processes ambiguous unfinished agents in indexed, deepest-first batches under a fixed deadline rather than hydrating every conversation or active graph.
+Hierarchy upgrades backfill verified execution ancestry transactionally while
+preserving existing root, run, agent, event, approval, and workspace identities.
+Original event ownership, sequences, operation revisions, and runtime fences do
+not change. Conversation reads resolve their bound execution owners before indexed
+pagination; child history is never a filter over the parent's newest page. Only
+read projections use the selected logical conversation ID. Event bodies are not
+copied into another transcript store. Child selection does not expose the parent's
+handoff or routing audit, and steering/interruption validate both the selected
+conversation and the exact managed run before dispatch.
+
+SQLite is the local source of truth. It uses WAL mode, versioned migrations, foreign-key enforcement, bounded queries, and indexes that support status/project filtering and timeline pagination. Ordinary sidebar synchronization filters archived conversations at this query boundary; archived history remains available only through an explicit future archive surface. Durable state transitions are transactional. User and assistant messages occupy the same role-bearing event sequence; the separate message projection exists only for provider handoff context. Upgrades reconstruct historical user events from that projection, replace transitional user-event copies, and deterministically place a user turn before provider events when old independent sequences share a timestamp. Desktop timeline pages expose UTF-8-safe bounded previews and fetch a separately bounded event detail by the app-owned event ID. Child conversations, provider-run audits, and pending or historical approvals use stable independent cursors, so a sidebar cutoff never makes descendants, historical routing, or actionable requests inaccessible. Provider-run audit summaries expose only app-owned run identity, canonical provider and routing reason, and explicit truncation state; a conversation-scoped detail read returns the bounded routing evaluation and UTF-8-safe bounded handoff without exposing native session identity. Approval rows carry their canonical conversation ownership and use conversation-first partial indexes for pending and historical pages. Approval question previews are normalized once in the approval transaction and paged through an indexed app-owned ordinal; ordinary snapshots contain only app-owned IDs and bounded canonical fields, while provider-native request and question identities remain internal and are mapped at provider dispatch. Application startup pages queued roots and processes ambiguous unfinished agents in indexed, deepest-first batches under a fixed deadline rather than hydrating every conversation or active graph.
 
 Provider output received while an approval is pending is durably staged in receipt order without changing the Waiting lifecycle. Assistant deltas with the same native item ID aggregate into one durable message before, during, and after staging, including after restart, so a streamed message never becomes a row per token. Each run's staged queue accepts up to 256 complete provider events, with one additional physical row reserved for an overflow marker; the full queue, including that marker reserve, is limited to 8 MiB of content. Events within that capacity retain their full content. The first event that would exceed either limit is replaced by one compact diagnostic marker that records the omitted event kind and makes mutation certainty Unknown; later staged ingress is rejected. Recovery returns at most the 257-row physical limit together with explicit overflow and truncation flags. Once an approval response is accepted by the supervisor, the supervisor owns its complete intent, provider-dispatch, acknowledgement, publication, and cleanup lifecycle independently of the requesting UI future; interruption and shutdown cancel and join that operation. Approval acknowledgement atomically publishes the resumed lifecycle, any privacy-filtered accepted-answer message, and each staged event once, then clears the queue; interruption, failure, or crash performs the same bounded publish before the terminal diagnostic, so restart recovery retains bounded evidence of already-observed activity.
 

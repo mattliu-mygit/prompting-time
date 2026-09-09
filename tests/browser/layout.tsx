@@ -1,10 +1,11 @@
 import { createRoot } from "react-dom/client";
 import { App } from "../../src/app/App";
 import { createAppStore, type AppApi } from "../../src/app/store";
-import type { AgentSnapshot, ConversationSummary } from "../../src/bridge/types";
+import type { ConversationSummary } from "../../src/bridge/types";
 import { chatApproval, chatDiagnostics, chatScenario, chatTimeline, listenToChatEvents } from "./chat-fixture";
 import { composerMessages, composerScenario, steerComposerRun, submitComposerMessage } from "./composer-fixture";
 import { listenToToolEvents, toolEventDetail, toolProvider, toolScenario, toolTimeline } from "./tool-operations-fixture";
+import { archiveSyntheticRoot, listenToTreeEvents, treeConversationPath, treeIds, treeListChildren, treeListConversations, treeLoadConversation, treeScenario, treeTimeline } from "./conversation-tree-fixture";
 import "../../src/styles/tokens.css";
 import "../../src/styles/app.css";
 
@@ -18,6 +19,8 @@ const syntheticStatus = composerScenario === "send" || composerScenario === "fai
   : chatMode === "reading" || chatMode === "density" ? "completed" : "running";
 const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, index) => ({
   id: `conversation-${index}`,
+  parentId: null, hasChildren: true, summary: null,
+  capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
   title: longLabels && index === 0 ? "Synthetic conversation with an intentionally long title for checking the compact header" : `Synthetic conversation ${index}`,
   routingProfile: "balanced",
   workspaceId: null,
@@ -27,13 +30,23 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
   provider: syntheticProvider,
   runStatus: syntheticStatus,
   rollupStatus: syntheticStatus === "failed" ? "failed" : syntheticStatus === "waiting" ? "needsAttention" : syntheticStatus === "completed" ? "completed" : "active",
-  agents: [
-    { id: `root-${index}`, parentId: null, provider: syntheticProvider, label: longLabels && index === 0 ? `Synthetic root ${"reviewing invented work ".repeat(8)}` : "Root agent", summary: null, status: syntheticStatus },
-    { id: `child-${index}`, parentId: `root-${index}`, provider: syntheticProvider, label: longLabels && index === 0 ? `Synthetic child ${"reviewing a long description of invented work ".repeat(12)}` : `Synthetic child ${index}`, summary: "Reviewing invented work", status: syntheticStatus },
-    ...(chatScenario ? [{ id: `grandchild-${index}`, parentId: `child-${index}`, provider: syntheticProvider, label: "Synthetic test agent", summary: "Checking invented test results", status: syntheticStatus } satisfies AgentSnapshot] : []),
-  ],
-  agentsTruncated: false,
 }));
+
+const children: ConversationSummary[] = conversations.flatMap((root, index) => {
+  const child: ConversationSummary = {
+    ...root, id: `child-${index}`, parentId: root.id, hasChildren: chatScenario,
+    title: longLabels && index === 0 ? `Synthetic child ${"reviewing a long description of invented work ".repeat(12)}` : `Synthetic child ${index}`,
+    summary: "Reviewing invented work",
+    capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "This provider exposes recorded child activity, not an independently controllable chat." },
+  };
+  return [child, ...(chatScenario ? [{ ...child, id: `grandchild-${index}`, parentId: child.id, hasChildren: false, title: "Synthetic test conversation" }] : [])];
+});
+
+function loadSyntheticConversation(conversationId: string) {
+  const found = [...conversations, ...children].find(({ id }) => id === conversationId);
+  if (!found) throw new Error("Synthetic conversation is unavailable.");
+  return found;
+}
 
 async function unsupported(): Promise<never> {
   throw new Error("This synthetic layout fixture does not support that action.");
@@ -49,13 +62,22 @@ const api: AppApi = {
     ],
   }),
   listConversations: async () => ({ items: conversations, nextCursor: null }),
-  loadConversation: async ({ conversationId }) => conversations.find(({ id }) => id === conversationId)!,
-  loadAgentTree: async ({ conversationId }) => {
-    const conversation = conversations.find(({ id }) => id === conversationId)!;
-    return { runId: conversation.currentRunId, items: conversation.agents.map((agent, depth) => ({ agent, depth })), nextCursor: null };
+  loadConversation: async ({ conversationId }) => loadSyntheticConversation(conversationId),
+  listChildConversations: async ({ parentId }) => ({ items: children.filter((child) => child.parentId === parentId), nextCursor: null }),
+  loadConversationPath: async ({ conversationId }) => {
+    const items = [loadSyntheticConversation(conversationId)];
+    while (items[0].parentId) items.unshift(loadSyntheticConversation(items[0].parentId));
+    return { items, truncated: false, ownerConversationId: items[0].id };
   },
   listenToAppEvents: async (handler) => toolScenario ? listenToToolEvents(handler) : listenToChatEvents(handler),
-  loadTimeline: async ({ conversationId, cursor, limit }) => composerScenario ? ({
+  loadTimeline: async ({ conversationId, cursor, limit }) => loadSyntheticConversation(conversationId).parentId !== null ? ({
+    items: [{
+      id: `${conversationId}-activity`, conversationId, runId: loadSyntheticConversation(conversationId).currentRunId!,
+      agentId: conversationId, sequence: "1", kind: "message", role: "assistant", provider: syntheticProvider,
+      presentation: "normal", content: "Captured synthetic child activity.", operation: null, contentBytes: "34", truncated: false,
+    }],
+    nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+  }) : composerScenario ? ({
     items: composerMessages(conversationId), nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
   }) : toolScenario && !conversationId.startsWith("created-") ? toolTimeline(conversationId, cursor, limit)
     : chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId, cursor, limit) : ({
@@ -67,7 +89,7 @@ const api: AppApi = {
     })),
     nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
   }),
-  loadDiagnostics: async ({ conversationId, cursor, limit }) => chatScenario
+  loadDiagnostics: async ({ conversationId, cursor, limit }) => chatScenario && loadSyntheticConversation(conversationId).parentId === null
     ? chatDiagnostics(conversationId, cursor, limit) : { items: [], nextCursor: null },
   loadApprovals: async () => ({ items: [], nextCursor: null }),
   inspectWorkspace: async () => ({
@@ -80,7 +102,6 @@ const api: AppApi = {
     cleanup: { eligible: false, blocker: "notOwned" }, currentRun: null,
     routing: null, handoff: null,
     activeDescendantCount: syntheticStatus === "running" || syntheticStatus === "waiting" ? (chatScenario ? 2 : 1) : 0,
-    agentsTruncated: false,
   }),
   listRunAudits: async () => ({ items: [], nextCursor: null }),
   loadEventDetail: async ({ eventId }) => toolScenario ? toolEventDetail(eventId) : unsupported(),
@@ -104,10 +125,12 @@ const api: AppApi = {
   createConversation: async (request) => {
     const conversation: ConversationSummary = {
       id: `created-${conversations.length}`, title: request.title,
+      parentId: null, hasChildren: false, summary: null,
+      capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
       routingProfile: request.routingProfile, workspaceId: `synthetic-workspace-${conversations.length}`,
       projectRoot: request.workspace.kind === "projectless" ? null : request.workspace.path,
       archived: false, currentRunId: null, provider: null, runStatus: null,
-      rollupStatus: null, agents: [], agentsTruncated: false,
+      rollupStatus: null,
     };
     conversations.unshift(conversation);
     return conversation;
@@ -116,4 +139,20 @@ const api: AppApi = {
   loadRunAudit: unsupported,
 };
 
-createRoot(document.getElementById("root")!).render(<App store={createAppStore(api)} />);
+const fixtureApi = treeScenario ? {
+  ...api,
+  listConversations: async () => treeListConversations(),
+  loadConversation: async (request: { conversationId: string }) => treeLoadConversation(request),
+  listChildConversations: async (request: Parameters<typeof treeListChildren>[0]) => treeListChildren(request),
+  loadConversationPath: async (request: { conversationId: string }) => treeConversationPath(request),
+  loadTimeline: async ({ conversationId, cursor, limit }: Parameters<AppApi["loadTimeline"]>[0]) => treeTimeline(conversationId, cursor, limit),
+  loadDiagnostics: async () => ({ items: [], nextCursor: null }),
+  listenToAppEvents: async (handler: Parameters<AppApi["listenToAppEvents"]>[0]) => listenToTreeEvents(handler),
+  createConversation: unsupported,
+  archiveConversation: async ({ conversationId }: { conversationId: string }) => {
+    if (conversationId !== treeIds.root) return unsupported();
+    archiveSyntheticRoot();
+  },
+} : api;
+
+createRoot(document.getElementById("root")!).render(<App store={createAppStore(fixtureApi)} />);

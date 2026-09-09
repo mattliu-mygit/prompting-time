@@ -134,7 +134,7 @@ Interrupt, then choose Keep running. After the dialog closes the provider select
 must regain focus, with the preview/draft preserved. A real browser is necessary:
 jsdom does not model native inert focus suppression or the same rendering schedule.
 
-## Reading context and nested agents
+## Reading context and nested conversations
 
 Use `?chat=stream` at 1440 × 900. Scroll to an earlier observation, expand tool
 activity, and switch from Synthetic conversation 0 to 1 and back. Confirm the
@@ -149,12 +149,35 @@ read one outside the newest 80, switch away, advance the stream, and return.
 The older message should remain visible; the same helper appends one new message
 to conversation 0 without changing the older messages.
 
-Use the nested agents in the same fixture to navigate from child to grandchild
-and back through the breadcrumb and palette. Verify the selected agent is clearly
-identified, duplicate labels include conversation context, and navigation leaves
-the composer draft and provider choice unchanged. Check Escape focus restoration,
-normal arrow-key text editing, and bounded horizontal paths at minimum window width.
-These checks inspect agents; they do not establish direct child messaging support.
+Use `?tree=nested` for durable root, child, grandchild, older completed child,
+missing transcript, paged siblings, and deep long-name conversations. Select each
+through the same sidebar rows, ancestor path, and palette. The header and transcript
+must belong to the selected conversation, with no parent/sibling activity mixed in.
+Provider-observed children explain why they are read-only and offer no Send,
+Steer, Interrupt, routing, or archive control. Returning to the parent preserves
+its draft, nondefault provider choice, Markdown preview, and reading position.
+
+At 960 × 600 and 1440 × 900, expand root and child, then check actual geometry:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-conversation-tree.ts")).checkConversationTreeGeometry()'
+```
+
+Each generation must indent visibly, controls remain at least 32px, and long deep
+paths must not escape the viewport. Repeat at 125% CSS scale. Exercise tree arrow
+keys, Home/End, Enter/Space, and collapse persistence across pane hide/show and
+selection changes. The helper also exports `checkSelectedConversation` for exact
+header and transcript-marker assertions.
+
+The fixture exposes manual controls, with no timers or native/provider calls:
+`addSyntheticChild`, `startNextSyntheticParentRun`, `advanceSyntheticChildActivity`,
+`failSyntheticChildPages`, `archiveSyntheticRoot`, and `treeFixtureStats`, all in
+`conversation-tree-fixture.ts`. Newly observed children must appear in an open
+branch without toggling it; a later parent run must not remove the selected older
+child. Reject a page, verify Retry, recover it, and page to Completed earlier child.
+An archived root removes its cached descendants from active navigation. Reload
+the fixture to reset it. These checks do not establish native child messaging or
+historical transcript import support.
 
 ## Compact shell and composer
 
@@ -172,11 +195,10 @@ footer action, not force Send onto a separate row. Verify Preview/Edit preserves
 the raw draft and restores input focus. Errors and blocked-send explanations
 must remain visible with help closed.
 
-Use `?chat=reading&labels=long` to check an invented long title and selected agent
-label. The header must remain one row, the collapsed agent summary must stay
-32px, and the full label/summary must remain available through disclosure.
-Activate the conversation breadcrumb with Enter: the ancestry disappears and
-focus moves to Timeline, without scrolling or changing the draft/preview.
+Use `?chat=reading&labels=long` to check an invented long root title and child
+conversation name. The header remains one row and tree controls stay reachable.
+Navigate to the child and back through its ancestor path using Enter; the parent
+draft, preview, and reading position must survive the child visit.
 
 Exercise Filter by keyboard, select Completed, hide/show the sidebar, and verify
 the radio selection persists. Search and New must appear only once, moving to the

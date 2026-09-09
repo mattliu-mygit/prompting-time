@@ -7,7 +7,7 @@ The current release candidate integrates Codex App Server and Claude Code. Suppo
 ## What is implemented
 
 - Multiple concurrent projectless and project-backed conversations.
-- Recursive agent trees: any child may act as an orchestrator and create descendants.
+- Nested conversations: any child may act as an orchestrator and create descendants.
 - Deterministic automatic routing with a visible reason and per-turn provider override.
 - Provider switching and bounded context handoff at turn boundaries, with hermetic coverage and a passed live Claude → Codex/Astra → Claude application smoke. See [version-specific evidence](docs/provider-protocols.md).
 - Streamed timeline activity, approval and question handling, steering where supported, interruption, and safe archival.
@@ -112,10 +112,10 @@ Provider selection and message actions share one footer below the input.
 **Composer help** reveals routing guidance and keyboard hints; errors and reasons
 that sending is blocked remain visible without opening help.
 
-Unsent drafts stay with each conversation when you switch away and back. They are
-kept in memory only and are discarded when the app closes; no draft autosave files
-are created. A completed send clears only the submitted draft, not newer edits or
-another conversation's text.
+Unsent drafts, provider choices, and Markdown preview stay with each conversation
+when you switch away and back. They are kept in memory only and are discarded when
+the app closes; no draft autosave files are created. A completed send clears only
+the submitted draft, not newer edits or another conversation's text.
 
 Returning to a recently visited conversation restores your reading position and
 expanded activity, including loaded older history. A view following latest keeps
@@ -126,13 +126,25 @@ Press **⌘K** (or **Ctrl+K**) or use **Search** to find active conversations by
 or project and run common commands. The same palette can create a conversation,
 toggle either side pane, or focus the message input. Arrow keys select, Enter opens
 or runs the selection, and Escape returns to where you were. Search covers
-conversation names/projects and known agents, not message contents.
+conversation names/projects and loaded child conversations, not message contents.
 Composition input and held Enter keys do not accidentally submit messages.
 
-Known agents also appear in Search with their conversation context. Selecting one
-shows a compact ancestor path and an expandable summary; use an ancestor or Go to
-parent to navigate back. The root conversation does not repeat its title in a
-breadcrumb. The composer still addresses the conversation, not the inspected child.
+Roots and children use one conversation model and the same chat view. The sidebar
+indents each generation; expand a child to see its own children. Completed children
+remain available after the parent starts another turn. Search includes loaded
+children, and an ancestor path lets you return to a parent.
+
+Selecting a child opens only its captured activity, not its parent's transcript.
+Provider-observed children may have incomplete message history and are read-only
+except for supported approval responses. The app explains that limitation and
+never sends a child-view message to the parent. Parent drafts and reading positions
+survive visiting children. Children inherit workspace context without creating
+another worktree or gaining cleanup ownership.
+
+Child identity is currently scoped to the recorded parent run: repeated observations
+reuse one child conversation, but the same native child seen in a later parent run
+is a separate conversation. The app does not guess cross-run continuity or import
+missing historical transcripts.
 
 **Send**, **Steer**, and **Interrupt** stay tied to the provider's supported state.
 The composer does not silently queue a message when steering is unavailable.

@@ -47,8 +47,8 @@ const response = [
 export function chatApproval(conversationId: string): ApprovalSnapshot {
   const owner = conversationId.replace("conversation-", "");
   return {
-    id: `${conversationId}-approval`, runId: `run-${owner}`, agentId: `child-${owner}`, provider: "codex",
-    agentPath: ["Root agent", `Synthetic child ${owner}`], agentPathTruncated: false,
+    id: `${conversationId}-approval`, runId: `run-${owner}`, agentId: `root-${owner}`, provider: "codex",
+    agentPath: ["Root agent"], agentPathTruncated: false,
     operation: "Run synthetic test command", scope: "One synthetic operation", status: "pending", responsePending: false,
   };
 }
