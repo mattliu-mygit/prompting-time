@@ -4,6 +4,9 @@ use serde_json::{Value, json};
 
 use super::{protocol_error, rejected};
 use crate::domain::MutationState;
+use crate::tool_operation::ToolOperation;
+#[path = "operations.rs"]
+mod operations;
 use crate::providers::{
     ApprovalRequestDetails, ApprovalResponse, FileChangeApprovalDetail, FileChangeKind,
     NativeAgentStatus, NativeChildStatus, ProviderError, ProviderEvent, UserInputOption,
@@ -41,8 +44,13 @@ pub(super) fn validate_session(value: &Value, session: &str) -> Result<(), Provi
 
 struct Tool {
     name: String,
+    identified: bool,
+    order: usize,
     parent: Option<String>,
     completed: bool,
+    operation: ToolOperation,
+    dirty: bool,
+    mutation: MutationState,
 }
 
 struct Task {
@@ -68,6 +76,7 @@ pub(super) struct Protocol {
     tools: HashMap<String, Tool>,
     tasks: BTreeMap<String, Task>,
     root_success: bool,
+    operation_bytes: usize,
 }
 
 impl Protocol {
@@ -82,6 +91,7 @@ impl Protocol {
             tools: HashMap::new(),
             tasks: BTreeMap::new(),
             root_success: false,
+            operation_bytes: 0,
         }
     }
 
@@ -106,6 +116,9 @@ impl Protocol {
                 let content = message["content"]
                     .as_array()
                     .ok_or_else(|| protocol_error("assistant-content"))?;
+                if content.len() > MAX_IDENTITIES {
+                    return Err(protocol_error("assistant-content-capacity"));
+                }
                 let frame_id = value
                     .get("uuid")
                     .map(|_| required_id(&value, "uuid"))
@@ -132,7 +145,10 @@ impl Protocol {
                             false,
                             &mut events,
                         )?,
-                        Some("tool_use") => self.tool(block, parent, &mut events)?,
+                        Some("tool_use") => {
+                            self.tool(block, parent)?;
+                            self.emit_operations(&mut events);
+                        }
                         Some("text" | "thinking" | "redacted_thinking") => {}
                         _ => return Err(protocol_error("unsupported-assistant-block")),
                     }
@@ -140,18 +156,22 @@ impl Protocol {
             }
             Some("user") => {
                 if let Some(content) = value["message"]["content"].as_array() {
+                    if content.len() > MAX_IDENTITIES {
+                        return Err(protocol_error("tool-result-capacity"));
+                    }
                     for block in content {
                         if block["type"] != "tool_result" {
                             continue;
                         }
                         let id = required_id(block, "tool_use_id")?;
-                        let Some(tool) = self.tools.get_mut(id) else {
-                            return Err(protocol_error("unknown-tool-result"));
-                        };
-                        if tool.completed {
-                            continue;
+                        if !self.tools.contains_key(id) {
+                            self.tool(&json!({"id":id,"name":"Tool","input":{}}), parent)?;
+                            self.tools.get_mut(id).unwrap().identified = false;
                         }
-                        tool.completed = true;
+                        let tool = self.tools.get_mut(id).unwrap();
+                        if parent.is_some() && tool.parent.as_deref() != parent {
+                            return Err(protocol_error("tool-result-owner-conflict"));
+                        }
                         let mutation =
                             if matches!(tool.name.as_str(), "Write" | "Edit" | "NotebookEdit")
                                 && block["is_error"] == false
@@ -160,14 +180,24 @@ impl Protocol {
                             } else {
                                 MutationState::Unknown
                             };
-                        events.push(ProviderEvent::NativeItemActivity {
-                            native_turn_id: None,
-                            native_agent_id: None,
-                            operation: None,
-                            native_item_id: id.into(),
-                            description: format!("{} finished", tool.name),
-                            mutation,
-                        });
+                        let mutation = match (tool.mutation, mutation) {
+                            (MutationState::Unknown, _) | (_, MutationState::Unknown) => {
+                                MutationState::Unknown
+                            }
+                            (MutationState::Observed, _) | (_, MutationState::Observed) => {
+                                MutationState::Observed
+                            }
+                            _ => MutationState::NoneObserved,
+                        };
+                        if !tool.completed || tool.mutation != mutation {
+                            events.push(ProviderEvent::MutationEvidence { mutation });
+                        }
+                        tool.completed = true;
+                        tool.mutation = mutation;
+                        let mut operation = operations::result(&tool.name, block);
+                        operation.title = tool.operation.title.clone();
+                        self.update_operation(id, operation)?;
+                        self.emit_operations(&mut events);
                     }
                 }
             }
@@ -233,7 +263,11 @@ impl Protocol {
             // No raw notification payload is retained. Unknown meaningful shapes fail closed.
             _ => return Err(protocol_error("unsupported-envelope")),
         }
+        // Preserve observed tool order when its Agent block unlocks a lifecycle
+        // event; newly resolved child operations follow their owner registration.
+        self.emit_operations(&mut events);
         self.materialize(&mut events)?;
+        self.emit_operations(&mut events);
         if self.root_success
             && self
                 .tasks
@@ -350,7 +384,7 @@ impl Protocol {
                             false,
                             events,
                         )?,
-                        Some("tool_use") => self.tool(block, None, events)?,
+                        Some("tool_use") => self.tool(block, None)?,
                         Some("thinking" | "redacted_thinking") => {}
                         _ => return Err(protocol_error("unsupported-stream-block")),
                     }
@@ -383,29 +417,36 @@ impl Protocol {
         Ok(())
     }
 
-    fn tool(
-        &mut self,
-        block: &Value,
-        parent: Option<&str>,
-        events: &mut Vec<ProviderEvent>,
-    ) -> Result<(), ProviderError> {
+    fn tool(&mut self, block: &Value, parent: Option<&str>) -> Result<(), ProviderError> {
         let id = required_id(block, "id")?;
         let name = required_id(block, "name")?;
-        if let Some(tool) = self.tools.get(id) {
-            if tool.name != name || tool.parent.as_deref() != parent {
+        if let Some(tool) = self.tools.get_mut(id) {
+            if (tool.identified && tool.name != name) || tool.parent.as_deref() != parent {
                 return Err(protocol_error("tool-identity-conflict"));
             }
-            return Ok(());
+            tool.name = name.into();
+            tool.identified = true;
+            return self.update_operation(id, operations::input(name, &block["input"]));
         }
         if self.tools.len() >= MAX_IDENTITIES || parent == Some(id) {
             return Err(protocol_error("tool-capacity-or-cycle"));
+        }
+        let operation = operations::input(name, &block["input"]);
+        let bytes = self.operation_bytes + operation.display_bytes();
+        if bytes > MAX_TEXT_BYTES {
+            return Err(protocol_error("tool-operation-capacity"));
         }
         self.tools.insert(
             id.into(),
             Tool {
                 name: name.into(),
+                identified: true,
+                order: self.tools.len(),
                 parent: parent.map(str::to_owned),
                 completed: false,
+                operation,
+                dirty: true,
+                mutation: MutationState::NoneObserved,
             },
         );
         let mut cursor = parent;
@@ -420,15 +461,62 @@ impl Protocol {
                 .get(parent)
                 .and_then(|tool| tool.parent.as_deref());
         }
-        events.push(ProviderEvent::NativeItemActivity {
-            native_turn_id: None,
-            native_agent_id: None,
-            operation: None,
-            native_item_id: id.into(),
-            description: format!("{name} requested"),
-            mutation: MutationState::NoneObserved,
-        });
+        self.operation_bytes = bytes;
         Ok(())
+    }
+
+    fn update_operation(&mut self, id: &str, incoming: ToolOperation) -> Result<(), ProviderError> {
+        let tool = self.tools.get_mut(id).expect("known tool");
+        let title = (tool.operation.input.is_none() && incoming.input.is_some())
+            .then(|| incoming.title.clone());
+        let mut merged = tool.operation.clone().merge(incoming);
+        if let Some(title) = title {
+            merged.title = title;
+            merged = merged.bounded();
+        }
+        let bytes = self.operation_bytes - tool.operation.display_bytes() + merged.display_bytes();
+        if bytes > MAX_TEXT_BYTES {
+            return Err(protocol_error("tool-operation-capacity"));
+        }
+        self.operation_bytes = bytes;
+        tool.dirty |= tool.operation != merged;
+        tool.operation = merged;
+        Ok(())
+    }
+
+    fn emit_operations(&mut self, events: &mut Vec<ProviderEvent>) {
+        let mut dirty: Vec<_> = self
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.dirty)
+            .map(|(id, tool)| (tool.order, id.clone()))
+            .collect();
+        dirty.sort_by_key(|(order, _)| *order);
+        for (_, id) in dirty {
+            let tool = self.tools.get_mut(&id).unwrap();
+            let owner = match &tool.parent {
+                None => None,
+                Some(parent) => {
+                    let Some((task_id, _)) = self
+                        .tasks
+                        .iter()
+                        .find(|(_, task)| task.tool == *parent && task.emitted.is_some())
+                    else {
+                        continue;
+                    };
+                    Some(task_id.clone())
+                }
+            };
+            events.push(ProviderEvent::NativeItemActivity {
+                native_item_id: id.clone(),
+                native_turn_id: None,
+                native_agent_id: owner,
+                description: tool.operation.title.clone(),
+                operation: Some(tool.operation.clone()),
+                mutation: tool.mutation,
+            });
+            tool.dirty = false;
+        }
     }
 
     fn task_update(&mut self, value: &Value) -> Result<(), ProviderError> {
@@ -822,4 +910,357 @@ pub(super) fn control(
         }),
         None,
     ))
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+    use crate::tool_operation::ToolOperationStatus;
+
+    fn operation(events: &[ProviderEvent]) -> &crate::tool_operation::ToolOperation {
+        events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::NativeItemActivity { operation, .. } => operation.as_ref(),
+                _ => None,
+            })
+            .expect("selected tool operation")
+    }
+
+    #[test]
+    fn claude_operation_enriches_streamed_input_and_result() {
+        let mut protocol = Protocol::new("session".into());
+        protocol.normalize(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"message"}}})).unwrap();
+        let start = protocol
+            .normalize(
+                json!({"type":"stream_event","event":{"type":"content_block_start","index":0,
+            "content_block":{"type":"tool_use","id":"tool","name":"Bash","input":{}}}}),
+            )
+            .unwrap();
+        assert_eq!(operation(&start).title, "Bash");
+        let frame = json!({"type":"assistant","message":{"id":"message","content":[{"type":"tool_use","id":"tool","name":"Bash","input":{"command":"cargo test","private":"PRIVATE_MARKER"}}]}});
+        let full = protocol.normalize(frame.clone()).unwrap();
+        assert_eq!(operation(&full).title, "Run cargo test");
+        assert_eq!(operation(&full).input.as_deref(), Some("cargo test"));
+        assert!(protocol.normalize(frame).unwrap().is_empty());
+        let result = json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool","is_error":true,"content":""}]}});
+        let end = protocol.normalize(result.clone()).unwrap();
+        assert_eq!(operation(&end).status, ToolOperationStatus::Failed);
+        assert_eq!(operation(&end).output.as_deref(), Some(""));
+        assert!(
+            !serde_json::to_string(&end)
+                .unwrap()
+                .contains("PRIVATE_MARKER")
+        );
+        assert!(protocol.normalize(result).unwrap().is_empty());
+    }
+
+    fn tool_frame(id: &str, name: &str, input: Value, parent: Option<&str>) -> Value {
+        json!({"type":"assistant","parent_tool_use_id":parent,"message":{"id":"message","content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
+    }
+
+    #[test]
+    fn claude_operation_selected_file_and_search_inputs() {
+        for (name, input, title) in [
+            (
+                "Read",
+                json!({"file_path":"src/main.rs"}),
+                "Read src/main.rs",
+            ),
+            (
+                "Write",
+                json!({"file_path":"src/main.rs","content":"NEW"}),
+                "Write src/main.rs",
+            ),
+            (
+                "Edit",
+                json!({"file_path":"src/main.rs","old_string":"OLD","new_string":"NEW"}),
+                "Edit src/main.rs",
+            ),
+            (
+                "Glob",
+                json!({"pattern":"*.rs","path":"src"}),
+                "Find files *.rs",
+            ),
+            (
+                "Grep",
+                json!({"pattern":"routing","path":"src"}),
+                "Search routing",
+            ),
+            (
+                "WebSearch",
+                json!({"query":"rust docs"}),
+                "Search rust docs",
+            ),
+            (
+                "WebFetch",
+                json!({"url":"https://example.com"}),
+                "Fetch https://example.com",
+            ),
+            (
+                "NotebookEdit",
+                json!({"notebook_path":"example.ipynb"}),
+                "Edit example.ipynb",
+            ),
+        ] {
+            let mut protocol = Protocol::new("session".into());
+            let events = protocol
+                .normalize(tool_frame("tool", name, input, None))
+                .unwrap();
+            assert_eq!(operation(&events).title, title);
+            if name == "Edit" {
+                assert_eq!(
+                    operation(&events).input.as_deref(),
+                    Some("Old text:\nOLD\nNew text:\nNEW")
+                );
+            }
+            if name == "Write" {
+                assert_eq!(operation(&events).input.as_deref(), Some("NEW"));
+            }
+        }
+    }
+
+    #[test]
+    fn claude_operation_missing_empty_and_text_block_results() {
+        for (content, expected) in [
+            (None, None),
+            (Some(json!("")), Some("")),
+            (Some(json!([])), Some("")),
+            (
+                Some(
+                    json!([{"type":"text","text":"A"},{"type":"image","data":"PRIVATE"},{"type":"text","text":"B"}]),
+                ),
+                Some("A\nB"),
+            ),
+            (Some(json!([{"type":"image","data":"PRIVATE"}])), None),
+        ] {
+            let mut protocol = Protocol::new("session".into());
+            protocol
+                .normalize(tool_frame(
+                    "tool",
+                    "Unfamiliar",
+                    json!({"secret":"PRIVATE"}),
+                    None,
+                ))
+                .unwrap();
+            let mut block = json!({"type":"tool_result","tool_use_id":"tool"});
+            if let Some(content) = content {
+                block["content"] = content;
+            }
+            let events = protocol
+                .normalize(json!({"type":"user","message":{"content":[block]}}))
+                .unwrap();
+            assert_eq!(operation(&events).output.as_deref(), expected);
+            assert_eq!(operation(&events).status, ToolOperationStatus::Succeeded);
+            assert!(!serde_json::to_string(&events).unwrap().contains("PRIVATE"));
+        }
+    }
+
+    #[test]
+    fn claude_operation_completion_only_and_late_input() {
+        let mut protocol = Protocol::new("session".into());
+        let events = protocol.normalize(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"missing","content":"DONE"}]}})).unwrap();
+        assert_eq!(operation(&events).status, ToolOperationStatus::Succeeded);
+        let events = protocol
+            .normalize(tool_frame(
+                "missing",
+                "Bash",
+                json!({"command":"cargo test"}),
+                None,
+            ))
+            .unwrap();
+        assert_eq!(operation(&events).input.as_deref(), Some("cargo test"));
+        assert_eq!(operation(&events).title, "Run cargo test");
+        assert_eq!(operation(&events).status, ToolOperationStatus::Succeeded);
+    }
+
+    #[test]
+    fn claude_operation_child_waits_for_materialized_owner_but_keeps_mutation() {
+        let mut protocol = Protocol::new("session".into());
+        protocol
+            .normalize(tool_frame("agent", "Agent", json!({}), None))
+            .unwrap();
+        let start = protocol
+            .normalize(tool_frame(
+                "write",
+                "Write",
+                json!({"file_path":"child.txt","content":"NEW"}),
+                Some("agent"),
+            ))
+            .unwrap();
+        assert!(
+            start
+                .iter()
+                .all(|event| !matches!(event, ProviderEvent::NativeItemActivity { .. }))
+        );
+        let end = protocol.normalize(json!({"type":"user","parent_tool_use_id":"agent","message":{"content":[{"type":"tool_result","tool_use_id":"write","is_error":false,"content":"DONE"}]}})).unwrap();
+        assert!(end.iter().any(|event| matches!(
+            event,
+            ProviderEvent::MutationEvidence {
+                mutation: MutationState::Observed
+            }
+        )));
+        assert!(
+            end.iter()
+                .all(|event| !matches!(event, ProviderEvent::NativeItemActivity { .. }))
+        );
+        let mapped = protocol.normalize(json!({"type":"system","subtype":"task_started","task_id":"child","tool_use_id":"agent"})).unwrap();
+        let ProviderEvent::NativeItemActivity {
+            native_agent_id,
+            native_turn_id,
+            operation: Some(op),
+            ..
+        } = mapped
+            .iter()
+            .find(|event| matches!(event, ProviderEvent::NativeItemActivity { .. }))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(native_agent_id.as_deref(), Some("child"));
+        assert!(native_turn_id.is_none());
+        assert_eq!(op.output.as_deref(), Some("DONE"));
+        assert!(matches!(
+            mapped.first(),
+            Some(ProviderEvent::ChildAgentActivity { .. })
+        ));
+    }
+
+    #[test]
+    fn claude_operation_bounds_retention_and_omits_thinking() {
+        let mut protocol = Protocol::new("session".into());
+        let private = protocol.normalize(json!({"type":"assistant","message":{"id":"message","content":[{"type":"thinking","thinking":"PRIVATE"},{"type":"redacted_thinking","data":"PRIVATE"}]}})).unwrap();
+        assert!(private.is_empty());
+        let long = "é".repeat(crate::tool_operation::MAX_OPERATION_BYTES);
+        let mut rejected = false;
+        for index in 0..40 {
+            match protocol.normalize(tool_frame(
+                &format!("tool-{index}"),
+                "Bash",
+                json!({"command":long}),
+                None,
+            )) {
+                Ok(events) => {
+                    let op = operation(&events);
+                    assert!(op.truncated);
+                    assert!(op.display_bytes() <= crate::tool_operation::MAX_OPERATION_BYTES);
+                }
+                Err(_) => {
+                    rejected = true;
+                    break;
+                }
+            }
+        }
+        assert!(rejected, "aggregate retained tool detail must be bounded");
+        assert!(protocol.operation_bytes <= MAX_TEXT_BYTES);
+    }
+
+    #[test]
+    fn claude_operation_conflicting_results_keep_failure_and_same_identity() {
+        let mut protocol = Protocol::new("session".into());
+        protocol
+            .normalize(tool_frame("tool", "Bash", json!({"command":"false"}), None))
+            .unwrap();
+        for (failed, output) in [(true, "broken"), (false, "ok")] {
+            let events = protocol.normalize(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool","is_error":failed,"content":output}]}})).unwrap();
+            if !failed {
+                assert!(operation(&events).conflicted);
+                assert_eq!(operation(&events).status, ToolOperationStatus::Unknown);
+                assert_eq!(operation(&events).error.as_deref(), Some("broken"));
+            }
+        }
+    }
+
+    #[test]
+    fn claude_operation_multi_tool_order_and_ownership_conflicts() {
+        let mut protocol = Protocol::new("session".into());
+        let blocks: Vec<_> = (0..30).map(|index| json!({"type":"tool_use","id":format!("tool-{index}"),"name":"Read","input":{"file_path":"same.rs"}})).collect();
+        let events = protocol
+            .normalize(json!({"type":"assistant","message":{"id":"message","content":blocks}}))
+            .unwrap();
+        let ids: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::NativeItemActivity { native_item_id, .. } => {
+                    Some(native_item_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            (0..30)
+                .map(|index| format!("tool-{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            protocol
+                .normalize(tool_frame("tool-0", "Read", json!({}), Some("unrelated")))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn claude_operation_result_cannot_change_owner_or_invent_success() {
+        let mut protocol = Protocol::new("session".into());
+        protocol
+            .normalize(tool_frame(
+                "tool",
+                "Read",
+                json!({"file_path":"file"}),
+                None,
+            ))
+            .unwrap();
+        let events = protocol.normalize(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool","is_error":"no"}]}})).unwrap();
+        assert_eq!(operation(&events).status, ToolOperationStatus::Unknown);
+        assert!(protocol.normalize(json!({"type":"user","parent_tool_use_id":"different","message":{"content":[{"type":"tool_result","tool_use_id":"tool","content":"WRONG"}]}})).is_err());
+    }
+
+    #[test]
+    fn claude_operation_bounds_collection_work() {
+        let mut protocol = Protocol::new("session".into());
+        let blocks = vec![
+            json!({"type":"tool_use","id":"same","name":"Read","input":{}});
+            MAX_IDENTITIES + 1
+        ];
+        assert!(
+            protocol
+                .normalize(json!({"type":"assistant","message":{"id":"message","content":blocks}}))
+                .is_err()
+        );
+        let mut protocol = Protocol::new("session".into());
+        let blocks = vec![
+            json!({"type":"tool_result","tool_use_id":"same","content":""});
+            MAX_IDENTITIES + 1
+        ];
+        assert!(
+            protocol
+                .normalize(json!({"type":"user","message":{"content":blocks}}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn claude_operation_keeps_position_between_assistant_blocks() {
+        let mut protocol = Protocol::new("session".into());
+        let events = protocol
+            .normalize(
+                json!({"type":"assistant","message":{"id":"message","content":[
+                    {"type":"text","text":"Before"},
+                    {"type":"tool_use","id":"tool","name":"Read","input":{"file_path":"file"}},
+                    {"type":"text","text":"After"}
+                ]}}),
+            )
+            .unwrap();
+        assert!(
+            matches!(&events[0],ProviderEvent::AssistantMessageDelta { content, .. } if content == "Before")
+        );
+        assert!(matches!(
+            &events[1],
+            ProviderEvent::NativeItemActivity { .. }
+        ));
+        assert!(
+            matches!(&events[2],ProviderEvent::AssistantMessageDelta { content, .. } if content == "After")
+        );
+    }
 }

@@ -1587,6 +1587,50 @@ result()
 }
 
 #[tokio::test]
+async fn tool_operation_stream_enrichment_survives_adapter_delivery() {
+    let fixture = Fixture::new(
+        r#"
+emit({'type':'stream_event','session_id':session,'event':{'type':'message_start','message':{'id':'message'}}})
+emit({'type':'stream_event','session_id':session,'event':{'type':'content_block_start','index':0,'content_block':{'type':'tool_use','id':'tool-1','name':'Bash','input':{}}}})
+assistant([{'type':'tool_use','id':'tool-1','name':'Bash','input':{'command':'cargo test','private':'PRIVATE_INPUT'}}])
+emit({'type':'user','session_id':session,'message':{'content':[{'type':'tool_result','tool_use_id':'tool-1','is_error':False,'content':'DONE'}]}})
+result()
+"#,
+    );
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&session, TurnRequest::new("operation"))
+        .await
+        .unwrap();
+    let events = collect(&mut turn).await;
+    let snapshots: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Ok(ProviderEvent::NativeItemActivity {
+                native_item_id,
+                operation: Some(operation),
+                ..
+            }) => Some((native_item_id, operation)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snapshots.len(), 3);
+    assert!(snapshots.iter().all(|(id, _)| id.as_str() == "tool-1"));
+    assert_eq!(snapshots[1].1.input.as_deref(), Some("cargo test"));
+    assert_eq!(snapshots[2].1.output.as_deref(), Some("DONE"));
+    assert_eq!(
+        snapshots[2].1.status,
+        prompting_time_core::tool_operation::ToolOperationStatus::Succeeded
+    );
+    assert!(matches!(
+        events.last(),
+        Some(Ok(ProviderEvent::TurnCompleted))
+    ));
+    assert!(!format!("{events:?}").contains("PRIVATE_INPUT"));
+}
+
+#[tokio::test]
 async fn permission_request_is_not_mutation_and_unknown_tool_completion_is_uncertain() {
     let fixture = Fixture::new(
         r#"
