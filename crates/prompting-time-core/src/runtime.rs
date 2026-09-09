@@ -2822,6 +2822,11 @@ async fn execute_attempt(
                                 ).await;
                             }
                         };
+                        if let ProviderEvent::MutationEvidence { mutation: observed } = event {
+                            store.retain_discarded_operation_mutation(attempt.run_id, &attempt.dispatch_owner_id, observed).await?;
+                            mutation = merge_mutation(mutation, observed);
+                            continue;
+                        }
                         // Once a child's terminal waits for its response acknowledgement,
                         // later turns and controls from that thread must wait behind it.
                         // A deferred root terminal fences everything after it; siblings
@@ -3132,6 +3137,17 @@ async fn execute_attempt(
                 .await;
             }
         };
+        if let ProviderEvent::MutationEvidence { mutation: observed } = event {
+            store
+                .retain_discarded_operation_mutation(
+                    attempt.run_id,
+                    &attempt.dispatch_owner_id,
+                    observed,
+                )
+                .await?;
+            mutation = merge_mutation(mutation, observed);
+            continue;
+        }
         if started
             && matches!(
                 &event,
@@ -6588,6 +6604,109 @@ mod tests {
                 .count(),
             1
         );
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mutation_evidence_is_fenced_and_has_no_timeline_row_while_waiting_or_running() {
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("mutation evidence"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(ApprovalAdapter {
+            sender: Mutex::new(None),
+            responses: AtomicUsize::new(0),
+            owner_shutdowns: Arc::new(AtomicUsize::new(0)),
+            control_started: AtomicUsize::new(0),
+            block_steer: false,
+            response_barrier: None,
+            response_drops: Arc::new(AtomicUsize::new(0)),
+            owned_pid: None,
+            panic_response: false,
+        });
+        let supervisor = RunSupervisor::new(store.clone(), vec![adapter.clone()]).unwrap();
+        let handle = supervisor
+            .submit(RunRequest::new(
+                conversation.id,
+                PathBuf::from("/tmp/mutation-evidence"),
+                ProviderId::Codex,
+                TurnRequest::new("invented"),
+            ))
+            .await
+            .unwrap();
+        handle.wait_for(RunStatus::Waiting).await.unwrap();
+        assert!(matches!(
+            store
+                .retain_discarded_operation_mutation(
+                    handle.run_id(),
+                    "wrong-owner",
+                    MutationState::Unknown
+                )
+                .await,
+            Err(StoreError::DispatchOwnerMismatch(_))
+        ));
+        assert_eq!(
+            store
+                .load_run(handle.run_id())
+                .await
+                .unwrap()
+                .mutation_state,
+            MutationState::NoneObserved
+        );
+        let sender = adapter.sender.lock().unwrap().as_ref().unwrap().clone();
+        sender
+            .send(Ok(ProviderEvent::MutationEvidence {
+                mutation: MutationState::Observed,
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store
+                .load_run(handle.run_id())
+                .await
+                .unwrap()
+                .mutation_state
+                != MutationState::Observed
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        supervisor
+            .respond(
+                handle.run_id(),
+                "fixture-approval",
+                ApprovalResponse::Denied,
+            )
+            .await
+            .unwrap();
+        sender
+            .send(Ok(ProviderEvent::MutationEvidence {
+                mutation: MutationState::Unknown,
+            }))
+            .await
+            .unwrap();
+        sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+        adapter.sender.lock().unwrap().take();
+        drop(sender);
+        assert_eq!(handle.wait().await.unwrap().status, RunStatus::Completed);
+        assert_eq!(
+            store
+                .load_run(handle.run_id())
+                .await
+                .unwrap()
+                .mutation_state,
+            MutationState::Unknown
+        );
+        let timeline = store
+            .load_recent_timeline(conversation.id, None, 20)
+            .await
+            .unwrap();
+        assert!(timeline.items.iter().all(|row| row.event.kind
+            != crate::domain::TimelineEventKind::Tool
+            && row.operation.is_none()));
         supervisor.shutdown().await.unwrap();
     }
 

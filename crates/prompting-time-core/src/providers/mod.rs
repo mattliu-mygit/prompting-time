@@ -199,6 +199,10 @@ pub struct NativeChildTurn {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ProviderEvent {
+    /// Mutation evidence without sufficient ownership metadata for a display row.
+    MutationEvidence {
+        mutation: MutationState,
+    },
     NativeChildIdentity {
         #[serde(rename = "parentNativeThreadId")]
         parent_native_thread_id: String,

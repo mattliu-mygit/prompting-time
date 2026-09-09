@@ -19,10 +19,12 @@ const AGENT_PAGE_SIZE = 20;
 export type TimelineViewState = {
   newestItems: TimelineItem[];
   olderPages: TimelineItem[][];
+  olderPageCursors: string[];
   cursor: string | null;
   newestCursor: string | null;
   historyEvicted: boolean;
   expandedGroups: ReadonlySet<string>;
+  expandedOperations: ReadonlySet<string>;
   following: boolean;
   anchor: ScrollAnchor | null;
 };
@@ -78,9 +80,11 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
   const olderPagesRef = useRef<TimelineItem[][]>([]);
+  const olderPageCursors = useRef<string[]>([]);
   const newestItemsRef = useRef<TimelineItem[]>([]);
   const newestCursor = useRef<string | null>(null);
   const scrollBox = useRef<HTMLDivElement>(null);
+  const operationFocus = useRef<{ id: string; control: HTMLElement } | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const prependAnchor = useRef<ScrollAnchor | null>(null);
   const scrollToEnd = useRef(false);
@@ -88,11 +92,12 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   const lastScrollTop = useRef(0);
   const [showJump, setShowJump] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const [expandedOperations, setExpandedOperations] = useState<ReadonlySet<string>>(() => new Set());
   const rootStatus = agents.find(({ parentId }) => parentId === null)?.status;
-  const retainedView = useRef({ newestItems, olderPages, cursor, historyEvicted, expandedGroups });
+  const retainedView = useRef({ newestItems, olderPages, cursor, historyEvicted, expandedGroups, expandedOperations });
   const viewCommitted = useRef(false);
   useLayoutEffect(() => {
-    retainedView.current = { newestItems, olderPages, cursor, historyEvicted, expandedGroups };
+    retainedView.current = { newestItems, olderPages, cursor, historyEvicted, expandedGroups, expandedOperations };
     viewCommitted.current = loadedConversation.current === conversationId;
   });
   useLayoutEffect(() => {
@@ -105,7 +110,9 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
         viewStates.set(conversationId, {
           ...saved,
           newestCursor: newestCursor.current,
+          olderPageCursors: [...olderPageCursors.current],
           expandedGroups: new Set([...saved.expandedGroups].filter((id) => retainedIds.has(id))),
+          expandedOperations: new Set([...saved.expandedOperations].filter((id) => retainedIds.has(id))),
           following: following.current,
           anchor: captureScrollAnchor(box),
         });
@@ -140,6 +147,13 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   );
   const groups = useMemo(() => groupActivity(items), [items]);
 
+  function rememberOperationFocus() {
+    const control = document.activeElement;
+    if (!(control instanceof HTMLElement) || !control.matches("[data-operation-disclosure]")) return;
+    const id = control.closest<HTMLElement>("[data-timeline-id]")?.dataset.timelineId;
+    if (id && scrollBox.current?.contains(control)) operationFocus.current = { id, control };
+  }
+
   function loadTimelinePage(request: { conversationId: string; cursor: string | null; limit: number }) {
     const result = readTail.current
       .catch(() => undefined)
@@ -165,12 +179,14 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
       lastScrollTop.current = 0;
       setShowJump(!following.current);
       setExpandedGroups(saved?.expandedGroups ?? new Set());
+      setExpandedOperations(saved?.expandedOperations ?? new Set());
       requestGeneration.current += 1;
       historyRequestGeneration.current += 1;
       setNewestItems(saved?.newestItems ?? []);
       newestItemsRef.current = saved?.newestItems ?? [];
       setOlderPages(saved?.olderPages ?? []);
       olderPagesRef.current = saved?.olderPages ?? [];
+      olderPageCursors.current = saved?.olderPageCursors ?? [];
       loadedConversation.current = saved ? conversationId : null;
       prependAnchor.current = saved && !saved.following ? saved.anchor : null;
       scrollToEnd.current = saved?.following ?? false;
@@ -213,7 +229,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
             scrollToEnd.current = replacesConversation
               || box === null
               || (following.current && box.scrollHeight - box.scrollTop - box.clientHeight < 32);
-            if (!scrollToEnd.current) prependAnchor.current = captureScrollAnchor(box);
+            if (!scrollToEnd.current && !prependAnchor.current) prependAnchor.current = captureScrollAnchor(box);
             loadedConversation.current = targetConversation;
             const bounded = boundTimelinePage(page.items);
             if (!replacesConversation && newestItemsRef.current.length > 0) {
@@ -221,11 +237,29 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
               if (newestItemsRef.current.some(({ id }) => !incomingIds.has(id))) setHistoryEvicted(true);
             }
             newestItemsRef.current = bounded;
+            rememberOperationFocus();
             setNewestItems(bounded);
             newestCursor.current = page.nextCursor;
             if (replacesConversation || olderPagesRef.current.length === 0) {
               setCursor(page.nextCursor);
             }
+            // A tool can finish outside the newest page. Refresh the original
+            // fixed windows, preserving opaque cursors and the reader's position.
+            const historyGeneration = historyRequestGeneration.current;
+            const retainedCursors = [...olderPageCursors.current];
+            for (const retainedCursor of retainedCursors) {
+              const retained = await loadTimelinePage({ conversationId: targetConversation, cursor: retainedCursor, limit: PAGE_SIZE });
+              if (generation !== requestGeneration.current || targetConversation !== requestedConversation.current
+                || historyGeneration !== historyRequestGeneration.current) break;
+              const index = olderPageCursors.current.indexOf(retainedCursor);
+              if (index === -1) continue;
+              if (!following.current && !prependAnchor.current) prependAnchor.current = captureScrollAnchor(scrollBox.current);
+              const refreshed = olderPagesRef.current.map((items, pageIndex) => pageIndex === index ? boundTimelinePage(retained.items) : items);
+              olderPagesRef.current = refreshed;
+              rememberOperationFocus();
+              setOlderPages(refreshed);
+            }
+            if (generation !== requestGeneration.current || targetConversation !== requestedConversation.current) continue;
             const refreshedPages = [pendingApprovalPage(page.approvals)];
             const refreshedAnchors: Array<string | null> = [null];
             let refreshedCursor = page.approvalsNextCursor;
@@ -277,6 +311,13 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
 
   useLayoutEffect(() => {
     if (!scrollBox.current) return;
+    const focused = operationFocus.current;
+    operationFocus.current = null;
+    if (focused && !focused.control.isConnected && document.activeElement === document.body) {
+      const replacement = [...scrollBox.current.querySelectorAll<HTMLButtonElement>("[data-operation-disclosure]")]
+        .find(button => button.closest<HTMLElement>("[data-timeline-id]")?.dataset.timelineId === focused.id);
+      replacement?.focus({ preventScroll: true });
+    }
     if (prependAnchor.current !== null) {
       restoreScrollAnchor(scrollBox.current, prependAnchor.current);
       lastScrollTop.current = scrollBox.current.scrollTop;
@@ -312,10 +353,24 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
   }
 
   function toggleGroup(group: TimelineItem[]) {
+    const expanded = group.some(({ id }) => expandedGroups.has(id) || expandedOperations.has(id));
+    if (expanded) setExpandedOperations(current => new Set([...current].filter(id => !group.some(item => item.id === id))));
     setExpandedGroups((current) => {
       const next = new Set(current);
-      if (group.some(({ id }) => current.has(id))) group.forEach(({ id }) => next.delete(id));
+      if (expanded) group.forEach(({ id }) => next.delete(id));
       else next.add(group[0]!.id);
+      return next;
+    });
+  }
+
+  function toggleOperation(id: string) {
+    if (expandedOperations.has(id) && groups.some(group => isGroupActivity(group[0]!) && group.some(item => item.id === id))) {
+      setExpandedGroups(current => new Set([...current, id]));
+    }
+    setExpandedOperations(current => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }
@@ -330,6 +385,9 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     if (!cursor || loadingOlder) return;
     const requestedCursor = cursor;
     const historyGeneration = ++historyRequestGeneration.current;
+    // Paging invalidates the in-flight retained-window pass; finish it against
+    // the new bounded set once the serialized older read has committed.
+    if (newestRefreshInFlight.current) newestRefreshQueued.current = true;
     setLoadingOlder(true);
     setError(null);
     try {
@@ -339,13 +397,13 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
         || historyGeneration !== historyRequestGeneration.current
       ) return;
       prependAnchor.current = captureScrollAnchor(scrollBox.current);
-      setOlderPages((current) => {
-        const next = [...current, boundTimelinePage(page.items)];
-        const bounded = next.length > MAX_OLDER_PAGES ? next.slice(-MAX_OLDER_PAGES) : next;
-        olderPagesRef.current = bounded;
-        if (next.length > MAX_OLDER_PAGES) setHistoryEvicted(true);
-        return bounded;
-      });
+      olderPageCursors.current = [...olderPageCursors.current, requestedCursor].slice(-MAX_OLDER_PAGES);
+      const next = [...olderPagesRef.current, boundTimelinePage(page.items)];
+      const bounded = next.slice(-MAX_OLDER_PAGES);
+      olderPagesRef.current = bounded;
+      if (next.length > MAX_OLDER_PAGES) setHistoryEvicted(true);
+      rememberOperationFocus();
+      setOlderPages(bounded);
       setCursor(page.nextCursor);
     } catch (reason) {
       if (historyGeneration !== historyRequestGeneration.current) return;
@@ -360,6 +418,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
     historyRequestGeneration.current += 1;
     prependAnchor.current = null;
     olderPagesRef.current = [];
+    olderPageCursors.current = [];
     setOlderPages([]);
     setCursor(newestCursor.current);
     setHistoryEvicted(false);
@@ -481,19 +540,20 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
           {groups.map((group) => {
             const first = group[0]!;
             if (!isGroupActivity(first)) return <li key={first.id} data-timeline-id={first.id}>
-              <TimelineEntry item={first} actions={actions} agentPath={agents.some(({ id }) => id === first.agentId) ? canonicalAgentPath(first.agentId, agents) : undefined} />
+              <TimelineEntry item={first} actions={actions} expanded={expandedOperations.has(first.id)} onToggle={() => toggleOperation(first.id)} agentPath={agents.some(({ id }) => id === first.agentId) ? canonicalAgentPath(first.agentId, agents) : undefined} />
             </li>;
-            const expandedAnchor = group.find(({ id }) => expandedGroups.has(id));
+            const expandedAnchor = group.find(({ id }) => expandedGroups.has(id) || expandedOperations.has(id));
             const expanded = expandedAnchor !== undefined;
-            const label = group.some(({ kind }) => kind === "tool") ? "tool activity" : "progress";
+            const completed = first.operation !== null;
+            const label = completed ? `${group.length} completed ${group.length === 1 ? "operation" : "operations"}` : group.some(({ kind }) => kind === "tool") ? "tool activity" : "progress";
             const attribution = `${providerNames[first.provider]} · ${canonicalAgentPath(first.agentId, agents)}`;
             // Keep the disclosed subtree mounted when older activity joins its front.
             return <li key={expandedAnchor?.id ?? first.id} className="activity-group">
               <button type="button" className="activity-toggle" data-timeline-id={expanded ? undefined : first.id} aria-expanded={expanded} onClick={() => toggleGroup(group)} aria-label={`${expanded ? "Hide" : "Show"} ${label} · ${attribution}`}>
-                <span aria-hidden="true">{expanded ? "▾" : "▸"}</span><span>{label === "tool activity" ? "Tool activity" : "Progress"}</span><small>{attribution}</small>
+                <span aria-hidden="true">{expanded ? "▾" : "▸"}</span><span>{completed ? label : label === "tool activity" ? "Tool activity" : "Progress"}</span><small>{attribution}</small>
               </button>
               {expanded ? <><p className="activity-fragment-note">Activity in the loaded history.</p><ol className="activity-entries">
-                {group.map((item) => <li key={item.id} data-timeline-id={item.id}><TimelineEntry item={item} actions={actions} agentPath={canonicalAgentPath(item.agentId, agents)} /></li>)}
+                {group.map((item) => <li key={item.id} data-timeline-id={item.id}><TimelineEntry item={item} actions={actions} grouped expanded={expandedOperations.has(item.id)} onToggle={() => toggleOperation(item.id)} agentPath={canonicalAgentPath(item.agentId, agents)} /></li>)}
               </ol></> : null}
             </li>;
           })}
@@ -541,6 +601,7 @@ export function Timeline({ conversationId, refreshVersion, agents, agentsTruncat
 }
 
 function isGroupActivity(item: TimelineItem) {
+  if (item.operation) return item.presentation === "normal" && item.operation.status === "succeeded" && !item.operation.conflicted;
   return item.presentation === "normal" && (item.kind === "tool" || item.kind === "progress");
 }
 
@@ -550,6 +611,7 @@ function groupActivity(items: readonly TimelineItem[]) {
     const previous = groups.at(-1);
     const first = previous?.[0];
     if (first && isGroupActivity(first) && isGroupActivity(item)
+      && Boolean(first.operation) === Boolean(item.operation)
       && first.runId === item.runId && first.agentId === item.agentId && first.provider === item.provider) previous!.push(item);
     else groups.push([item]);
   }

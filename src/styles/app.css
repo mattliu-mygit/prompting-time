@@ -750,6 +750,74 @@ button:disabled {
   color: var(--color-text-muted);
   margin: 0.25rem 0;
 }
+
+.tool-operation {
+  min-width: 0;
+  font-size: var(--font-size-secondary);
+}
+
+.tool-operation-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 32px;
+  min-width: 0;
+}
+
+.tool-operation-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-operation-status, .tool-operation-meta, .tool-operation-attribution {
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.tool-operation-attribution {
+  max-width: 25%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-operation.failed .tool-operation-status, .tool-operation.failure,
+.tool-operation-notice {
+  color: var(--color-danger);
+}
+
+.tool-operation button {
+  min-height: 32px;
+  min-width: 32px;
+  flex-shrink: 0;
+}
+
+.tool-operation-detail {
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.5rem 0;
+}
+
+.tool-operation-field > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.tool-operation-detail pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0.25rem 0 0.75rem;
+}
+
+@media (max-width: 700px) {
+  .tool-operation-summary { flex-wrap: wrap; gap: 0.125rem 0.5rem; }
+  .tool-operation-title { flex-basis: 45%; }
+  .tool-operation-attribution { max-width: 40%; }
+}
 .run-status {
   font-size: var(--font-size-secondary);
   color: var(--color-text-muted);

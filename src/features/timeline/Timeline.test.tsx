@@ -61,6 +61,169 @@ const agents: AgentSnapshot[] = [
 ];
 
 describe("Timeline", () => {
+  const operation = (id: string, status: "running" | "succeeded" | "failed" = "succeeded", detailRevision = "1") => event({ id, sequence: id, kind: "tool", role: null, content: `Run check ${id}`, operation: { status, hasDetails: true, detailRevision, durationMs: null, exitCode: null, truncated: false, conflicted: false } });
+
+  it("keeps running and failed operations visible while counting completed loaded operations", async () => {
+    const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([operation("1"), operation("2"), operation("3", "running"), operation("4", "failed")], null)) });
+    render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={agents} actions={api} />);
+    expect(await screen.findByText("Running")).toBeVisible();
+    expect(screen.getByText("Failed")).toBeVisible();
+    const completed = screen.getByRole("button", { name: /Show 2 completed operations/ });
+    expect(screen.queryByText("Run check 1")).not.toBeInTheDocument();
+    fireEvent.click(completed);
+    expect(screen.getByText("Run check 1")).toBeVisible();
+    expect(api.loadEventDetail).not.toHaveBeenCalled();
+  });
+
+  it("keeps operation disclosure open when completion moves it into a group", async () => {
+    const loadTimeline = vi.fn().mockResolvedValueOnce(timelinePage([operation("1", "running")], null)).mockResolvedValueOnce(timelinePage([operation("1", "succeeded", "2")], null));
+    const loadEventDetail = vi.fn().mockImplementation(() => Promise.resolve({ id: "1", content: "Run check 1", contentBytes: "11", truncated: false, operation: { title: "Run check 1", status: "succeeded", input: "check", output: "captured output", error: null, context: null, durationMs: null, exitCode: 0, truncated: false, conflicted: false, detailRevision: loadEventDetail.mock.calls.length === 1 ? "1" : "2" } }));
+    const api = actions({ loadTimeline, loadEventDetail });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={agents} actions={api} />);
+    const disclosure = await screen.findByRole("button", { name: "Show details" });
+    disclosure.focus();
+    fireEvent.click(disclosure);
+    await screen.findByText("captured output");
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={agents} actions={api} />);
+    await screen.findByText("Succeeded");
+    expect(screen.getByRole("button", { name: "Hide details" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Hide details" })).toHaveFocus();
+    expect(await screen.findByText("captured output")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Hide details" }));
+    expect(screen.getByText("Run check 1")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Show details" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("refreshes operations in retained fixed pages with original opaque cursors", async () => {
+    let revision = "1";
+    const loadTimeline = vi.fn(({ cursor }) => Promise.resolve(timelinePage(cursor ? [operation("1", revision === "1" ? "running" : "failed", revision)] : [event({ id: "newest", sequence: "90", content: "Newest answer" })], cursor ? null : "opaque-original-window")));
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={agents} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    await screen.findByText("Running");
+    revision = "2";
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={agents} actions={api} />);
+    expect(await screen.findByText("Failed")).toBeVisible();
+    expect(loadTimeline.mock.calls.map(([request]) => request.cursor)).toEqual([null, "opaque-original-window", null, "opaque-original-window"]);
+    expect(screen.getAllByText("Run check 1")).toHaveLength(1);
+  });
+
+  it("refreshes an older operation after its in-flight page resolves without stale status or duplicate rows", async () => {
+    let resolveOlder!: (page: ReturnType<typeof timelinePage>) => void;
+    let olderCalls = 0;
+    const loadTimeline = vi.fn(({ cursor }) => {
+      if (!cursor) return Promise.resolve(timelinePage([event({ id: "90", sequence: "90", content: "newest" })], "fixed-window"));
+      olderCalls += 1;
+      return olderCalls === 1 ? new Promise<ReturnType<typeof timelinePage>>(resolve => { resolveOlder = resolve; }) : Promise.resolve(timelinePage([operation("1", "failed", "2")], null));
+    });
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    await waitFor(() => expect(olderCalls).toBe(1));
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={[]} actions={api} />);
+    await act(async () => resolveOlder(timelinePage([operation("1", "running")], null)));
+    expect(await screen.findByText("Failed")).toBeVisible();
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Run check 1")).toHaveLength(1);
+  });
+
+  it("retains original operation pages and open details across conversation mounts", async () => {
+    const viewStates = new Map<string, TimelineViewState>();
+    let revision = "1";
+    const loadTimeline = vi.fn(({ cursor }) => Promise.resolve(timelinePage(cursor ? [operation("1", revision === "1" ? "running" : "failed", revision)] : [event({ id: "90", sequence: "90", content: "newest" })], cursor ? null : "opaque-window")));
+    const loadEventDetail = vi.fn().mockImplementation(() => Promise.resolve({ id: "1", content: "Run check 1", contentBytes: "11", truncated: false, operation: { title: "Run check 1", status: "failed", input: "check", output: `output ${revision}`, error: null, context: null, durationMs: null, exitCode: null, truncated: false, conflicted: false, detailRevision: revision } }));
+    const api = actions({ loadTimeline, loadEventDetail });
+    const mount = (id: string) => <Timeline key={id} conversationId={id} refreshVersion={0} agents={[]} actions={api} viewStates={viewStates} />;
+    const view = render(mount("a"));
+    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show details" }));
+    await screen.findByText("output 1");
+    view.rerender(mount("b"));
+    await screen.findByText("newest");
+    revision = "2";
+    view.rerender(mount("a"));
+    expect(await screen.findByText("Failed")).toBeVisible();
+    expect(await screen.findByText("output 2")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Hide details" })).toHaveAttribute("aria-expanded", "true");
+    expect(loadTimeline.mock.calls.at(-1)?.[0].cursor).toBe("opaque-window");
+  });
+
+  it("keeps loaded older operation windows fixed and reports a genuine gap when newest history advances", async () => {
+    let newestSequence = 90;
+    const loadTimeline = vi.fn(({ cursor }) => Promise.resolve(timelinePage(cursor ? [operation("1", "running")] : [event({ id: String(newestSequence), sequence: String(newestSequence), content: `newest ${newestSequence}` })], cursor ? "oldest-fixed" : `window-${newestSequence}`)));
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    await screen.findByText("Running");
+    newestSequence = 180;
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={[]} actions={api} />);
+    await screen.findByText("newest 180");
+    await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(4));
+    expect(loadTimeline.mock.calls.at(-1)?.[0].cursor).toBe("window-90");
+    expect(screen.getByRole("button", { name: "Reload newest history" })).toBeVisible();
+    expect(screen.getByText("Running")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await waitFor(() => expect(loadTimeline.mock.calls.at(-1)?.[0].cursor).toBe("oldest-fixed"));
+  });
+
+  it("finishes refreshing retained operations when another older page is requested mid-refresh", async () => {
+    let revision = "1";
+    let resolveRefresh!: (page: ReturnType<typeof timelinePage>) => void;
+    let pause = false;
+    const loadTimeline = vi.fn(({ cursor }) => {
+      if (!cursor) return Promise.resolve(timelinePage([event({ id: "90", sequence: "90", content: "newest" })], "first"));
+      const page = timelinePage([operation(cursor === "first" ? "20" : cursor === "second" ? "10" : "1", revision === "1" ? "running" : "failed", revision)], cursor === "first" ? "second" : cursor === "second" ? "third" : null);
+      if (pause && cursor === "first") {
+        pause = false;
+        return new Promise<ReturnType<typeof timelinePage>>(resolve => { resolveRefresh = resolve; });
+      }
+      return Promise.resolve(page);
+    });
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    await screen.findByText("Run check 20");
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await screen.findByText("Run check 10");
+    revision = "2";
+    pause = true;
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={[]} actions={api} />);
+    await waitFor(() => expect(resolveRefresh).toBeTypeOf("function"));
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await act(async () => resolveRefresh(timelinePage([operation("20", "failed", "2")], "second")));
+    await screen.findByText("Run check 1");
+    await waitFor(() => expect(screen.queryAllByText("Running")).toHaveLength(0));
+    expect(screen.getAllByText("Failed")).toHaveLength(3);
+  });
+
+  it("refreshes at most four retained older pages and fences a reset during their read", async () => {
+    let refresh = false;
+    let finish!: (page: ReturnType<typeof timelinePage>) => void;
+    const loadTimeline = vi.fn(({ cursor }) => {
+      if (refresh && cursor === "opaque-2") return new Promise<ReturnType<typeof timelinePage>>(resolve => { finish = resolve; });
+      const index = cursor ? Number(cursor.slice(7)) : 0;
+      return Promise.resolve(timelinePage([operation(String(90 - index), "running")], `opaque-${index + 1}`));
+    });
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[]} actions={api} />);
+    await screen.findByText("Run check 90");
+    for (let index = 1; index <= 5; index += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+      await screen.findByText(`Run check ${90 - index}`);
+    }
+    expect(screen.queryByText("Run check 89")).not.toBeInTheDocument();
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={1} agents={[]} actions={api} />);
+    await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(11));
+    expect(loadTimeline.mock.calls.slice(-5).map(([request]) => request.cursor)).toEqual([null, "opaque-2", "opaque-3", "opaque-4", "opaque-5"]);
+    refresh = true;
+    view.rerender(<Timeline conversationId="conversation-1" refreshVersion={2} agents={[]} actions={api} />);
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    fireEvent.click(screen.getByRole("button", { name: "Reload newest history" }));
+    await act(async () => finish(timelinePage([operation("88", "failed", "2")], "opaque-3")));
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Running")).toHaveLength(1);
+  });
+
   it.each([
     { kind: "lifecycle", presentation: "normal", truncated: false, compact: true },
     { kind: "lifecycle", presentation: "failure", truncated: false, compact: false },
@@ -115,7 +278,7 @@ describe("Timeline", () => {
     expect(screen.getByText("older reading")).toBeVisible();
     expect(screen.getByText("expanded output")).toBeVisible();
     expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
-    expect(api.loadTimeline).toHaveBeenCalledTimes(4);
+    expect(api.loadTimeline).toHaveBeenCalledTimes(5);
     offset.mockRestore(); height.mockRestore(); scrollHeight.mockRestore();
   });
 
@@ -213,13 +376,13 @@ describe("Timeline", () => {
       .mockResolvedValueOnce(timelinePage([event({ id: "t1", sequence: "1", kind: "tool", content: "older tool" })], null)) });
     const view = render(<Timeline conversationId="conversation-1" refreshVersion={0} agents={[{ ...agents[0]!, status: "completed" }]} actions={api} />);
     fireEvent.click(await screen.findByRole("button", { name: /Show tool activity/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Show tool output" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
     expect(api.loadEventDetail).toHaveBeenCalledExactlyOnceWith({ eventId: "t2" });
     fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
     expect(await screen.findByText("older tool")).toBeVisible();
     expect(screen.getByText("Complete bounded tool output")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Hide tool output" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Hide details" })).toHaveAttribute("aria-expanded", "true");
     expect(api.loadEventDetail).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: /Hide tool activity/i })).toHaveAttribute("aria-expanded", "true");
     expect(view.container.querySelectorAll("[data-timeline-id]")).toHaveLength(2);
@@ -493,12 +656,12 @@ describe("Timeline", () => {
     expect(api.loadEventDetail).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /Show tool activity/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Show tool output" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
     expect(api.loadEventDetail).toHaveBeenCalledWith({ eventId: "tool-1" });
-    fireEvent.click(screen.getByRole("button", { name: "Hide tool output" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide details" }));
     expect(screen.queryByText("Complete bounded tool output")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Show tool output" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
     expect(api.loadEventDetail).toHaveBeenCalledTimes(2);
   });

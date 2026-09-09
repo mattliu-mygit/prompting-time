@@ -2,12 +2,22 @@ import { useLayoutEffect, useRef, useState } from "react";
 import type { TimelineItem } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
 import { CopyButton, MessageContent } from "./MessageContent";
+import { ToolOperation } from "./ToolOperation";
 
-export function TimelineEntry({ item, actions, agentPath }: {
+type EntryProps = {
   item: TimelineItem;
   actions: Pick<ConversationActions, "loadEventDetail">;
   agentPath?: string;
-}) {
+  grouped?: boolean;
+  expanded?: boolean;
+  onToggle?(): void;
+};
+
+export function TimelineEntry(props: EntryProps) {
+  return props.item.kind === "tool" ? <ToolOperation {...props} /> : <TextEntry {...props} />;
+}
+
+function TextEntry({ item, actions, agentPath }: EntryProps) {
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<{ content: string; truncated: boolean } | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -60,9 +70,8 @@ export function TimelineEntry({ item, actions, agentPath }: {
   const label = item.presentation === "failure" ? "Failure"
     : item.presentation === "notice" ? "Notice"
     : item.kind === "progress" ? "Progress"
-    : item.kind === "lifecycle" ? "Run lifecycle"
-    : item.kind === "tool" ? "Tool activity" : "Provider activity";
-  const detailLabel = message ? "full message" : item.kind === "tool" ? "tool output" : `full ${label.toLowerCase()}`;
+    : item.kind === "lifecycle" ? "Run lifecycle" : "Provider activity";
+  const detailLabel = message ? "full message" : `full ${label.toLowerCase()}`;
   const compactLifecycle = item.kind === "lifecycle" && item.presentation === "normal" && !item.truncated;
   if (compactLifecycle) return <article className="timeline-activity lifecycle normal compact-lifecycle" aria-label={`${provider} run lifecycle`}>
     <span>{provider}{agentPath ? ` · ${agentPath}` : ""}</span>{" · "}<span className="literal-content">{content}</span>
@@ -75,9 +84,9 @@ export function TimelineEntry({ item, actions, agentPath }: {
       {user ? <span>You</span> : <><span>{provider}{agentPath ? ` · ${agentPath}` : ""}</span>{message ? null : <span>{label}</span>}</>}
       {message ? <CopyButton content={content} label={truncated ? "Copy preview" : "Copy message"} iconOnly /> : null}
     </header>
-    {message ? <MessageContent content={content} /> : item.kind === "tool" && expanded ? <pre>{content}</pre> : <p className="literal-content">{content}</p>}
+    {message ? <MessageContent content={content} /> : <p className="literal-content">{content}</p>}
     {truncated ? <p className="truncation-note">{displayedDetail ? "Bounded detail remains truncated." : "Preview truncated."}</p> : null}
-    {item.truncated || item.kind === "tool" ? <div className="entry-actions">
+    {item.truncated ? <div className="entry-actions">
       <button type="button" className="disclosure-link" aria-expanded={expanded} onClick={toggleDetail}>
         {expanded ? `Hide ${detailLabel}` : `Show ${detailLabel}`}
       </button>
