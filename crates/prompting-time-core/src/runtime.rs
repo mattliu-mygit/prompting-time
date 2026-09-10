@@ -611,7 +611,7 @@ enum ManagerCommand {
         admission: OwnedSemaphorePermit,
         reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
-    Spawn(AdmittedJob),
+    Spawn(Box<AdmittedJob>),
     Respond {
         job: ResponseJob,
         admission: OwnedSemaphorePermit,
@@ -1069,7 +1069,7 @@ impl RunSupervisor {
             .lock()
             .expect("active run mutex must not be poisoned")
             .insert(run.id, Arc::clone(&active));
-        command.send(ManagerCommand::Spawn(AdmittedJob {
+        command.send(ManagerCommand::Spawn(Box::new(AdmittedJob {
             job: Job {
                 request,
                 primary_run_id: run.id,
@@ -1079,7 +1079,7 @@ impl RunSupervisor {
                 active: Arc::clone(&active),
             },
             admission,
-        }));
+        })));
         RunHandle {
             primary_run_id: run.id,
             state: receiver,
@@ -1584,6 +1584,7 @@ async fn run_manager(
                     owners.insert(task.id(), owner);
                 }
                 Some(ManagerCommand::Spawn(job)) => {
+                    let job = *job;
                     if active_root_tasks < MAX_CONCURRENT_ROOT_RUNS {
                         spawn_root_task(
                             &store,
@@ -1654,7 +1655,7 @@ async fn run_manager(
                 clear_steering_operation(&job.active, job.operation_id);
                 let _ = reply.send(Err(RuntimeError::OperationCancelled));
             }
-            ManagerCommand::Spawn(job) => pending.push_back(job),
+            ManagerCommand::Spawn(job) => pending.push_back(*job),
             ManagerCommand::Respond {
                 job,
                 admission: _,
