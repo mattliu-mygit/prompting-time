@@ -15,6 +15,7 @@ use prompting_time_core::providers::{
 };
 use prompting_time_core::router::Router;
 use prompting_time_core::store::Store;
+use prompting_time_core::thinking::{ThinkingDecision, ThinkingPreference};
 use prompting_time_core::workspace::WorkspaceManager;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -90,6 +91,7 @@ fn app_request(
     provider: Option<ProviderId>,
 ) -> SubmitRequest {
     SubmitRequest {
+        thinking: None,
         command_id: uuid::Uuid::now_v7().to_string(),
         conversation_id,
         content: content.into(),
@@ -487,13 +489,248 @@ initialize = receive()
 record('initialize', initialize)
 if (root / 'hold-initialize').exists():
     barrier('initialize')
-emit({'type':'control_response','response':{'subtype':'success','request_id':initialize['request_id'],'response':{}}})
+models = [{'value':'default','resolvedModel':'invented-model','supportsEffort':True,'supportedEffortLevels':['low','medium','high','xhigh','max']}]
+metadata = json.loads((root / 'thinking-metadata').read_text()) if (root / 'thinking-metadata').exists() else {}
+emit({'type':'control_response','response':{'subtype':'success','request_id':initialize['request_id'],'response':{'models':metadata.get('models', models), 'account':'MUST-NOT-RETAIN'}}})
+message = receive()
+assert message.get('request', {}).get('subtype') == 'get_settings'
+record('get-settings', message)
+if (root / 'hold-settings').exists():
+    barrier('settings')
+applied = {'model':'invented-model','effort':os.environ.get('CLAUDE_CODE_EFFORT_LEVEL', 'high')}
+emit({'type':'control_response','response':{'subtype':'success','request_id':message['request_id'],'response':{'applied':metadata.get('applied', applied), 'settings':{'secret':'MUST-NOT-RETAIN'}}}})
 if (root / 'hold-prompt-read').exists():
     sys.stdin.read(1)
     barrier('prompt-read')
 prompt = receive()
 record('prompt', prompt)
+record('effort-env', os.environ.get('CLAUDE_CODE_EFFORT_LEVEL'))
 "#;
+
+fn thinking_request(preference: ThinkingPreference) -> TurnRequest {
+    TurnRequest::new("Review this code")
+        .with_thinking(ThinkingDecision::resolve(preference, "Review this code").unwrap())
+}
+
+#[tokio::test]
+async fn thinking_environment_override_and_resume_reset() {
+    // Exercise inheritance in an isolated test process; never mutate the test runner's environment.
+    if std::env::var_os("PROMPTING_TIME_THINKING_ENV_FIXTURE").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "thinking_environment_override_and_resume_reset",
+                "--nocapture",
+            ])
+            .env("PROMPTING_TIME_THINKING_ENV_FIXTURE", "1")
+            .env("CLAUDE_CODE_EFFORT_LEVEL", "high")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let fixture = Fixture::new("result()");
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(
+            &session,
+            thinking_request(ThinkingPreference::Manual {
+                level: "low".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        turn.thinking().unwrap().configured_effort.as_deref(),
+        Some("low")
+    );
+    collect(&mut turn).await;
+    assert_eq!(fixture.read("effort-env"), "low");
+    assert_eq!(std::env::var("CLAUDE_CODE_EFFORT_LEVEL").unwrap(), "high");
+    let resumed = fixture.resume(&session).await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&resumed, TurnRequest::new("Provider default again"))
+        .await
+        .unwrap();
+    let configuration = turn.thinking().unwrap();
+    assert_eq!(configuration.configured_effort.as_deref(), Some("high"));
+    assert_eq!(configuration.model, "invented-model");
+    assert!(
+        !serde_json::to_string(configuration)
+            .unwrap()
+            .contains("MUST-NOT-RETAIN")
+    );
+    collect(&mut turn).await;
+    assert_eq!(fixture.read("effort-env"), "high");
+    let args = fixture.read("args");
+    let args = args.as_array().unwrap();
+    assert!(args.contains(&json!(format!("--resume={}", session.native_id))));
+    assert!(args.contains(&json!("--setting-sources=")));
+    assert!(args.contains(&json!("--strict-mcp-config")));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == [json!("--mcp-config"), json!(r#"{"mcpServers":{}}"#)])
+    );
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.as_str().unwrap().starts_with("--effort"))
+    );
+}
+
+#[tokio::test]
+async fn thinking_manual_rejects_caps_unsupported_and_unknown_before_prompt() {
+    for metadata in [
+        json!({"applied":{"model":"invented-model","effort":"medium"}}),
+        json!({"models":[{"value":"default","resolvedModel":"invented-model","supportsEffort":true,"supportedEffortLevels":["low","medium","high"]}],"applied":{"model":"invented-model","effort":"high"}}),
+        json!({"models":[]}),
+        json!({"applied":{"model":"different-active-model","effort":"max"}}),
+        json!({"applied":{"model":"invented-model"}}),
+        json!({"applied":{"model":"invented-model","effort":null}}),
+        json!({"models":[{"value":"default","resolvedModel":"invented-model","supportsEffort":false}]}),
+    ] {
+        let fixture = Fixture::new("result()");
+        fs::write(
+            fixture.directory.path().join("thinking-metadata"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        let session = fixture.session().await;
+        let result = fixture
+            .adapter
+            .start_turn(
+                &session,
+                thinking_request(ThinkingPreference::Manual {
+                    level: "max".into(),
+                }),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(ProviderError::NotDispatched {
+                    category:
+                        prompting_time_core::providers::ProviderErrorCategory::UnsupportedThinking
+                })
+            ),
+            "metadata: {metadata}"
+        );
+        assert!(!fixture.directory.path().join("prompt").exists());
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+        fs::remove_file(fixture.directory.path().join("thinking-metadata")).unwrap();
+        let mut next = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("first actual prompt"))
+            .await
+            .unwrap();
+        collect(&mut next).await;
+        assert!(
+            fixture
+                .read("args")
+                .as_array()
+                .unwrap()
+                .contains(&json!(format!("--session-id={}", session.native_id)))
+        );
+    }
+}
+
+#[tokio::test]
+async fn thinking_auto_discloses_cap_and_uses_active_model_metadata() {
+    let fixture = Fixture::new("result()");
+    fs::write(fixture.directory.path().join("thinking-metadata"), serde_json::to_vec(&json!({
+        "models":[
+            {"value":"default","resolvedModel":"other-default","supportsEffort":false},
+            {"value":"chosen","resolvedModel":"invented-active","supportsEffort":true,"supportedEffortLevels":["low","medium","high"]},
+            {"value":"invented-active","resolvedModel":"invented-active","supportsEffort":true,"supportedEffortLevels":["low","medium","high"]}
+        ],
+        "applied":{"model":"invented-active","effort":"medium"}
+    })).unwrap()).unwrap();
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&session, thinking_request(ThinkingPreference::Auto))
+        .await
+        .unwrap();
+    let configuration = turn.thinking().unwrap();
+    assert_eq!(configuration.model, "invented-active");
+    assert_eq!(configuration.supported_efforts, ["low", "medium", "high"]);
+    assert_eq!(configuration.configured_effort.as_deref(), Some("medium"));
+    collect(&mut turn).await;
+    assert_eq!(fixture.read("effort-env"), "high");
+}
+
+#[tokio::test]
+async fn thinking_unknown_or_unbounded_configuration_fails_closed_for_defaults() {
+    for metadata in [
+        json!({"models":null}),
+        json!({"models":[{"value":"default","resolvedModel":"invented-model","supportsEffort":true}]}),
+        json!({"models":[{"resolvedModel":"invented-model","supportsEffort":true,"supportedEffortLevels":["high","high"]}]}),
+        json!({"models":[{"resolvedModel":"invented-model","supportsEffort":true,"supportedEffortLevels":["high"]},{"resolvedModel":"invented-model","supportsEffort":true,"supportedEffortLevels":["low"]}]}),
+        json!({"applied":{"model":"m".repeat(257),"effort":"high"}}),
+        json!({"applied":{"model":"invented-model","effort":"e".repeat(65)}}),
+        json!({"applied":{}}),
+    ] {
+        for preference in [
+            ThinkingPreference::ProviderDefault,
+            ThinkingPreference::Auto,
+        ] {
+            let fixture = Fixture::new("result()");
+            fs::write(
+                fixture.directory.path().join("thinking-metadata"),
+                serde_json::to_vec(&metadata).unwrap(),
+            )
+            .unwrap();
+            let session = fixture.session().await;
+            assert!(matches!(
+                fixture
+                    .adapter
+                    .start_turn(&session, thinking_request(preference))
+                    .await,
+                Err(ProviderError::NotDispatched {
+                    category:
+                        prompting_time_core::providers::ProviderErrorCategory::UnsupportedThinking
+                })
+            ));
+            assert!(!fixture.directory.path().join("prompt").exists());
+        }
+    }
+}
+
+#[tokio::test]
+async fn thinking_cancel_during_applied_settings_reaps_child_without_dispatch() {
+    let fixture = Fixture::new("result()");
+    fs::write(fixture.directory.path().join("hold-settings"), "").unwrap();
+    let session = fixture.session().await;
+    let ready = fixture.directory.path().join("settings.ready");
+    {
+        let start = fixture
+            .adapter
+            .start_turn(&session, thinking_request(ThinkingPreference::Auto));
+        tokio::pin!(start);
+        tokio::select! {
+            _ = &mut start => panic!("must await native settings before prompt"),
+            _ = wait_file(&ready) => {}
+        }
+    }
+    reaped(fixture.read("pid").as_u64().unwrap()).await;
+    assert!(!fixture.directory.path().join("prompt").exists());
+    fs::remove_file(fixture.directory.path().join("hold-settings")).unwrap();
+    let mut turn = fixture
+        .adapter
+        .start_turn(&session, TurnRequest::new("first actual prompt"))
+        .await
+        .unwrap();
+    collect(&mut turn).await;
+    assert!(
+        fixture
+            .read("args")
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!("--session-id={}", session.native_id)))
+    );
+}
 
 async fn event(turn: &mut ProviderTurn) -> Result<ProviderEvent, ProviderError> {
     timeout(Duration::from_secs(5), turn.recv())

@@ -466,7 +466,37 @@ sleep 30
 fn fake_codex(script: &str) -> (TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let binary = directory.path().join("codex-fixture");
-    fs::write(&binary, format!("#!/bin/sh\nset -eu\n{script}\n")).unwrap();
+    // Protocol fixtures use invented capabilities. Dedicated thinking fixtures exercise
+    // malformed metadata, pagination and effort choices without this convenience shim.
+    let metadata = r#"
+read_fixture_line() {
+  while IFS= read -r line; do
+    case "$line" in
+      *'"method":"model/list"'*)
+        metadata_id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+        printf '{"id":%s,"result":{"data":[{"model":"fixture-model","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]},{"model":"invented-model","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]}],"nextCursor":null}}\n' "$metadata_id"
+        ;;
+      *'"method":"config/read"'*)
+        metadata_id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+        printf '{"id":%s,"result":{"config":{"model_reasoning_effort":null}}}\n' "$metadata_id"
+        ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+"#;
+    let script = script
+        .replace("IFS= read -r line", "read_fixture_line")
+        .replace(
+            "\"result\":{\"thread\":",
+            "\"result\":{\"model\":\"fixture-model\",\"thread\":",
+        );
+    fs::write(
+        &binary,
+        format!("#!/bin/sh\nset -eu\n{metadata}\n{script}\n"),
+    )
+    .unwrap();
     let mut permissions = fs::metadata(&binary).unwrap().permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(&binary, permissions).unwrap();
@@ -665,12 +695,11 @@ IFS= read -r line
 printf '{{"id":%s,"result":{{"thread":{{"id":"thread-opposite-id","sessionId":"session-opposite-id"}}}}}}\n' "$request_id"
 IFS= read -r line
 {extract_id}
-printf '%s' "$request_id" | grep -q '^2$'
 printf '{{"method":"turn/started","params":{{"threadId":"thread-opposite-id","turn":{{"id":"turn-opposite-id","items":[],"status":"inProgress"}}}}}}\n'
-printf '{{"id":2,"method":"item/commandExecution/requestApproval","params":{{"threadId":"thread-opposite-id","turnId":"turn-opposite-id","itemId":"command-opposite-id","startedAtMs":1,"command":"printf invented","cwd":"/invented/project"}}}}\n'
-printf '{{"id":2,"result":{{"turn":{{"id":"turn-opposite-id","items":[],"status":"inProgress"}}}}}}\n'
+printf '{{"id":%s,"method":"item/commandExecution/requestApproval","params":{{"threadId":"thread-opposite-id","turnId":"turn-opposite-id","itemId":"command-opposite-id","startedAtMs":1,"command":"printf invented","cwd":"/invented/project"}}}}\n' "$request_id"
+printf '{{"id":%s,"result":{{"turn":{{"id":"turn-opposite-id","items":[],"status":"inProgress"}}}}}}\n' "$request_id"
 IFS= read -r line
-printf '%s' "$line" | grep -q '"id":2'
+printf '%s' "$line" | grep -q "\"id\":$request_id"
 printf '%s' "$line" | grep -q '"decision":"decline"'
 printf '{{"method":"turn/completed","params":{{"threadId":"thread-opposite-id","turn":{{"id":"turn-opposite-id","items":[],"status":"completed"}}}}}}\n'
 sleep 30
@@ -691,7 +720,7 @@ sleep 30
         ProviderEvent::ApprovalRequested { request_id, .. } => request_id,
         event => panic!("expected approval, got {event:?}"),
     };
-    assert_eq!(request_id, "number:2");
+    assert!(request_id.starts_with("number:"));
     adapter
         .respond(&session, &request_id, ApprovalResponse::Denied)
         .await
@@ -1292,7 +1321,17 @@ async fn codex_adapter_streams_schema_valid_fixture_events() {
         } else {
             let message = serde_json::to_string(&envelope["message"]).unwrap();
             assert!(!message.contains('\''));
-            script.push_str(&format!("printf '%s\\n' '{message}'\n"));
+            if envelope["message"]["id"].is_number() && envelope["message"].get("method").is_none()
+            {
+                let id = envelope["message"]["id"].to_string();
+                let message = message.replacen(&format!("\"id\":{id}"), "\"id\":%s", 1);
+                script.push_str(&response_id_shell("fixture_response_id"));
+                script.push_str(&format!(
+                    "\nprintf '{message}\\n' \"$fixture_response_id\"\n"
+                ));
+            } else {
+                script.push_str(&format!("printf '%s\\n' '{message}'\n"));
+            }
         }
     }
     script.push_str("sleep 30\n");

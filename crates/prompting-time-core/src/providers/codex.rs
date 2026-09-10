@@ -11,6 +11,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::domain::MutationState;
+use crate::thinking::{ThinkingConfiguration, ThinkingDecision, ThinkingPreference};
 
 use super::process::{EVENT_CHANNEL_CAPACITY, JsonLineProcess, JsonLineSender, JsonLineShutdown};
 use super::provider_command;
@@ -39,6 +40,7 @@ const REQUEST_FINISHED: u8 = 3;
 const REQUEST_CANCELLED: u8 = 4;
 const FATAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_THINKING_SESSIONS: usize = 256;
 
 #[path = "codex_children.rs"]
 mod children;
@@ -57,6 +59,13 @@ struct AdapterInner {
     dispatcher: AsyncMutex<Option<JoinHandle<Result<(), ProviderError>>>>,
     version: Mutex<String>,
     alive: Arc<AtomicBool>,
+    thinking_sessions: Arc<Mutex<VecDeque<(String, ThinkingSession)>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ThinkingSession {
+    model: Option<String>,
+    cwd: String,
 }
 
 impl Drop for AdapterInner {
@@ -250,6 +259,8 @@ impl CodexAdapter {
             process_shutdown: process_shutdown.clone(),
         };
         let alive = Arc::new(AtomicBool::new(true));
+        let thinking_sessions = Arc::new(Mutex::new(VecDeque::new()));
+        let dispatcher_thinking_sessions = Arc::clone(&thinking_sessions);
         let dispatcher_alive = Arc::clone(&alive);
         let dispatcher = tokio::spawn(async move {
             let result = run_dispatcher(
@@ -257,6 +268,7 @@ impl CodexAdapter {
                 command_receiver,
                 cancellation_receiver,
                 shutdown_receiver,
+                dispatcher_thinking_sessions,
             )
             .await;
             dispatcher_alive.store(false, Ordering::Release);
@@ -270,6 +282,7 @@ impl CodexAdapter {
                 dispatcher: AsyncMutex::new(Some(dispatcher)),
                 version: Mutex::new(String::new()),
                 alive,
+                thinking_sessions,
             }),
         };
 
@@ -339,7 +352,210 @@ impl CodexAdapter {
             .client
             .request("thread/archive", json!({"threadId": session.native_id}))
             .await?;
+        self.inner
+            .thinking_sessions
+            .lock()
+            .expect("thinking sessions mutex")
+            .retain(|(id, _)| id != &session.native_id);
         Ok(())
+    }
+
+    fn bind_thinking_session(
+        &self,
+        result: Value,
+        cwd: &str,
+    ) -> Result<ProviderSession, ProviderError> {
+        let metadata = ThinkingSession {
+            model: bounded_model(result.get("model")),
+            cwd: result
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096)
+                .unwrap_or(cwd)
+                .to_owned(),
+        };
+        let session = parse_session(result)?;
+        let mut sessions = self
+            .inner
+            .thinking_sessions
+            .lock()
+            .expect("thinking sessions mutex");
+        sessions.retain(|(id, _)| id != &session.native_id);
+        if sessions.len() == MAX_THINKING_SESSIONS {
+            // Active turns already own their frozen configuration. An evicted session
+            // must be resumed to refresh metadata before any subsequent prompt dispatch.
+            sessions.pop_front();
+        }
+        sessions.push_back((session.native_id.clone(), metadata));
+        Ok(session)
+    }
+
+    async fn configure_thinking(
+        &self,
+        session: &ProviderSession,
+        decision: &ThinkingDecision,
+    ) -> Result<ThinkingConfiguration, ProviderError> {
+        let metadata = self
+            .inner
+            .thinking_sessions
+            .lock()
+            .expect("thinking sessions mutex")
+            .iter()
+            .find(|(id, _)| id == &session.native_id)
+            .map(|(_, metadata)| metadata.clone())
+            .ok_or_else(unsupported_thinking)?;
+        let model = metadata.model.as_deref().ok_or_else(unsupported_thinking)?;
+        let mut cursors = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut catalog = None;
+        // Bound both the total discovery duration and the catalog work. Request hidden
+        // entries because native configuration can select a model absent from a picker.
+        for _ in 0..16 {
+            let page = self
+                .inner
+                .client
+                .request(
+                    "model/list",
+                    json!({"includeHidden": true, "limit": 100, "cursor": cursor}),
+                )
+                .await?;
+            let rows = page
+                .get("data")
+                .and_then(Value::as_array)
+                .filter(|rows| rows.len() <= 100)
+                .ok_or_else(unsupported_thinking)?;
+            for row in rows {
+                if row.get("model").and_then(Value::as_str) == Some(model) {
+                    if catalog.is_some() {
+                        return Err(unsupported_thinking());
+                    }
+                    let efforts = row
+                        .get("supportedReasoningEfforts")
+                        .and_then(Value::as_array)
+                        .filter(|values| values.len() <= 32)
+                        .ok_or_else(unsupported_thinking)?;
+                    let supported = efforts
+                        .iter()
+                        .map(|value| {
+                            value
+                                .get("reasoningEffort")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .ok_or_else(unsupported_thinking)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let default = row
+                        .get("defaultReasoningEffort")
+                        .and_then(Value::as_str)
+                        .ok_or_else(unsupported_thinking)?
+                        .to_owned();
+                    let configuration = ThinkingConfiguration {
+                        model: model.to_owned(),
+                        supported_efforts: supported,
+                        configured_effort: Some(default),
+                    };
+                    configuration
+                        .validate()
+                        .map_err(|_| unsupported_thinking())?;
+                    catalog = Some(configuration);
+                }
+            }
+            if catalog.is_some() {
+                break;
+            }
+            match page.get("nextCursor") {
+                Some(Value::Null) => break,
+                Some(Value::String(next))
+                    if !next.is_empty() && next.len() <= 1024 && !cursors.contains(next) =>
+                {
+                    cursors.push(next.clone());
+                    cursor = Some(next.clone());
+                }
+                _ => return Err(unsupported_thinking()),
+            }
+        }
+        let mut configuration = catalog.ok_or_else(unsupported_thinking)?;
+        let default = configuration
+            .configured_effort
+            .clone()
+            .ok_or_else(unsupported_thinking)?;
+        let effort = match &decision.preference {
+            ThinkingPreference::Manual { level } => {
+                decision
+                    .preference
+                    .validate()
+                    .map_err(|_| unsupported_thinking())?;
+                if decision.requested_effort.as_ref() != Some(level) {
+                    return Err(unsupported_thinking());
+                }
+                level.clone()
+            }
+            ThinkingPreference::Auto => {
+                let requested = decision
+                    .requested_effort
+                    .as_ref()
+                    .ok_or_else(unsupported_thinking)?;
+                if configuration.supported_efforts.contains(requested) {
+                    requested.clone()
+                } else {
+                    default
+                }
+            }
+            ThinkingPreference::ProviderDefault => {
+                let result = self
+                    .inner
+                    .client
+                    .request(
+                        "config/read",
+                        json!({"cwd": metadata.cwd, "includeLayers": false}),
+                    )
+                    .await?;
+                // Never retain settings/configuration payloads beyond this allowlisted field.
+                let config = result
+                    .get("config")
+                    .and_then(Value::as_object)
+                    .ok_or_else(unsupported_thinking)?;
+                match config.get("model_reasoning_effort") {
+                    None | Some(Value::Null) => default,
+                    Some(Value::String(effort)) => effort.clone(),
+                    _ => return Err(unsupported_thinking()),
+                }
+            }
+        };
+        if !configuration.supported_efforts.contains(&effort) {
+            return Err(unsupported_thinking());
+        }
+        configuration.configured_effort = Some(effort);
+        configuration
+            .validate()
+            .map_err(|_| unsupported_thinking())?;
+        // A model change observed during discovery invalidates the result before dispatch.
+        if self
+            .inner
+            .thinking_sessions
+            .lock()
+            .expect("thinking sessions mutex")
+            .iter()
+            .find(|(id, _)| id == &session.native_id)
+            .map(|(_, metadata)| metadata)
+            != Some(&metadata)
+        {
+            return Err(unsupported_thinking());
+        }
+        Ok(configuration)
+    }
+}
+
+fn bounded_model(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty() && model.len() <= 256)
+        .map(str::to_owned)
+}
+
+fn unsupported_thinking() -> ProviderError {
+    ProviderError::NotDispatched {
+        category: super::ProviderErrorCategory::UnsupportedThinking,
     }
 }
 
@@ -758,7 +974,7 @@ impl ProviderAdapter for CodexAdapter {
                 }),
             )
             .await?;
-        parse_session(result)
+        self.bind_thinking_session(result, cwd)
     }
 
     async fn resume_session(
@@ -780,7 +996,7 @@ impl ProviderAdapter for CodexAdapter {
                 }),
             )
             .await?;
-        parse_session(result)
+        self.bind_thinking_session(result, cwd)
     }
 
     async fn start_turn(
@@ -789,6 +1005,17 @@ impl ProviderAdapter for CodexAdapter {
         request: TurnRequest,
     ) -> Result<ProviderTurn, ProviderError> {
         require_codex_session(session)?;
+        let thinking = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.configure_thinking(session, &request.thinking),
+        )
+        .await
+        .map_err(|_| ProviderError::NotDispatched {
+            category: super::ProviderErrorCategory::TimedOut,
+        })?
+        .map_err(|error| ProviderError::NotDispatched {
+            category: error.category(),
+        })?;
         let (events, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let completed = Arc::new(AtomicBool::new(false));
         let native_children = Arc::new(children::NativeTurns::default());
@@ -825,6 +1052,7 @@ impl ProviderAdapter for CodexAdapter {
                 json!({
                     "threadId": session.native_id,
                     "input": [{"type": "text", "text": request.prompt}],
+                    "effort": thinking.configured_effort,
                 }),
             )
             .await?;
@@ -840,7 +1068,8 @@ impl ProviderAdapter for CodexAdapter {
                 completed,
                 native_children,
             },
-        ))
+        )
+        .with_thinking(thinking))
     }
 
     async fn steer(
@@ -917,6 +1146,7 @@ async fn run_dispatcher(
     mut commands: mpsc::Receiver<ClientCommand>,
     mut cancellations: mpsc::Receiver<Cancellation>,
     mut shutdown: watch::Receiver<bool>,
+    thinking_sessions: Arc<Mutex<VecDeque<(String, ThinkingSession)>>>,
 ) -> Result<(), ProviderError> {
     let sender = process.sender();
     let mut state = DispatcherState {
@@ -984,6 +1214,15 @@ async fn run_dispatcher(
             message = process.recv() => {
                 match message {
                     Some(Ok(message)) => {
+                        if message.get("method").and_then(Value::as_str) == Some("thread/settings/updated")
+                            && let Some(thread_id) = message.pointer("/params/threadId").and_then(Value::as_str)
+                            && let Some((_, metadata)) = thinking_sessions.lock().expect("thinking sessions mutex").iter_mut().find(|(id, _)| id == thread_id)
+                        {
+                            metadata.model = bounded_model(message.pointer("/params/threadSettings/model"));
+                            if let Some(cwd) = message.pointer("/params/threadSettings/cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096) {
+                                metadata.cwd = cwd.to_owned();
+                            }
+                        }
                         if let Err(error) = handle_server_message(message, &sender, &mut state).await {
                             broadcast_error(&mut state.turns, error.clone()).await;
                             break Err(error);

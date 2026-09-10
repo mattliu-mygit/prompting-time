@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
@@ -32,6 +33,7 @@ use super::{
     ProviderTurn, ProviderTurnOwner, ResumeSession, StartSession, TurnRequest,
 };
 use crate::domain::ConversationId;
+use crate::thinking::{ThinkingConfiguration, ThinkingDecision, ThinkingPreference};
 use protocol::{PendingControl, Protocol};
 
 const MAX_SESSION_BINDINGS: usize = 4096;
@@ -40,6 +42,7 @@ const MAX_SESSION_BINDINGS: usize = 4096;
 const MAX_CONTROLS: usize = 128;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_MODELS: usize = 256;
 
 #[derive(Clone)]
 pub struct ClaudeAdapter {
@@ -67,6 +70,7 @@ struct ActiveTurn {
 // The worker holds this state, not the ActiveTurn that owns its join handle.
 struct TurnState {
     generation: String,
+    thinking: ThinkingDecision,
     sender: JsonLineSender,
     process_shutdown: JsonLineShutdown,
     stop: watch::Sender<bool>,
@@ -303,6 +307,26 @@ impl ProviderAdapter for ClaudeAdapter {
         session: &ProviderSession,
         request: TurnRequest,
     ) -> Result<ProviderTurn, ProviderError> {
+        request
+            .thinking
+            .preference
+            .validate()
+            .map_err(|_| unsupported_thinking())?;
+        match (
+            &request.thinking.preference,
+            &request.thinking.requested_effort,
+        ) {
+            (ThinkingPreference::ProviderDefault, None) => {}
+            (ThinkingPreference::Manual { level }, Some(requested)) if level == requested => {}
+            (ThinkingPreference::Auto, Some(level)) => {
+                ThinkingPreference::Manual {
+                    level: level.clone(),
+                }
+                .validate()
+                .map_err(|_| unsupported_thinking())?;
+            }
+            _ => return Err(unsupported_thinking()),
+        }
         let prompt = json!({"type":"user", "message":{"role":"user", "content":request.prompt},
             "parent_tool_use_id":null, "session_id":session.native_id});
         if serde_json::to_vec(&prompt).map_err(|_| rejected())?.len() > MAX_LINE_BYTES {
@@ -361,11 +385,17 @@ impl ProviderAdapter for ClaudeAdapter {
                 .current_dir(&binding.workspace)
                 .env_remove("CLAUDECODE")
                 .env("CLAUDE_CODE_ENTRYPOINT", "prompting-time");
+            // --effort can persist Claude launch preferences. Override only this child; a
+            // subsequent Provider default turn inherits the original parent environment.
+            if let Some(level) = &request.thinking.requested_effort {
+                command.env("CLAUDE_CODE_EFFORT_LEVEL", level);
+            }
             let process = JsonLineProcess::spawn(command)?;
             let (stop, _) = watch::channel(false);
             let (terminal, _) = watch::channel(None);
             let shared = Arc::new(TurnState {
                 generation: Uuid::now_v7().to_string(),
+                thinking: request.thinking,
                 sender: process.sender(),
                 process_shutdown: process.shutdown_handle(),
                 stop,
@@ -394,9 +424,9 @@ impl ProviderAdapter for ClaudeAdapter {
             .await
             .map_err(|_| protocol_error("start-worker-stopped"))?
         {
-            Ok(()) => {
+            Ok(configuration) => {
                 guard.0.take();
-                Ok(ProviderTurn::new(receiver, TurnOwner(active)))
+                Ok(ProviderTurn::new(receiver, TurnOwner(active)).with_thinking(configuration))
             }
             Err(error) => {
                 active.stop().await?;
@@ -551,6 +581,115 @@ fn rejected() -> ProviderError {
     }
 }
 
+fn unsupported_thinking() -> ProviderError {
+    ProviderError::NotDispatched {
+        category: ProviderErrorCategory::UnsupportedThinking,
+    }
+}
+
+// Initialize and get_settings include account/settings data. Only these allowlisted, bounded
+// capability fields survive startup; neither raw response is retained in the turn or audit.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EffortModel {
+    value: Option<String>,
+    resolved_model: Option<String>,
+    supports_effort: Option<bool>,
+    supported_effort_levels: Option<Vec<String>>,
+}
+
+fn effort_models(response: &Value) -> Result<Vec<EffortModel>, ProviderError> {
+    let entries = response["models"]
+        .as_array()
+        .ok_or_else(unsupported_thinking)?;
+    if entries.is_empty() || entries.len() > MAX_MODELS {
+        return Err(unsupported_thinking());
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let model: EffortModel =
+                serde_json::from_value(entry.clone()).map_err(|_| unsupported_thinking())?;
+            for name in [&model.value, &model.resolved_model].into_iter().flatten() {
+                if name.is_empty() || name.len() > 256 {
+                    return Err(unsupported_thinking());
+                }
+            }
+            if let Some(levels) = &model.supported_effort_levels {
+                ThinkingConfiguration {
+                    model: "metadata".into(),
+                    supported_efforts: levels.clone(),
+                    configured_effort: None,
+                }
+                .validate()
+                .map_err(|_| unsupported_thinking())?;
+            }
+            Ok(model)
+        })
+        .collect()
+}
+
+fn thinking_configuration(
+    models: Vec<EffortModel>,
+    settings: &Value,
+    decision: &ThinkingDecision,
+) -> Result<ThinkingConfiguration, ProviderError> {
+    let applied = &settings["applied"];
+    let model = applied["model"].as_str().ok_or_else(unsupported_thinking)?;
+    let configured_effort = match applied.get("effort") {
+        Some(Value::Null) => None,
+        Some(Value::String(level)) => Some(level.clone()),
+        _ => return Err(unsupported_thinking()),
+    };
+    let mut supported: Option<Vec<String>> = None;
+    for entry in models
+        .into_iter()
+        .filter(|entry| entry.resolved_model.as_deref().or(entry.value.as_deref()) == Some(model))
+    {
+        let mut levels = match (entry.supports_effort, entry.supported_effort_levels) {
+            (Some(true), Some(levels)) if !levels.is_empty() => levels,
+            (Some(false), None) => Vec::new(),
+            (Some(false), Some(levels)) if levels.is_empty() => levels,
+            _ => return Err(unsupported_thinking()),
+        };
+        // Several native aliases can resolve to the active model. Accept agreement, but never
+        // guess between conflicting capability records. Preserve native ordering for display.
+        if let Some(previous) = &supported {
+            let mut sorted_previous: Vec<String> = previous.clone();
+            sorted_previous.sort();
+            levels.sort();
+            if levels != sorted_previous {
+                return Err(unsupported_thinking());
+            }
+        } else {
+            supported = Some(levels);
+        }
+    }
+    let configuration = ThinkingConfiguration {
+        model: model.into(),
+        supported_efforts: supported.ok_or_else(unsupported_thinking)?,
+        configured_effort,
+    };
+    configuration
+        .validate()
+        .map_err(|_| unsupported_thinking())?;
+    if configuration
+        .configured_effort
+        .as_ref()
+        .is_some_and(|level| !configuration.supported_efforts.contains(level))
+    {
+        return Err(unsupported_thinking());
+    }
+    if let ThinkingPreference::Manual { level } = &decision.preference
+        && (!configuration.supported_efforts.contains(level)
+            || configuration.configured_effort.as_ref() != Some(level))
+    {
+        return Err(unsupported_thinking());
+    }
+    // Auto reports the native applied effort honestly, including model or organization caps.
+    Ok(configuration)
+}
+
 async fn run_turn(
     mut process: JsonLineProcess,
     state: Arc<TurnState>,
@@ -558,7 +697,7 @@ async fn run_turn(
     dispatched: Arc<AtomicBool>,
     prompt: Value,
     events: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
-    ready: oneshot::Sender<Result<(), ProviderError>>,
+    ready: oneshot::Sender<Result<ThinkingConfiguration, ProviderError>>,
 ) -> Result<(), ProviderError> {
     let mut stop = state.stop.subscribe();
     let mut ready = Some(ready);
@@ -566,7 +705,7 @@ async fn run_turn(
         let deadline = Instant::now() + OPERATION_TIMEOUT;
         let init_id = format!("initialize:{}", state.generation);
         write(&state.sender, &json!({"type":"control_request","request_id":init_id,"request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true}}), deadline).await?;
-        loop {
+        let models = loop {
             let value = timeout_at(deadline, process.recv())
                 .await
                 .map_err(|_| protocol_error("initialize-timeout"))?
@@ -576,12 +715,35 @@ async fn run_turn(
                 if value["response"]["subtype"] != "success" {
                     return Err(protocol_error("initialize-rejected"));
                 }
-                break;
+                break effort_models(&value["response"]["response"])?;
             }
             if value["type"] != "system" || value["subtype"] != "init" {
                 return Err(protocol_error("unexpected-initialize-envelope"));
             }
-        }
+        };
+        let settings_id = format!("get_settings:{}", state.generation);
+        write(&state.sender, &json!({"type":"control_request","request_id":settings_id,"request":{"subtype":"get_settings"}}), deadline).await?;
+        let configuration = loop {
+            let value = timeout_at(deadline, process.recv())
+                .await
+                .map_err(|_| protocol_error("settings-timeout"))?
+                .ok_or(ProviderError::StreamClosed)??;
+            protocol::validate_session(&value, &session)?;
+            if value["type"] == "control_response" && value["response"]["request_id"] == settings_id
+            {
+                if value["response"]["subtype"] != "success" {
+                    return Err(unsupported_thinking());
+                }
+                break thinking_configuration(
+                    models,
+                    &value["response"]["response"],
+                    &state.thinking,
+                )?;
+            }
+            if value["type"] != "system" || value["subtype"] != "init" {
+                return Err(protocol_error("unexpected-settings-envelope"));
+            }
+        };
         // From this point a prompt might reach the native process. Never retry it as Fresh.
         dispatched.store(true, Ordering::Release);
         write(&state.sender, &prompt, deadline).await?;
@@ -592,7 +754,7 @@ async fn run_turn(
             .await
             .map_err(|_| ProviderError::StreamClosed)?;
         if let Some(ready) = ready.take() {
-            let _ = ready.send(Ok(()));
+            let _ = ready.send(Ok(configuration));
         }
         let mut protocol = Protocol::new(session.clone());
         loop {
