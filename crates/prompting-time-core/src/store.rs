@@ -32,6 +32,7 @@ use crate::providers::{
     UserInputQuestion, UserInputRequest,
 };
 use crate::router::{RoutingDecision, RoutingProfile, RoutingReason, TaskKind};
+use crate::thinking::{ThinkingConfiguration, ThinkingDecision, ThinkingError, ThinkingPreference};
 
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_POOL_CONNECTIONS: u32 = 8;
@@ -127,6 +128,8 @@ pub struct StoreChange {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error(transparent)]
+    Thinking(#[from] ThinkingError),
     #[error("could not create SQLite parent directory {path}")]
     CreateParent {
         path: PathBuf,
@@ -209,6 +212,7 @@ pub struct ConversationSettings {
 
 #[derive(Clone, Debug)]
 pub(crate) struct NewSubmission {
+    pub thinking_decision: ThinkingDecision,
     pub command_id: String,
     pub request_hash: String,
     pub conversation_id: ConversationId,
@@ -228,6 +232,7 @@ pub(crate) enum PreparedSubmission {
 
 #[derive(Clone, Debug)]
 pub(crate) struct StoredSubmission {
+    pub thinking_decision: ThinkingDecision,
     pub request_hash: String,
     pub run: ProviderRun,
     pub fallback_run: Option<ProviderRun>,
@@ -251,6 +256,7 @@ pub(crate) struct StoredRoutingDecision {
 
 #[derive(Clone, Debug)]
 pub(crate) struct NewFallbackAttempt {
+    pub thinking_decision: ThinkingDecision,
     pub provider: ProviderId,
     pub native_session_id: Option<String>,
     pub turn_prompt: String,
@@ -707,6 +713,9 @@ pub struct Page<T> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SidebarDetails {
+    pub thinking_preference: ThinkingPreference,
+    pub thinking_decision: Option<ThinkingDecision>,
+    pub thinking_configuration: Option<ThinkingConfiguration>,
     pub conversation_id: ConversationId,
     pub binding: ConversationBinding,
     pub has_children: bool,
@@ -805,6 +814,8 @@ pub struct ApprovalDetailRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunAuditSummary {
+    pub thinking_decision: ThinkingDecision,
+    pub thinking_configuration: Option<ThinkingConfiguration>,
     pub id: RunId,
     pub provider: ProviderId,
     pub status: RunStatus,
@@ -822,6 +833,8 @@ pub struct RunAuditPage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunAuditDetailRecord {
+    pub thinking_decision: ThinkingDecision,
+    pub thinking_configuration: Option<ThinkingConfiguration>,
     pub id: RunId,
     pub provider: ProviderId,
     pub status: RunStatus,
@@ -865,6 +878,7 @@ pub struct RecoveryRun {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryAttemptIntent {
+    pub thinking_decision: ThinkingDecision,
     pub turn_prompt: String,
     pub handoff_rendered: Option<String>,
     pub handoff_hash: Option<String>,
@@ -1173,6 +1187,78 @@ impl Store {
         .map(|record| record.conversation)
     }
 
+    pub async fn load_thinking_preference(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ThinkingPreference, StoreError> {
+        let json: String =
+            sqlx::query_scalar("SELECT thinking_preference_json FROM conversations WHERE id = ?")
+                .bind(conversation_id.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+        let preference: ThinkingPreference =
+            serde_json::from_str(&json).map_err(invalid_data("thinking preference"))?;
+        preference.validate()?;
+        Ok(preference)
+    }
+
+    pub(crate) async fn set_thinking_preference(
+        &self,
+        conversation_id: ConversationId,
+        preference: &ThinkingPreference,
+    ) -> Result<(), StoreError> {
+        preference.validate()?;
+        let result = sqlx::query("UPDATE conversations SET thinking_preference_json = ?, updated_at = ? WHERE id = ? AND status = 'active' AND observed_agent_id IS NULL")
+            .bind(serde_json::to_string(preference).map_err(invalid_data("thinking preference"))?)
+            .bind(now_millis()).bind(conversation_id.to_string()).execute(&self.pool).await?;
+        if result.rows_affected() != 1 {
+            let conversation = self.load_conversation(conversation_id).await?;
+            if conversation.archived {
+                return Err(StoreError::ConversationArchived(conversation_id));
+            }
+            return Err(StoreError::InvalidData {
+                entity: "thinking preference",
+                detail: "observed conversations cannot change settings".into(),
+            });
+        }
+        self.notify_conversation_change(conversation_id);
+        Ok(())
+    }
+
+    pub async fn load_run_thinking(
+        &self,
+        run_id: RunId,
+    ) -> Result<(ThinkingDecision, Option<ThinkingConfiguration>), StoreError> {
+        let (decision, configuration): (String, Option<String>) = sqlx::query_as("SELECT thinking_decision_json, thinking_configuration_json FROM provider_runs WHERE id = ?")
+            .bind(run_id.to_string()).fetch_one(&self.pool).await?;
+        Ok((
+            serde_json::from_str(&decision).map_err(invalid_data("thinking decision"))?,
+            configuration
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(invalid_data("thinking configuration"))
+                })
+                .transpose()?,
+        ))
+    }
+
+    pub(crate) async fn persist_owned_thinking_configuration(
+        &self,
+        run_id: RunId,
+        expected_owner_id: &str,
+        configuration: &ThinkingConfiguration,
+    ) -> Result<(), StoreError> {
+        configuration.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        require_dispatch_owner(&mut transaction, run_id, expected_owner_id).await?;
+        sqlx::query("UPDATE provider_runs SET thinking_configuration_json = ?, updated_at = ? WHERE id = ? AND dispatch_owner_id = ?")
+            .bind(serde_json::to_string(configuration).map_err(invalid_data("thinking configuration"))?)
+            .bind(now_millis()).bind(run_id.to_string()).bind(expected_owner_id).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        let run = self.load_run(run_id).await?;
+        self.notify_change(run.conversation_id, run_id);
+        Ok(())
+    }
+
     pub async fn load_conversation_settings(
         &self,
         conversation_id: ConversationId,
@@ -1315,8 +1401,8 @@ impl Store {
         sqlx::query(
             "INSERT INTO provider_runs \
              (id, conversation_id, provider, native_session_id, status, mutation_state, \
-              handoff_rendered, handoff_hash, application_managed, turn_prompt, created_at, updated_at) \
-             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?, ?)",
+              handoff_rendered, handoff_hash, application_managed, turn_prompt, thinking_decision_json, created_at, updated_at) \
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
         )
         .bind(run.id.to_string())
         .bind(run.conversation_id.to_string())
@@ -1326,6 +1412,7 @@ impl Store {
         .bind(&submission.handoff_rendered)
         .bind(&submission.handoff_hash)
         .bind(&submission.turn_prompt)
+        .bind(serde_json::to_string(&submission.thinking_decision).map_err(invalid_data("thinking decision"))?)
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
@@ -1462,6 +1549,7 @@ impl Store {
         };
         let (request_hash, run) = row.into_parts()?;
         let routing_decision = self.load_routing_decision(run.id).await?;
+        let thinking_decision = self.load_run_thinking(run.id).await?.0;
         let fallback_run = sqlx::query_as::<_, ProviderRunRow>(
             "SELECT id, conversation_id, provider, fallback_from_run_id, native_session_id, \
              status, mutation_state, dispatch_certainty, created_at FROM provider_runs \
@@ -1473,6 +1561,7 @@ impl Store {
         .map(ProviderRunRow::into_domain)
         .transpose()?;
         Ok(Some(StoredSubmission {
+            thinking_decision,
             request_hash,
             run,
             fallback_run,
@@ -1485,6 +1574,20 @@ impl Store {
         conversation_id: ConversationId,
         provider: ProviderId,
     ) -> Result<(ProviderRun, AgentNode), StoreError> {
+        self.create_run_with_thinking(
+            conversation_id,
+            provider,
+            &ThinkingDecision::provider_default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_run_with_thinking(
+        &self,
+        conversation_id: ConversationId,
+        provider: ProviderId,
+        thinking: &ThinkingDecision,
+    ) -> Result<(ProviderRun, AgentNode), StoreError> {
         let run = ProviderRun::new(conversation_id, provider);
         let root = AgentNode::root(run.id, provider, "orchestrator");
         let now = now_millis();
@@ -1492,14 +1595,15 @@ impl Store {
 
         sqlx::query(
             "INSERT INTO provider_runs \
-             (id, conversation_id, provider, native_session_id, status, mutation_state, created_at, updated_at) \
-             VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+             (id, conversation_id, provider, native_session_id, status, mutation_state, thinking_decision_json, created_at, updated_at) \
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)",
         )
         .bind(run.id.to_string())
         .bind(conversation_id.to_string())
         .bind(provider_label(run.provider))
         .bind(run_status_label(run.status))
         .bind(mutation_state_label(run.mutation_state))
+        .bind(serde_json::to_string(thinking).map_err(invalid_data("thinking decision"))?)
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
@@ -4127,6 +4231,9 @@ impl Store {
                     conversations.observed_agent_id, latest_runs.conversation_id AS run_conversation_id, \
                     EXISTS (SELECT 1 FROM conversations AS child WHERE child.parent_id = selected.id AND child.status = 'active') AS has_children, \
                     COALESCE(conversation_settings.routing_profile, 'balanced') AS routing_profile, \
+                    conversations.thinking_preference_json, \
+                    CASE WHEN conversations.observed_agent_id IS NULL THEN latest_runs.thinking_decision_json END AS thinking_decision_json, \
+                    CASE WHEN conversations.observed_agent_id IS NULL THEN latest_runs.thinking_configuration_json END AS thinking_configuration_json, \
                     workspaces.project_root, \
                     latest_runs.id AS run_id, latest_runs.provider, \
                     latest_runs.fallback_from_run_id, latest_runs.native_session_id, \
@@ -4178,6 +4285,9 @@ impl Store {
             by_id.insert(
                 *id,
                 SidebarDetails {
+                    thinking_preference: ThinkingPreference::Auto,
+                    thinking_decision: None,
+                    thinking_configuration: None,
                     conversation_id: *id,
                     binding: ConversationBinding::Managed,
                     has_children: false,
@@ -4204,6 +4314,20 @@ impl Store {
             details.binding = row.binding()?;
             details.has_children = row.has_children;
             details.routing_profile = parse_routing_profile(&row.routing_profile)?;
+            details.thinking_preference = serde_json::from_str(&row.thinking_preference_json)
+                .map_err(invalid_data("thinking preference"))?;
+            details.thinking_decision = row
+                .thinking_decision_json
+                .as_deref()
+                .map(|json| serde_json::from_str(json).map_err(invalid_data("thinking decision")))
+                .transpose()?;
+            details.thinking_configuration = row
+                .thinking_configuration_json
+                .as_deref()
+                .map(|json| {
+                    serde_json::from_str(json).map_err(invalid_data("thinking configuration"))
+                })
+                .transpose()?;
             details.run = row.provider_run()?;
             details.rollup_status = row
                 .rollup_status
@@ -4489,7 +4613,7 @@ impl Store {
         let cursor = cursor.map(|value| decode_cursor(&value)).transpose()?;
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT provider_runs.id, provider_runs.provider, provider_runs.status, \
-                    provider_runs.created_at, \
+                    provider_runs.created_at, provider_runs.thinking_decision_json, provider_runs.thinking_configuration_json, \
                     routing_decisions.reason AS routing_reason, \
                     COALESCE(length(CAST(routing_decisions.details_json AS BLOB)) > ",
         );
@@ -4548,6 +4672,7 @@ impl Store {
     ) -> Result<RunAuditDetailRecord, StoreError> {
         sqlx::query_as::<_, RunAuditDetailRow>(
             "SELECT provider_runs.id, provider_runs.provider, provider_runs.status, \
+                    provider_runs.thinking_decision_json, provider_runs.thinking_configuration_json, \
                     CASE WHEN length(CAST(routing_decisions.details_json AS BLOB)) <= ? \
                          THEN routing_decisions.details_json END AS routing_json, \
                     routing_decisions.reason AS routing_reason, \
@@ -4810,12 +4935,13 @@ impl Store {
 
             for row in run_rows {
                 let run = row.into_domain()?;
-                let (turn_prompt, handoff_rendered, handoff_hash): (
+                let (turn_prompt, handoff_rendered, handoff_hash, thinking_json): (
                     Option<String>,
                     Option<String>,
                     Option<String>,
+                    String,
                 ) = sqlx::query_as(
-                    "SELECT turn_prompt, handoff_rendered, handoff_hash \
+                    "SELECT turn_prompt, handoff_rendered, handoff_hash, thinking_decision_json \
                      FROM provider_runs WHERE id = ?",
                 )
                 .bind(run.id.to_string())
@@ -4827,7 +4953,10 @@ impl Store {
                         detail: "rendered capsule and hash must both be present".to_owned(),
                     });
                 }
+                let thinking_decision = serde_json::from_str(&thinking_json)
+                    .map_err(invalid_data("thinking decision"))?;
                 let attempt_intent = turn_prompt.map(|turn_prompt| RecoveryAttemptIntent {
+                    thinking_decision,
                     turn_prompt,
                     handoff_rendered,
                     handoff_hash,
@@ -5203,12 +5332,13 @@ impl Store {
         let mut recovery = Vec::with_capacity(rows.len());
         for row in rows {
             let run = row.into_domain()?;
-            let (turn_prompt, handoff_rendered, handoff_hash): (
+            let (turn_prompt, handoff_rendered, handoff_hash, thinking_json): (
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                String,
             ) = sqlx::query_as(
-                "SELECT turn_prompt, handoff_rendered, handoff_hash FROM provider_runs WHERE id = ?",
+                "SELECT turn_prompt, handoff_rendered, handoff_hash, thinking_decision_json FROM provider_runs WHERE id = ?",
             )
             .bind(run.id.to_string())
             .fetch_one(&self.pool)
@@ -5219,7 +5349,10 @@ impl Store {
                     detail: "rendered capsule and hash must both be present".to_owned(),
                 });
             }
+            let thinking_decision =
+                serde_json::from_str(&thinking_json).map_err(invalid_data("thinking decision"))?;
             let attempt_intent = turn_prompt.map(|turn_prompt| RecoveryAttemptIntent {
+                thinking_decision,
                 turn_prompt,
                 handoff_rendered,
                 handoff_hash,
@@ -5725,9 +5858,9 @@ async fn insert_atomic_fallback(
         "INSERT INTO provider_runs \
          (id, conversation_id, provider_session_id, provider, fallback_from_run_id, \
           native_session_id, status, mutation_state, handoff_rendered, handoff_hash, \
-          context_through_sequence, application_managed, turn_prompt, dispatch_certainty, \
+          context_through_sequence, application_managed, turn_prompt, thinking_decision_json, dispatch_certainty, \
           dispatch_owner_id, dispatch_lease_expires_at, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', 'none_observed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', 'none_observed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(run.id.to_string())
     .bind(run.conversation_id.to_string())
@@ -5740,6 +5873,7 @@ async fn insert_atomic_fallback(
     .bind(context_through_sequence)
     .bind(application_managed)
     .bind(&fallback.turn_prompt)
+    .bind(serde_json::to_string(&fallback.thinking_decision).map_err(invalid_data("thinking decision"))?)
     .bind(dispatch_certainty)
     .bind(dispatch_owner_id)
     .bind(dispatch_lease_expires_at)
@@ -5809,19 +5943,22 @@ async fn load_existing_fallback(
     type ExistingFallbackRow = (
         String,
         String,
+        String,
         Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
     );
     let row: Option<ExistingFallbackRow> = sqlx::query_as(
-        "SELECT id, provider, native_session_id, handoff_hash, turn_prompt, dispatch_owner_id \
+        "SELECT thinking_decision_json, id, provider, native_session_id, handoff_hash, turn_prompt, dispatch_owner_id \
              FROM provider_runs WHERE fallback_from_run_id = ?",
     )
     .bind(primary.id.to_string())
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((id, provider, native_session_id, handoff_hash, turn_prompt, owner_id)) = row else {
+    let Some((thinking_json, id, provider, native_session_id, handoff_hash, turn_prompt, owner_id)) =
+        row
+    else {
         return Ok(None);
     };
     let fallback_run_id = parse_uuid("provider run", &id)?.into();
@@ -5834,6 +5971,9 @@ async fn load_existing_fallback(
         || native_session_id != expected.native_session_id
         || handoff_hash != expected.handoff_hash
         || turn_prompt.as_deref() != Some(expected.turn_prompt.as_str())
+        || serde_json::from_str::<ThinkingDecision>(&thinking_json)
+            .map_err(invalid_data("thinking decision"))?
+            != expected.thinking_decision
     {
         return Err(StoreError::FallbackIntentConflict);
     }
@@ -6742,6 +6882,9 @@ fn provider_error_content(category: ProviderErrorCategory) -> &'static str {
         ProviderErrorCategory::TimedOut => "Provider failed: timed out",
         ProviderErrorCategory::InspectionFailed => "Provider failed: inspection failed",
         ProviderErrorCategory::Rejected => "Provider failed: request rejected",
+        ProviderErrorCategory::UnsupportedThinking => {
+            "The requested thinking effort is unavailable for this model/provider. Choose Auto or Provider default."
+        }
         ProviderErrorCategory::Protocol => "Provider failed: protocol error",
         ProviderErrorCategory::Transport => "Provider failed: transport error",
         ProviderErrorCategory::MalformedJson => "Provider failed: malformed JSON",
@@ -7081,6 +7224,8 @@ struct ApprovalListRow {
 
 #[derive(FromRow)]
 struct RunAuditRow {
+    thinking_decision_json: String,
+    thinking_configuration_json: Option<String>,
     id: String,
     provider: String,
     status: String,
@@ -7093,6 +7238,14 @@ struct RunAuditRow {
 impl RunAuditRow {
     fn into_summary(self) -> Result<RunAuditSummary, StoreError> {
         Ok(RunAuditSummary {
+            thinking_decision: serde_json::from_str(&self.thinking_decision_json)
+                .map_err(invalid_data("thinking decision"))?,
+            thinking_configuration: self
+                .thinking_configuration_json
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(invalid_data("thinking configuration"))
+                })
+                .transpose()?,
             id: parse_uuid("provider run", &self.id)?.into(),
             provider: parse_provider(&self.provider)?,
             status: parse_run_status(&self.status)?,
@@ -7110,6 +7263,8 @@ impl RunAuditRow {
 
 #[derive(FromRow)]
 struct RunAuditDetailRow {
+    thinking_decision_json: String,
+    thinking_configuration_json: Option<String>,
     id: String,
     provider: String,
     status: String,
@@ -7123,6 +7278,14 @@ struct RunAuditDetailRow {
 impl RunAuditDetailRow {
     fn into_detail(self) -> Result<RunAuditDetailRecord, StoreError> {
         Ok(RunAuditDetailRecord {
+            thinking_decision: serde_json::from_str(&self.thinking_decision_json)
+                .map_err(invalid_data("thinking decision"))?,
+            thinking_configuration: self
+                .thinking_configuration_json
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(invalid_data("thinking configuration"))
+                })
+                .transpose()?,
             id: parse_uuid("provider run", &self.id)?.into(),
             provider: parse_provider(&self.provider)?,
             status: parse_run_status(&self.status)?,
@@ -7537,6 +7700,9 @@ impl TimelineRecordRow {
 
 #[derive(FromRow)]
 struct SidebarDetailRow {
+    thinking_preference_json: String,
+    thinking_decision_json: Option<String>,
+    thinking_configuration_json: Option<String>,
     conversation_id: String,
     observed_agent_id: Option<String>,
     run_conversation_id: Option<String>,
@@ -7667,6 +7833,7 @@ impl TimelineEventRow {
 
 #[cfg(test)]
 mod tests {
+    use crate::thinking::{ThinkingDecision, ThinkingPreference};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -8241,6 +8408,7 @@ mod tests {
             Duration::from_secs(120),
             ProviderErrorCategory::Rejected,
             NewFallbackAttempt {
+                thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 provider: ProviderId::Claude,
                 native_session_id: None,
                 handoff_rendered: None,
@@ -8622,6 +8790,7 @@ mod tests {
             .unwrap();
         let PreparedSubmission::Created { run, .. } = store
             .prepare_submission(NewSubmission {
+                thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 command_id: "post-commit-submit".to_owned(),
                 request_hash: "post-commit-hash".to_owned(),
                 conversation_id: conversation.id,
@@ -9077,6 +9246,7 @@ mod tests {
             )
             .unwrap();
         let submission = NewSubmission {
+            thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
             command_id: "canonical-transcript-command".to_owned(),
             request_hash: "canonical-transcript-hash".to_owned(),
             conversation_id: conversation.id,
@@ -9863,6 +10033,7 @@ mod tests {
             .unwrap();
         let PreparedSubmission::Created { run, root } = store
             .prepare_submission(NewSubmission {
+                thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 command_id: "managed-fallback".to_owned(),
                 request_hash: "managed-fallback-hash".to_owned(),
                 conversation_id: conversation.id,
@@ -9904,6 +10075,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thinking_preferences_intent_configuration_and_owner_fence_round_trip() {
+        use crate::thinking::{ThinkingConfiguration, ThinkingDecision, ThinkingPreference};
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("thinking"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_thinking_preference(conversation.id)
+                .await
+                .unwrap(),
+            ThinkingPreference::Auto
+        );
+        let high = ThinkingPreference::Manual {
+            level: "high".into(),
+        };
+        store
+            .set_thinking_preference(conversation.id, &high)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_thinking_preference(conversation.id)
+                .await
+                .unwrap(),
+            high
+        );
+        let (run, _) = store
+            .create_run(conversation.id, ProviderId::Codex)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_run_thinking(run.id).await.unwrap(),
+            (ThinkingDecision::provider_default(), None)
+        );
+        let configuration = ThinkingConfiguration {
+            model: "fixture".into(),
+            supported_efforts: vec!["high".into()],
+            configured_effort: Some("high".into()),
+        };
+        assert!(
+            store
+                .claim_provider_dispatch(run.id, "owner", Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        assert!(
+            matches!(store.persist_owned_thinking_configuration(run.id, "stranger", &configuration).await, Err(StoreError::DispatchOwnerMismatch(id)) if id == run.id)
+        );
+        assert_eq!(store.load_run_thinking(run.id).await.unwrap().1, None);
+        store
+            .persist_owned_thinking_configuration(run.id, "owner", &configuration)
+            .await
+            .unwrap();
+        let replacement = ThinkingConfiguration {
+            configured_effort: Some("low".into()),
+            ..configuration.clone()
+        };
+        assert!(matches!(
+            store.persist_owned_thinking_configuration(run.id, "stranger", &replacement).await,
+            Err(StoreError::DispatchOwnerMismatch(id)) if id == run.id
+        ));
+        let low = ThinkingPreference::Manual {
+            level: "low".into(),
+        };
+        store
+            .set_thinking_preference(conversation.id, &low)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_thinking_preference(conversation.id)
+                .await
+                .unwrap(),
+            low
+        );
+        assert_eq!(
+            store.load_run_thinking(run.id).await.unwrap().1,
+            Some(configuration.clone())
+        );
+        assert_eq!(
+            store
+                .load_run_audit(conversation.id, run.id)
+                .await
+                .unwrap()
+                .thinking_configuration,
+            Some(configuration)
+        );
+    }
+
+    #[tokio::test]
     async fn atomic_fallback_retry_returns_the_same_durable_attempt() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -9919,6 +10182,13 @@ mod tests {
             .await
             .unwrap();
         let fallback = NewFallbackAttempt {
+            thinking_decision: ThinkingDecision::resolve(
+                ThinkingPreference::Manual {
+                    level: "high".into(),
+                },
+                "fallback",
+            )
+            .unwrap(),
             provider: ProviderId::Claude,
             native_session_id: None,
             turn_prompt: "provider-specific prompt".to_owned(),
@@ -9941,11 +10211,29 @@ mod tests {
                 run.id,
                 root.id,
                 crate::providers::ProviderErrorCategory::Rejected,
-                fallback,
+                fallback.clone(),
             )
             .await
             .unwrap();
 
+        let conflict = store
+            .fail_and_create_fallback(
+                run.id,
+                root.id,
+                ProviderErrorCategory::Rejected,
+                NewFallbackAttempt {
+                    thinking_decision: ThinkingDecision::resolve(
+                        ThinkingPreference::Manual {
+                            level: "low".into(),
+                        },
+                        "fallback",
+                    )
+                    .unwrap(),
+                    ..fallback.clone()
+                },
+            )
+            .await;
+        assert!(matches!(conflict, Err(StoreError::FallbackIntentConflict)));
         assert_eq!(first.0.id, retry.0.id);
         assert_eq!(first.1.id, retry.1.id);
         assert_eq!(
@@ -9971,6 +10259,14 @@ mod tests {
         let recovery = store.pending_recovery().await.unwrap();
         assert_eq!(recovery.len(), 1);
         assert_eq!(recovery[0].run.id, first.0.id);
+        assert_eq!(
+            recovery[0]
+                .attempt_intent
+                .as_ref()
+                .unwrap()
+                .thinking_decision,
+            fallback.thinking_decision
+        );
         assert_eq!(
             recovery[0].attempt_intent.as_ref().unwrap().turn_prompt,
             "provider-specific prompt"
@@ -10002,6 +10298,7 @@ mod tests {
             .await
             .unwrap();
         let fallback = NewFallbackAttempt {
+            thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
             provider: ProviderId::Claude,
             native_session_id: None,
             turn_prompt: "first prompt".to_owned(),
@@ -10544,6 +10841,7 @@ mod tests {
 
         let error = store
             .prepare_submission(NewSubmission {
+                thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 command_id: "oversized".to_owned(),
                 request_hash: "hash".to_owned(),
                 conversation_id: conversation.id,
@@ -10703,6 +11001,41 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_migration_keeps_historical_runs_at_provider_default() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        MIGRATOR.run_to(19, &pool).await.unwrap();
+        let conversation = ConversationId::new();
+        let run = RunId::new();
+        sqlx::query("INSERT INTO conversations (id, title, status, created_at, updated_at) VALUES (?, 'history', 'active', 1, 1)").bind(conversation.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO provider_runs (id, conversation_id, provider, status, mutation_state, created_at, updated_at) VALUES (?, ?, 'codex', 'completed', 'none_observed', 1, 1)").bind(run.to_string()).bind(conversation.to_string()).execute(&pool).await.unwrap();
+        MIGRATOR.run(&pool).await.unwrap();
+        let preference: String =
+            sqlx::query_scalar("SELECT thinking_preference_json FROM conversations WHERE id = ?")
+                .bind(conversation.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ThinkingPreference>(&preference).unwrap(),
+            ThinkingPreference::Auto
+        );
+        let decision: String =
+            sqlx::query_scalar("SELECT thinking_decision_json FROM provider_runs WHERE id = ?")
+                .bind(run.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ThinkingDecision>(&decision).unwrap(),
+            ThinkingDecision::provider_default()
         );
     }
 

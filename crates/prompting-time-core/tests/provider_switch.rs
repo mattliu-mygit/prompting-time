@@ -215,6 +215,7 @@ async fn accepted_steering_survives_timeline_and_provider_switches() {
     let first = fixture
         .app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "first".into(),
             conversation_id: conversation.id,
             content: "Implement the fixture".into(),
@@ -260,6 +261,7 @@ async fn accepted_steering_survives_timeline_and_provider_switches() {
         fixture
             .app
             .submit(SubmitRequest {
+                thinking: None,
                 command_id: command.into(),
                 conversation_id: conversation.id,
                 content: command.into(),
@@ -292,6 +294,7 @@ async fn acknowledged_questions_survive_provider_handoff() {
     let first = fixture
         .app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "first".into(),
             conversation_id: conversation.id,
             content: "Prepare deployment".into(),
@@ -331,6 +334,7 @@ async fn acknowledged_questions_survive_provider_handoff() {
     fixture
         .app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "second".into(),
             conversation_id: conversation.id,
             content: "Continue deployment".into(),
@@ -359,6 +363,7 @@ async fn structured_child_answers_keep_provenance_privacy_and_session_tree_bound
     let first = fixture
         .app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "first".into(),
             conversation_id: conversation.id,
             content: "Prepare fixture".into(),
@@ -531,6 +536,7 @@ async fn structured_child_answers_keep_provenance_privacy_and_session_tree_bound
         fixture
             .app
             .submit(SubmitRequest {
+                thinking: None,
                 command_id: command.into(),
                 conversation_id: conversation.id,
                 content: command.into(),
@@ -585,6 +591,7 @@ async fn switching_back_resumes_provider_and_sends_only_unseen_context() {
         fixture
             .app
             .submit(SubmitRequest {
+                thinking: None,
                 command_id: command_id.to_owned(),
                 conversation_id: conversation.id,
                 content: content.to_owned(),
@@ -645,6 +652,7 @@ async fn empty_objective_conversation_sends_the_first_user_request_without_inven
     let first_request = "Explain the synthetic fixture";
     let submission = app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "first-empty-objective".into(),
             conversation_id: conversation.id,
             content: first_request.into(),
@@ -784,6 +792,7 @@ async fn duplicate_command_is_idempotent_across_app_restart() {
         .await
         .unwrap();
     let request = SubmitRequest {
+        thinking: None,
         command_id: "stable-command".to_owned(),
         conversation_id: conversation.id,
         content: "run once".to_owned(),
@@ -816,6 +825,7 @@ async fn duplicate_command_with_different_content_is_rejected() {
         .await
         .unwrap();
     let first = SubmitRequest {
+        thinking: None,
         command_id: "same-command".to_owned(),
         conversation_id: conversation.id,
         content: "first content".to_owned(),
@@ -863,6 +873,7 @@ async fn switching_after_restart_uses_durable_unseen_context() {
         .unwrap();
     first
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "before-restart".to_owned(),
             conversation_id: conversation.id,
             content: "durable first message".to_owned(),
@@ -886,6 +897,7 @@ async fn switching_after_restart_uses_durable_unseen_context() {
     .unwrap();
     restarted
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "after-restart".to_owned(),
             conversation_id: conversation.id,
             content: "continue elsewhere".to_owned(),
@@ -918,6 +930,7 @@ async fn provider_run_records_the_exact_handoff_and_hash() {
         .unwrap();
     let submission = app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "inspect-command".to_owned(),
             conversation_id: conversation.id,
             content: "show exact context".to_owned(),
@@ -985,6 +998,7 @@ async fn stale_approval_response_is_rejected_before_provider_dispatch() {
         .unwrap();
     let submission = app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "approval-command".to_owned(),
             conversation_id: conversation.id,
             content: "request approval".to_owned(),
@@ -1026,6 +1040,7 @@ async fn automatic_routing_falls_back_once_before_mutation() {
         .unwrap();
 
     let fallback_request = SubmitRequest {
+        thinking: None,
         command_id: "fallback-command".to_owned(),
         conversation_id: conversation.id,
         content: "implement this".to_owned(),
@@ -1066,6 +1081,7 @@ async fn automatic_routing_falls_back_once_before_mutation() {
         prompting_time_core::domain::RunStatus::Completed
     );
     app.submit(SubmitRequest {
+        thinking: None,
         command_id: "retry-codex".to_owned(),
         conversation_id: conversation.id,
         content: "try Codex again".to_owned(),
@@ -1105,6 +1121,7 @@ async fn automatic_routing_does_not_fallback_after_mutation() {
 
     let outcome = app
         .submit(SubmitRequest {
+            thinking: None,
             command_id: "mutating-command".to_owned(),
             conversation_id: conversation.id,
             content: "change a file".to_owned(),
@@ -1147,12 +1164,14 @@ async fn concurrent_commands_cannot_create_two_active_application_runs() {
 
     let (first_result, second_result) = tokio::join!(
         first.submit(SubmitRequest {
+            thinking: None,
             command_id: "concurrent-1".to_owned(),
             conversation_id: conversation.id,
             content: "first command".to_owned(),
             provider_override: Some(ProviderId::Codex),
         }),
         second.submit(SubmitRequest {
+            thinking: None,
             command_id: "concurrent-2".to_owned(),
             conversation_id: conversation.id,
             content: "second command".to_owned(),

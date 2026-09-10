@@ -798,6 +798,7 @@ impl From<AppError> for CommandError {
                 message: "This provider exposes recorded child activity, not an independently controllable chat.".to_owned(),
                 action: None,
             },
+            AppError::Thinking(error) => invalid_request(&error.to_string()),
             AppError::RunConversationMismatch { .. } => invalid_request(
                 "The run does not belong to the selected conversation.",
             ),

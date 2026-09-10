@@ -32,6 +32,7 @@ use crate::store::{
     MAX_CANONICAL_MESSAGE_BYTES, NewSubmission, Page, ProviderEventRecord, SidebarDetails, Store,
     StoreChange, StoreError, TimelineRecord, validate_conversation_settings,
 };
+use crate::thinking::{ThinkingConfiguration, ThinkingDecision, ThinkingError, ThinkingPreference};
 use crate::workspace::{
     CleanupEligibility, WorkspaceError, WorkspaceManager, WorkspaceRequest, WorkspaceSnapshot,
 };
@@ -71,6 +72,7 @@ impl ConversationRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitRequest {
+    pub thinking: Option<ThinkingPreference>,
     pub command_id: String,
     pub conversation_id: ConversationId,
     pub content: String,
@@ -78,6 +80,7 @@ pub struct SubmitRequest {
 }
 
 pub struct Submission {
+    pub thinking_decision: ThinkingDecision,
     pub handle: RunHandle,
     pub decision: RoutingDecision,
     pub duplicate: bool,
@@ -85,6 +88,9 @@ pub struct Submission {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationOverview {
+    pub thinking_preference: ThinkingPreference,
+    pub thinking_decision: Option<ThinkingDecision>,
+    pub thinking_configuration: Option<ThinkingConfiguration>,
     pub conversation: Conversation,
     pub has_children: bool,
     pub summary: Option<String>,
@@ -281,6 +287,9 @@ impl PromptingTime {
         let routing_profile = request.routing_profile;
         let (conversation, workspace) = self.create_conversation_with_workspace(request).await?;
         Ok(ConversationOverview {
+            thinking_preference: ThinkingPreference::Auto,
+            thinking_decision: None,
+            thinking_configuration: None,
             conversation,
             has_children: false,
             summary: None,
@@ -308,6 +317,7 @@ impl PromptingTime {
                 .into());
             }
             return Ok(Submission {
+                thinking_decision: existing.thinking_decision,
                 handle: self
                     .supervisor
                     .existing_handle(existing.run, existing.fallback_run),
@@ -315,6 +325,10 @@ impl PromptingTime {
                 duplicate: true,
             });
         }
+        let thinking_decision = match request.thinking.clone() {
+            Some(preference) => ThinkingDecision::resolve(preference, &request.content)?,
+            None => ThinkingDecision::provider_default(),
+        };
         let conversation = self
             .store
             .load_conversation(request.conversation_id)
@@ -391,7 +405,8 @@ impl PromptingTime {
                 Some(FallbackRequest {
                     provider,
                     native_session_id: session.map(|session| session.native_id),
-                    turn: crate::providers::TurnRequest::new(&capsule.rendered),
+                    turn: crate::providers::TurnRequest::new(&capsule.rendered)
+                        .with_thinking(thinking_decision.clone()),
                     handoff_rendered: Some(capsule.rendered),
                     handoff_hash: Some(capsule.content_hash),
                     routing_decision: Some(Box::new(RoutingDecision {
@@ -425,7 +440,7 @@ impl PromptingTime {
             request.conversation_id,
             workspace.execution_path,
             decision.provider,
-            crate::providers::TurnRequest::new(prompt),
+            crate::providers::TurnRequest::new(prompt).with_thinking(thinking_decision.clone()),
         );
         if let Some(session) = native_session {
             run_request = run_request.resume(session.native_id);
@@ -438,6 +453,7 @@ impl PromptingTime {
             .submit_persisted(
                 run_request,
                 NewSubmission {
+                    thinking_decision: thinking_decision.clone(),
                     command_id: request.command_id,
                     request_hash,
                     conversation_id: request.conversation_id,
@@ -451,6 +467,7 @@ impl PromptingTime {
             )
             .await?;
         Ok(Submission {
+            thinking_decision,
             handle,
             decision,
             duplicate,
@@ -557,6 +574,19 @@ impl PromptingTime {
         self.require_conversation_run(conversation_id, run_id)
             .await?;
         self.supervisor.interrupt(run_id).await.map_err(Into::into)
+    }
+
+    pub async fn set_thinking_preference(
+        &self,
+        conversation_id: ConversationId,
+        preference: ThinkingPreference,
+    ) -> Result<(), AppError> {
+        self.require_managed_conversation(conversation_id).await?;
+        preference.validate()?;
+        self.store
+            .set_thinking_preference(conversation_id, &preference)
+            .await?;
+        Ok(())
     }
 
     pub async fn archive(&self, conversation_id: ConversationId) -> Result<(), AppError> {
@@ -940,7 +970,8 @@ impl PromptingTime {
                     recovery.run.conversation_id,
                     workspace.execution_path,
                     recovery.run.provider,
-                    crate::providers::TurnRequest::new(intent.turn_prompt),
+                    crate::providers::TurnRequest::new(intent.turn_prompt)
+                        .with_thinking(intent.thinking_decision),
                 );
                 match self
                     .supervisor
@@ -1157,6 +1188,9 @@ impl PromptingTime {
 fn overview(conversation: Conversation, details: SidebarDetails) -> ConversationOverview {
     debug_assert_eq!(conversation.id, details.conversation_id);
     ConversationOverview {
+        thinking_preference: details.thinking_preference,
+        thinking_decision: details.thinking_decision,
+        thinking_configuration: details.thinking_configuration,
         conversation,
         has_children: details.has_children,
         summary: details.summary,
@@ -1170,6 +1204,8 @@ fn overview(conversation: Conversation, details: SidebarDetails) -> Conversation
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error(transparent)]
+    Thinking(#[from] ThinkingError),
     #[error(
         "This provider exposes recorded child activity, not an independently controllable chat."
     )]
@@ -1256,6 +1292,10 @@ fn submission_hash(request: &SubmitRequest) -> String {
         Some(ProviderId::Claude) => b"claude".as_slice(),
         None => b"auto".as_slice(),
     });
+    if let Some(preference) = &request.thinking {
+        digest.update(b"\0thinking-v1\0");
+        digest.update(serde_json::to_vec(preference).expect("thinking preference is serializable"));
+    }
     format!("{:x}", digest.finalize())
 }
 
@@ -1284,6 +1324,7 @@ fn unavailable_error(category: ProviderErrorCategory) -> ProviderUnavailability 
         ProviderErrorCategory::TimedOut
         | ProviderErrorCategory::InspectionFailed
         | ProviderErrorCategory::Rejected
+        | ProviderErrorCategory::UnsupportedThinking
         | ProviderErrorCategory::Protocol
         | ProviderErrorCategory::Transport
         | ProviderErrorCategory::MalformedJson
@@ -1323,7 +1364,205 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn thinking_accepted_request_survives_preference_changes_and_conflicts_on_changed_intent()
+    {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let (adapter, gate) = RecoveryAdapter::blocked();
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![Arc::new(adapter)],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("thinking"))
+            .await
+            .unwrap();
+        let high = ThinkingPreference::Manual {
+            level: "high".into(),
+        };
+        let request = SubmitRequest {
+            command_id: "thinking-command".into(),
+            conversation_id: conversation.id,
+            content: "hi".into(),
+            provider_override: Some(ProviderId::Codex),
+            thinking: Some(high.clone()),
+        };
+        let first = app.submit(request.clone()).await.unwrap();
+        assert_eq!(
+            first.thinking_decision.requested_effort.as_deref(),
+            Some("high")
+        );
+        let low = ThinkingPreference::Manual {
+            level: "low".into(),
+        };
+        app.set_thinking_preference(conversation.id, low.clone())
+            .await
+            .unwrap();
+        let overview = app
+            .load_conversation_overview(conversation.id)
+            .await
+            .unwrap();
+        assert_eq!(overview.thinking_preference, low.clone());
+        assert_eq!(
+            overview.thinking_decision,
+            Some(first.thinking_decision.clone())
+        );
+        let retry = app.submit(request.clone()).await.unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.thinking_decision, first.thinking_decision);
+        assert!(matches!(
+            app.submit(SubmitRequest {
+                thinking: Some(low),
+                ..request.clone()
+            })
+            .await,
+            Err(AppError::Store(StoreError::CommandConflict { .. }))
+        ));
+        gate.add_permits(1);
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn thinking_invalid_configuration_shuts_down_the_accepted_turn_without_replay() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter {
+            invalid_configuration: true,
+            ..RecoveryAdapter::new()
+        });
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("invalid configuration"))
+            .await
+            .unwrap();
+        let request = SubmitRequest {
+            command_id: "invalid-config".into(),
+            conversation_id: conversation.id,
+            content: "hi".into(),
+            provider_override: None,
+            thinking: Some(ThinkingPreference::Auto),
+        };
+        let accepted = app.submit(request.clone()).await.unwrap();
+        let outcome = accepted.handle.wait().await.unwrap();
+        assert_eq!(outcome.status, RunStatus::Failed);
+        assert_eq!(outcome.fallback_run_id, None);
+        assert_eq!(adapter.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .load_run(outcome.primary_run_id)
+                .await
+                .unwrap()
+                .dispatch_certainty,
+            Some(DispatchCertainty::MayHaveDispatched)
+        );
+        assert_eq!(
+            store
+                .load_run_thinking(outcome.primary_run_id)
+                .await
+                .unwrap()
+                .1,
+            None
+        );
+        let retry = app.submit(request).await.unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.handle.run_id(), outcome.primary_run_id);
+        assert_eq!(adapter.turns.load(Ordering::SeqCst), 1);
+        assert_eq!(app.reconcile_startup().await.unwrap(), 0);
+        let _ = app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn thinking_legacy_submit_ignores_saved_manual_choice_and_deduplicates() {
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let adapter = Arc::new(RecoveryAdapter::new());
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("legacy"))
+            .await
+            .unwrap();
+        app.set_thinking_preference(
+            conversation.id,
+            ThinkingPreference::Manual {
+                level: "high".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let request = SubmitRequest {
+            command_id: "old-command".into(),
+            conversation_id: conversation.id,
+            content: "hello".into(),
+            provider_override: None,
+            thinking: None,
+        };
+        let mut historical = recovery_submission(conversation.id);
+        historical.command_id = request.command_id.clone();
+        historical.request_hash = submission_hash(&request);
+        let PreparedSubmission::Created { run, .. } =
+            store.prepare_submission(historical).await.unwrap()
+        else {
+            panic!("new history")
+        };
+        let duplicate = app.submit(request).await.unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.handle.run_id(), run.id);
+        assert_eq!(
+            duplicate.thinking_decision,
+            ThinkingDecision::provider_default()
+        );
+        assert_eq!(adapter.health_checks.load(Ordering::SeqCst), 0);
+        app.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn thinking_omitted_request_retains_the_legacy_command_hash() {
+        let request = SubmitRequest {
+            command_id: "legacy".into(),
+            conversation_id: uuid::Uuid::nil().into(),
+            content: "hello".into(),
+            provider_override: None,
+            thinking: None,
+        };
+        let mut legacy = Sha256::new();
+        legacy.update(request.conversation_id.to_string());
+        legacy.update([0]);
+        legacy.update(b"hello");
+        legacy.update([0]);
+        legacy.update(b"auto");
+        assert_eq!(
+            submission_hash(&request),
+            format!("{:x}", legacy.finalize())
+        );
+        assert_ne!(
+            submission_hash(&request),
+            submission_hash(&SubmitRequest {
+                thinking: Some(ThinkingPreference::ProviderDefault),
+                ..request
+            })
+        );
+    }
+
     struct RecoveryAdapter {
+        invalid_configuration: bool,
+        shutdowns: Arc<AtomicUsize>,
+        thinking: std::sync::Mutex<Vec<ThinkingDecision>>,
         health_checks: AtomicUsize,
         controls: AtomicUsize,
         starts: AtomicUsize,
@@ -1335,6 +1574,9 @@ mod tests {
     impl RecoveryAdapter {
         fn new() -> Self {
             Self {
+                invalid_configuration: false,
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                thinking: std::sync::Mutex::new(Vec::new()),
                 health_checks: AtomicUsize::new(0),
                 controls: AtomicUsize::new(0),
                 starts: AtomicUsize::new(0),
@@ -1348,6 +1590,9 @@ mod tests {
             let gate = Arc::new(Semaphore::new(0));
             (
                 Self {
+                    invalid_configuration: false,
+                    shutdowns: Arc::new(AtomicUsize::new(0)),
+                    thinking: std::sync::Mutex::new(Vec::new()),
                     health_checks: AtomicUsize::new(0),
                     controls: AtomicUsize::new(0),
                     starts: AtomicUsize::new(0),
@@ -1360,11 +1605,12 @@ mod tests {
         }
     }
 
-    struct RecoveryTurnOwner;
+    struct RecoveryTurnOwner(Arc<AtomicUsize>);
 
     #[async_trait]
     impl ProviderTurnOwner for RecoveryTurnOwner {
         async fn shutdown(self: Box<Self>) -> Result<(), crate::providers::ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -1417,8 +1663,9 @@ mod tests {
         async fn start_turn(
             &self,
             _session: &ProviderSession,
-            _request: TurnRequest,
+            request: TurnRequest,
         ) -> Result<ProviderTurn, crate::providers::ProviderError> {
+            self.thinking.lock().unwrap().push(request.thinking.clone());
             self.turns.fetch_add(1, Ordering::SeqCst);
             let (sender, receiver) = mpsc::channel(4);
             sender
@@ -1428,7 +1675,18 @@ mod tests {
                 .await
                 .unwrap();
             sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
-            Ok(ProviderTurn::new(receiver, RecoveryTurnOwner))
+            Ok(
+                ProviderTurn::new(receiver, RecoveryTurnOwner(self.shutdowns.clone()))
+                    .with_thinking(ThinkingConfiguration {
+                        model: if self.invalid_configuration {
+                            String::new()
+                        } else {
+                            "recovery-fixture".into()
+                        },
+                        supported_efforts: vec!["low".into(), "medium".into(), "high".into()],
+                        configured_effort: request.thinking.requested_effort,
+                    }),
+            )
         }
 
         async fn steer(
@@ -1513,6 +1771,18 @@ mod tests {
             .unwrap()
             .items
             .remove(0);
+        app.set_thinking_preference(
+            conversation.id,
+            ThinkingPreference::Manual {
+                level: "high".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let child_overview = app.load_conversation_overview(child.id).await.unwrap();
+        assert_eq!(child_overview.thinking_preference, ThinkingPreference::Auto);
+        assert_eq!(child_overview.thinking_decision, None);
+        assert_eq!(child_overview.thinking_configuration, None);
         let before_run = store.load_run(run.id).await.unwrap();
         let before_workspace = store.load_workspace(conversation.id).await.unwrap();
         let before_timeline = store
@@ -1521,6 +1791,7 @@ mod tests {
             .unwrap();
         let error = app
             .submit(SubmitRequest {
+                thinking: None,
                 command_id: "child-submit".into(),
                 conversation_id: child.id,
                 content: "send to child".into(),
@@ -1534,6 +1805,8 @@ mod tests {
         );
         for result in [
             app.archive(child.id).await,
+            app.set_thinking_preference(child.id, ThinkingPreference::Auto)
+                .await,
             app.steer_conversation(child.id, run.id, "steer child")
                 .await,
             app.interrupt_conversation(child.id, run.id).await,
@@ -1633,6 +1906,7 @@ mod tests {
             )
             .unwrap();
         NewSubmission {
+            thinking_decision: ThinkingDecision::provider_default(),
             command_id: format!("recover-{conversation_id}"),
             request_hash: "recovery-hash".to_owned(),
             conversation_id,
@@ -1954,16 +2228,46 @@ mod tests {
             .create_conversation(ConversationRequest::projectless("queued recovery"))
             .await
             .unwrap();
+        let thinking = ThinkingDecision::resolve(
+            ThinkingPreference::Manual {
+                level: "high".into(),
+            },
+            "recover",
+        )
+        .unwrap();
         let PreparedSubmission::Created { run, .. } = store
-            .prepare_submission(recovery_submission(conversation.id))
+            .prepare_submission(NewSubmission {
+                thinking_decision: thinking.clone(),
+                ..recovery_submission(conversation.id)
+            })
             .await
             .unwrap()
         else {
             panic!("fixture must create a queued run");
         };
 
+        app.set_thinking_preference(
+            conversation.id,
+            ThinkingPreference::Manual {
+                level: "low".into(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(app.reconcile_startup().await.unwrap(), 0);
         wait_for_run_status(&store, run.id, RunStatus::Completed).await;
+
+        assert_eq!(*adapter.thinking.lock().unwrap(), vec![thinking.clone()]);
+        let audit = store.load_run_audit(conversation.id, run.id).await.unwrap();
+        assert_eq!(audit.thinking_decision, thinking);
+        assert_eq!(
+            audit
+                .thinking_configuration
+                .unwrap()
+                .configured_effort
+                .as_deref(),
+            Some("high")
+        );
 
         assert_eq!(adapter.starts.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
@@ -2296,6 +2600,7 @@ mod tests {
             .await
             .unwrap();
         let request = SubmitRequest {
+            thinking: None,
             command_id: "atomic-claim-command".to_owned(),
             conversation_id: conversation.id,
             content: "run after the transaction succeeds".to_owned(),

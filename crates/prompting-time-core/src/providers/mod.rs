@@ -17,6 +17,7 @@ pub use crate::domain::{
     UserInputQuestion, UserInputRequest,
 };
 use crate::domain::{ConversationId, MutationState};
+use crate::thinking::{ThinkingConfiguration, ThinkingDecision};
 
 pub mod claude;
 pub mod codex;
@@ -121,13 +122,21 @@ pub struct ProviderSession {
 #[serde(rename_all = "camelCase")]
 pub struct TurnRequest {
     pub prompt: String,
+    #[serde(default = "ThinkingDecision::provider_default")]
+    pub thinking: ThinkingDecision,
 }
 
 impl TurnRequest {
     pub fn new(prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),
+            thinking: ThinkingDecision::provider_default(),
         }
+    }
+
+    pub fn with_thinking(mut self, thinking: ThinkingDecision) -> Self {
+        self.thinking = thinking;
+        self
     }
 }
 
@@ -304,6 +313,7 @@ pub trait ProviderTurnOwner: Send {
 pub struct ProviderTurn {
     events: mpsc::Receiver<Result<ProviderEvent, ProviderError>>,
     owner: Option<Box<dyn ProviderTurnOwner>>,
+    thinking: Option<ThinkingConfiguration>,
 }
 
 impl ProviderTurn {
@@ -314,7 +324,17 @@ impl ProviderTurn {
         Self {
             events,
             owner: Some(Box::new(owner)),
+            thinking: None,
         }
+    }
+
+    pub fn with_thinking(mut self, thinking: ThinkingConfiguration) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+
+    pub fn thinking(&self) -> Option<&ThinkingConfiguration> {
+        self.thinking.as_ref()
     }
 
     pub async fn recv(&mut self) -> Option<Result<ProviderEvent, ProviderError>> {
@@ -383,6 +403,7 @@ pub enum ProviderErrorCategory {
     TimedOut,
     InspectionFailed,
     Rejected,
+    UnsupportedThinking,
     Protocol,
     Transport,
     MalformedJson,
@@ -626,6 +647,7 @@ mod tests {
         let mut turn = ProviderTurn {
             events,
             owner: None,
+            thinking: None,
         };
         let Some(Ok(ProviderEvent::NativeItemActivity {
             operation: Some(operation),

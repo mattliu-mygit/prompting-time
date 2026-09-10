@@ -1228,6 +1228,7 @@ mod tests {
 
         let error = match app
             .submit(prompting_time_core::app::SubmitRequest {
+                thinking: None,
                 command_id: "command-1".to_owned(),
                 conversation_id: conversation.id,
                 content: "hello".to_owned(),

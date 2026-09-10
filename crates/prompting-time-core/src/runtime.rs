@@ -812,7 +812,11 @@ impl RunSupervisor {
             })?;
         let (run, root) = self
             .store
-            .create_run(request.conversation_id, request.provider)
+            .create_run_with_thinking(
+                request.conversation_id,
+                request.provider,
+                &request.turn.thinking,
+            )
             .await?;
         if !self
             .store
@@ -831,6 +835,13 @@ impl RunSupervisor {
         request: RunRequest,
         submission: NewSubmission,
     ) -> Result<PreparedRunHandle, RuntimeError> {
+        if request.turn.thinking != submission.thinking_decision {
+            return Err(StoreError::InvalidData {
+                entity: "thinking intent",
+                detail: "dispatch decision differs from the durable submission".into(),
+            }
+            .into());
+        }
         let lifecycle = self.lifecycle.lock().await;
         if *lifecycle != Lifecycle::Open {
             return Err(RuntimeError::SupervisorClosed);
@@ -2727,6 +2738,15 @@ async fn execute_attempt(
     let turn = turn_slot
         .as_mut()
         .expect("provider turn was stored before processing");
+    if let Some(configuration) = turn.thinking() {
+        store
+            .persist_owned_thinking_configuration(
+                attempt.run_id,
+                &attempt.dispatch_owner_id,
+                configuration,
+            )
+            .await?;
+    }
     let mut started = false;
     let mut mutation = MutationState::NoneObserved;
     let mut buffered = VecDeque::new();
@@ -3830,6 +3850,7 @@ async fn fail_attempt(
                 DISPATCH_LEASE_DURATION,
                 category,
                 NewFallbackAttempt {
+                    thinking_decision: fallback.turn.thinking.clone(),
                     provider: fallback.provider,
                     native_session_id: fallback.native_session_id.clone(),
                     turn_prompt: fallback.turn.prompt.clone(),
@@ -4335,6 +4356,7 @@ mod tests {
             )
             .unwrap();
         NewSubmission {
+            thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
             command_id: command_id.to_owned(),
             request_hash: format!("hash-{command_id}"),
             conversation_id,
@@ -4345,6 +4367,124 @@ mod tests {
             handoff_hash: None,
             turn_prompt: "fixture turn".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn thinking_persisted_submission_rejects_mismatched_dispatch_intent() {
+        use crate::thinking::{ThinkingDecision, ThinkingPreference};
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("intent mismatch"))
+            .await
+            .unwrap();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let supervisor = RunSupervisor::new(
+            store.clone(),
+            vec![Arc::new(ImmediateAdapter {
+                provider: ProviderId::Codex,
+                reject_before_dispatch: false,
+                start_calls: Some(starts.clone()),
+                held_turns: None,
+            })],
+        )
+        .unwrap();
+        let submission = test_submission("thinking-mismatch", conversation.id, ProviderId::Codex);
+        let request = RunRequest::new(
+            conversation.id,
+            PathBuf::from("/tmp/thinking-fixture"),
+            ProviderId::Codex,
+            TurnRequest::new(&submission.turn_prompt).with_thinking(
+                ThinkingDecision::resolve(
+                    ThinkingPreference::Manual {
+                        level: "high".into(),
+                    },
+                    "fixture",
+                )
+                .unwrap(),
+            ),
+        );
+        assert!(matches!(
+            supervisor.submit_persisted(request, submission).await,
+            Err(RuntimeError::Store(StoreError::InvalidData {
+                entity: "thinking intent",
+                ..
+            }))
+        ));
+        assert!(
+            store
+                .load_submission("thinking-mismatch")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn thinking_direct_primary_and_fallback_audit_the_frozen_decision() {
+        use crate::thinking::{ThinkingDecision, ThinkingPreference};
+        let store = Store::open_in_memory().await.unwrap();
+        let conversation = store
+            .create_conversation(NewConversation::projectless("thinking fallback"))
+            .await
+            .unwrap();
+        let supervisor = RunSupervisor::new(
+            store.clone(),
+            vec![
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Codex,
+                    reject_before_dispatch: true,
+                    start_calls: None,
+                    held_turns: None,
+                }),
+                Arc::new(ImmediateAdapter {
+                    provider: ProviderId::Claude,
+                    reject_before_dispatch: false,
+                    start_calls: None,
+                    held_turns: None,
+                }),
+            ],
+        )
+        .unwrap();
+        let thinking = ThinkingDecision::resolve(
+            ThinkingPreference::Manual {
+                level: "high".into(),
+            },
+            "fixture",
+        )
+        .unwrap();
+        let handle = supervisor
+            .submit(
+                RunRequest::new(
+                    conversation.id,
+                    PathBuf::from("/tmp/thinking-fixture"),
+                    ProviderId::Codex,
+                    TurnRequest::new("fixture").with_thinking(thinking.clone()),
+                )
+                .with_fallback(ProviderId::Claude),
+            )
+            .await
+            .unwrap();
+        let outcome = handle.wait().await.unwrap();
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(
+            store
+                .load_run_thinking(outcome.primary_run_id)
+                .await
+                .unwrap()
+                .0,
+            thinking
+        );
+        assert_eq!(
+            store
+                .load_run_thinking(outcome.fallback_run_id.unwrap())
+                .await
+                .unwrap()
+                .0,
+            thinking
+        );
+        supervisor.shutdown().await.unwrap();
     }
 
     #[tokio::test]

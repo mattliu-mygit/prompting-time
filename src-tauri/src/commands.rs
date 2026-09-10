@@ -233,6 +233,7 @@ pub async fn submit_message(
     let submission = state
         .service()?
         .submit(CoreSubmitRequest {
+            thinking: None,
             command_id: request.command_id,
             conversation_id,
             content: request.text,
