@@ -583,6 +583,22 @@ describe("Composer", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
+  it("shows a Thinking save failure after a prior interruption failure", async () => {
+    const api = actions({ interruptRun: vi.fn().mockRejectedValue(new Error("Interrupt failed")) });
+    saveThinking = vi.fn().mockRejectedValue(new Error("Thinking save failed"));
+    render(<Composer conversation={conversation({ currentRunId: "run-1", provider: "codex", runStatus: "running" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "keep draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt Codex" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Interrupt Codex" }));
+    expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Interrupt failed");
+    fireEvent.click(screen.getByRole("button", { name: "Keep Codex running" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Thinking" }), { target: { value: "manual:high" } });
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Thinking save failed"));
+    expect(screen.queryByText("Interrupt failed")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Thinking" })).toHaveValue("auto");
+    expect(screen.getByLabelText("Message")).toHaveValue("keep draft");
+  });
+
   it("closes a pending provider switch when the active run becomes terminal", async () => {
     const api = actions();
     const view = render(<Composer conversation={conversation({ currentRunId: "run-1", provider: "codex", runStatus: "running" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);

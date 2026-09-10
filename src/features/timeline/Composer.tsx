@@ -340,6 +340,7 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
           <select aria-label="Thinking" aria-describedby={helpId} value={thinkingValue}
             disabled={submitting || thinkingSave?.pending}
             onChange={(event) => {
+              setError(null);
               const value = event.target.value;
               const preference: ThinkingPreference = value.startsWith("manual:")
                 ? { kind: "manual", level: value.slice(7) }
