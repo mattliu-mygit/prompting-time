@@ -20,6 +20,7 @@ import type {
   SubmissionSnapshot,
   TimelinePage,
   DiagnosticsPage,
+  ThinkingPreference,
 } from "../bridge/types";
 
 const PAGE_SIZE = 200;
@@ -45,7 +46,8 @@ export type AppApi = {
   loadApprovals(request: { conversationId: string; cursor: string | null; limit: number; kind: "pending" | "history" }): Promise<ApprovalPage>;
   loadApprovalDetail(request: { approvalId: string }): Promise<ApprovalDetailSnapshot>;
   loadApprovalQuestions(request: { approvalId: string; cursor: string | null; limit: number }): Promise<ApprovalQuestionPage>;
-  submitMessage(request: { conversationId: string; text: string; providerOverride: ProviderId | null; commandId: string }): Promise<SubmissionSnapshot>;
+  submitMessage(request: { conversationId: string; text: string; providerOverride: ProviderId | null; commandId: string; thinking: ThinkingPreference }): Promise<SubmissionSnapshot>;
+  setThinkingPreference(request: { conversationId: string; preference: ThinkingPreference }): Promise<void>;
   steerRun(request: { conversationId: string; runId: string; text: string }): Promise<void>;
   respondToApproval(request: RespondToApprovalRequest): Promise<void>;
   interruptRun(request: { conversationId: string; runId: string }): Promise<void>;
@@ -78,7 +80,7 @@ export type AppActions = ConversationActions & Pick<AppApi, "listRunAudits" | "l
 type DraftSubmission = Readonly<{
   pending: boolean;
   providerOverride: ProviderId | null;
-  command: Readonly<{ id: string; text: string; provider: ProviderId | null }> | null;
+  command: Readonly<{ id: string; text: string; provider: ProviderId | null; thinking: ThinkingPreference }> | null;
   error: string | null;
 }>;
 
@@ -111,6 +113,7 @@ export type AppSnapshot = Readonly<{
   draftsById: Readonly<Record<string, Readonly<{ text: string }>>>;
   composerViewsById: Readonly<Record<string, ComposerView>>;
   submissionsById: Readonly<Record<string, DraftSubmission>>;
+  thinkingSavesById: Readonly<Record<string, Readonly<{ pending: boolean; preference: ThinkingPreference | null; error: string | null }>>>;
 }>;
 
 export type AppStore = {
@@ -131,6 +134,7 @@ export type AppStore = {
   refreshConversation(conversationId: string): void;
   setDraft(conversationId: string, text: string): void;
   resetDraftCommand(conversationId: string): void;
+  setThinkingPreference(conversationId: string, preference: ThinkingPreference): Promise<void>;
   submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null): Promise<boolean>;
   readonly actions: AppActions;
 };
@@ -153,6 +157,7 @@ const emptySnapshot: AppSnapshot = freezeSnapshot({
   draftsById: {},
   composerViewsById: {},
   submissionsById: {},
+  thinkingSavesById: {},
 });
 
 export function createAppStore(api: AppApi): AppStore {
@@ -217,16 +222,47 @@ export function createAppStore(api: AppApi): AppStore {
     }
   }
 
+  async function setThinkingPreference(conversationId: string, preference: ThinkingPreference) {
+    if (disposed || snapshot.thinkingSavesById[conversationId]?.pending) return;
+    const setSave = (pending: boolean, error: string | null) => {
+      if (!disposed) update({ thinkingSavesById: { ...snapshot.thinkingSavesById,
+        [conversationId]: Object.freeze({ pending, preference: pending ? preference : null, error }) } });
+    };
+    const conversation = snapshot.conversationsById[conversationId];
+    if (!conversation?.capabilities.canSend || conversation.archived || conversation.parentId !== null) {
+      setSave(false, "This conversation is read-only.");
+      return;
+    }
+    setSave(true, null);
+    try {
+      await api.setThinkingPreference({ conversationId, preference });
+      if (disposed) return;
+      // Only patch the acknowledged preference into the current summary, never a captured run.
+      const current = snapshot.conversationsById[conversationId];
+      if (current) {
+        eventRevision += 1;
+        requestConversationRefresh(conversationId);
+        update({ conversationsById: { ...snapshot.conversationsById,
+          [conversationId]: Object.freeze({ ...current, thinkingPreference: Object.freeze({ ...preference }) }) } });
+      }
+      setSave(false, null);
+    } catch (reason) {
+      setSave(false, reason instanceof Error ? reason.message : "Thinking could not be saved.");
+    }
+  }
+
   async function submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null) {
     const draft = snapshot.draftsById[conversationId];
     const previous = snapshot.submissionsById[conversationId];
     const conversation = snapshot.conversationsById[conversationId];
-    if (disposed || !conversation?.capabilities.canSend || !draft?.text.trim() || previous?.pending) return false;
+    if (disposed || !conversation?.capabilities.canSend || !draft?.text.trim() || previous?.pending
+      || snapshot.thinkingSavesById[conversationId]?.pending) return false;
     const command = runId ? null : previous?.command
       && previous.command.text === draft.text
       && previous.command.provider === providerOverride
       ? previous.command
-      : Object.freeze({ id: globalThis.crypto.randomUUID(), text: draft.text, provider: providerOverride });
+      : Object.freeze({ id: globalThis.crypto.randomUUID(), text: draft.text, provider: providerOverride,
+        thinking: Object.freeze({ ...conversation.thinkingPreference }) });
     setSubmission(conversationId, { pending: true, providerOverride, command, error: null });
     try {
       if (runId) await api.steerRun({ conversationId, runId, text: draft.text });
@@ -235,6 +271,7 @@ export function createAppStore(api: AppApi): AppStore {
         text: command.text,
         providerOverride: command.provider,
         commandId: command.id,
+        thinking: command.thinking,
       });
       if (disposed) return false;
       // Identity protects even an edit away from and back to the submitted text.
@@ -739,6 +776,7 @@ export function createAppStore(api: AppApi): AppStore {
     initialize,
     setDraft,
     resetDraftCommand,
+    setThinkingPreference,
     submitDraft,
     loadChildPage,
     toggleConversation,
@@ -764,7 +802,7 @@ export function createAppStore(api: AppApi): AppStore {
       unlisten?.();
       unlisten = null;
       listeners.clear();
-      update({ draftsById: {}, composerViewsById: {}, submissionsById: {} });
+      update({ draftsById: {}, composerViewsById: {}, submissionsById: {}, thinkingSavesById: {} });
     },
     setStatusFilter(statusFilter) {
       if (snapshot.statusFilter !== statusFilter) update({ statusFilter });
@@ -870,6 +908,7 @@ function freezeSnapshot(snapshot: AppSnapshot): AppSnapshot {
     conversationVersions: Object.freeze(snapshot.conversationVersions),
     draftsById: Object.freeze(snapshot.draftsById),
     submissionsById: Object.freeze(snapshot.submissionsById),
+    thinkingSavesById: Object.freeze(snapshot.thinkingSavesById),
   });
 }
 

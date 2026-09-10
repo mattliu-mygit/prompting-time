@@ -29,6 +29,7 @@ import {
   respondToApproval,
   steerRun,
   submitMessage,
+  setThinkingPreference,
 } from "./bridge/api";
 import "./styles/tokens.css";
 import "./styles/app.css";
@@ -51,6 +52,7 @@ const store = createAppStore({
   loadApprovalDetail,
   loadApprovalQuestions,
   submitMessage,
+  setThinkingPreference,
   steerRun,
   respondToApproval,
   interruptRun,

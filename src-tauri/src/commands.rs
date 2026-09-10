@@ -233,7 +233,7 @@ pub async fn submit_message(
     let submission = state
         .service()?
         .submit(CoreSubmitRequest {
-            thinking: None,
+            thinking: request.thinking.map(Into::into),
             command_id: request.command_id,
             conversation_id,
             content: request.text,
@@ -241,6 +241,7 @@ pub async fn submit_message(
         })
         .await?;
     let snapshot = SubmissionSnapshot {
+        thinking_decision: submission.thinking_decision.into(),
         run_id: submission.handle.run_id().to_string(),
         status: submission.handle.status().into(),
         provider: submission.decision.provider.into(),
@@ -248,6 +249,22 @@ pub async fn submit_message(
         routing_explanation: submission.decision.explanation,
     };
     Ok(snapshot)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_thinking_preference(
+    state: State<'_, Arc<AppState>>,
+    request: SetThinkingPreferenceRequest,
+) -> Result<(), CommandError> {
+    state
+        .service()?
+        .set_thinking_preference(
+            parse_conversation_id(&request.conversation_id)?,
+            request.preference.into(),
+        )
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -387,6 +404,7 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             load_approval_questions,
             create_conversation,
             submit_message,
+            set_thinking_preference,
             steer_run,
             respond_to_approval,
             interrupt_run,
@@ -529,6 +547,9 @@ mod tests {
         let id = overview.conversation.id.to_string();
         let json = serde_json::to_value(ConversationSummary::from(overview)).unwrap();
         assert_eq!(json["id"], id);
+        assert_eq!(json["thinkingPreference"], serde_json::json!({ "kind": "auto" }));
+        assert!(json.get("thinkingDecision").is_some_and(serde_json::Value::is_null));
+        assert!(json.get("thinkingConfiguration").is_some_and(serde_json::Value::is_null));
         assert!(json.get("parentId").is_some_and(serde_json::Value::is_null));
         assert_eq!(json["hasChildren"], false);
         assert!(json.get("summary").is_some_and(serde_json::Value::is_null));
@@ -872,6 +893,9 @@ mod tests {
     #[test]
     fn provider_run_audit_boundary_exposes_only_app_owned_ids_and_bounded_content() {
         let snapshot = RunAuditDetailSnapshot {
+            thinking_decision: prompting_time_core::thinking::ThinkingDecision::provider_default()
+                .into(),
+            thinking_configuration: None,
             id: RunId::new().to_string(),
             provider: ProviderId::Claude,
             status: RunStatus::Completed,
@@ -917,6 +941,41 @@ mod tests {
         assert!(detail.truncated);
         assert!(encoded.len() <= 256 * 1024);
         assert!(detail.input.is_none());
+    }
+
+    #[test]
+    fn thinking_requests_preserve_manual_levels_and_legacy_omission() {
+        let legacy: SubmitMessageRequest = serde_json::from_value(serde_json::json!({
+            "conversationId": "fixture", "text": "hello", "providerOverride": null, "commandId": "command"
+        })).unwrap();
+        assert!(legacy.thinking.is_none());
+        for preference in [
+            serde_json::json!({"kind": "auto"}),
+            serde_json::json!({"kind": "providerDefault"}),
+            serde_json::json!({"kind": "manual", "level": "xhigh"}),
+        ] {
+            let request: SetThinkingPreferenceRequest = serde_json::from_value(serde_json::json!({
+                "conversationId": "fixture", "preference": preference
+            })).unwrap();
+            let core: prompting_time_core::thinking::ThinkingPreference = request.preference.into();
+            assert_eq!(serde_json::to_value(ThinkingPreference::from(core)).unwrap(), preference);
+        }
+        let decision = prompting_time_core::thinking::ThinkingDecision::resolve(
+            prompting_time_core::thinking::ThinkingPreference::Manual { level: "high".into() },
+            "fixture",
+        )
+        .unwrap();
+        let json = serde_json::to_value(ThinkingDecision::from(decision.clone())).unwrap();
+        assert_eq!(json["requestedEffort"], "high");
+        assert_eq!(json["reason"], decision.reason);
+        let configuration = prompting_time_core::thinking::ThinkingConfiguration {
+            model: "fixture-model".into(),
+            supported_efforts: vec!["high".into()],
+            configured_effort: None,
+        };
+        assert_eq!(serde_json::to_value(ThinkingConfiguration::from(configuration)).unwrap(), serde_json::json!({
+            "model": "fixture-model", "supportedEfforts": ["high"], "configuredEffort": null
+        }));
     }
 
     #[test]

@@ -11,6 +11,102 @@ import type {
 import { createAppStore, selectVisibleConversations, type AppApi } from "./store";
 
 describe("in-session drafts", () => {
+  it("saves thinking independently and freezes uncertain send retries", async () => {
+    const { api } = createFakeApi();
+    let saved = conversation("c1", { thinkingPreference: { kind: "manual", level: "high" } });
+    api.listConversations = vi.fn(async () => ({ items: [saved], nextCursor: null }));
+    api.loadConversation = vi.fn(async () => saved);
+    api.setThinkingPreference = vi.fn(async ({ preference }) => { saved = { ...saved, thinkingPreference: preference }; });
+    api.submitMessage = vi.fn().mockRejectedValue(Object.assign(new Error("Unknown outcome"), { code: "outcome-unknown" }));
+    const store = createAppStore(api);
+    await store.initialize();
+    store.setDraft("c1", "review this");
+    await store.submitDraft("c1", null, null);
+    const original = vi.mocked(api.submitMessage).mock.calls[0]![0];
+    expect(original.thinking).toEqual({ kind: "manual", level: "high" });
+    await store.setThinkingPreference("c1", { kind: "manual", level: "low" });
+    await waitFor(() => expect(store.getSnapshot().conversationsById.c1?.thinkingPreference).toEqual({ kind: "manual", level: "low" }));
+    await store.submitDraft("c1", null, null);
+    expect(vi.mocked(api.submitMessage).mock.calls[1]![0]).toEqual(original);
+    store.setDraft("c1", "different text");
+    await store.submitDraft("c1", null, null);
+    expect(vi.mocked(api.submitMessage).mock.calls[2]![0].thinking).toEqual({ kind: "manual", level: "low" });
+    await store.retry();
+    expect(store.getSnapshot().conversationsById.c1?.thinkingPreference).toEqual({ kind: "manual", level: "low" });
+  });
+
+  it("blocks sending during a save, preserves drafts and shows save failure", async () => {
+    const { api } = createFakeApi();
+    let reject!: (reason: Error) => void;
+    api.setThinkingPreference = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+    const store = createAppStore(api);
+    await store.initialize();
+    store.setDraft("c1", "keep draft");
+    const saving = store.setThinkingPreference("c1", { kind: "manual", level: "high" });
+    expect(store.getSnapshot().thinkingSavesById.c1?.pending).toBe(true);
+    expect(await store.submitDraft("c1", null, null)).toBe(false);
+    await store.setThinkingPreference("c1", { kind: "manual", level: "low" });
+    expect(api.setThinkingPreference).toHaveBeenCalledTimes(1);
+    reject(new Error("Save unavailable"));
+    await saving;
+    expect(store.getSnapshot().thinkingSavesById.c1).toMatchObject({ pending: false, error: "Save unavailable" });
+    expect(store.getSnapshot().conversationsById.c1?.thinkingPreference).toEqual({ kind: "auto" });
+    expect(store.getSnapshot().draftsById.c1?.text).toBe("keep draft");
+    expect(api.submitMessage).not.toHaveBeenCalled();
+  });
+
+  it("refuses observed child preference changes locally", async () => {
+    const { api } = createFakeApi();
+    api.listConversations = vi.fn().mockResolvedValue({ items: [conversation("c1", { capabilities: child("x", "c1").capabilities })], nextCursor: null });
+    api.setThinkingPreference = vi.fn();
+    const store = createAppStore(api);
+    await store.initialize();
+    await store.setThinkingPreference("c1", { kind: "manual", level: "high" });
+    expect(api.setThinkingPreference).not.toHaveBeenCalled();
+    expect(store.getSnapshot().thinkingSavesById.c1?.error).toMatch(/read-only/i);
+  });
+
+  it("keeps newer run metadata on save completion and changes no other conversation", async () => {
+    const { api, emit } = createFakeApi();
+    let resolve!: () => void;
+    api.setThinkingPreference = vi.fn(() => new Promise<void>(finish => { resolve = finish; }));
+    let latest = conversation("c1");
+    api.loadConversation = vi.fn(async () => latest);
+    const store = createAppStore(api);
+    await store.initialize();
+    const other = store.getSnapshot().conversationsById.c2;
+    const listCalls = vi.mocked(api.listConversations).mock.calls.length;
+    const saving = store.setThinkingPreference("c1", { kind: "manual", level: "low" });
+    latest = conversation("c1", { currentRunId: "new-run", runStatus: "completed",
+      thinkingDecision: { preference: { kind: "manual", level: "high" }, requestedEffort: "high", reason: "Frozen high" } });
+    emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
+    await waitFor(() => expect(store.getSnapshot().conversationsById.c1?.currentRunId).toBe("new-run"));
+    latest = { ...latest, thinkingPreference: { kind: "manual", level: "low" } };
+    resolve();
+    await saving;
+    expect(store.getSnapshot().conversationsById.c1).toMatchObject({ currentRunId: "new-run", runStatus: "completed",
+      thinkingPreference: { kind: "manual", level: "low" }, thinkingDecision: { requestedEffort: "high" } });
+    expect(store.getSnapshot().conversationsById.c2).toBe(other);
+    expect(vi.mocked(api.listConversations).mock.calls).toHaveLength(listCalls);
+    store.setDraft("c1", "direction");
+    await store.submitDraft("c1", null, "new-run");
+    expect(api.steerRun).toHaveBeenCalledExactlyOnceWith({ conversationId: "c1", runId: "new-run", text: "direction" });
+    expect(api.setThinkingPreference).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears pending thinking state on disposal and ignores its late completion", async () => {
+    const { api } = createFakeApi();
+    let resolve!: () => void;
+    api.setThinkingPreference = vi.fn(() => new Promise<void>(finish => { resolve = finish; }));
+    const store = createAppStore(api);
+    await store.initialize();
+    const saving = store.setThinkingPreference("c1", { kind: "manual", level: "high" });
+    store.dispose();
+    resolve();
+    await saving;
+    expect(store.getSnapshot().thinkingSavesById).toEqual({});
+  });
+
   it("retains drafts through refresh and archive, removes empty entries, and drops them on disposal", async () => {
     const { api } = createFakeApi();
     const store = createAppStore(api);
@@ -33,7 +129,7 @@ describe("in-session drafts", () => {
     const pending = new Promise<void>((finish) => { resolve = finish; });
     api.submitMessage = vi.fn<AppApi["submitMessage"]>(async () => {
       await pending;
-      return { runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" };
+      return { runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test", thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "fixture" } };
     });
     api.steerRun = vi.fn(() => pending);
     const store = createAppStore(api);
@@ -101,12 +197,14 @@ function conversation(
     provider: "codex",
     runStatus: "running",
     rollupStatus: "active",
+    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     ...overrides,
   };
 }
 
 function conversationActions(): Pick<
   AppApi,
+  | "setThinkingPreference"
   | "loadTimeline"
   | "loadDiagnostics"
   | "loadEventDetail"
@@ -126,6 +224,7 @@ function conversationActions(): Pick<
   | "pickProjectDirectory"
 > {
   return {
+    setThinkingPreference: vi.fn(),
     loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
     loadEventDetail: vi.fn(),
@@ -156,6 +255,7 @@ function createFakeApi() {
   };
 
   const api: AppApi = {
+    setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({
       providers: [
         {

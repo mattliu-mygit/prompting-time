@@ -55,13 +55,13 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 function conversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
-  return { id: "conversation-1", title: "Work", parentId: null, hasChildren: false, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "codex", runStatus: "running", rollupStatus: "active", capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null }, ...overrides };
+  return { thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "conversation-1", title: "Work", parentId: null, hasChildren: false, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "codex", runStatus: "running", rollupStatus: "active", capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null }, ...overrides };
 }
 
 describe("Timeline", () => {
   it("explains missing recorded child history without greeting or duplicate activity cards", async () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([], null)) });
-    const child: ConversationSummary = { id: "reviewer", title: "Reviewer", parentId: "conversation-1", hasChildren: true, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "claude", runStatus: "completed", rollupStatus: "completed", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } };
+    const child: ConversationSummary = { thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "reviewer", title: "Reviewer", parentId: "conversation-1", hasChildren: true, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "claude", runStatus: "completed", rollupStatus: "completed", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } };
     render(<Timeline conversation={child} refreshVersion={0} actions={api} />);
     expect(await screen.findByText("No recorded activity is available.")).toBeVisible();
     expect(screen.queryByText(/captured activity may be incomplete/i)).not.toBeInTheDocument();

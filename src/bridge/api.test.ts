@@ -27,6 +27,7 @@ import {
   respondToApproval,
   steerRun,
   submitMessage,
+  setThinkingPreference,
 } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -37,6 +38,13 @@ const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 
 describe("desktop bridge", () => {
+  it("saves an explicit thinking preference without sending a message", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await setThinkingPreference({ conversationId: "fixture", preference: { kind: "manual", level: "high" } });
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith("set_thinking_preference", { request: {
+      conversationId: "fixture", preference: { kind: "manual", level: "high" },
+    } });
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });

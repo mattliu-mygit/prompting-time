@@ -87,6 +87,9 @@ impl From<CreateConversationRequest> for CoreConversationRequest {
 impl From<ConversationOverview> for ConversationSummary {
     fn from(value: ConversationOverview) -> Self {
         Self {
+            thinking_preference: value.thinking_preference.into(),
+            thinking_decision: value.thinking_decision.map(Into::into),
+            thinking_configuration: value.thinking_configuration.map(Into::into),
             id: value.conversation.id.to_string(),
             parent_id: value.conversation.parent_id.map(|id| id.to_string()),
             title: value.conversation.title,
@@ -621,6 +624,8 @@ impl From<prompting_time_core::store::RunAuditPage> for RunAuditPage {
 impl From<prompting_time_core::store::RunAuditDetailRecord> for RunAuditDetailSnapshot {
     fn from(value: prompting_time_core::store::RunAuditDetailRecord) -> Self {
         Self {
+            thinking_decision: value.thinking_decision.into(),
+            thinking_configuration: value.thinking_configuration.map(Into::into),
             id: value.id.to_string(),
             provider: value.provider.into(),
             status: value.status.into(),
@@ -629,6 +634,46 @@ impl From<prompting_time_core::store::RunAuditDetailRecord> for RunAuditDetailSn
             routing_truncated: value.routing_truncated,
             handoff: value.handoff,
             handoff_truncated: value.handoff_truncated,
+        }
+    }
+}
+
+impl From<ThinkingPreference> for prompting_time_core::thinking::ThinkingPreference {
+    fn from(value: ThinkingPreference) -> Self {
+        match value {
+            ThinkingPreference::Auto => Self::Auto,
+            ThinkingPreference::ProviderDefault => Self::ProviderDefault,
+            ThinkingPreference::Manual { level } => Self::Manual { level },
+        }
+    }
+}
+
+impl From<prompting_time_core::thinking::ThinkingPreference> for ThinkingPreference {
+    fn from(value: prompting_time_core::thinking::ThinkingPreference) -> Self {
+        match value {
+            prompting_time_core::thinking::ThinkingPreference::Auto => Self::Auto,
+            prompting_time_core::thinking::ThinkingPreference::ProviderDefault => Self::ProviderDefault,
+            prompting_time_core::thinking::ThinkingPreference::Manual { level } => Self::Manual { level },
+        }
+    }
+}
+
+impl From<prompting_time_core::thinking::ThinkingDecision> for ThinkingDecision {
+    fn from(value: prompting_time_core::thinking::ThinkingDecision) -> Self {
+        Self {
+            preference: value.preference.into(),
+            requested_effort: value.requested_effort,
+            reason: value.reason,
+        }
+    }
+}
+
+impl From<prompting_time_core::thinking::ThinkingConfiguration> for ThinkingConfiguration {
+    fn from(value: prompting_time_core::thinking::ThinkingConfiguration) -> Self {
+        Self {
+            model: value.model,
+            supported_efforts: value.supported_efforts,
+            configured_effort: value.configured_effort,
         }
     }
 }

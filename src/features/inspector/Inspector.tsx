@@ -236,6 +236,12 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
         {selectedRun ? (
           <div className="run-audit-detail">
             <h3>{providerNames[selectedRun.provider]} run detail</h3>
+            <h4>Thinking</h4>
+            {selectedRun.thinkingDecision ? <>
+              <p>Requested: {selectedRun.thinkingDecision.requestedEffort ?? "Provider default"} · configured: {selectedRun.thinkingConfiguration ? selectedRun.thinkingConfiguration.configuredEffort ?? "not set" : "unreported"} · model: {selectedRun.thinkingConfiguration?.model ?? "unreported"}</p>
+              <p>{selectedRun.thinkingDecision.reason}</p>
+              <p className="route-note">Configured effort reports a provider setting, not a thinking-token count.</p>
+            </> : <p>No thinking decision was recorded for this run.</p>}
             <p>{selectedRun.routing?.explanation ?? "No routing decision was recorded for this run."}</p>
             <p><strong>Reason:</strong> {selectedRun.reason ? humanize(selectedRun.reason) : "Unavailable"}</p>
             {selectedRun.routingTruncated ? <p>Detailed routing evaluation exceeded the audit display limit.</p> : null}

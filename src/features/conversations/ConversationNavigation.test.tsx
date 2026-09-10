@@ -5,6 +5,7 @@ import { ConversationNavigation } from "./ConversationNavigation";
 
 function conversation(id: string, title: string, parentId: string | null): ConversationSummary {
   return { id, title, parentId, hasChildren: id !== "grandchild", summary: null,
+    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     capabilities: { canSend: parentId === null, canInterrupt: parentId === null, canArchive: parentId === null, canRoute: parentId === null, unavailableReason: parentId ? "Recorded activity only." : null },
     routingProfile: "balanced", workspaceId: null, archived: false, projectRoot: null,
     currentRunId: "run", provider: "codex", runStatus: "running", rollupStatus: "active" };

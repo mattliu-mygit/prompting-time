@@ -1,24 +1,30 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { type ComponentProps } from "react";
+import { useSyncExternalStore, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary, ProviderInstallation, TimelineItem } from "../../bridge/types";
 import { BridgeError } from "../../bridge/api";
-import { createAppStore, type AppStore, type ConversationActions } from "../../app/store";
+import { createAppStore, type AppApi, type AppStore, type ConversationActions } from "../../app/store";
 import { Composer as StoreComposer } from "./Composer";
 import { Timeline } from "./Timeline";
 
 let testStore: AppStore;
 let currentActions: ConversationActions;
+let saveThinking: AppApi["setThinkingPreference"];
 
 beforeEach(async () => {
   currentActions = actions();
+  let savedConversations = [conversation(), conversation({ id: "conversation-2" })];
+  saveThinking = vi.fn(async ({ conversationId, preference }) => {
+    savedConversations = savedConversations.map(item => item.id === conversationId ? { ...item, thinkingPreference: preference } : item);
+  });
   testStore = createAppStore({
     ...currentActions,
     submitMessage: request => currentActions.submitMessage(request),
     steerRun: request => currentActions.steerRun(request),
     getBootstrap: vi.fn().mockResolvedValue({ providers, startupDiagnostic: null }),
-    listConversations: vi.fn().mockResolvedValue({ items: [conversation(), conversation({ id: "conversation-2" })], nextCursor: null }),
-    loadConversation: vi.fn(), listChildConversations: vi.fn(), loadConversationPath: vi.fn(),
+    setThinkingPreference: request => saveThinking(request),
+    listConversations: vi.fn(async () => ({ items: savedConversations, nextCursor: null })),
+    loadConversation: vi.fn(async ({ conversationId }) => savedConversations.find(item => item.id === conversationId)!), listChildConversations: vi.fn(), loadConversationPath: vi.fn(),
     listenToAppEvents: vi.fn().mockResolvedValue(() => {}), listRunAudits: vi.fn(),
     loadRunAudit: vi.fn(), createConversation: vi.fn(), archiveConversation: vi.fn(),
     inspectProject: vi.fn(), pickProjectDirectory: vi.fn(),
@@ -39,6 +45,7 @@ const providers: ProviderInstallation[] = [
 
 function conversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
+    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     id: "conversation-1", title: "Work", workspaceId: null, archived: false,
     parentId: null, hasChildren: false, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
@@ -58,6 +65,82 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 describe("Composer", () => {
+  it("saves immediately, disables send and choice while pending, and restores choice on failure", async () => {
+    let reject!: (reason: Error) => void;
+    saveThinking = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+    function ConnectedComposer() {
+      const snapshot = useSyncExternalStore(testStore.subscribe, testStore.getSnapshot);
+      return <Composer conversation={snapshot.conversationsById["conversation-1"]!} providers={providers} routingProfile="balanced" actions={currentActions} onMutation={vi.fn()} />;
+    }
+    render(<ConnectedComposer />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "keep draft" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Thinking" }), { target: { value: "manual:high" } });
+    expect(saveThinking).toHaveBeenCalledExactlyOnceWith({ conversationId: "conversation-1", preference: { kind: "manual", level: "high" } });
+    expect(screen.getByRole("combobox", { name: "Thinking" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+    await act(async () => reject(new Error("Preference save failed")));
+    expect(screen.getByRole("alert")).toHaveTextContent("Preference save failed");
+    expect(screen.getByRole("combobox", { name: "Thinking" })).toHaveValue("auto");
+    expect(screen.getByLabelText("Message")).toHaveValue("keep draft");
+  });
+
+  it("allows next-turn preference changes while steering keeps the active request unchanged", async () => {
+    render(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={currentActions} onMutation={vi.fn()} />);
+    expect(screen.getByText("Thinking · Next turn")).toBeVisible();
+    fireEvent.change(screen.getByRole("combobox", { name: "Thinking" }), { target: { value: "manual:low" } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Thinking" })).toBeEnabled());
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "direction" } });
+    fireEvent.click(screen.getByRole("button", { name: "Steer Codex" }));
+    await waitFor(() => expect(currentActions.steerRun).toHaveBeenCalledExactlyOnceWith({ conversationId: "conversation-1", runId: "run", text: "direction" }));
+    expect(saveThinking).toHaveBeenCalledTimes(1);
+    expect(currentActions.submitMessage).not.toHaveBeenCalled();
+  });
+
+  it("retries the frozen command even after refreshed metadata reveals an active run", async () => {
+    const api = actions({ submitMessage: vi.fn().mockRejectedValue(new BridgeError("outcome-unknown", "Unknown outcome", null)) });
+    const view = render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "review this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Retry send" });
+    const original = vi.mocked(api.submitMessage).mock.calls[0]![0];
+    view.rerender(<Composer conversation={conversation({ currentRunId: "accepted", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry send" }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.submitMessage).mock.calls[1]![0]).toEqual(original);
+    expect(api.steerRun).not.toHaveBeenCalled();
+  });
+  it("offers saved Auto and common Thinking levels with honest pre-dispatch help", () => {
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    const thinking = screen.getByRole("combobox", { name: "Thinking" });
+    expect(thinking).toHaveValue("auto");
+    expect(within(thinking).getAllByRole("option").map(option => option.textContent)).toEqual(["Auto", "Provider default", "Low", "Medium", "High"]);
+    expect(screen.queryByText(/configured High/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Composer help" }));
+    expect(screen.getByText(/Auto chooses effort locally/)).toBeVisible();
+  });
+
+  it("distinguishes a reported configuration with no effort setting from an unreported configuration", () => {
+    render(<Composer conversation={conversation({ thinkingDecision: { preference: { kind: "providerDefault" }, requestedEffort: null, reason: "Native default." },
+      thinkingConfiguration: { model: "fixture", supportedEfforts: [], configuredEffort: null } })} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    expect(screen.getByText("Requested Provider default · configured effort not set")).toBeVisible();
+    expect(screen.queryByText(/configuration unreported/)).not.toBeInTheDocument();
+  });
+
+  it("filters extra effort levels by provider and preserves an unsupported saved choice", () => {
+    const saved = conversation({ provider: "codex", thinkingPreference: { kind: "manual", level: "xhigh" },
+      thinkingConfiguration: { model: "fixture-model", supportedEfforts: ["low", "medium", "high", "xhigh"], configuredEffort: "medium" },
+      thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "Engineering task." } });
+    const view = render(<Composer conversation={saved} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    expect(screen.getByRole("option", { name: "Xhigh" })).toBeInTheDocument();
+    expect(screen.getByText("Auto → High · configured Medium")).toBeVisible();
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), { target: { value: "claude" } });
+    expect(screen.getByRole("option", { name: /Xhigh.*saved/ })).toBeInTheDocument();
+    expect(screen.getByText(/Xhigh is not reported/)).toBeVisible();
+    view.rerender(<Composer conversation={{ ...saved, thinkingPreference: { kind: "auto" } }} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    expect(screen.queryByRole("option", { name: /Xhigh/ })).not.toBeInTheDocument();
+  });
+
   it.each(["empty", "lifecycle", "tool", "message"] as const)("keeps the child completeness caveat visible with %s history", async kind => {
     const child = conversation({ id: "reviewer", parentId: "conversation-1", capabilities: {
       canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only.",
@@ -181,7 +264,7 @@ describe("Composer", () => {
     });
     expect(submitMessage).toHaveBeenCalledTimes(1);
     expect(field).toHaveValue("draft");
-    await act(async () => finish({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" }));
+    await act(async () => finish({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test", thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "fixture" } }));
     fireEvent.change(field, { target: { value: "next draft" } });
     expect(fireEvent.keyDown(field, { key: "Enter", repeat: true })).toBe(false);
     expect(submitMessage).toHaveBeenCalledTimes(1);
@@ -358,7 +441,7 @@ describe("Composer", () => {
     view.rerender(<Composer key="new" conversation={conversation({ id: "conversation-2" })} providers={providers} routingProfile="balanced" actions={api} onMutation={onMutation} messageRef={messageRef} />);
     const provider = screen.getByRole("combobox", { name: "Provider" });
     provider.focus();
-    await act(async () => finish({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" }));
+    await act(async () => finish({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test", thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "fixture" } }));
     expect(provider).toHaveFocus();
   });
   it("can interrupt steerable Codex when the other provider is unavailable", async () => {

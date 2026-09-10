@@ -9,6 +9,7 @@ import type { ConversationSummary, ListChildConversationsRequest, LoadConversati
 
 function createdConversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
+    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     id: "new-1", title: "synthetic-project", routingProfile: "bestFit", workspaceId: "w-1",
     parentId: null, hasChildren: false, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
@@ -294,6 +295,7 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
     capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false,
       unavailableReason: "Recorded child activity is read-only." } });
   return {
+    setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({
       providers: [
         {
@@ -560,7 +562,7 @@ describe("App", () => {
     fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter" });
     expect(submitMessage).toHaveBeenCalledTimes(1);
     select("b");
-    await act(async () => pending.resolve({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test" }));
+    await act(async () => pending.resolve({ runId: "run", status: "queued", provider: "codex", duplicate: false, routingExplanation: "test", thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "fixture" } }));
     expect(screen.getByLabelText("Message")).toHaveValue("B draft");
     select("a");
     expect(screen.getByLabelText("Message")).toHaveValue("");
@@ -677,6 +679,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(submitMessage).toHaveBeenCalledWith({
       conversationId: "new-1", text: "Explain the synthetic project", providerOverride: null, commandId: expect.any(String),
+      thinking: { kind: "auto" },
     }));
   });
 

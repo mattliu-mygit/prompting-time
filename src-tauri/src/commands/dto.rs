@@ -55,9 +55,43 @@ pub struct LoadConversationRequest {
     pub conversation_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ThinkingPreference {
+    Auto,
+    ProviderDefault,
+    Manual { level: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingDecision {
+    pub preference: ThinkingPreference,
+    pub requested_effort: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingConfiguration {
+    pub model: String,
+    pub supported_efforts: Vec<String>,
+    pub configured_effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SetThinkingPreferenceRequest {
+    pub conversation_id: String,
+    pub preference: ThinkingPreference,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSummary {
+    pub thinking_preference: ThinkingPreference,
+    pub thinking_decision: Option<ThinkingDecision>,
+    pub thinking_configuration: Option<ThinkingConfiguration>,
     pub id: String,
     pub parent_id: Option<String>,
     pub title: String,
@@ -277,6 +311,8 @@ pub struct ProjectPathSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitMessageRequest {
+    #[specta(optional)]
+    pub thinking: Option<ThinkingPreference>,
     pub conversation_id: String,
     pub text: String,
     pub provider_override: Option<ProviderId>,
@@ -297,6 +333,7 @@ pub enum RunStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmissionSnapshot {
+    pub thinking_decision: ThinkingDecision,
     pub run_id: String,
     pub status: RunStatus,
     pub provider: ProviderId,
@@ -781,6 +818,8 @@ pub struct RunAuditPage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAuditDetailSnapshot {
+    pub thinking_decision: ThinkingDecision,
+    pub thinking_configuration: Option<ThinkingConfiguration>,
     pub id: String,
     pub provider: ProviderId,
     pub status: RunStatus,

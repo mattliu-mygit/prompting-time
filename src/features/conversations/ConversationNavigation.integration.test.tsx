@@ -16,6 +16,7 @@ it("navigates a known descendant from palette to parent and root without changin
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   const root: ConversationSummary = {
+    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     id: "root", parentId: null, title: "Compiler", hasChildren: true, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     routingProfile: "balanced", workspaceId: null, archived: false, projectRoot: null,
@@ -26,6 +27,7 @@ it("navigates a known descendant from palette to parent and root without changin
   const grandchild: ConversationSummary = { ...child, id: "grandchild", parentId: "child", title: "Researcher", hasChildren: false };
   const nodes: Record<string, ConversationSummary> = { root, child, grandchild };
   const api: AppApi = {
+    setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({ providers: [], startupDiagnostic: null }),
     listConversations: vi.fn().mockResolvedValue({ items: [root], nextCursor: null }),
     loadConversation: vi.fn(({ conversationId }) => Promise.resolve(nodes[conversationId]!)),

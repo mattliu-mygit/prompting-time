@@ -461,6 +461,7 @@ button:disabled {
 }
 
 .composer-provider select,
+.composer-thinking select,
 .message-field textarea,
 .approval-question input[type="text"],
 .approval-question input[type="password"] {
@@ -529,6 +530,27 @@ button:disabled {
   min-height: var(--control-target);
   font-size: var(--font-size-ui);
   padding: 0.3rem;
+}
+.composer-thinking {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--font-size-secondary);
+  flex-wrap: wrap;
+}
+.composer-thinking select {
+  min-height: var(--control-target);
+  max-width: 100%;
+  width: 9rem;
+  padding: 0.3rem;
+  font-size: var(--font-size-ui);
+}
+.thinking-decision {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-secondary);
+  overflow-wrap: anywhere;
 }
 .composer-provider {
   min-width: 0;

@@ -52,6 +52,7 @@ const approval: ApprovalSnapshot = {
 };
 
 const conversation: ConversationSummary = {
+  thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
   parentId: null, hasChildren: false, summary: null,
   capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
   id: "conversation-1", title: "Work", workspaceId: "workspace-1", archived: false,
@@ -65,6 +66,20 @@ const providers: ProviderInstallation[] = [
 ];
 
 describe("ApprovalCard", () => {
+  it("shows the selected run's frozen thinking and configuration independently of next-turn choice", async () => {
+    const api = actions({
+      listRunAudits: vi.fn().mockResolvedValue({ items: [{ id: "old-run", provider: "codex", status: "completed", reason: null, hasHandoff: false }], nextCursor: null }),
+      loadRunAudit: vi.fn().mockResolvedValue({ id: "old-run", provider: "codex", status: "completed", routing: null, reason: null,
+        handoff: null, handoffTruncated: false, routingTruncated: false,
+        thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "Engineering task." },
+        thinkingConfiguration: { model: "fixture-model", supportedEfforts: ["low", "medium", "high"], configuredEffort: "medium" } }),
+    });
+    render(<Inspector conversation={{ ...conversation, thinkingPreference: { kind: "manual", level: "low" } }} providers={providers} refreshVersion={0} actions={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect Codex run 1" }));
+    expect(await screen.findByText("Requested: high · configured: medium · model: fixture-model")).toBeVisible();
+    expect(screen.getByText("Engineering task.")).toBeVisible();
+    expect(screen.queryByText("Requested: low")).not.toBeInTheDocument();
+  });
   it("keeps inherited workspace but hides unavailable child control metadata", async () => {
     const api = actions({ loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }) });
     render(<Inspector conversation={{ ...conversation, id: "reviewer", parentId: "conversation-1", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } }} providers={providers} refreshVersion={0} actions={api} />);

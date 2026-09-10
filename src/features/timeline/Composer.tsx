@@ -6,6 +6,7 @@ import type {
   ProviderId,
   ProviderInstallation,
   RoutingProfile,
+  ThinkingPreference,
 } from "../../bridge/types";
 import type { AppStore, ConversationActions } from "../../app/store";
 import { MessageContent } from "./MessageContent";
@@ -41,6 +42,8 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const text = snapshot.draftsById[conversation.id]?.text ?? "";
   const submission = snapshot.submissionsById[conversation.id];
+  const thinkingSave = snapshot.thinkingSavesById[conversation.id];
+  const thinkingPreference = thinkingSave?.preference ?? conversation.thinkingPreference;
   const composerView = snapshot.composerViewsById[conversation.id];
   const preview = composerView?.preview ?? false;
   const setPreview = (preview: boolean) => store.setComposerView(conversation.id, { preview });
@@ -53,7 +56,8 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
   const [localSubmitting, setSubmitting] = useState(false);
   const submitting = localSubmitting || submission?.pending === true;
   const [localError, setError] = useState<string | null>(null);
-  const error = localError ?? submission?.error ?? null;
+  const error = localError ?? thinkingSave?.error ?? submission?.error ?? null;
+  const retrying = submission?.command != null && submission.error !== null;
   const providerSelect = useRef<HTMLSelectElement>(null);
   const localMessageField = useRef<HTMLTextAreaElement>(null);
   const messageField = messageRef ?? localMessageField;
@@ -70,11 +74,19 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
     && conversation.currentRunId === interruptRequestedFor;
   const currentProvider = providers.find(({ id }) => id === conversation.provider);
   const canSteer = conversation.capabilities.canSend && conversation.runStatus === "running"
+    && !retrying
     && !interruptionPending
     && currentProvider?.capabilities.includes("steering") === true;
   const canInterrupt = conversation.capabilities.canInterrupt && currentProvider?.capabilities.includes("interruption") === true;
   const interruptionDialogOpen = pendingInterruption !== null;
-  const canSubmit = conversation.capabilities.canSend && !submitting && !!text.trim() && (!active || canSteer) && !interruptionDialogOpen;
+  const canSubmit = conversation.capabilities.canSend && !submitting && !thinkingSave?.pending && !!text.trim() && (!active || canSteer || retrying) && !interruptionDialogOpen;
+  const applicableConfiguration = choice === "auto" || choice === conversation.provider ? conversation.thinkingConfiguration : null;
+  const effortChoices = [...new Set(["low", "medium", "high", ...(applicableConfiguration?.supportedEfforts ?? [])])];
+  const savedLevel = thinkingPreference?.kind === "manual" ? thinkingPreference.level : null;
+  const unreportedChoice = savedLevel !== null && (applicableConfiguration
+    ? !applicableConfiguration.supportedEfforts.includes(savedLevel)
+    : !effortChoices.includes(savedLevel));
+  const thinkingValue = savedLevel === null ? thinkingPreference?.kind ?? "auto" : `manual:${savedLevel}`;
 
   useLayoutEffect(() => {
     if (!conversation.capabilities.canSend || !focusRequested || submitting || interruptionDialogOpen) return;
@@ -266,7 +278,6 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
     }
   }
 
-  const retrying = submission?.command != null && error !== null;
   const activeName = conversation.provider ? providerNames[conversation.provider] : "provider";
 
   if (!conversation.capabilities.canSend) return (
@@ -300,7 +311,7 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
         {text ? <MessageContent content={text} /> : <p className="empty-note">Nothing to preview.</p>}
       </section> : null}
       {error && !pendingInterruption ? <p role="alert" className="inline-error">{error}</p> : null}
-      {active && !canSteer ? (
+      {active && !canSteer && !retrying ? (
         <p className="composer-explanation">{interruptionPending
           ? `Waiting for ${activeName} to stop before another turn.`
           : descendantOnlyActive
@@ -324,6 +335,23 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
             ))}
           </select>
         </label> : null}
+        <label className="composer-thinking">
+          <span>{active ? "Thinking · Next turn" : "Thinking"}</span>
+          <select aria-label="Thinking" aria-describedby={helpId} value={thinkingValue}
+            disabled={submitting || thinkingSave?.pending}
+            onChange={(event) => {
+              const value = event.target.value;
+              const preference: ThinkingPreference = value.startsWith("manual:")
+                ? { kind: "manual", level: value.slice(7) }
+                : { kind: value as "auto" | "providerDefault" };
+              void store.setThinkingPreference(conversation.id, preference);
+            }}>
+            <option value="auto">Auto</option>
+            <option value="providerDefault">Provider default</option>
+            {effortChoices.map(level => <option key={level} value={`manual:${level}`}>{effortName(level)}</option>)}
+            {savedLevel && !effortChoices.includes(savedLevel) ? <option value={`manual:${savedLevel}`}>{effortName(savedLevel)} (saved)</option> : null}
+          </select>
+        </label>
         <button
           type="button"
           className="composer-help"
@@ -369,10 +397,25 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
         >
           {submitting ? "Working…" : canSteer ? `Steer ${activeName}` : retrying ? "Retry send" : "Send"}
         </button>
+        {conversation.thinkingDecision ? <span className="thinking-decision" title={conversation.thinkingDecision.reason}>
+          {conversation.thinkingDecision.preference.kind === "auto" ? "Auto → " : "Requested "}
+          {conversation.thinkingDecision.requestedEffort ? effortName(conversation.thinkingDecision.requestedEffort) : "Provider default"}
+          {conversation.thinkingConfiguration
+            ? conversation.thinkingConfiguration.configuredEffort !== null
+              ? ` · configured ${effortName(conversation.thinkingConfiguration.configuredEffort)}`
+              : " · configured effort not set"
+            : " · configuration unreported"}
+        </span> : null}
       </div>
+      {unreportedChoice ? <p className="composer-explanation">{effortName(savedLevel!)} is not reported as supported for this provider/model. The saved choice is retained and dispatch will validate it.</p> : null}
       <div id={helpId} className="composer-help-content" hidden={!helpOpen}>
         <p className="route-note">{choice === "auto" ? "Prompting Time will explain the selected route." : `Pinned to ${providerNames[choice]}.`}</p>
-        {!active || canSteer ? <p className="composer-shortcut">Enter to {canSteer ? "steer" : "send"} · Shift + Enter for newline · ⌘ / Ctrl + Enter also {canSteer ? "steers" : "sends"}</p> : null}
+        <p className="route-note">Auto chooses effort locally for each new turn. Provider default uses the native CLI configuration without an app override. Manual levels depend on the provider and model; dispatch validates support.</p>
+        {choice === "auto" && applicableConfiguration ? <p className="route-note">Choices use the latest {conversation.provider ? providerNames[conversation.provider] : "provider"} model report ({applicableConfiguration.model}); automatic routing revalidates them at dispatch.</p> : null}
+        {active ? <p className="route-note">Thinking changes apply to the next turn. Steering keeps the active turn's frozen decision.</p> : null}
+        {conversation.thinkingDecision ? <p className="route-note">Latest run: {conversation.thinkingDecision.reason} Configured effort reports a provider setting, not a thinking-token count.</p> : null}
+        {retrying ? <p className="route-note">Retry sends the original command with its frozen Thinking choice. Edit the message or provider to start a new request.</p> : null}
+        {!active || canSteer || retrying ? <p className="composer-shortcut">Enter to {canSteer ? "steer" : "send"} · Shift + Enter for newline · ⌘ / Ctrl + Enter also {canSteer ? "steers" : "sends"}</p> : null}
       </div>
       </section>
       {pendingInterruption ? createPortal((
@@ -402,4 +445,8 @@ export function Composer({ conversation, providers, routingProfile, actions, sto
 
 function messageFor(reason: unknown) {
   return reason instanceof Error ? reason.message : "Prompting Time could not submit this request.";
+}
+
+function effortName(level: string) {
+  return level.charAt(0).toUpperCase() + level.slice(1);
 }

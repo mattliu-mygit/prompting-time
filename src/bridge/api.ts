@@ -33,6 +33,7 @@ import type {
   SteerRunRequest,
   SubmissionSnapshot,
   SubmitMessageRequest,
+  SetThinkingPreferenceRequest,
   TimelinePage,
   DiagnosticsPage,
   RunAuditPage,
@@ -165,6 +166,10 @@ export async function pickProjectDirectory(): Promise<string | null> {
 
 export function submitMessage(request: SubmitMessageRequest): Promise<SubmissionSnapshot> {
   return submitCall("submit_message", { request });
+}
+
+export function setThinkingPreference(request: SetThinkingPreferenceRequest): Promise<void> {
+  return call("set_thinking_preference", { request });
 }
 
 export function steerRun(request: SteerRunRequest): Promise<void> {

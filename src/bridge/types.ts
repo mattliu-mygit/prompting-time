@@ -18,6 +18,7 @@ export const commands = {
 	loadApprovalQuestions: (request: LoadApprovalQuestionsRequest) => typedError<ApprovalQuestionPage, CommandError>(__TAURI_INVOKE("load_approval_questions", { request })),
 	createConversation: (request: CreateConversationRequest) => typedError<ConversationSummary, CommandError>(__TAURI_INVOKE("create_conversation", { request })),
 	submitMessage: (request: SubmitMessageRequest) => typedError<SubmissionSnapshot, CommandError>(__TAURI_INVOKE("submit_message", { request })),
+	setThinkingPreference: (request: SetThinkingPreferenceRequest) => typedError<null, CommandError>(__TAURI_INVOKE("set_thinking_preference", { request })),
 	steerRun: (request: SteerRunRequest) => typedError<null, CommandError>(__TAURI_INVOKE("steer_run", { request })),
 	respondToApproval: (request: RespondToApprovalRequest) => typedError<null, CommandError>(__TAURI_INVOKE("respond_to_approval", { request })),
 	interruptRun: (request: InterruptRunRequest) => typedError<null, CommandError>(__TAURI_INVOKE("interrupt_run", { request })),
@@ -136,6 +137,9 @@ export type ConversationPath = {
 };
 
 export type ConversationSummary = {
+	thinkingPreference: ThinkingPreference,
+	thinkingDecision: ThinkingDecision | null,
+	thinkingConfiguration: ThinkingConfiguration | null,
 	id: string,
 	parentId: string | null,
 	title: string,
@@ -344,6 +348,8 @@ export type RoutingSnapshot = {
 };
 
 export type RunAuditDetailSnapshot = {
+	thinkingDecision: ThinkingDecision,
+	thinkingConfiguration: ThinkingConfiguration | null,
 	id: string,
 	provider: ProviderId,
 	status: RunStatus,
@@ -370,6 +376,11 @@ export type RunAuditSummarySnapshot = {
 
 export type RunStatus = "queued" | "running" | "waiting" | "completed" | "interrupted" | "failed";
 
+export type SetThinkingPreferenceRequest = {
+	conversationId: string,
+	preference: ThinkingPreference,
+};
+
 export type SpecialPath = { kind: "root" } | { kind: "minimal" } | { kind: "project_roots"; subpath: string | null } | { kind: "tmpdir" } | { kind: "slash_tmp" } | { kind: "unknown"; path: string; subpath: string | null };
 
 export type SteerRunRequest = {
@@ -379,6 +390,7 @@ export type SteerRunRequest = {
 };
 
 export type SubmissionSnapshot = {
+	thinkingDecision: ThinkingDecision,
 	runId: string,
 	status: RunStatus,
 	provider: ProviderId,
@@ -387,6 +399,7 @@ export type SubmissionSnapshot = {
 };
 
 export type SubmitMessageRequest = {
+	thinking?: ThinkingPreference | null,
 	conversationId: string,
 	text: string,
 	providerOverride: ProviderId | null,
@@ -394,6 +407,20 @@ export type SubmitMessageRequest = {
 };
 
 export type TaskKind = "implementation" | "review" | "research" | "general";
+
+export type ThinkingConfiguration = {
+	model: string,
+	supportedEfforts: string[],
+	configuredEffort: string | null,
+};
+
+export type ThinkingDecision = {
+	preference: ThinkingPreference,
+	requestedEffort: string | null,
+	reason: string,
+};
+
+export type ThinkingPreference = { kind: "auto" } | { kind: "providerDefault" } | { kind: "manual"; level: string };
 
 export type TimelineItem = {
 	operation: ToolOperationSummary | null,
