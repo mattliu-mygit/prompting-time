@@ -76,6 +76,35 @@ fixture instance with no store listener.
 
 ## Composer conventions
 
+### Thinking preferences
+
+Use `?composer=send&thinking=controls` for invented thinking settings and provider
+configuration. Before the first synthetic send, only common requested levels are
+available. Send a coding request on Codex to reveal its invented Xhigh choice;
+switch to Claude and confirm the stale Codex-only choice is not advertised there.
+After a synthetic Claude send, its invented Max choice becomes available. No
+model, native configuration or Rust policy is invoked by this browser fixture.
+
+Change the saved preference, navigate away and back, and confirm the choice stays
+with its conversation. The latest turn decision must remain separate from the next
+preference. Check the setting also during `?composer=steer&thinking=controls`:
+steering must not include thinking configuration. Read captured calls with:
+
+```sh
+playwright-cli -s=thinking eval 'async () => (await import("/tests/browser/thinking-fixture.ts")).thinkingFixtureStats()'
+```
+
+Trigger a synthetic save error with `failNextThinkingSave()` from the same module;
+the next selection must show an error and retain its draft and previously saved
+preference. At 1440 × 900, 960 × 600 and 768 × 480 (the effective content size
+of the minimum window at 125% zoom), run
+`checkThinkingLayout()` from `/tests/browser/check-thinking-layout.ts` to check
+that controls remain inside the composer, do not overlap, and do not overflow the
+window. This is reflow evidence, not native WebView zoom acceptance. Inspect an
+observed child: it must not expose a Thinking control.
+
+### Sending and editing
+
 Use `?composer=send` for browser-memory acknowledgment and sent-message rendering,
 `?composer=failure` to reject the send without clearing the draft, and
 `?composer=steer` for synthetic steering. No provider process runs. Check Enter sends

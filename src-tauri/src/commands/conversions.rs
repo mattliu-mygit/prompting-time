@@ -652,8 +652,12 @@ impl From<prompting_time_core::thinking::ThinkingPreference> for ThinkingPrefere
     fn from(value: prompting_time_core::thinking::ThinkingPreference) -> Self {
         match value {
             prompting_time_core::thinking::ThinkingPreference::Auto => Self::Auto,
-            prompting_time_core::thinking::ThinkingPreference::ProviderDefault => Self::ProviderDefault,
-            prompting_time_core::thinking::ThinkingPreference::Manual { level } => Self::Manual { level },
+            prompting_time_core::thinking::ThinkingPreference::ProviderDefault => {
+                Self::ProviderDefault
+            }
+            prompting_time_core::thinking::ThinkingPreference::Manual { level } => {
+                Self::Manual { level }
+            }
         }
     }
 }

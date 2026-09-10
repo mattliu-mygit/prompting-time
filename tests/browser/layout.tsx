@@ -6,6 +6,7 @@ import { chatApproval, chatDiagnostics, chatScenario, chatTimeline, listenToChat
 import { composerMessages, composerScenario, steerComposerRun, submitComposerMessage } from "./composer-fixture";
 import { listenToToolEvents, toolEventDetail, toolProvider, toolScenario, toolTimeline } from "./tool-operations-fixture";
 import { archiveSyntheticRoot, listenToTreeEvents, treeConversationPath, treeIds, treeListChildren, treeListConversations, treeLoadConversation, treeScenario, treeTimeline } from "./conversation-tree-fixture";
+import { thinkingScenario, withThinkingFixture } from "./thinking-fixture";
 import "../../src/styles/tokens.css";
 import "../../src/styles/app.css";
 
@@ -23,6 +24,7 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
   capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
   title: longLabels && index === 0 ? "Synthetic conversation with an intentionally long title for checking the compact header" : `Synthetic conversation ${index}`,
   routingProfile: "balanced",
+  thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
   workspaceId: null,
   archived: false,
   projectRoot: null,
@@ -113,6 +115,7 @@ const api: AppApi = {
   },
   loadApprovalQuestions: unsupported,
   submitMessage: composerScenario ? submitComposerMessage : unsupported,
+  setThinkingPreference: unsupported,
   steerRun: composerScenario ? steerComposerRun : unsupported,
   respondToApproval: unsupported,
   interruptRun: unsupported,
@@ -128,6 +131,7 @@ const api: AppApi = {
       parentId: null, hasChildren: false, summary: null,
       capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
       routingProfile: request.routingProfile, workspaceId: `synthetic-workspace-${conversations.length}`,
+      thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
       projectRoot: request.workspace.kind === "projectless" ? null : request.workspace.path,
       archived: false, currentRunId: null, provider: null, runStatus: null,
       rollupStatus: null,
@@ -155,4 +159,4 @@ const fixtureApi = treeScenario ? {
   },
 } : api;
 
-createRoot(document.getElementById("root")!).render(<App store={createAppStore(fixtureApi)} />);
+createRoot(document.getElementById("root")!).render(<App store={createAppStore(thinkingScenario ? withThinkingFixture(fixtureApi) : fixtureApi)} />);

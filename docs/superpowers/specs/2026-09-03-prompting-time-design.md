@@ -464,6 +464,40 @@ suitability and distribution; they do not bypass eligibility or manual overrides
 
 Every run records and displays the selected provider and a concise reason. Prompt classification runs locally in Rust and does not add a separate model call. The application records manual overrides and outcomes locally so a learned router can be evaluated in later work instead of being guessed into Milestone 1.
 
+### Thinking effort
+
+Thinking is a separate per-conversation preference beside the composer provider control.
+Auto is the default and resolves each new request locally, without an extra model call.
+It favors High for coding, debugging, review, complex requests and ambiguous follow-ups;
+only clearly bounded greetings and simple text transformations use lighter effort.
+This is a conservative heuristic, not a promise that task difficulty is known.
+
+Provider default is distinct from Auto: it uses the provider's configured/default effort.
+Manual levels are native model-dependent choices, not comparable token budgets across
+providers. Low, Medium and High remain discoverable; additional choices require reported
+support for the applicable provider/model. Cached choices are advisory: each adapter
+validates the actual model again before sending the prompt. An unsupported or capped
+manual request fails before dispatch rather than silently changing the user's choice.
+
+The saved preference applies to subsequent turns. An accepted logical send freezes its
+decision and explanation, including during uncertain retries, safe provider fallback and
+queued recovery. Changing the next preference never reconfigures active work or steering.
+Observed child conversations remain read-only and do not inherit their parent's controls.
+Historical runs and legacy requests retain Provider default; migration does not invent
+historical Auto decisions.
+
+The latest turn and run audit distinguish requested effort from provider configuration.
+Neither indicates a measured thinking-token budget or exposes hidden reasoning. Only
+bounded model/effort metadata is retained, never complete settings or account responses.
+
+Codex effort overrides can persist on the native thread, so returning to Provider default
+explicitly resolves the current workspace-configured effort, or the actual model's
+advertised default when no effort is configured. Claude starts a process per turn and
+uses a child-only native effort environment override; Provider default leaves the
+inherited environment untouched. This avoids the installed CLI flag's persistent
+launch-preference side effect. Neither adapter edits global settings, replaces provider
+prompts, adds a model picker, or changes the existing skills, MCP or permission boundary.
+
 ## Provider switching and context handoff
 
 Switching providers occurs only at a turn boundary. Steering an active turn stays with its current provider. To switch during active work, the user first interrupts the run.

@@ -547,9 +547,18 @@ mod tests {
         let id = overview.conversation.id.to_string();
         let json = serde_json::to_value(ConversationSummary::from(overview)).unwrap();
         assert_eq!(json["id"], id);
-        assert_eq!(json["thinkingPreference"], serde_json::json!({ "kind": "auto" }));
-        assert!(json.get("thinkingDecision").is_some_and(serde_json::Value::is_null));
-        assert!(json.get("thinkingConfiguration").is_some_and(serde_json::Value::is_null));
+        assert_eq!(
+            json["thinkingPreference"],
+            serde_json::json!({ "kind": "auto" })
+        );
+        assert!(
+            json.get("thinkingDecision")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert!(
+            json.get("thinkingConfiguration")
+                .is_some_and(serde_json::Value::is_null)
+        );
         assert!(json.get("parentId").is_some_and(serde_json::Value::is_null));
         assert_eq!(json["hasChildren"], false);
         assert!(json.get("summary").is_some_and(serde_json::Value::is_null));
@@ -956,12 +965,18 @@ mod tests {
         ] {
             let request: SetThinkingPreferenceRequest = serde_json::from_value(serde_json::json!({
                 "conversationId": "fixture", "preference": preference
-            })).unwrap();
+            }))
+            .unwrap();
             let core: prompting_time_core::thinking::ThinkingPreference = request.preference.into();
-            assert_eq!(serde_json::to_value(ThinkingPreference::from(core)).unwrap(), preference);
+            assert_eq!(
+                serde_json::to_value(ThinkingPreference::from(core)).unwrap(),
+                preference
+            );
         }
         let decision = prompting_time_core::thinking::ThinkingDecision::resolve(
-            prompting_time_core::thinking::ThinkingPreference::Manual { level: "high".into() },
+            prompting_time_core::thinking::ThinkingPreference::Manual {
+                level: "high".into(),
+            },
             "fixture",
         )
         .unwrap();
@@ -973,9 +988,12 @@ mod tests {
             supported_efforts: vec!["high".into()],
             configured_effort: None,
         };
-        assert_eq!(serde_json::to_value(ThinkingConfiguration::from(configuration)).unwrap(), serde_json::json!({
-            "model": "fixture-model", "supportedEfforts": ["high"], "configuredEffort": null
-        }));
+        assert_eq!(
+            serde_json::to_value(ThinkingConfiguration::from(configuration)).unwrap(),
+            serde_json::json!({
+                "model": "fixture-model", "supportedEfforts": ["high"], "configuredEffort": null
+            })
+        );
     }
 
     #[test]

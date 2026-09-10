@@ -36,7 +36,10 @@ export const submitComposerMessage: AppApi["submitMessage"] = async (request) =>
   if (composerScenario === "failure") throw new Error("Synthetic send failure. Your draft was not accepted.");
   if (composerScenario === "pending") await new Promise<void>((resolve) => pendingSubmissions.push(resolve));
   appendMessage(request.conversationId, request.text);
-  return { runId: "synthetic-accepted-run", provider: "codex", status: "completed", duplicate: false, routingExplanation: "Synthetic acceptance only" };
+  return {
+    runId: "synthetic-accepted-run", provider: "codex", status: "completed", duplicate: false, routingExplanation: "Synthetic acceptance only",
+    thinkingDecision: { preference: { kind: "providerDefault" }, requestedEffort: null, reason: "Synthetic acceptance only; no provider configuration." },
+  };
 };
 
 export const steerComposerRun: AppApi["steerRun"] = async (request) => {

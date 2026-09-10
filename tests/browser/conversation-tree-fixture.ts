@@ -66,6 +66,7 @@ function summary(id: string, title: string, parentId: string | null, hasChildren
       unavailableReason: managed ? null : "This provider exposes recorded child activity, not an independently controllable chat.",
     },
     routingProfile: "bestFit" as const, workspaceId: null, projectRoot: null,
+    thinkingPreference: { kind: "auto" as const }, thinkingDecision: null, thinkingConfiguration: null,
     archived: id === treeIds.root && rootArchived,
     currentRunId: id === treeIds.root ? `run-${parentRun}`
       : id.startsWith("new-child-") ? `run-${newChildRuns[Number(id.slice("new-child-".length)) - 1]}`
