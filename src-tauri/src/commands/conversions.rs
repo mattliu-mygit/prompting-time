@@ -848,6 +848,7 @@ impl From<AppError> for CommandError {
                 action: None,
             },
             AppError::Thinking(error) => invalid_request(&error.to_string()),
+            AppError::ContextBudget(error) => invalid_request(&error.to_string()),
             AppError::RunConversationMismatch { .. } => invalid_request(
                 "The run does not belong to the selected conversation.",
             ),

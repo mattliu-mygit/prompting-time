@@ -295,6 +295,7 @@ impl ProviderAdapter for ClaudeAdapter {
         self.bind(
             native_id.into(),
             StartSession {
+                context_budget: request.context_budget,
                 conversation_id: request.conversation_id,
                 working_directory: request.working_directory,
             },

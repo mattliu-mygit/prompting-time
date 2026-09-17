@@ -48,6 +48,8 @@ impl Fixture {
     async fn session(&self) -> ProviderSession {
         self.adapter
             .start_session(StartSession {
+                context_budget:
+                    prompting_time_core::context_budget::ContextBudget::provider_default(),
                 conversation_id: self.conversation,
                 working_directory: self.directory.path().to_path_buf(),
             })
@@ -60,6 +62,8 @@ impl Fixture {
             .resume_session(
                 &session.native_id,
                 ResumeSession {
+                    context_budget:
+                        prompting_time_core::context_budget::ContextBudget::provider_default(),
                     conversation_id: self.conversation,
                     working_directory: self.directory.path().to_path_buf(),
                 },
@@ -91,6 +95,7 @@ fn app_request(
     provider: Option<ProviderId>,
 ) -> SubmitRequest {
     SubmitRequest {
+        context_budget: None,
         thinking: None,
         command_id: uuid::Uuid::now_v7().to_string(),
         conversation_id,
@@ -904,6 +909,8 @@ async fn adapter_restart_with_missing_native_session_fails_closed_without_fresh_
         .resume_session(
             &session.native_id,
             ResumeSession {
+                context_budget:
+                    prompting_time_core::context_budget::ContextBudget::provider_default(),
                 conversation_id: fixture.conversation,
                 working_directory: fixture.directory.path().into(),
             },
@@ -1066,10 +1073,10 @@ async fn live_adapter_streams_and_resumes_context() {
     let adapter = ClaudeAdapter::new("claude".into());
     let conversation_id = ConversationId::new();
     let result = timeout(Duration::from_secs(120), async {
-        let session = adapter.start_session(StartSession {conversation_id, working_directory:workspace.path().into()}).await?;
+        let session = adapter.start_session(StartSession {context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(), conversation_id, working_directory:workspace.path().into()}).await?;
         let marker = format!("INVENTED-{}", uuid::Uuid::now_v7());
         for (prompt, expected) in [(format!("Remember this invented marker: {marker}. Reply only STORED. Do not use tools."), "STORED"), ("What was the invented marker? Reply with only that exact marker. Do not use tools.".into(), marker.as_str())] {
-            let session = adapter.resume_session(&session.native_id, ResumeSession {conversation_id, working_directory:workspace.path().into()}).await?;
+            let session = adapter.resume_session(&session.native_id, ResumeSession {context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(), conversation_id, working_directory:workspace.path().into()}).await?;
             let mut turn = adapter.start_turn(&session, TurnRequest::new(prompt)).await?;
             let mut text = String::new();
             let mut completed = false;
@@ -1103,7 +1110,7 @@ async fn live_adapter_denies_and_allows_invented_write() {
         let target = workspace.path().join("adapter-probe.txt");
         let adapter = ClaudeAdapter::new("claude".into());
         let result = timeout(Duration::from_secs(120), async {
-            let session = adapter.start_session(StartSession {conversation_id:ConversationId::new(), working_directory:workspace.path().into()}).await?;
+            let session = adapter.start_session(StartSession {context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(), conversation_id:ConversationId::new(), working_directory:workspace.path().into()}).await?;
             let mut turn = adapter.start_turn(&session, TurnRequest::new(format!("Use the Write tool exactly once to write the exact text ADAPTER-PROBE to {}. Use no other tools. If permission is denied, do not retry. Then reply DONE.", target.display()))).await?;
             let mut requested = false;
             let mut completed = false;
@@ -1996,6 +2003,8 @@ async fn session_bindings_reject_changed_ownership_and_bound_lifetime_admission(
             .resume_session(
                 &session.native_id,
                 ResumeSession {
+                    context_budget:
+                        prompting_time_core::context_budget::ContextBudget::provider_default(),
                     conversation_id: ConversationId::new(),
                     working_directory: fixture.directory.path().into(),
                 }
@@ -2009,6 +2018,8 @@ async fn session_bindings_reject_changed_ownership_and_bound_lifetime_admission(
             .resume_session(
                 "not-a-session",
                 ResumeSession {
+                    context_budget:
+                        prompting_time_core::context_budget::ContextBudget::provider_default(),
                     conversation_id: fixture.conversation,
                     working_directory: fixture.directory.path().into(),
                 }
@@ -2023,6 +2034,8 @@ async fn session_bindings_reject_changed_ownership_and_bound_lifetime_admission(
         fixture
             .adapter
             .start_session(StartSession {
+                context_budget:
+                    prompting_time_core::context_budget::ContextBudget::provider_default(),
                 conversation_id: fixture.conversation,
                 working_directory: fixture.directory.path().into()
             })

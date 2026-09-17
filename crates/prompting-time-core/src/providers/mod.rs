@@ -10,6 +10,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use crate::context_budget::ContextBudget;
 pub use crate::domain::{
     ApprovalRequestDetails, FileChangeApprovalDetail, FileChangeKind, RequestedFileSystemAccess,
     RequestedFileSystemEntry, RequestedFileSystemPath, RequestedFileSystemPermissions,
@@ -98,6 +99,8 @@ pub enum ProviderHealth {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartSession {
+    #[serde(default = "ContextBudget::provider_default")]
+    pub context_budget: ContextBudget,
     pub conversation_id: ConversationId,
     pub working_directory: PathBuf,
 }
@@ -105,6 +108,8 @@ pub struct StartSession {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeSession {
+    #[serde(default = "ContextBudget::provider_default")]
+    pub context_budget: ContextBudget,
     pub conversation_id: ConversationId,
     pub working_directory: PathBuf,
 }
@@ -121,6 +126,8 @@ pub struct ProviderSession {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnRequest {
+    #[serde(default = "ContextBudget::provider_default")]
+    pub context_budget: ContextBudget,
     pub prompt: String,
     #[serde(default = "ThinkingDecision::provider_default")]
     pub thinking: ThinkingDecision,
@@ -130,12 +137,18 @@ impl TurnRequest {
     pub fn new(prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),
+            context_budget: ContextBudget::provider_default(),
             thinking: ThinkingDecision::provider_default(),
         }
     }
 
     pub fn with_thinking(mut self, thinking: ThinkingDecision) -> Self {
         self.thinking = thinking;
+        self
+    }
+
+    pub fn with_context_budget(mut self, context_budget: ContextBudget) -> Self {
+        self.context_budget = context_budget;
         self
     }
 }

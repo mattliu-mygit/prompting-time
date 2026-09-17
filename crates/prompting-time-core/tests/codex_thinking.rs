@@ -31,6 +31,8 @@ async fn codex_thinking_bounds_session_cache_and_resume_repopulates_evicted_meta
         sessions.push(
             adapter
                 .start_session(StartSession {
+                    context_budget:
+                        prompting_time_core::context_budget::ContextBudget::provider_default(),
                     conversation_id: ConversationId::new(),
                     working_directory: "/tmp/invented-project".into(),
                 })
@@ -49,6 +51,8 @@ async fn codex_thinking_bounds_session_cache_and_resume_repopulates_evicted_meta
         .resume_session(
             &sessions[0].native_id,
             ResumeSession {
+                context_budget:
+                    prompting_time_core::context_budget::ContextBudget::provider_default(),
                 conversation_id: ConversationId::new(),
                 working_directory: "/tmp/invented-project".into(),
             },
@@ -80,6 +84,7 @@ async fn codex_thinking_restores_workspace_default_after_manual_and_resume() {
     let adapter = CodexAdapter::connect(binary).await.unwrap();
     let session = adapter
         .start_session(StartSession {
+            context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
             conversation_id: ConversationId::new(),
             working_directory: "/tmp/invented-project".into(),
         })
@@ -113,6 +118,8 @@ async fn codex_thinking_restores_workspace_default_after_manual_and_resume() {
         .resume_session(
             &session.native_id,
             ResumeSession {
+                context_budget:
+                    prompting_time_core::context_budget::ContextBudget::provider_default(),
                 conversation_id: ConversationId::new(),
                 working_directory: "/tmp/invented-project".into(),
             },
@@ -175,6 +182,8 @@ async fn codex_thinking_rejects_unsupported_or_unknown_before_prompt() {
         let adapter = CodexAdapter::connect(binary).await.unwrap();
         let session = adapter
             .start_session(StartSession {
+                context_budget:
+                    prompting_time_core::context_budget::ContextBudget::provider_default(),
                 conversation_id: ConversationId::new(),
                 working_directory: "/tmp/invented-project".into(),
             })
@@ -212,6 +221,7 @@ async fn codex_thinking_null_config_uses_catalog_default() {
     let adapter = CodexAdapter::connect(binary).await.unwrap();
     let session = adapter
         .start_session(StartSession {
+            context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
             conversation_id: ConversationId::new(),
             working_directory: "/tmp/invented-project".into(),
         })
@@ -240,6 +250,7 @@ async fn codex_thinking_schema_optional_unset_effort_uses_explicit_catalog_defau
     let adapter = CodexAdapter::connect(binary).await.unwrap();
     let session = adapter
         .start_session(StartSession {
+            context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
             conversation_id: ConversationId::new(),
             working_directory: "/tmp/invented-project".into(),
         })
@@ -268,6 +279,7 @@ async fn codex_thinking_revalidates_changed_thread_model_before_manual_dispatch(
     let adapter = CodexAdapter::connect(binary).await.unwrap();
     let session = adapter
         .start_session(StartSession {
+            context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
             conversation_id: ConversationId::new(),
             working_directory: "/tmp/invented-project".into(),
         })
@@ -313,6 +325,7 @@ async fn codex_thinking_cancelled_discovery_never_dispatches_prompt_and_connecti
     let adapter = CodexAdapter::connect(binary).await.unwrap();
     let session = adapter
         .start_session(StartSession {
+            context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
             conversation_id: ConversationId::new(),
             working_directory: "/tmp/invented-project".into(),
         })

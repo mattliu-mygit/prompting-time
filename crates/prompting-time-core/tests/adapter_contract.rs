@@ -189,6 +189,7 @@ impl ProviderAdapter for FakeAdapter {
 
 fn start_request() -> StartSession {
     StartSession {
+        context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
         conversation_id: ConversationId::new(),
         working_directory: PathBuf::from("/tmp/invented-project"),
     }
@@ -1613,6 +1614,8 @@ sleep 30
         .resume_session(
             "thread-existing",
             ResumeSession {
+                context_budget:
+                    prompting_time_core::context_budget::ContextBudget::provider_default(),
                 conversation_id: ConversationId::new(),
                 working_directory: PathBuf::from("/tmp/invented-project"),
             },
@@ -3936,6 +3939,7 @@ async fn live_codex_smoke_uses_an_empty_temporary_git_repository() {
     let adapter = CodexAdapter::connect(PathBuf::from("codex")).await.unwrap();
     let session = adapter
         .start_session(StartSession {
+            context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
             conversation_id: ConversationId::new(),
             working_directory: repository.path().to_owned(),
         })

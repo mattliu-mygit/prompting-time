@@ -20,6 +20,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::context_budget::{ContextBudget, ContextBudgetError};
 use crate::domain::{
     AgentId, AgentNode, AgentStatus, Approval, ApprovalId, ApprovalRequestDetails,
     ApprovalResolution, ApprovalResponseIntent, ApprovalResponseIntentStatus, ApprovalStatus,
@@ -130,6 +131,8 @@ pub struct StoreChange {
 pub enum StoreError {
     #[error(transparent)]
     Thinking(#[from] ThinkingError),
+    #[error(transparent)]
+    ContextBudget(#[from] ContextBudgetError),
     #[error("could not create SQLite parent directory {path}")]
     CreateParent {
         path: PathBuf,
@@ -212,6 +215,7 @@ pub struct ConversationSettings {
 
 #[derive(Clone, Debug)]
 pub(crate) struct NewSubmission {
+    pub context_budget: ContextBudget,
     pub thinking_decision: ThinkingDecision,
     pub command_id: String,
     pub request_hash: String,
@@ -256,6 +260,7 @@ pub(crate) struct StoredRoutingDecision {
 
 #[derive(Clone, Debug)]
 pub(crate) struct NewFallbackAttempt {
+    pub context_budget: ContextBudget,
     pub thinking_decision: ThinkingDecision,
     pub provider: ProviderId,
     pub native_session_id: Option<String>,
@@ -713,6 +718,8 @@ pub struct Page<T> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SidebarDetails {
+    pub context_budget: ContextBudget,
+    pub run_context_budget: Option<ContextBudget>,
     pub thinking_preference: ThinkingPreference,
     pub thinking_decision: Option<ThinkingDecision>,
     pub thinking_configuration: Option<ThinkingConfiguration>,
@@ -878,6 +885,7 @@ pub struct RecoveryRun {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryAttemptIntent {
+    pub context_budget: ContextBudget,
     pub thinking_decision: ThinkingDecision,
     pub turn_prompt: String,
     pub handoff_rendered: Option<String>,
@@ -1187,6 +1195,59 @@ impl Store {
         .map(|record| record.conversation)
     }
 
+    pub async fn load_context_budget(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ContextBudget, StoreError> {
+        let json: String =
+            sqlx::query_scalar("SELECT context_budget_json FROM conversations WHERE id = ?")
+                .bind(conversation_id.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+        let budget: ContextBudget =
+            serde_json::from_str(&json).map_err(invalid_data("context budget"))?;
+        budget.validate()?;
+        Ok(budget)
+    }
+
+    pub(crate) async fn set_context_budget(
+        &self,
+        conversation_id: ConversationId,
+        preference: &ContextBudget,
+    ) -> Result<(), StoreError> {
+        preference.validate()?;
+        let result = sqlx::query("UPDATE conversations SET context_budget_json = ?, updated_at = ? WHERE id = ? AND status = 'active' AND observed_agent_id IS NULL")
+            .bind(serde_json::to_string(preference).map_err(invalid_data("context budget"))?)
+            .bind(now_millis()).bind(conversation_id.to_string()).execute(&self.pool).await?;
+        if result.rows_affected() != 1 {
+            let conversation = self.load_conversation(conversation_id).await?;
+            if conversation.archived {
+                return Err(StoreError::ConversationArchived(conversation_id));
+            }
+            return Err(StoreError::InvalidData {
+                entity: "context budget",
+                detail: "observed conversations cannot change settings".into(),
+            });
+        }
+        self.notify_conversation_change(conversation_id);
+        Ok(())
+    }
+
+    pub async fn load_run_context_budget(
+        &self,
+        run_id: RunId,
+    ) -> Result<ContextBudget, StoreError> {
+        let json: String =
+            sqlx::query_scalar("SELECT context_budget_json FROM provider_runs WHERE id = ?")
+                .bind(run_id.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+        let budget: ContextBudget =
+            serde_json::from_str(&json).map_err(invalid_data("context budget"))?;
+        budget.validate()?;
+        Ok(budget)
+    }
+
     pub async fn load_thinking_preference(
         &self,
         conversation_id: ConversationId,
@@ -1347,6 +1408,7 @@ impl Store {
         dispatch_claim: Option<(&str, Duration)>,
     ) -> Result<PreparedSubmission, StoreError> {
         validate_message_size(&submission.content)?;
+        submission.context_budget.validate()?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let duplicate = sqlx::query_as::<_, SubmittedRunRow>(
             "SELECT submitted_commands.request_hash, provider_runs.id, \
@@ -1401,8 +1463,8 @@ impl Store {
         sqlx::query(
             "INSERT INTO provider_runs \
              (id, conversation_id, provider, native_session_id, status, mutation_state, \
-              handoff_rendered, handoff_hash, application_managed, turn_prompt, thinking_decision_json, created_at, updated_at) \
-             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+              handoff_rendered, handoff_hash, application_managed, turn_prompt, thinking_decision_json, context_budget_json, created_at, updated_at) \
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
         )
         .bind(run.id.to_string())
         .bind(run.conversation_id.to_string())
@@ -1413,6 +1475,7 @@ impl Store {
         .bind(&submission.handoff_hash)
         .bind(&submission.turn_prompt)
         .bind(serde_json::to_string(&submission.thinking_decision).map_err(invalid_data("thinking decision"))?)
+        .bind(serde_json::to_string(&submission.context_budget).map_err(invalid_data("context budget"))?)
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
@@ -1574,20 +1637,23 @@ impl Store {
         conversation_id: ConversationId,
         provider: ProviderId,
     ) -> Result<(ProviderRun, AgentNode), StoreError> {
-        self.create_run_with_thinking(
+        self.create_run_with_intent(
             conversation_id,
             provider,
             &ThinkingDecision::provider_default(),
+            ContextBudget::provider_default(),
         )
         .await
     }
 
-    pub(crate) async fn create_run_with_thinking(
+    pub(crate) async fn create_run_with_intent(
         &self,
         conversation_id: ConversationId,
         provider: ProviderId,
         thinking: &ThinkingDecision,
+        context_budget: ContextBudget,
     ) -> Result<(ProviderRun, AgentNode), StoreError> {
+        context_budget.validate()?;
         let run = ProviderRun::new(conversation_id, provider);
         let root = AgentNode::root(run.id, provider, "orchestrator");
         let now = now_millis();
@@ -1595,8 +1661,8 @@ impl Store {
 
         sqlx::query(
             "INSERT INTO provider_runs \
-             (id, conversation_id, provider, native_session_id, status, mutation_state, thinking_decision_json, created_at, updated_at) \
-             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+             (id, conversation_id, provider, native_session_id, status, mutation_state, thinking_decision_json, context_budget_json, created_at, updated_at) \
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
         )
         .bind(run.id.to_string())
         .bind(conversation_id.to_string())
@@ -1604,6 +1670,7 @@ impl Store {
         .bind(run_status_label(run.status))
         .bind(mutation_state_label(run.mutation_state))
         .bind(serde_json::to_string(thinking).map_err(invalid_data("thinking decision"))?)
+        .bind(serde_json::to_string(&context_budget).map_err(invalid_data("context budget"))?)
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
@@ -1705,10 +1772,11 @@ impl Store {
             "INSERT INTO provider_runs \
              (id, conversation_id, provider, fallback_from_run_id, native_session_id, status, \
               mutation_state, handoff_rendered, handoff_hash, context_through_sequence, \
-              application_managed, created_at, updated_at) \
+              application_managed, context_budget_json, created_at, updated_at) \
              VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, \
                      (SELECT context_through_sequence FROM provider_runs WHERE id = ?), \
-                     (SELECT application_managed FROM provider_runs WHERE id = ?), ?, ?)",
+                     (SELECT application_managed FROM provider_runs WHERE id = ?), \
+                     (SELECT context_budget_json FROM provider_runs WHERE id = ?), ?, ?)",
         )
         .bind(run.id.to_string())
         .bind(run.conversation_id.to_string())
@@ -1718,6 +1786,7 @@ impl Store {
         .bind(mutation_state_label(run.mutation_state))
         .bind(handoff_rendered)
         .bind(handoff_hash)
+        .bind(primary_run_id.to_string())
         .bind(primary_run_id.to_string())
         .bind(primary_run_id.to_string())
         .bind(now)
@@ -4232,6 +4301,8 @@ impl Store {
                     EXISTS (SELECT 1 FROM conversations AS child WHERE child.parent_id = selected.id AND child.status = 'active') AS has_children, \
                     COALESCE(conversation_settings.routing_profile, 'balanced') AS routing_profile, \
                     conversations.thinking_preference_json, \
+                    conversations.context_budget_json, \
+                    CASE WHEN conversations.observed_agent_id IS NULL THEN latest_runs.context_budget_json END AS run_context_budget_json, \
                     CASE WHEN conversations.observed_agent_id IS NULL THEN latest_runs.thinking_decision_json END AS thinking_decision_json, \
                     CASE WHEN conversations.observed_agent_id IS NULL THEN latest_runs.thinking_configuration_json END AS thinking_configuration_json, \
                     workspaces.project_root, \
@@ -4285,6 +4356,8 @@ impl Store {
             by_id.insert(
                 *id,
                 SidebarDetails {
+                    context_budget: ContextBudget::default(),
+                    run_context_budget: None,
                     thinking_preference: ThinkingPreference::Auto,
                     thinking_decision: None,
                     thinking_configuration: None,
@@ -4314,6 +4387,17 @@ impl Store {
             details.binding = row.binding()?;
             details.has_children = row.has_children;
             details.routing_profile = parse_routing_profile(&row.routing_profile)?;
+            details.context_budget = serde_json::from_str(&row.context_budget_json)
+                .map_err(invalid_data("context budget"))?;
+            details.context_budget.validate()?;
+            details.run_context_budget = row
+                .run_context_budget_json
+                .as_deref()
+                .map(|json| serde_json::from_str(json).map_err(invalid_data("context budget")))
+                .transpose()?;
+            if let Some(budget) = details.run_context_budget {
+                budget.validate()?;
+            }
             details.thinking_preference = serde_json::from_str(&row.thinking_preference_json)
                 .map_err(invalid_data("thinking preference"))?;
             details.thinking_decision = row
@@ -4935,13 +5019,14 @@ impl Store {
 
             for row in run_rows {
                 let run = row.into_domain()?;
-                let (turn_prompt, handoff_rendered, handoff_hash, thinking_json): (
+                let (turn_prompt, handoff_rendered, handoff_hash, thinking_json, context_budget_json): (
                     Option<String>,
                     Option<String>,
                     Option<String>,
                     String,
+                    String,
                 ) = sqlx::query_as(
-                    "SELECT turn_prompt, handoff_rendered, handoff_hash, thinking_decision_json \
+                    "SELECT turn_prompt, handoff_rendered, handoff_hash, thinking_decision_json, context_budget_json \
                      FROM provider_runs WHERE id = ?",
                 )
                 .bind(run.id.to_string())
@@ -4955,7 +5040,11 @@ impl Store {
                 }
                 let thinking_decision = serde_json::from_str(&thinking_json)
                     .map_err(invalid_data("thinking decision"))?;
+                let context_budget: ContextBudget = serde_json::from_str(&context_budget_json)
+                    .map_err(invalid_data("context budget"))?;
+                context_budget.validate()?;
                 let attempt_intent = turn_prompt.map(|turn_prompt| RecoveryAttemptIntent {
+                    context_budget,
                     thinking_decision,
                     turn_prompt,
                     handoff_rendered,
@@ -5332,13 +5421,14 @@ impl Store {
         let mut recovery = Vec::with_capacity(rows.len());
         for row in rows {
             let run = row.into_domain()?;
-            let (turn_prompt, handoff_rendered, handoff_hash, thinking_json): (
+            let (turn_prompt, handoff_rendered, handoff_hash, thinking_json, context_budget_json): (
                 Option<String>,
                 Option<String>,
                 Option<String>,
                 String,
+                String,
             ) = sqlx::query_as(
-                "SELECT turn_prompt, handoff_rendered, handoff_hash, thinking_decision_json FROM provider_runs WHERE id = ?",
+                "SELECT turn_prompt, handoff_rendered, handoff_hash, thinking_decision_json, context_budget_json FROM provider_runs WHERE id = ?",
             )
             .bind(run.id.to_string())
             .fetch_one(&self.pool)
@@ -5351,7 +5441,11 @@ impl Store {
             }
             let thinking_decision =
                 serde_json::from_str(&thinking_json).map_err(invalid_data("thinking decision"))?;
+            let context_budget: ContextBudget = serde_json::from_str(&context_budget_json)
+                .map_err(invalid_data("context budget"))?;
+            context_budget.validate()?;
             let attempt_intent = turn_prompt.map(|turn_prompt| RecoveryAttemptIntent {
+                context_budget,
                 thinking_decision,
                 turn_prompt,
                 handoff_rendered,
@@ -5776,6 +5870,7 @@ async fn insert_atomic_fallback(
     {
         return Err(StoreError::UnsafeFallbackState);
     }
+    fallback.context_budget.validate()?;
     if primary.provider == fallback.provider {
         return Err(StoreError::SameFallbackProvider);
     }
@@ -5858,9 +5953,9 @@ async fn insert_atomic_fallback(
         "INSERT INTO provider_runs \
          (id, conversation_id, provider_session_id, provider, fallback_from_run_id, \
           native_session_id, status, mutation_state, handoff_rendered, handoff_hash, \
-          context_through_sequence, application_managed, turn_prompt, thinking_decision_json, dispatch_certainty, \
+          context_through_sequence, application_managed, turn_prompt, thinking_decision_json, context_budget_json, dispatch_certainty, \
           dispatch_owner_id, dispatch_lease_expires_at, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', 'none_observed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', 'none_observed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(run.id.to_string())
     .bind(run.conversation_id.to_string())
@@ -5874,6 +5969,7 @@ async fn insert_atomic_fallback(
     .bind(application_managed)
     .bind(&fallback.turn_prompt)
     .bind(serde_json::to_string(&fallback.thinking_decision).map_err(invalid_data("thinking decision"))?)
+    .bind(serde_json::to_string(&fallback.context_budget).map_err(invalid_data("context budget"))?)
     .bind(dispatch_certainty)
     .bind(dispatch_owner_id)
     .bind(dispatch_lease_expires_at)
@@ -5944,20 +6040,29 @@ async fn load_existing_fallback(
         String,
         String,
         String,
+        String,
         Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
     );
     let row: Option<ExistingFallbackRow> = sqlx::query_as(
-        "SELECT thinking_decision_json, id, provider, native_session_id, handoff_hash, turn_prompt, dispatch_owner_id \
+        "SELECT context_budget_json, thinking_decision_json, id, provider, native_session_id, handoff_hash, turn_prompt, dispatch_owner_id \
              FROM provider_runs WHERE fallback_from_run_id = ?",
     )
     .bind(primary.id.to_string())
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((thinking_json, id, provider, native_session_id, handoff_hash, turn_prompt, owner_id)) =
-        row
+    let Some((
+        context_budget_json,
+        thinking_json,
+        id,
+        provider,
+        native_session_id,
+        handoff_hash,
+        turn_prompt,
+        owner_id,
+    )) = row
     else {
         return Ok(None);
     };
@@ -5974,6 +6079,9 @@ async fn load_existing_fallback(
         || serde_json::from_str::<ThinkingDecision>(&thinking_json)
             .map_err(invalid_data("thinking decision"))?
             != expected.thinking_decision
+        || serde_json::from_str::<ContextBudget>(&context_budget_json)
+            .map_err(invalid_data("context budget"))?
+            != expected.context_budget
     {
         return Err(StoreError::FallbackIntentConflict);
     }
@@ -7700,6 +7808,8 @@ impl TimelineRecordRow {
 
 #[derive(FromRow)]
 struct SidebarDetailRow {
+    context_budget_json: String,
+    run_context_budget_json: Option<String>,
     thinking_preference_json: String,
     thinking_decision_json: Option<String>,
     thinking_configuration_json: Option<String>,
@@ -7833,6 +7943,7 @@ impl TimelineEventRow {
 
 #[cfg(test)]
 mod tests {
+    use crate::context_budget::ContextBudget;
     use crate::thinking::{ThinkingDecision, ThinkingPreference};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -8408,6 +8519,7 @@ mod tests {
             Duration::from_secs(120),
             ProviderErrorCategory::Rejected,
             NewFallbackAttempt {
+                context_budget: crate::context_budget::ContextBudget::provider_default(),
                 thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 provider: ProviderId::Claude,
                 native_session_id: None,
@@ -8584,7 +8696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visible_run_creation_publishes_only_after_commit() {
+    async fn context_budget_visible_fallback_preserves_intent_and_publishes_after_commit() {
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
             .create_conversation(NewConversation::projectless("run changes"))
@@ -8592,7 +8704,12 @@ mod tests {
             .unwrap();
         let mut changes = store.subscribe_changes();
         let (primary, root) = store
-            .create_run(conversation.id, ProviderId::Codex)
+            .create_run_with_intent(
+                conversation.id,
+                ProviderId::Codex,
+                &ThinkingDecision::provider_default(),
+                ContextBudget::Tokens { tokens: 400_000 },
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -8622,6 +8739,14 @@ mod tests {
             .create_fallback_run(primary.id, ProviderId::Claude)
             .await
             .unwrap();
+        assert_eq!(
+            store
+                .load_run_context_budget(fallback.id)
+                .await
+                .unwrap()
+                .requested_tokens(),
+            Some(400_000)
+        );
         assert_eq!(
             changes.recv().await.unwrap(),
             super::StoreChange {
@@ -8790,6 +8915,7 @@ mod tests {
             .unwrap();
         let PreparedSubmission::Created { run, .. } = store
             .prepare_submission(NewSubmission {
+                context_budget: crate::context_budget::ContextBudget::provider_default(),
                 thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 command_id: "post-commit-submit".to_owned(),
                 request_hash: "post-commit-hash".to_owned(),
@@ -9246,6 +9372,7 @@ mod tests {
             )
             .unwrap();
         let submission = NewSubmission {
+            context_budget: crate::context_budget::ContextBudget::provider_default(),
             thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
             command_id: "canonical-transcript-command".to_owned(),
             request_hash: "canonical-transcript-hash".to_owned(),
@@ -10033,6 +10160,7 @@ mod tests {
             .unwrap();
         let PreparedSubmission::Created { run, root } = store
             .prepare_submission(NewSubmission {
+                context_budget: crate::context_budget::ContextBudget::provider_default(),
                 thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 command_id: "managed-fallback".to_owned(),
                 request_hash: "managed-fallback-hash".to_owned(),
@@ -10182,6 +10310,7 @@ mod tests {
             .await
             .unwrap();
         let fallback = NewFallbackAttempt {
+            context_budget: ContextBudget::Tokens { tokens: 400_000 },
             thinking_decision: ThinkingDecision::resolve(
                 ThinkingPreference::Manual {
                     level: "high".into(),
@@ -10234,6 +10363,25 @@ mod tests {
             )
             .await;
         assert!(matches!(conflict, Err(StoreError::FallbackIntentConflict)));
+        let context_conflict = store
+            .fail_and_create_fallback(
+                run.id,
+                root.id,
+                ProviderErrorCategory::Rejected,
+                NewFallbackAttempt {
+                    context_budget: ContextBudget::Tokens { tokens: 500_000 },
+                    ..fallback.clone()
+                },
+            )
+            .await;
+        assert!(matches!(
+            context_conflict,
+            Err(StoreError::FallbackIntentConflict)
+        ));
+        assert_eq!(
+            store.load_run_context_budget(first.0.id).await.unwrap(),
+            fallback.context_budget
+        );
         assert_eq!(first.0.id, retry.0.id);
         assert_eq!(first.1.id, retry.1.id);
         assert_eq!(
@@ -10259,6 +10407,10 @@ mod tests {
         let recovery = store.pending_recovery().await.unwrap();
         assert_eq!(recovery.len(), 1);
         assert_eq!(recovery[0].run.id, first.0.id);
+        assert_eq!(
+            recovery[0].attempt_intent.as_ref().unwrap().context_budget,
+            fallback.context_budget
+        );
         assert_eq!(
             recovery[0]
                 .attempt_intent
@@ -10298,6 +10450,7 @@ mod tests {
             .await
             .unwrap();
         let fallback = NewFallbackAttempt {
+            context_budget: crate::context_budget::ContextBudget::provider_default(),
             thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
             provider: ProviderId::Claude,
             native_session_id: None,
@@ -10841,6 +10994,7 @@ mod tests {
 
         let error = store
             .prepare_submission(NewSubmission {
+                context_budget: crate::context_budget::ContextBudget::provider_default(),
                 thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
                 command_id: "oversized".to_owned(),
                 request_hash: "hash".to_owned(),
@@ -11002,6 +11156,109 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn context_budget_preferences_are_isolated_and_persist_across_reopen() {
+        use crate::context_budget::ContextBudget;
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("context.sqlite");
+        let store = Store::open(&path).await.unwrap();
+        let first = store
+            .create_conversation(NewConversation::projectless("first"))
+            .await
+            .unwrap();
+        let second = store
+            .create_conversation(NewConversation::projectless("second"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_context_budget(first.id).await.unwrap(),
+            ContextBudget::default()
+        );
+        for tokens in [200_000, 300_000, 400_000, 500_000] {
+            let budget = ContextBudget::Tokens { tokens };
+            store.set_context_budget(first.id, &budget).await.unwrap();
+            assert_eq!(store.load_context_budget(first.id).await.unwrap(), budget);
+        }
+        assert!(
+            store
+                .set_context_budget(first.id, &ContextBudget::Tokens { tokens: 250_000 })
+                .await
+                .is_err()
+        );
+        store
+            .set_context_budget(first.id, &ContextBudget::ProviderDefault)
+            .await
+            .unwrap();
+        store.pool.close().await;
+        let reopened = Store::open(&path).await.unwrap();
+        assert_eq!(
+            reopened.load_context_budget(first.id).await.unwrap(),
+            ContextBudget::ProviderDefault
+        );
+        assert_eq!(
+            reopened.load_context_budget(second.id).await.unwrap(),
+            ContextBudget::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn context_budget_migration_keeps_historical_runs_and_bounds_json() {
+        use crate::context_budget::ContextBudget;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        MIGRATOR.run_to(20, &pool).await.unwrap();
+        let conversation = ConversationId::new();
+        let run = RunId::new();
+        sqlx::query("INSERT INTO conversations (id, title, status, created_at, updated_at) VALUES (?, 'history', 'active', 1, 1)").bind(conversation.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO provider_runs (id, conversation_id, provider, status, mutation_state, application_managed, turn_prompt, created_at, updated_at) VALUES (?, ?, 'codex', 'queued', 'none_observed', 1, 'old accepted prompt', 1, 1)").bind(run.to_string()).bind(conversation.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO submitted_commands (command_id, request_hash, conversation_id, run_id, created_at) VALUES ('old-command', 'old-hash', ?, ?, 1)").bind(conversation.to_string()).bind(run.to_string()).execute(&pool).await.unwrap();
+        MIGRATOR.run(&pool).await.unwrap();
+        let preference: String =
+            sqlx::query_scalar("SELECT context_budget_json FROM conversations WHERE id = ?")
+                .bind(conversation.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ContextBudget>(&preference).unwrap(),
+            ContextBudget::default()
+        );
+        let budget: String =
+            sqlx::query_scalar("SELECT context_budget_json FROM provider_runs WHERE id = ?")
+                .bind(run.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ContextBudget>(&budget).unwrap(),
+            ContextBudget::ProviderDefault
+        );
+        let accepted: (String, String, String) = sqlx::query_as("SELECT submitted_commands.command_id, submitted_commands.request_hash, provider_runs.turn_prompt FROM submitted_commands JOIN provider_runs ON provider_runs.id = submitted_commands.run_id").fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            accepted,
+            (
+                "old-command".into(),
+                "old-hash".into(),
+                "old accepted prompt".into()
+            )
+        );
+        for query in [
+            "UPDATE conversations SET context_budget_json = ?",
+            "UPDATE provider_runs SET context_budget_json = ?",
+        ] {
+            assert!(
+                sqlx::query(query)
+                    .bind("é".repeat(129))
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+use crate::context_budget::{ContextBudget, ContextBudgetError};
 use crate::domain::{
     AgentStatus, Approval, ApprovalId, ApprovalStatus, Conversation, ConversationId, MessageRole,
     ProviderRun, RollupStatus, RunId, Workspace, WorkspaceId,
@@ -72,6 +73,7 @@ impl ConversationRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitRequest {
+    pub context_budget: Option<ContextBudget>,
     pub thinking: Option<ThinkingPreference>,
     pub command_id: String,
     pub conversation_id: ConversationId,
@@ -88,6 +90,8 @@ pub struct Submission {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationOverview {
+    pub context_budget: ContextBudget,
+    pub run_context_budget: Option<ContextBudget>,
     pub thinking_preference: ThinkingPreference,
     pub thinking_decision: Option<ThinkingDecision>,
     pub thinking_configuration: Option<ThinkingConfiguration>,
@@ -288,6 +292,8 @@ impl PromptingTime {
         let (conversation, workspace) = self.create_conversation_with_workspace(request).await?;
         Ok(ConversationOverview {
             thinking_preference: ThinkingPreference::Auto,
+            context_budget: ContextBudget::default(),
+            run_context_budget: None,
             thinking_decision: None,
             thinking_configuration: None,
             conversation,
@@ -325,6 +331,9 @@ impl PromptingTime {
                 duplicate: true,
             });
         }
+        let context_budget = request
+            .context_budget
+            .unwrap_or_else(ContextBudget::provider_default);
         let thinking_decision = match request.thinking.clone() {
             Some(preference) => ThinkingDecision::resolve(preference, &request.content)?,
             None => ThinkingDecision::provider_default(),
@@ -406,6 +415,7 @@ impl PromptingTime {
                     provider,
                     native_session_id: session.map(|session| session.native_id),
                     turn: crate::providers::TurnRequest::new(&capsule.rendered)
+                        .with_context_budget(context_budget)
                         .with_thinking(thinking_decision.clone()),
                     handoff_rendered: Some(capsule.rendered),
                     handoff_hash: Some(capsule.content_hash),
@@ -440,7 +450,9 @@ impl PromptingTime {
             request.conversation_id,
             workspace.execution_path,
             decision.provider,
-            crate::providers::TurnRequest::new(prompt).with_thinking(thinking_decision.clone()),
+            crate::providers::TurnRequest::new(prompt)
+                .with_thinking(thinking_decision.clone())
+                .with_context_budget(context_budget),
         );
         if let Some(session) = native_session {
             run_request = run_request.resume(session.native_id);
@@ -453,6 +465,7 @@ impl PromptingTime {
             .submit_persisted(
                 run_request,
                 NewSubmission {
+                    context_budget,
                     thinking_decision: thinking_decision.clone(),
                     command_id: request.command_id,
                     request_hash,
@@ -585,6 +598,19 @@ impl PromptingTime {
         preference.validate()?;
         self.store
             .set_thinking_preference(conversation_id, &preference)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_context_budget(
+        &self,
+        conversation_id: ConversationId,
+        preference: ContextBudget,
+    ) -> Result<(), AppError> {
+        self.require_managed_conversation(conversation_id).await?;
+        preference.validate()?;
+        self.store
+            .set_context_budget(conversation_id, &preference)
             .await?;
         Ok(())
     }
@@ -971,6 +997,7 @@ impl PromptingTime {
                     workspace.execution_path,
                     recovery.run.provider,
                     crate::providers::TurnRequest::new(intent.turn_prompt)
+                        .with_context_budget(intent.context_budget)
                         .with_thinking(intent.thinking_decision),
                 );
                 match self
@@ -1189,6 +1216,8 @@ fn overview(conversation: Conversation, details: SidebarDetails) -> Conversation
     debug_assert_eq!(conversation.id, details.conversation_id);
     ConversationOverview {
         thinking_preference: details.thinking_preference,
+        context_budget: details.context_budget,
+        run_context_budget: details.run_context_budget,
         thinking_decision: details.thinking_decision,
         thinking_configuration: details.thinking_configuration,
         conversation,
@@ -1206,6 +1235,8 @@ fn overview(conversation: Conversation, details: SidebarDetails) -> Conversation
 pub enum AppError {
     #[error(transparent)]
     Thinking(#[from] ThinkingError),
+    #[error(transparent)]
+    ContextBudget(#[from] ContextBudgetError),
     #[error(
         "This provider exposes recorded child activity, not an independently controllable chat."
     )]
@@ -1270,6 +1301,9 @@ fn remap_approval_response(
 }
 
 fn validate_submit(request: &SubmitRequest) -> Result<(), AppError> {
+    if let Some(budget) = request.context_budget {
+        budget.validate()?;
+    }
     if request.command_id.trim().is_empty() || request.content.trim().is_empty() {
         return Err(AppError::EmptySubmission);
     }
@@ -1295,6 +1329,10 @@ fn submission_hash(request: &SubmitRequest) -> String {
     if let Some(preference) = &request.thinking {
         digest.update(b"\0thinking-v1\0");
         digest.update(serde_json::to_vec(preference).expect("thinking preference is serializable"));
+    }
+    if let Some(budget) = request.context_budget {
+        digest.update(b"\0context-budget-v1\0");
+        digest.update(serde_json::to_vec(&budget).expect("context budget is serializable"));
     }
     format!("{:x}", digest.finalize())
 }
@@ -1365,6 +1403,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_budget_accepted_intent_survives_busy_save_and_retry() {
+        use crate::context_budget::ContextBudget;
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let (adapter, gate) = RecoveryAdapter::blocked();
+        let adapter = Arc::new(adapter);
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![adapter.clone()],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("context budget"))
+            .await
+            .unwrap();
+        let budget = ContextBudget::Tokens { tokens: 400_000 };
+        let request = SubmitRequest {
+            context_budget: Some(budget),
+            command_id: "context-budget-command".into(),
+            conversation_id: conversation.id,
+            content: "hello".into(),
+            provider_override: Some(ProviderId::Codex),
+            thinking: None,
+        };
+        let first = app.submit(request.clone()).await.unwrap();
+        app.set_context_budget(conversation.id, ContextBudget::Tokens { tokens: 500_000 })
+            .await
+            .unwrap();
+        let overview = app
+            .load_conversation_overview(conversation.id)
+            .await
+            .unwrap();
+        assert_eq!(overview.context_budget.requested_tokens(), Some(500_000));
+        assert_eq!(overview.run_context_budget, Some(budget));
+        assert_eq!(
+            store
+                .load_run_context_budget(first.handle.run_id())
+                .await
+                .unwrap(),
+            budget
+        );
+        let retry = app.submit(request.clone()).await.unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.handle.run_id(), first.handle.run_id());
+        assert!(matches!(
+            app.submit(SubmitRequest {
+                context_budget: Some(ContextBudget::default()),
+                ..request
+            })
+            .await,
+            Err(AppError::Store(StoreError::CommandConflict { .. }))
+        ));
+        gate.add_permits(1);
+        first.handle.wait().await.unwrap();
+        assert_eq!(*adapter.context_budgets.lock().unwrap(), vec![budget; 2]);
+        let next_budget = ContextBudget::Tokens { tokens: 500_000 };
+        let next = app
+            .submit(SubmitRequest {
+                context_budget: Some(next_budget),
+                command_id: "context-budget-resume".into(),
+                conversation_id: conversation.id,
+                content: "continue".into(),
+                provider_override: Some(ProviderId::Codex),
+                thinking: None,
+            })
+            .await
+            .unwrap();
+        next.handle.wait().await.unwrap();
+        assert_eq!(
+            *adapter.context_budgets.lock().unwrap(),
+            vec![budget, budget, next_budget, next_budget]
+        );
+        assert_eq!(adapter.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_budget_legacy_send_retains_provider_default() {
+        use crate::context_budget::ContextBudget;
+        let temporary = tempdir().unwrap();
+        let store = Store::open_in_memory().await.unwrap();
+        let app = PromptingTime::new(
+            store.clone(),
+            Router::default(),
+            WorkspaceManager::new(temporary.path()),
+            vec![Arc::new(RecoveryAdapter::new())],
+        )
+        .unwrap();
+        let conversation = app
+            .create_conversation(ConversationRequest::projectless("legacy budget"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.set_context_budget(conversation.id, ContextBudget::Tokens { tokens: 250_000 })
+                .await,
+            Err(AppError::ContextBudget(_))
+        ));
+        app.set_context_budget(conversation.id, ContextBudget::Tokens { tokens: 500_000 })
+            .await
+            .unwrap();
+        let submission = app
+            .submit(SubmitRequest {
+                context_budget: None,
+                command_id: "legacy-budget-command".into(),
+                conversation_id: conversation.id,
+                content: "hello".into(),
+                provider_override: Some(ProviderId::Codex),
+                thinking: None,
+            })
+            .await
+            .unwrap();
+        let outcome = submission.handle.wait().await.unwrap();
+        assert_eq!(
+            store
+                .load_run_context_budget(outcome.primary_run_id)
+                .await
+                .unwrap(),
+            ContextBudget::ProviderDefault
+        );
+        app.archive(conversation.id).await.unwrap();
+        assert!(
+            app.set_context_budget(conversation.id, ContextBudget::default())
+                .await
+                .is_err()
+        );
+        app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn thinking_accepted_request_survives_preference_changes_and_conflicts_on_changed_intent()
     {
         let temporary = tempdir().unwrap();
@@ -1385,6 +1555,7 @@ mod tests {
             level: "high".into(),
         };
         let request = SubmitRequest {
+            context_budget: None,
             command_id: "thinking-command".into(),
             conversation_id: conversation.id,
             content: "hi".into(),
@@ -1446,6 +1617,7 @@ mod tests {
             .await
             .unwrap();
         let request = SubmitRequest {
+            context_budget: None,
             command_id: "invalid-config".into(),
             conversation_id: conversation.id,
             content: "hi".into(),
@@ -1506,6 +1678,7 @@ mod tests {
         .await
         .unwrap();
         let request = SubmitRequest {
+            context_budget: None,
             command_id: "old-command".into(),
             conversation_id: conversation.id,
             content: "hello".into(),
@@ -1534,6 +1707,7 @@ mod tests {
     #[test]
     fn thinking_omitted_request_retains_the_legacy_command_hash() {
         let request = SubmitRequest {
+            context_budget: None,
             command_id: "legacy".into(),
             conversation_id: uuid::Uuid::nil().into(),
             content: "hello".into(),
@@ -1560,6 +1734,7 @@ mod tests {
     }
 
     struct RecoveryAdapter {
+        context_budgets: std::sync::Mutex<Vec<ContextBudget>>,
         invalid_configuration: bool,
         shutdowns: Arc<AtomicUsize>,
         thinking: std::sync::Mutex<Vec<ThinkingDecision>>,
@@ -1575,6 +1750,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 invalid_configuration: false,
+                context_budgets: std::sync::Mutex::new(Vec::new()),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 thinking: std::sync::Mutex::new(Vec::new()),
                 health_checks: AtomicUsize::new(0),
@@ -1591,6 +1767,7 @@ mod tests {
             (
                 Self {
                     invalid_configuration: false,
+                    context_budgets: std::sync::Mutex::new(Vec::new()),
                     shutdowns: Arc::new(AtomicUsize::new(0)),
                     thinking: std::sync::Mutex::new(Vec::new()),
                     health_checks: AtomicUsize::new(0),
@@ -1637,6 +1814,10 @@ mod tests {
             request: StartSession,
         ) -> Result<ProviderSession, crate::providers::ProviderError> {
             self.starts.fetch_add(1, Ordering::SeqCst);
+            self.context_budgets
+                .lock()
+                .unwrap()
+                .push(request.context_budget);
             if let Some(gate) = &self.start_gate {
                 gate.acquire().await.unwrap().forget();
             }
@@ -1650,9 +1831,13 @@ mod tests {
         async fn resume_session(
             &self,
             native_id: &str,
-            _request: ResumeSession,
+            request: ResumeSession,
         ) -> Result<ProviderSession, crate::providers::ProviderError> {
             self.resumes.fetch_add(1, Ordering::SeqCst);
+            self.context_budgets
+                .lock()
+                .unwrap()
+                .push(request.context_budget);
             Ok(ProviderSession {
                 provider: ProviderId::Codex,
                 native_id: native_id.to_owned(),
@@ -1666,6 +1851,10 @@ mod tests {
             request: TurnRequest,
         ) -> Result<ProviderTurn, crate::providers::ProviderError> {
             self.thinking.lock().unwrap().push(request.thinking.clone());
+            self.context_budgets
+                .lock()
+                .unwrap()
+                .push(request.context_budget);
             self.turns.fetch_add(1, Ordering::SeqCst);
             let (sender, receiver) = mpsc::channel(4);
             sender
@@ -1783,6 +1972,7 @@ mod tests {
         assert_eq!(child_overview.thinking_preference, ThinkingPreference::Auto);
         assert_eq!(child_overview.thinking_decision, None);
         assert_eq!(child_overview.thinking_configuration, None);
+        assert_eq!(child_overview.run_context_budget, None);
         let before_run = store.load_run(run.id).await.unwrap();
         let before_workspace = store.load_workspace(conversation.id).await.unwrap();
         let before_timeline = store
@@ -1791,6 +1981,7 @@ mod tests {
             .unwrap();
         let error = app
             .submit(SubmitRequest {
+                context_budget: None,
                 thinking: None,
                 command_id: "child-submit".into(),
                 conversation_id: child.id,
@@ -1806,6 +1997,8 @@ mod tests {
         for result in [
             app.archive(child.id).await,
             app.set_thinking_preference(child.id, ThinkingPreference::Auto)
+                .await,
+            app.set_context_budget(child.id, ContextBudget::default())
                 .await,
             app.steer_conversation(child.id, run.id, "steer child")
                 .await,
@@ -1906,6 +2099,7 @@ mod tests {
             )
             .unwrap();
         NewSubmission {
+            context_budget: crate::context_budget::ContextBudget::provider_default(),
             thinking_decision: ThinkingDecision::provider_default(),
             command_id: format!("recover-{conversation_id}"),
             request_hash: "recovery-hash".to_owned(),
@@ -2237,6 +2431,7 @@ mod tests {
         .unwrap();
         let PreparedSubmission::Created { run, .. } = store
             .prepare_submission(NewSubmission {
+                context_budget: ContextBudget::Tokens { tokens: 400_000 },
                 thinking_decision: thinking.clone(),
                 ..recovery_submission(conversation.id)
             })
@@ -2254,9 +2449,16 @@ mod tests {
         )
         .await
         .unwrap();
+        app.set_context_budget(conversation.id, ContextBudget::Tokens { tokens: 200_000 })
+            .await
+            .unwrap();
         assert_eq!(app.reconcile_startup().await.unwrap(), 0);
         wait_for_run_status(&store, run.id, RunStatus::Completed).await;
 
+        assert_eq!(
+            *adapter.context_budgets.lock().unwrap(),
+            vec![ContextBudget::Tokens { tokens: 400_000 }; 2]
+        );
         assert_eq!(*adapter.thinking.lock().unwrap(), vec![thinking.clone()]);
         let audit = store.load_run_audit(conversation.id, run.id).await.unwrap();
         assert_eq!(audit.thinking_decision, thinking);
@@ -2600,6 +2802,7 @@ mod tests {
             .await
             .unwrap();
         let request = SubmitRequest {
+            context_budget: None,
             thinking: None,
             command_id: "atomic-claim-command".to_owned(),
             conversation_id: conversation.id,

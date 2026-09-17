@@ -812,10 +812,11 @@ impl RunSupervisor {
             })?;
         let (run, root) = self
             .store
-            .create_run_with_thinking(
+            .create_run_with_intent(
                 request.conversation_id,
                 request.provider,
                 &request.turn.thinking,
+                request.turn.context_budget,
             )
             .await?;
         if !self
@@ -835,6 +836,13 @@ impl RunSupervisor {
         request: RunRequest,
         submission: NewSubmission,
     ) -> Result<PreparedRunHandle, RuntimeError> {
+        if request.turn.context_budget != submission.context_budget {
+            return Err(StoreError::InvalidData {
+                entity: "context budget intent",
+                detail: "dispatch budget differs from the durable submission".into(),
+            }
+            .into());
+        }
         if request.turn.thinking != submission.thinking_decision {
             return Err(StoreError::InvalidData {
                 entity: "thinking intent",
@@ -2609,6 +2617,7 @@ async fn execute_attempt(
         return Err(RuntimeError::DispatchLeaseLost(attempt.run_id));
     }
     let session_request = StartSession {
+        context_budget: job.request.turn.context_budget,
         conversation_id: job.request.conversation_id,
         working_directory: job.request.working_directory.clone(),
     };
@@ -2620,6 +2629,7 @@ async fn execute_attempt(
                     .resume_session(
                         native_id,
                         ResumeSession {
+                            context_budget: session_request.context_budget,
                             conversation_id: session_request.conversation_id,
                             working_directory: session_request.working_directory,
                         },
@@ -3851,6 +3861,7 @@ async fn fail_attempt(
                 DISPATCH_LEASE_DURATION,
                 category,
                 NewFallbackAttempt {
+                    context_budget: fallback.turn.context_budget,
                     thinking_decision: fallback.turn.thinking.clone(),
                     provider: fallback.provider,
                     native_session_id: fallback.native_session_id.clone(),
@@ -4207,6 +4218,7 @@ mod tests {
             request: ResumeSession,
         ) -> Result<ProviderSession, ProviderError> {
             self.start_session(StartSession {
+                context_budget: request.context_budget,
                 conversation_id: request.conversation_id,
                 working_directory: request.working_directory,
             })
@@ -4357,6 +4369,7 @@ mod tests {
             )
             .unwrap();
         NewSubmission {
+            context_budget: crate::context_budget::ContextBudget::provider_default(),
             thinking_decision: crate::thinking::ThinkingDecision::provider_default(),
             command_id: command_id.to_owned(),
             request_hash: format!("hash-{command_id}"),
@@ -4371,7 +4384,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thinking_persisted_submission_rejects_mismatched_dispatch_intent() {
+    async fn thinking_and_context_budget_persisted_submission_rejects_mismatched_dispatch_intent() {
         use crate::thinking::{ThinkingDecision, ThinkingPreference};
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -4418,12 +4431,34 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let submission = test_submission("budget-mismatch", conversation.id, ProviderId::Codex);
+        let request = RunRequest::new(
+            conversation.id,
+            PathBuf::from("/tmp/context-fixture"),
+            ProviderId::Codex,
+            TurnRequest::new(&submission.turn_prompt)
+                .with_context_budget(crate::context_budget::ContextBudget::default()),
+        );
+        assert!(matches!(
+            supervisor.submit_persisted(request, submission).await,
+            Err(RuntimeError::Store(StoreError::InvalidData {
+                entity: "context budget intent",
+                ..
+            }))
+        ));
+        assert!(
+            store
+                .load_submission("budget-mismatch")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(starts.load(Ordering::SeqCst), 0);
         supervisor.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn thinking_direct_primary_and_fallback_audit_the_frozen_decision() {
+    async fn thinking_and_context_budget_direct_primary_and_fallback_audit_frozen_intent() {
         use crate::thinking::{ThinkingDecision, ThinkingPreference};
         let store = Store::open_in_memory().await.unwrap();
         let conversation = store
@@ -4461,7 +4496,11 @@ mod tests {
                     conversation.id,
                     PathBuf::from("/tmp/thinking-fixture"),
                     ProviderId::Codex,
-                    TurnRequest::new("fixture").with_thinking(thinking.clone()),
+                    TurnRequest::new("fixture")
+                        .with_thinking(thinking.clone())
+                        .with_context_budget(crate::context_budget::ContextBudget::Tokens {
+                            tokens: 500_000,
+                        }),
                 )
                 .with_fallback(ProviderId::Claude),
             )
@@ -4469,6 +4508,16 @@ mod tests {
             .unwrap();
         let outcome = handle.wait().await.unwrap();
         assert_eq!(outcome.status, RunStatus::Completed);
+        for run_id in [outcome.primary_run_id, outcome.fallback_run_id.unwrap()] {
+            assert_eq!(
+                store
+                    .load_run_context_budget(run_id)
+                    .await
+                    .unwrap()
+                    .requested_tokens(),
+                Some(500_000)
+            );
+        }
         assert_eq!(
             store
                 .load_run_thinking(outcome.primary_run_id)

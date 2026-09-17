@@ -183,6 +183,7 @@ async fn live_codex_app_native_child_approval_and_denial() {
             let conversation = app.create_conversation(ConversationRequest::projectless("Invented child control gate")).await?;
             let mut changes = app.subscribe_changes();
             let submission = app.submit(SubmitRequest {
+                context_budget: None,
                 thinking: None,
                 command_id: uuid::Uuid::now_v7().to_string(), conversation_id:conversation.id, provider_override:Some(ProviderId::Codex),
                 content:format!("Use the subagent tool exactly once to create one child. Give the child this exact instruction: Use exec_command exactly once to run `{command}` with shell /bin/sh, login=false, sandbox_permissions=require_escalated, justification='Synthetic child approval test'. Request approval explicitly even if the command could run in the sandbox. This is a test of a single permission request; if denied, stop and report DENIED, never retry or use another tool. If allowed, report DONE. Do no other filesystem, shell, network, or tool operations. Root: wait for this child using only agent tools, then report ROOT. Do not run the command yourself or create more children."),
@@ -275,6 +276,7 @@ async fn live_codex_app_recursive_ancestry_and_activity_completion() {
         let conversation = app.create_conversation(ConversationRequest::projectless("Invented Codex recursion gate")).await?;
         let mut changes = app.subscribe_changes();
         let submission = app.submit(SubmitRequest {
+            context_budget: None,
             thinking: None,
             command_id: uuid::Uuid::now_v7().to_string(), conversation_id: conversation.id,
             provider_override: Some(ProviderId::Codex),
