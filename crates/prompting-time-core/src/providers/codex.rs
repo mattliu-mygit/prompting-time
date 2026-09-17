@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::context_budget::ContextBudget;
+use crate::context_compaction::{CompactionObservation, CompactionPhase};
 use crate::domain::MutationState;
 use crate::thinking::{ThinkingConfiguration, ThinkingDecision, ThinkingPreference};
 
@@ -44,6 +46,7 @@ const MAX_THINKING_SESSIONS: usize = 256;
 
 #[path = "codex_children.rs"]
 mod children;
+mod context_budget;
 #[path = "codex_operations.rs"]
 mod operations;
 
@@ -66,6 +69,7 @@ struct AdapterInner {
 struct ThinkingSession {
     model: Option<String>,
     cwd: String,
+    context_budget: Option<ContextBudget>,
 }
 
 impl Drop for AdapterInner {
@@ -103,6 +107,12 @@ enum Cancellation {
 }
 
 enum ClientCommand {
+    ContextBudgetReload {
+        thread_id: String,
+        registration_id: u64,
+        finish: bool,
+        response: oneshot::Sender<Result<(), ProviderError>>,
+    },
     Request {
         request_key: u64,
         phase: Arc<AtomicU8>,
@@ -176,6 +186,7 @@ struct OutboundRequest {
 }
 
 struct TurnSink {
+    context_budget_reload: Option<context_budget::ReloadEvidence>,
     children: children::Children,
     registration_id: u64,
     events: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
@@ -364,8 +375,10 @@ impl CodexAdapter {
         &self,
         result: Value,
         cwd: &str,
+        context_budget: Option<ContextBudget>,
     ) -> Result<ProviderSession, ProviderError> {
         let metadata = ThinkingSession {
+            context_budget,
             model: bounded_model(result.get("model")),
             cwd: result
                 .get("cwd")
@@ -380,6 +393,13 @@ impl CodexAdapter {
             .thinking_sessions
             .lock()
             .expect("thinking sessions mutex");
+        let mut metadata = metadata;
+        if metadata.context_budget.is_none() {
+            metadata.context_budget = sessions
+                .iter()
+                .find(|(id, _)| id == &session.native_id)
+                .and_then(|(_, previous)| previous.context_budget);
+        }
         sessions.retain(|(id, _)| id != &session.native_id);
         if sessions.len() == MAX_THINKING_SESSIONS {
             // Active turns already own their frozen configuration. An evicted session
@@ -962,19 +982,31 @@ impl ProviderAdapter for CodexAdapter {
 
     async fn start_session(&self, request: StartSession) -> Result<ProviderSession, ProviderError> {
         let cwd = path_string(&request.working_directory)?;
+        request
+            .context_budget
+            .validate()
+            .map_err(|_| context_budget::unsupported())?;
+        if request.context_budget.requested_tokens().is_some() && !self.supports_context_budget() {
+            return Err(context_budget::unsupported());
+        }
+        let mut params =
+            json!({"cwd":cwd,"approvalPolicy":"on-request","sandbox":"workspace-write"});
+        if let Some(tokens) = request.context_budget.requested_tokens() {
+            params["config"] = json!({"model_auto_compact_token_limit":tokens});
+        }
         let result = self
             .inner
             .client
-            .request(
-                "thread/start",
-                json!({
-                    "cwd": cwd,
-                    "approvalPolicy": "on-request",
-                    "sandbox": "workspace-write",
-                }),
-            )
-            .await?;
-        self.bind_thinking_session(result, cwd)
+            .request("thread/start", params)
+            .await
+            .map_err(|error| {
+                if request.context_budget.requested_tokens().is_some() {
+                    context_budget::unsupported()
+                } else {
+                    error
+                }
+            })?;
+        self.bind_thinking_session(result, cwd, Some(request.context_budget))
     }
 
     async fn resume_session(
@@ -996,7 +1028,7 @@ impl ProviderAdapter for CodexAdapter {
                 }),
             )
             .await?;
-        self.bind_thinking_session(result, cwd)
+        self.bind_thinking_session(result, cwd, None)
     }
 
     async fn start_turn(
@@ -1005,17 +1037,6 @@ impl ProviderAdapter for CodexAdapter {
         request: TurnRequest,
     ) -> Result<ProviderTurn, ProviderError> {
         require_codex_session(session)?;
-        let thinking = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            self.configure_thinking(session, &request.thinking),
-        )
-        .await
-        .map_err(|_| ProviderError::NotDispatched {
-            category: super::ProviderErrorCategory::TimedOut,
-        })?
-        .map_err(|error| ProviderError::NotDispatched {
-            category: error.category(),
-        })?;
         let (events, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let completed = Arc::new(AtomicBool::new(false));
         let native_children = Arc::new(children::NativeTurns::default());
@@ -1041,7 +1062,23 @@ impl ProviderAdapter for CodexAdapter {
                 Arc::clone(&completed),
                 Arc::clone(&native_children),
             )
+            .await
+            .map_err(|error| ProviderError::NotDispatched {
+                category: error.category(),
+            })?;
+        self.configure_context_budget(session, request.context_budget, request_key)
             .await?;
+        let thinking = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.configure_thinking(session, &request.thinking),
+        )
+        .await
+        .map_err(|_| ProviderError::NotDispatched {
+            category: super::ProviderErrorCategory::TimedOut,
+        })?
+        .map_err(|error| ProviderError::NotDispatched {
+            category: error.category(),
+        })?;
         let result = self
             .inner
             .client
@@ -1273,6 +1310,41 @@ async fn handle_command(
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
     match command {
+        ClientCommand::ContextBudgetReload {
+            thread_id,
+            registration_id,
+            finish,
+            response,
+        } => {
+            let result = state
+                .turns
+                .get_mut(&thread_id)
+                .filter(|turn| {
+                    turn.registration_id == registration_id
+                        && !turn.cancelled
+                        && turn.native_turn_id.is_none()
+                })
+                .ok_or_else(context_budget::unsupported)
+                .and_then(|turn| {
+                    if finish {
+                        if turn
+                            .context_budget_reload
+                            .take()
+                            .is_some_and(|proof| proof.complete())
+                        {
+                            Ok(())
+                        } else {
+                            Err(context_budget::unsupported())
+                        }
+                    } else {
+                        turn.context_budget_reload =
+                            Some(context_budget::ReloadEvidence::default());
+                        Ok(())
+                    }
+                });
+            let _ = response.send(result);
+            Ok(())
+        }
         ClientCommand::Request {
             request_key,
             phase,
@@ -1330,6 +1402,7 @@ async fn handle_command(
                     }
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(TurnSink {
+                            context_budget_reload: None,
                             children: children::Children::new(native_children),
                             registration_id,
                             events,
@@ -2715,20 +2788,16 @@ async fn handle_child_notification(
                 }
                 items.insert(item, changes);
             }
-            if matches!(method, "item/started" | "item/completed")
-                && let Some(ProviderEvent::NativeItemActivity {
-                    native_item_id,
-                    native_turn_id,
-                    operation,
-                    description,
-                    mutation,
-                    ..
-                }) = normalize_item_with_phase(params, method == "item/completed")?
-            {
-                deliver_or_buffer_turn_event(
-                    state,
-                    root,
-                    Ok(ProviderEvent::NativeItemActivity {
+            if matches!(method, "item/started" | "item/completed") {
+                let event = match normalize_item_with_phase(params, method == "item/completed")? {
+                    Some(ProviderEvent::NativeItemActivity {
+                        native_item_id,
+                        native_turn_id,
+                        operation,
+                        description,
+                        mutation,
+                        ..
+                    }) => Some(ProviderEvent::NativeItemActivity {
                         native_item_id,
                         native_turn_id,
                         native_agent_id: Some(thread.to_owned()),
@@ -2736,10 +2805,15 @@ async fn handle_child_notification(
                         description,
                         mutation,
                     }),
-                    false,
-                    sender,
-                )
-                .await?;
+                    Some(ProviderEvent::Compaction { mut observation }) => {
+                        observation.native_agent_id = Some(thread.to_owned());
+                        Some(ProviderEvent::Compaction { observation })
+                    }
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    deliver_or_buffer_turn_event(state, root, Ok(event), false, sender).await?;
+                }
             }
             // Child messages/reasoning stay outside tool display capture.
             return Ok(());
@@ -2767,6 +2841,22 @@ async fn handle_notification(
     sender: &JsonLineSender,
     state: &mut DispatcherState,
 ) -> Result<(), ProviderError> {
+    // Canonical contextCompaction items carry the durable boundary identity. The
+    // deprecated notification adds no evidence and must not become a second notice.
+    if method == "thread/compacted" {
+        return Ok(());
+    }
+    if method == "thread/status/changed" {
+        if let Some(turn) = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .and_then(|id| state.turns.get_mut(id))
+            && let Some(proof) = &mut turn.context_budget_reload
+        {
+            proof.observe(params.pointer("/status/type").and_then(Value::as_str));
+        }
+        return Ok(());
+    }
     if method == "thread/started" {
         return children::announce_thread(&params, sender, state).await;
     }
@@ -3012,6 +3102,29 @@ fn normalize_item_with_phase(
     let item_type = required_string(item, &["type"], "item-type")?;
     if native_item_id.len() > 256 || item_type.len() > 256 {
         return Err(protocol("tool-identity-bounds"));
+    }
+    if item_type == "contextCompaction" {
+        let native_session_id = required_string(params, &["threadId"], "compaction-thread-id")?;
+        let native_turn_id = required_string(params, &["turnId"], "compaction-turn-id")?;
+        if native_item_id.chars().any(char::is_control) {
+            return Err(protocol("compaction-item-id"));
+        }
+        let observation = CompactionObservation {
+            native_session_id,
+            native_turn_id: Some(native_turn_id.clone()),
+            native_agent_id: None,
+            phase: if completed {
+                CompactionPhase::Completed {
+                    boundary_id: json!([native_turn_id, native_item_id]).to_string(),
+                }
+            } else {
+                CompactionPhase::Started
+            },
+        };
+        observation
+            .validate()
+            .map_err(|_| protocol("compaction-identity"))?;
+        return Ok(Some(ProviderEvent::Compaction { observation }));
     }
     if item_type == "collabAgentToolCall" {
         let parent_native_thread_id =
@@ -3456,6 +3569,7 @@ mod tests {
     fn turn_sink(registration_id: u64) -> TurnSink {
         let (events, _) = mpsc::channel(PROVISIONAL_EVENT_CAPACITY);
         TurnSink {
+            context_budget_reload: None,
             children: super::children::Children::default(),
             registration_id,
             events,
@@ -3469,6 +3583,38 @@ mod tests {
             interrupt_pending: false,
             interrupt_waiters: Vec::new(),
             file_changes: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn compaction_completion_without_start_is_bounded_and_native_owned() {
+        let params = json!({"threadId":"root","turnId":"turn","item":{"id":"boundary","type":"contextCompaction","private":"DO_NOT_RETAIN"}});
+        let Some(ProviderEvent::Compaction { observation }) =
+            super::normalize_item_with_phase(&params, true).unwrap()
+        else {
+            panic!("canonical completion missing")
+        };
+        assert_eq!(observation.native_session_id, "root");
+        assert_eq!(observation.native_turn_id.as_deref(), Some("turn"));
+        assert!(observation.native_agent_id.is_none());
+        assert!(matches!(
+            observation.phase,
+            crate::context_compaction::CompactionPhase::Completed { .. }
+        ));
+        assert!(
+            !serde_json::to_string(&observation)
+                .unwrap()
+                .contains("DO_NOT_RETAIN")
+        );
+        for (pointer, bad) in [
+            ("/threadId", json!("")),
+            ("/turnId", json!("bad\nturn")),
+            ("/item/id", json!("bad\nitem")),
+            ("/item/id", json!("x".repeat(257))),
+        ] {
+            let mut invalid = params.clone();
+            *invalid.pointer_mut(pointer).unwrap() = bad;
+            assert!(super::normalize_item_with_phase(&invalid, true).is_err());
         }
     }
 
