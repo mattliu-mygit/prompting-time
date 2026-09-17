@@ -152,10 +152,12 @@ impl Store {
         conversation_id: ConversationId,
     ) -> Result<Option<CompactionActivity>, StoreError> {
         let binding = self.conversation_binding(conversation_id).await?;
+        // A recovery claim fences abandoned work; it does not resume native execution.
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT e.run_id, e.agent_id, r.provider FROM events e JOIN provider_runs r ON r.id = e.run_id JOIN agent_nodes a ON a.id = e.agent_id \
              WHERE r.status IN ('running', 'waiting') AND a.status IN ('running', 'waiting') \
-             AND r.dispatch_owner_id IS NOT NULL AND r.dispatch_lease_expires_at >= ",
+             AND r.dispatch_owner_id IS NOT NULL AND r.dispatch_owner_id NOT GLOB 'recovery:*' \
+             AND r.dispatch_lease_expires_at >= ",
         );
         query.push_bind(now_millis());
         match binding {
@@ -577,13 +579,21 @@ mod tests {
             store
                 .claim_stale_provider_dispatch(
                     next.id,
-                    "recovery",
+                    "recovery:fixture",
                     "excluded",
                     Duration::from_secs(120),
                     Duration::ZERO
                 )
                 .await
                 .unwrap()
+        );
+        assert!(
+            store
+                .load_active_compaction(conversation)
+                .await
+                .unwrap()
+                .is_none(),
+            "a recovery lease must not revive stale native compaction before interruption"
         );
         assert!(
             store
@@ -600,11 +610,43 @@ mod tests {
             .append_owned_run_event(
                 next.id,
                 root.id,
-                "recovery",
+                "recovery:fixture",
                 ProviderEventRecord::interrupted(),
             )
             .await
             .unwrap();
+        assert!(
+            store
+                .load_active_compaction(conversation)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_unowned_recovery_claim_does_not_revive_activity() {
+        let (store, conversation, run, agent) = fixture().await;
+        store
+            .append_owned_run_event(run, agent, "owner", record(CompactionPhase::Started))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE provider_runs SET dispatch_owner_id = NULL, dispatch_lease_expires_at = NULL WHERE id = ?")
+            .bind(run.to_string()).execute(&store.pool).await.unwrap();
+        assert!(
+            store
+                .claim_unowned_provider_dispatch_recovery(
+                    run,
+                    "recovery:fixture",
+                    Duration::from_secs(120)
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.load_run(run).await.unwrap().status,
+            RunStatus::Running
+        );
         assert!(
             store
                 .load_active_compaction(conversation)
