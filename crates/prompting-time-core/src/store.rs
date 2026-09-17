@@ -1,4 +1,5 @@
 use crate::tool_operation::{ToolOperation, ToolOperationDetail, ToolOperationSummary};
+mod context_compaction;
 mod conversations;
 mod operations;
 pub use conversations::{ConversationBinding, ConversationPath};
@@ -285,6 +286,9 @@ enum RunEventTarget<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderEventRecord {
+    Compaction {
+        observation: crate::context_compaction::CompactionObservation,
+    },
     Started {
         native_turn_id: Option<String>,
     },
@@ -536,6 +540,9 @@ impl ProviderEventRecord {
 
     fn event_fields(&self, is_root: bool) -> (TimelineEventKind, &str) {
         match (self, is_root) {
+            (Self::Compaction { observation }, _) => {
+                context_compaction::event_fields(&observation.phase)
+            }
             (Self::Started { .. }, true) => (TimelineEventKind::Lifecycle, "Provider run started"),
             (Self::Started { .. }, false) => (TimelineEventKind::Lifecycle, "Agent started"),
             (Self::Message(content) | Self::NativeMessage { content, .. }, _) => {
@@ -594,6 +601,7 @@ impl ProviderEventRecord {
                 Some((RunStatus::Failed, AgentStatus::Failed))
             }
             Self::Message(_)
+            | Self::Compaction { .. }
             | Self::NativeMessage { .. }
             | Self::Progress(_)
             | Self::Tool { .. }
@@ -607,6 +615,9 @@ impl ProviderEventRecord {
 
     fn payload_json(&self) -> Option<String> {
         match self {
+            Self::Compaction { observation } => {
+                Some(serde_json::json!({"compaction": observation}).to_string())
+            }
             Self::Started {
                 native_turn_id: Some(native_turn_id),
             } => Some(serde_json::json!({ "nativeTurnId": native_turn_id }).to_string()),
@@ -2465,6 +2476,7 @@ impl Store {
             }
         };
         let agent_id = operations::owner(&mut transaction, &run, agent_id, &record).await?;
+        let agent_id = context_compaction::owner(&mut transaction, &run, agent_id, &record).await?;
         let agent_row = sqlx::query_as::<_, AgentNodeRow>(
             "SELECT id, run_id, parent_id, provider, provider_native_id, provider_native_path, label, summary, status, created_at \
              FROM agent_nodes WHERE id = ? AND run_id = ?",
@@ -2508,6 +2520,20 @@ impl Store {
         }
         if !native_start {
             validate_event_state(&record, &run, &agent)?;
+        }
+        if let ProviderEventRecord::Compaction { observation } = &record {
+            let event = context_compaction::persist(
+                &mut transaction,
+                run.conversation_id,
+                run.id,
+                agent_id,
+                run.provider,
+                observation,
+            )
+            .await?;
+            transaction.commit().await?;
+            self.notify_change(run.conversation_id, run.id);
+            return Ok((event, None));
         }
         if native.is_none()
             && matches!(
@@ -3034,6 +3060,14 @@ impl Store {
         expected_owner_id: Option<&str>,
     ) -> Result<StageWaitingEventOutcome, StoreError> {
         let record = operations::normalize(record)?;
+        if let ProviderEventRecord::Compaction { observation } = &record {
+            observation
+                .validate()
+                .map_err(|error| StoreError::InvalidData {
+                    entity: "compaction",
+                    detail: error.to_string(),
+                })?;
+        }
         let canonical_record = record.clone();
         let native_item_id = match &record {
             ProviderEventRecord::NativeMessage { native_item_id, .. } => {
@@ -3043,6 +3077,12 @@ impl Store {
         };
         let payload_json = record.payload_json();
         let (kind, content, mutation_state) = match record {
+            ProviderEventRecord::Compaction { observation } => {
+                let (_, content) = context_compaction::event_fields(&observation.phase);
+                // The bounded waiting queue accepts ordinary output; the typed payload
+                // determines the final diagnostic/lifecycle kind when it drains.
+                (TimelineEventKind::Progress, content.to_owned(), None)
+            }
             ProviderEventRecord::Message(content) => (TimelineEventKind::Message, content, None),
             ProviderEventRecord::NativeMessage { content, .. } => {
                 (TimelineEventKind::Message, content, None)
@@ -3085,6 +3125,8 @@ impl Store {
         .into_domain()?;
         let agent_id =
             operations::owner(&mut transaction, &run, agent_id, &canonical_record).await?;
+        let agent_id =
+            context_compaction::owner(&mut transaction, &run, agent_id, &canonical_record).await?;
         let agent = sqlx::query_as::<_, AgentNodeRow>(
             "SELECT id, run_id, parent_id, provider, provider_native_id, provider_native_path, label, summary, status, created_at \
              FROM agent_nodes WHERE id = ? AND run_id = ?",
@@ -3105,7 +3147,7 @@ impl Store {
                     ProviderEventRecord::NativeItem {
                         native_agent_id: Some(_),
                         ..
-                    }
+                    } | ProviderEventRecord::Compaction { .. }
                 ) && agent.status == AgentStatus::Running))
         {
             return Err(StoreError::InvalidEventState {
@@ -3190,6 +3232,21 @@ impl Store {
         }
         if overflowed != 0 {
             return Err(StoreError::StagedEventOverflowed);
+        }
+
+        if let ProviderEventRecord::Compaction { .. } = &canonical_record {
+            let existing = sqlx::query_as::<_, StagedProviderEventRow>(
+                "SELECT id, conversation_id, run_id, agent_id, sequence, kind, content, native_item_id, payload_json, mutation_state, overflowed_kind \
+                 FROM staged_provider_events WHERE run_id = ? AND agent_id = ? AND json_valid(payload_json) \
+                 AND json_type(payload_json, '$.compaction') = 'object' ORDER BY sequence DESC LIMIT 1")
+                .bind(run_id.to_string()).bind(event_agent_id.to_string()).fetch_optional(&mut *transaction).await?;
+            if let Some(existing) = existing
+                && existing.payload_json == payload_json
+            {
+                let event = existing.into_domain()?;
+                transaction.commit().await?;
+                return Ok(StageWaitingEventOutcome::Staged(event));
+            }
         }
 
         let incoming_bytes = content.len().saturating_add(if existing_message.is_some() {
@@ -4484,6 +4541,7 @@ impl Store {
                      WHEN json_type(payload_json, '$.failure') = 'true' \
                        OR (json_type(payload_json, '$.errorCategory') = 'text' \
                            AND substr(json_extract(payload_json, '$.errorCategory'), 1, 1) <> '') THEN 'failure' \
+                     WHEN json_type(payload_json, '$.compaction') = 'object' THEN 'telemetry' \
                      WHEN json_type(payload_json, '$.method') = 'text' \
                        AND substr(json_extract(payload_json, '$.method'), 1, 1) <> '' THEN 'telemetry' \
                      ELSE 'notice' END AS presentation \
@@ -6480,6 +6538,23 @@ async fn drain_staged_events_in_transaction(
     let mut drained = Vec::with_capacity(staged.len());
     for event in staged {
         if event.overflowed_kind.is_none()
+            && let Some(payload) = event.payload_json.as_deref()
+            && let Some(observation) = context_compaction::from_payload(payload)?
+        {
+            drained.push(
+                context_compaction::persist(
+                    transaction,
+                    event.conversation_id,
+                    event.run_id,
+                    event.agent_id,
+                    provider,
+                    &observation,
+                )
+                .await?,
+            );
+            continue;
+        }
+        if event.overflowed_kind.is_none()
             && event.payload_json.as_deref().is_some_and(|payload| {
                 serde_json::from_str::<serde_json::Value>(payload)
                     .ok()
@@ -6777,6 +6852,15 @@ fn validate_event_state(
 ) -> Result<(), StoreError> {
     let is_root = agent.parent_id.is_none();
     match record {
+        ProviderEventRecord::Compaction { .. }
+            if !matches!(run.status, RunStatus::Running | RunStatus::Waiting)
+                || !matches!(agent.status, AgentStatus::Running | AgentStatus::Waiting) =>
+        {
+            Err(StoreError::InvalidEventState {
+                event: "compaction",
+                status: agent_status_label(agent.status),
+            })
+        }
         ProviderEventRecord::Started { .. }
             if agent.status != AgentStatus::Queued
                 || (is_root && run.status != RunStatus::Queued) =>
@@ -6992,6 +7076,9 @@ fn provider_error_content(category: ProviderErrorCategory) -> &'static str {
         ProviderErrorCategory::Rejected => "Provider failed: request rejected",
         ProviderErrorCategory::UnsupportedThinking => {
             "The requested thinking effort is unavailable for this model/provider. Choose Auto or Provider default."
+        }
+        ProviderErrorCategory::UnsupportedContextBudget => {
+            "The requested context budget could not be applied safely. Choose Provider default or use a supported CLI version."
         }
         ProviderErrorCategory::Protocol => "Provider failed: protocol error",
         ProviderErrorCategory::Transport => "Provider failed: transport error",
@@ -7994,6 +8081,18 @@ mod tests {
             expiry,
             grace,
         ));
+    }
+
+    #[tokio::test]
+    async fn compaction_schema_has_durable_unique_identity() {
+        let store = Store::open_in_memory().await.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'compaction_key'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "completion replay needs a durable key");
     }
 
     #[tokio::test]

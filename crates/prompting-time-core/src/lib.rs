@@ -1,5 +1,6 @@
 pub mod app;
 pub mod context_budget;
+pub mod context_compaction;
 pub mod domain;
 pub mod error;
 pub mod handoff;
@@ -16,6 +17,21 @@ pub mod workspace;
 mod context_budget_contract_tests {
     use crate::context_budget::ContextBudget;
     use crate::providers::{ResumeSession, StartSession, TurnRequest};
+
+    #[test]
+    fn compaction_event_contract() {
+        let event = serde_json::json!({"kind":"compaction", "observation": {
+            "nativeSessionId":"session", "nativeTurnId":"turn", "nativeAgentId":null,
+            "phase":{"kind":"completed", "boundaryId":"boundary"}
+        }});
+        assert!(serde_json::from_value::<crate::providers::ProviderEvent>(event).is_ok());
+        assert!(
+            serde_json::from_str::<crate::providers::ProviderErrorCategory>(
+                "\"unsupportedContextBudget\""
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn context_budget_presets_and_legacy_requests() {

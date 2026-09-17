@@ -148,6 +148,7 @@ impl From<ProviderRun> for RunOverview {
 pub struct TimelineSnapshot {
     pub events: Page<TimelineRecord>,
     pub approvals: ApprovalPage,
+    pub active_compaction: Option<crate::context_compaction::CompactionActivity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -722,7 +723,12 @@ impl PromptingTime {
             .store
             .load_recent_approvals(conversation_id, 30)
             .await?;
-        Ok(TimelineSnapshot { events, approvals })
+        let active_compaction = self.store.load_active_compaction(conversation_id).await?;
+        Ok(TimelineSnapshot {
+            events,
+            approvals,
+            active_compaction,
+        })
     }
 
     pub async fn load_diagnostics(
@@ -1363,6 +1369,7 @@ fn unavailable_error(category: ProviderErrorCategory) -> ProviderUnavailability 
         | ProviderErrorCategory::InspectionFailed
         | ProviderErrorCategory::Rejected
         | ProviderErrorCategory::UnsupportedThinking
+        | ProviderErrorCategory::UnsupportedContextBudget
         | ProviderErrorCategory::Protocol
         | ProviderErrorCategory::Transport
         | ProviderErrorCategory::MalformedJson

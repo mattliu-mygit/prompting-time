@@ -221,6 +221,9 @@ pub struct NativeChildTurn {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ProviderEvent {
+    Compaction {
+        observation: crate::context_compaction::CompactionObservation,
+    },
     /// Mutation evidence without sufficient ownership metadata for a display row.
     MutationEvidence {
         mutation: MutationState,
@@ -417,6 +420,7 @@ pub enum ProviderErrorCategory {
     InspectionFailed,
     Rejected,
     UnsupportedThinking,
+    UnsupportedContextBudget,
     Protocol,
     Transport,
     MalformedJson,

@@ -2970,6 +2970,7 @@ async fn execute_attempt(
                             continue;
                         }
                         let record = match &event {
+                            ProviderEvent::Compaction { observation } => ProviderEventRecord::Compaction { observation: observation.clone() },
                             ProviderEvent::AssistantMessage { content } => {
                                 ProviderEventRecord::message(content.clone())
                             }
@@ -3042,6 +3043,7 @@ async fn execute_attempt(
                         let pending_child = job.active.attempt.lock().unwrap().as_ref().and_then(|attempt| attempt.pending_child.clone());
                         let waiting_child_operation = pending_child.as_ref().is_some_and(|(_, owner)| {
                             matches!(&event, ProviderEvent::NativeItemActivity { native_agent_id: Some(id), .. } if id == &owner.native_thread_id)
+                                || matches!(&event, ProviderEvent::Compaction { observation } if observation.native_agent_id.as_deref() == Some(owner.native_thread_id.as_str()))
                         });
                         if pending_child.is_some() && !waiting_child_operation {
                             let result = store.append_owned_run_event(attempt.run_id, attempt.root_id, &attempt.dispatch_owner_id, record).await;
@@ -3289,6 +3291,30 @@ async fn execute_attempt(
                     )
                     .await
                 {
+                    return finalize_attempt(
+                        store,
+                        &job.active,
+                        &attempt,
+                        turn,
+                        &mut buffered,
+                        AttemptFinish::RuntimeError(error.into()),
+                    )
+                    .await;
+                }
+            }
+            ProviderEvent::Compaction { observation } if started => {
+                if let Err(error) = store
+                    .append_owned_run_event(
+                        attempt.run_id,
+                        attempt.root_id,
+                        &attempt.dispatch_owner_id,
+                        ProviderEventRecord::Compaction { observation },
+                    )
+                    .await
+                {
+                    if matches!(error, StoreError::NativeAgentIdentityConflict) {
+                        continue;
+                    }
                     return finalize_attempt(
                         store,
                         &job.active,
@@ -3798,6 +3824,11 @@ async fn discard_stale_operation(
     event: &ProviderEvent,
     error: &StoreError,
 ) -> Result<bool, RuntimeError> {
+    if matches!(error, StoreError::NativeAgentIdentityConflict)
+        && matches!(event, ProviderEvent::Compaction { .. })
+    {
+        return Ok(true);
+    }
     if matches!(error, StoreError::NativeAgentIdentityConflict)
         && let ProviderEvent::NativeItemActivity {
             native_agent_id: Some(_),
@@ -5223,6 +5254,108 @@ mod tests {
             .unwrap();
         handle.wait_for(RunStatus::Waiting).await.unwrap();
         (store, supervisor, adapter, handle, conversation.id)
+    }
+
+    #[tokio::test]
+    async fn compaction_runtime_stages_then_clears_without_failing_run() {
+        use crate::context_compaction::{CompactionObservation, CompactionPhase};
+        let (store, supervisor, adapter, handle, conversation) =
+            steering_fixture(None, false).await;
+        let sender = adapter.sender.lock().unwrap().take().unwrap();
+        let event = |phase| ProviderEvent::Compaction {
+            observation: CompactionObservation {
+                native_session_id: "fixture-session".into(),
+                native_turn_id: Some("fixture-turn".into()),
+                native_agent_id: None,
+                phase,
+            },
+        };
+        sender
+            .send(Ok(event(CompactionPhase::Started)))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if store.pending_recovery().await.unwrap().iter().any(|run| {
+                    run.staged_events.iter().any(|entry| {
+                        entry
+                            .payload_json
+                            .as_deref()
+                            .is_some_and(|payload| payload.contains("compaction"))
+                    })
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("compaction must be staged while approval is pending");
+        supervisor
+            .respond(
+                handle.run_id(),
+                "fixture-approval",
+                ApprovalResponse::Approved,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .load_active_compaction(conversation)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        sender
+            .send(Ok(event(CompactionPhase::Failed)))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store
+                .load_active_compaction(conversation)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            store.load_run(handle.run_id()).await.unwrap().status,
+            RunStatus::Running
+        );
+        for _ in 0..2 {
+            sender
+                .send(Ok(event(CompactionPhase::Completed {
+                    boundary_id: "boundary".into(),
+                })))
+                .await
+                .unwrap();
+        }
+        sender.send(Ok(ProviderEvent::TurnCompleted)).await.unwrap();
+        drop(sender);
+        assert_eq!(handle.wait().await.unwrap().status, RunStatus::Completed);
+        let page = store
+            .load_recent_timeline(conversation, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .filter(|entry| entry.event.content == "Context compacted")
+                .count(),
+            1
+        );
+        assert!(
+            store
+                .load_active_compaction(conversation)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        supervisor.shutdown().await.unwrap();
     }
 
     #[tokio::test]
