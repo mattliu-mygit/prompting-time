@@ -67,6 +67,7 @@ function summary(id: string, title: string, parentId: string | null, hasChildren
     },
     routingProfile: "bestFit" as const, workspaceId: null, projectRoot: null,
     thinkingPreference: { kind: "auto" as const }, thinkingDecision: null, thinkingConfiguration: null,
+    contextBudget: { kind: "tokens" as const, tokens: 300000 }, runContextBudget: null,
     archived: id === treeIds.root && rootArchived,
     currentRunId: id === treeIds.root ? `run-${parentRun}`
       : id.startsWith("new-child-") ? `run-${newChildRuns[Number(id.slice("new-child-".length)) - 1]}`
@@ -159,6 +160,6 @@ export function treeTimeline(conversationId: string, cursor: string | null, limi
   const page = items.slice(-limit);
   return {
     items: page, nextCursor: items.length > page.length ? `${prefix}${page[0].sequence}` : null,
-    approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    approvals: [], approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
   };
 }

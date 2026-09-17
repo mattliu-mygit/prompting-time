@@ -66,7 +66,7 @@ export function chatTimeline(conversationId: string, cursor: string | null = nul
         item(conversationId, 7, "I’ll inspect the tests and summarize the findings."),
         item(conversationId, 8, "Provider run completed", { kind: "lifecycle", role: null }),
       ],
-      nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+      nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
     };
   }
   if (scenario === "orientation") {
@@ -79,7 +79,7 @@ export function chatTimeline(conversationId: string, cursor: string | null = nul
         return item(conversationId, sequence, `### Observation ${sequence}\n\n${"Invented history for reading-position checks. ".repeat(8)}`);
       }),
       nextCursor: start === 0 ? null : String(start),
-      approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+      approvals: [], approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
     };
   }
   const items = [
@@ -102,7 +102,7 @@ export function chatTimeline(conversationId: string, cursor: string | null = nul
   return {
     items, nextCursor: null,
     approvals: scenario === "approval" ? [chatApproval(conversationId)] : [],
-    approvalsTruncated: false, approvalsNextCursor: null,
+    approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
   };
 }
 

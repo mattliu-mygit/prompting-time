@@ -7,6 +7,7 @@ import { composerMessages, composerScenario, steerComposerRun, submitComposerMes
 import { listenToToolEvents, toolEventDetail, toolProvider, toolScenario, toolTimeline } from "./tool-operations-fixture";
 import { archiveSyntheticRoot, listenToTreeEvents, treeConversationPath, treeIds, treeListChildren, treeListConversations, treeLoadConversation, treeScenario, treeTimeline } from "./conversation-tree-fixture";
 import { thinkingScenario, withThinkingFixture } from "./thinking-fixture";
+import { contextBudgetScenario, withContextBudgetFixture } from "./context-budget-fixture";
 import "../../src/styles/tokens.css";
 import "../../src/styles/app.css";
 
@@ -25,6 +26,7 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
   title: longLabels && index === 0 ? "Synthetic conversation with an intentionally long title for checking the compact header" : `Synthetic conversation ${index}`,
   routingProfile: "balanced",
   thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+  contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null,
   workspaceId: null,
   archived: false,
   projectRoot: null,
@@ -78,9 +80,9 @@ const api: AppApi = {
       agentId: conversationId, sequence: "1", kind: "message", role: "assistant", provider: syntheticProvider,
       presentation: "normal", content: "Captured synthetic child activity.", operation: null, contentBytes: "34", truncated: false,
     }],
-    nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
   }) : composerScenario ? ({
-    items: composerMessages(conversationId), nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    items: composerMessages(conversationId), nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
   }) : toolScenario && !conversationId.startsWith("created-") ? toolTimeline(conversationId, cursor, limit)
     : chatScenario && !conversationId.startsWith("created-") ? chatTimeline(conversationId, cursor, limit) : ({
     items: Array.from({ length: conversationId.startsWith("created-") ? 0 : 80 }, (_, index) => ({
@@ -89,7 +91,7 @@ const api: AppApi = {
       presentation: "normal",
       content: `Synthetic message ${index}. This is invented layout content.`, operation: null, contentBytes: "60", truncated: false,
     })),
-    nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
   }),
   loadDiagnostics: async ({ conversationId, cursor, limit }) => chatScenario && loadSyntheticConversation(conversationId).parentId === null
     ? chatDiagnostics(conversationId, cursor, limit) : { items: [], nextCursor: null },
@@ -116,6 +118,7 @@ const api: AppApi = {
   loadApprovalQuestions: unsupported,
   submitMessage: composerScenario ? submitComposerMessage : unsupported,
   setThinkingPreference: unsupported,
+  setContextBudget: unsupported,
   steerRun: composerScenario ? steerComposerRun : unsupported,
   respondToApproval: unsupported,
   interruptRun: unsupported,
@@ -132,6 +135,7 @@ const api: AppApi = {
       capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
       routingProfile: request.routingProfile, workspaceId: `synthetic-workspace-${conversations.length}`,
       thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+      contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null,
       projectRoot: request.workspace.kind === "projectless" ? null : request.workspace.path,
       archived: false, currentRunId: null, provider: null, runStatus: null,
       rollupStatus: null,
@@ -159,4 +163,6 @@ const fixtureApi = treeScenario ? {
   },
 } : api;
 
-createRoot(document.getElementById("root")!).render(<App store={createAppStore(thinkingScenario ? withThinkingFixture(fixtureApi) : fixtureApi)} />);
+const thinkingApi = thinkingScenario ? withThinkingFixture(fixtureApi) : fixtureApi;
+const scenarioApi = contextBudgetScenario ? withContextBudgetFixture(thinkingApi) : thinkingApi;
+createRoot(document.getElementById("root")!).render(<App store={createAppStore(scenarioApi)} />);

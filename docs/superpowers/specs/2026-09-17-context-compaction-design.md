@@ -1,6 +1,8 @@
 # Selectable native context compaction
 
-Status: behavior approved in conversation, including presets through 500k; written-spec review pending. Not implemented.
+Status: implemented, including presets through 500k. Automated and synthetic-browser
+checks cover the controls and protocol boundaries. Authenticated high-context
+compaction and native-WebView acceptance remain unverified.
 
 ## Intent
 
@@ -11,7 +13,7 @@ This does not replace either harness's prompts or compaction algorithm.
 
 ## Conversation controls
 
-Add a compact **Context budget** selector beside Thinking. Choices are **200k, 300k,
+A compact **Context budget** selector sits beside Thinking. Choices are **200k, 300k,
 400k, 500k**, and **Provider default**. One k means 1,000 tokens. The default saved
 preference is **300k** for new and existing managed conversations after migration;
 historical runs and previously accepted requests retain their prior provider-default
@@ -80,17 +82,22 @@ with generated bridge types and a small composer control. Provider adapters tran
 the shared intent into native settings and normalize bounded compaction observations.
 The frontend does not reproduce native token-estimation or summarization algorithms.
 
-Codex has a native automatic-compaction threshold and per-session configuration
-overrides. Its loaded-session update/reset behavior must be verified before relying
-on those overrides. Claude supports a process-local auto-compact window; it subtracts
-native headroom and caps the window at model capacity. Its requested-window readback
-is not proof of the exact effective trigger. Native controls vary by installed version,
-so supported behavior must be verified against the adapter's installed-version contract.
+Numbered budgets are supported on the verified Codex **0.153.4** and Claude Code
+**2.1.205** contracts. Other versions fail before dispatch rather than claiming an
+unverified override; Provider default retains the adapter's baseline compatibility.
+Supporting another version requires revalidating its native configuration behavior.
+
+Codex applies initial configuration when creating the thread. Changing or resetting
+a loaded thread requires an idle, owned reload with fresh native unload/reload evidence;
+a successful resume response alone is insufficient. The thread identity is preserved,
+and other conversations are not restarted. Claude uses process-local settings and
+bounded effective-settings readback before sending the prompt. Native headroom and
+model capacity still apply; requested-window readback is not an exact trigger value.
 
 Do not inflate model capacity, edit global settings, change approval/permission/MCP
 boundaries, persist complete provider settings, or import private resources. No model
 picker, custom summarizer, manual Compact now button, unrelated layout changes, CLI
-upgrade, publication, or migration of a real private database is included.
+upgrade, or migration of a real private database is included.
 
 ## Acceptance and completion
 

@@ -108,7 +108,7 @@ export function toolTimeline(conversationId: string, cursor: string | null, limi
   const page = eligible.slice(-limit);
   return {
     items: page, nextCursor: eligible.length > page.length ? `tool-before-${page[0].sequence}` : null,
-    approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+    approvals: [], approvalsTruncated: false, approvalsNextCursor: null, activeCompaction: null,
   };
 }
 

@@ -498,6 +498,13 @@ inherited environment untouched. This avoids the installed CLI flag's persistent
 launch-preference side effect. Neither adapter edits global settings, replaces provider
 prompts, adds a model picker, or changes the existing skills, MCP or permission boundary.
 
+### Context budget
+
+The approved [native context-compaction specification](2026-09-17-context-compaction-design.md)
+defines the selectable next-turn context budget, provider-specific application boundaries,
+and truthful native progress. Its status records implementation and acceptance separately;
+it is the authoritative specification for this feature.
+
 ## Provider switching and context handoff
 
 Switching providers occurs only at a turn boundary. Steering an active turn stays with its current provider. To switch during active work, the user first interrupts the run.

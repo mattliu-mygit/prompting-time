@@ -76,6 +76,32 @@ fixture instance with no store listener.
 
 ## Composer conventions
 
+### Context budgets
+
+Use `?composer=send&thinking=controls&context=controls` for invented per-conversation
+context budgets. The fixture records preferences and submissions in browser memory;
+it does not apply a native setting, count tokens, or invoke compaction.
+
+Verify the five choices, a 300k initial selection, and draft preservation after
+changing conversations. Submit at 500k and inspect the frozen request with
+`contextBudgetFixtureStats()` from `/tests/browser/context-budget-fixture.ts`.
+Use `failNextContextBudgetSave()` to reject the next save, and
+`holdNextContextBudgetSave()` / `completeContextBudgetSaves()` to check that pending
+saves block new sends. A failed save must retain the previous preference and draft.
+Repeat with `?composer=steer&thinking=controls&context=controls`: a setting change
+must not add context configuration to steering. Recorded children remain read-only.
+
+Run `checkContextBudgetLayout()` from `/tests/browser/check-context-budget-layout.ts`
+at 1440 × 900, 960 × 600, and 768 × 480. The last size approximates the minimum
+window's available content at 125% zoom; it is not a native-WebView zoom test.
+
+From the same fixture module, `beginSyntheticCompaction()` reports invented active
+status; `completeSyntheticCompaction()` clears it and adds one completion, including
+when no start was emitted. `clearSyntheticCompaction()` clears status without claiming
+success. Replaying the same synthetic boundary must not add another completion or
+clear a newer active status. These calls test UI projection only; the Rust/native
+tests own event attribution, persistence and cross-run deduplication.
+
 ### Thinking preferences
 
 Use `?composer=send&thinking=controls` for invented thinking settings and provider

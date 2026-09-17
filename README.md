@@ -109,6 +109,11 @@ The composer edits Markdown source with an optional preview. **Enter** submits;
 its height limit. Successful submission clears the draft and restores input focus;
 failure keeps the draft available. Submitted text preserves Markdown whitespace.
 Provider selection and message actions share one footer below the input.
+**Context budget**, beside Thinking, offers 200k–500k presets (300k by default)
+or **Provider default**. Changes apply to the next new turn; native model limits
+and response headroom may cause earlier compaction. Your visible history stays
+intact. See the [native compaction contract](docs/superpowers/specs/2026-09-17-context-compaction-design.md)
+for supported CLI versions and compatibility limits.
 **Composer help** reveals routing guidance and keyboard hints; errors and reasons
 that sending is blocked remain visible without opening help.
 
