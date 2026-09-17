@@ -565,8 +565,14 @@ mod tests {
         let id = overview.conversation.id.to_string();
         let json = serde_json::to_value(ConversationSummary::from(overview)).unwrap();
         assert_eq!(json["id"], id);
-        assert_eq!(json["contextBudget"], serde_json::json!({ "kind": "tokens", "tokens": 300000 }));
-        assert!(json.get("runContextBudget").is_some_and(serde_json::Value::is_null));
+        assert_eq!(
+            json["contextBudget"],
+            serde_json::json!({ "kind": "tokens", "tokens": 300000 })
+        );
+        assert!(
+            json.get("runContextBudget")
+                .is_some_and(serde_json::Value::is_null)
+        );
         assert_eq!(
             json["thinkingPreference"],
             serde_json::json!({ "kind": "auto" })
@@ -990,14 +996,23 @@ mod tests {
         ] {
             let request: SetContextBudgetRequest = serde_json::from_value(serde_json::json!({
                 "conversationId": "fixture", "preference": preference
-            })).unwrap();
-            let core: prompting_time_core::context_budget::ContextBudget = request.preference.into();
-            assert_eq!(serde_json::to_value(ContextBudget::from(core)).unwrap(), preference);
+            }))
+            .unwrap();
+            let core: prompting_time_core::context_budget::ContextBudget =
+                request.preference.into();
+            assert_eq!(
+                serde_json::to_value(ContextBudget::from(core)).unwrap(),
+                preference
+            );
             let submission: SubmitMessageRequest = serde_json::from_value(serde_json::json!({
                 "conversationId": "fixture", "text": "hello", "providerOverride": null,
                 "commandId": "command", "contextBudget": preference
-            })).unwrap();
-            assert_eq!(serde_json::to_value(submission.context_budget.unwrap()).unwrap(), preference);
+            }))
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(submission.context_budget.unwrap()).unwrap(),
+                preference
+            );
         }
     }
 
@@ -1006,22 +1021,39 @@ mod tests {
         let run_id = RunId::new();
         let agent_id = prompting_time_core::domain::AgentId::new();
         let snapshot = CoreTimelineSnapshot {
-            events: Page { items: vec![], next_cursor: None },
-            approvals: prompting_time_core::store::ApprovalPage {
-                items: vec![], truncated: false, next_cursor: None,
+            events: Page {
+                items: vec![],
+                next_cursor: None,
             },
-            active_compaction: Some(prompting_time_core::context_compaction::CompactionActivity {
-                run_id, agent_id, provider: CoreProviderId::Claude,
-            }),
+            approvals: prompting_time_core::store::ApprovalPage {
+                items: vec![],
+                truncated: false,
+                next_cursor: None,
+            },
+            active_compaction: Some(
+                prompting_time_core::context_compaction::CompactionActivity {
+                    run_id,
+                    agent_id,
+                    provider: CoreProviderId::Claude,
+                },
+            ),
         };
         let json = serde_json::to_value(TimelinePage::from(snapshot.clone())).unwrap();
-        assert_eq!(json["activeCompaction"], serde_json::json!({
-            "runId": run_id.to_string(), "agentId": agent_id.to_string(), "provider": "claude"
-        }));
+        assert_eq!(
+            json["activeCompaction"],
+            serde_json::json!({
+                "runId": run_id.to_string(), "agentId": agent_id.to_string(), "provider": "claude"
+            })
+        );
         let json = serde_json::to_value(TimelinePage::from(CoreTimelineSnapshot {
-            active_compaction: None, ..snapshot
-        })).unwrap();
-        assert!(json.get("activeCompaction").is_some_and(serde_json::Value::is_null));
+            active_compaction: None,
+            ..snapshot
+        }))
+        .unwrap();
+        assert!(
+            json.get("activeCompaction")
+                .is_some_and(serde_json::Value::is_null)
+        );
     }
 
     #[test]
