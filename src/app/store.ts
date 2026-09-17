@@ -622,11 +622,17 @@ export function createAppStore(api: AppApi): AppStore {
     let path = loadedConversationPath(snapshot, conversationId);
     if (path.truncated || !snapshot.conversationsById[conversationId]) {
       const epoch = fullRefreshEpoch;
+      const conversationsAtStart = snapshot.conversationsById;
       try {
         const result = await api.loadConversationPath({ conversationId });
         if (disposed || generation !== selectionGeneration || epoch !== fullRefreshEpoch) return;
         if (!result.items.some(item => item.id === conversationId) || !snapshot.conversationsById[result.ownerConversationId]) return;
-        const conversationsById = { ...snapshot.conversationsById, ...normalizeConversations(result.items) };
+        const conversationsById = { ...snapshot.conversationsById };
+        for (const item of result.items) {
+          // Keep summaries acknowledged or refreshed while this ancestry read was in flight.
+          const current = conversationsById[item.id];
+          if (!current || current === conversationsAtStart[item.id]) conversationsById[item.id] = Object.freeze({ ...item });
+        }
         const executionOwners = { ...snapshot.executionOwners };
         result.items.forEach(item => { executionOwners[item.id] = result.ownerConversationId; });
         update({ conversationsById, executionOwners });

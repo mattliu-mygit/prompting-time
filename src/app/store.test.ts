@@ -11,6 +11,57 @@ import type {
 import { createAppStore, selectVisibleConversations, type AppApi } from "./store";
 
 describe("in-session drafts", () => {
+  it("keeps acknowledged preferences and newer run metadata when an older ancestry load completes", async () => {
+    const { api } = createFakeApi();
+    let saved = conversation("c1", { runStatus: "completed" });
+    const staleRoot = { ...saved, hasChildren: true };
+    let acknowledgeSave!: () => void;
+    let resolvePath!: (path: ConversationPath) => void;
+    api.listConversations = vi.fn(async () => ({ items: [saved], nextCursor: null }));
+    api.loadConversation = vi.fn(async () => saved);
+    api.listChildConversations = vi.fn(async () => ({ items: [], nextCursor: null }));
+    api.setContextBudget = vi.fn(({ preference }) => new Promise<void>(resolve => {
+      acknowledgeSave = () => {
+        saved = { ...saved, contextBudget: preference, hasChildren: true, title: "New root title", currentRunId: "new-run",
+          thinkingPreference: { kind: "manual", level: "high" }, runContextBudget: { kind: "tokens", tokens: 400000 } };
+        resolve();
+      };
+    }));
+    api.loadConversationPath = vi.fn(() => new Promise<ConversationPath>(resolve => { resolvePath = resolve; }));
+    const store = createAppStore(api);
+    await store.initialize();
+    const saving = store.setContextBudget("c1", { kind: "tokens", tokens: 500000 });
+    const selecting = store.selectConversation("missing-child");
+    acknowledgeSave();
+    await saving;
+    await waitFor(() => expect(store.getSnapshot().conversationsById.c1?.currentRunId).toBe("new-run"));
+    expect(store.getSnapshot().conversationsById.c1?.contextBudget).toEqual({ kind: "tokens", tokens: 500000 });
+    resolvePath({ items: [staleRoot, child("missing-child", "c1")], ownerConversationId: "c1", truncated: false });
+    await selecting;
+    expect(store.getSnapshot().selectedConversationId).toBe("missing-child");
+    expect(store.getSnapshot().selectedPath?.ids).toEqual(["c1", "missing-child"]);
+    expect(store.getSnapshot().executionOwners).toMatchObject({ c1: "c1", "missing-child": "c1" });
+    expect(store.getSnapshot().conversationsById.c1).toMatchObject({ title: "New root title", contextBudget: { kind: "tokens", tokens: 500000 },
+      thinkingPreference: { kind: "manual", level: "high" }, currentRunId: "new-run", runContextBudget: { kind: "tokens", tokens: 400000 } });
+    await store.selectConversation("c1");
+    store.setDraft("c1", "next turn");
+    await store.submitDraft("c1", null, null);
+    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ contextBudget: { kind: "tokens", tokens: 500000 }, thinking: { kind: "manual", level: "high" } }));
+    expect(api.loadConversationPath).toHaveBeenCalledTimes(1);
+    store.dispose();
+  });
+
+  it("accepts refreshed known ancestors when none changed during the path request", async () => {
+    const { api } = createFakeApi();
+    api.listChildConversations = vi.fn(async () => ({ items: [], nextCursor: null }));
+    api.loadConversationPath = vi.fn(async () => ({ items: [conversation("c1", { hasChildren: true, title: "Updated ancestor", contextBudget: { kind: "tokens", tokens: 400000 } }), child("missing-child", "c1")], ownerConversationId: "c1", truncated: false }));
+    const store = createAppStore(api);
+    await store.initialize();
+    await store.selectConversation("missing-child");
+    expect(store.getSnapshot().conversationsById.c1).toMatchObject({ title: "Updated ancestor", hasChildren: true, contextBudget: { kind: "tokens", tokens: 400000 } });
+    expect(store.getSnapshot().selectedPath?.ids).toEqual(["c1", "missing-child"]);
+    store.dispose();
+  });
   it("acknowledges context saves into current metadata without undoing navigation or another draft", async () => {
     const { api, emit } = createFakeApi();
     let resolve!: () => void;
