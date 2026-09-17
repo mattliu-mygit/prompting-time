@@ -32,6 +32,7 @@ use super::{
     ProviderErrorCategory, ProviderEvent, ProviderHealth, ProviderId, ProviderSession,
     ProviderTurn, ProviderTurnOwner, ResumeSession, StartSession, TurnRequest,
 };
+use crate::context_budget::ContextBudget;
 use crate::domain::ConversationId;
 use crate::thinking::{ThinkingConfiguration, ThinkingDecision, ThinkingPreference};
 use protocol::{PendingControl, Protocol};
@@ -71,6 +72,7 @@ struct ActiveTurn {
 struct TurnState {
     generation: String,
     thinking: ThinkingDecision,
+    context_budget: ContextBudget,
     sender: JsonLineSender,
     process_shutdown: JsonLineShutdown,
     stop: watch::Sender<bool>,
@@ -309,6 +311,22 @@ impl ProviderAdapter for ClaudeAdapter {
         request: TurnRequest,
     ) -> Result<ProviderTurn, ProviderError> {
         request
+            .context_budget
+            .validate()
+            .map_err(|_| unsupported_context_budget())?;
+        if request.context_budget.requested_tokens().is_some() {
+            // The process-local settings/environment contract was audited for this exact CLI.
+            // Inspect version only: a turn must not add an authentication probe.
+            let (version, success) = inspect(&self.inner.binary, &["--version"])
+                .await
+                .map_err(|_| unsupported_context_budget())?;
+            if !success
+                || String::from_utf8_lossy(&version).split_whitespace().next() != Some("2.1.205")
+            {
+                return Err(unsupported_context_budget());
+            }
+        }
+        request
             .thinking
             .preference
             .validate()
@@ -391,12 +409,26 @@ impl ProviderAdapter for ClaudeAdapter {
             if let Some(level) = &request.thinking.requested_effort {
                 command.env("CLAUDE_CODE_EFFORT_LEVEL", level);
             }
+            if let Some(tokens) = request.context_budget.requested_tokens() {
+                // Mirror these narrow child overrides in settings because native startup can
+                // reapply legacy/settings env. Provider default omits both on its fresh process.
+                let env = json!({"DISABLE_COMPACT":"0","DISABLE_AUTO_COMPACT":"0","CLAUDE_CODE_AUTO_COMPACT_WINDOW":""});
+                command.arg("--settings").arg(
+                    json!({"autoCompactEnabled":true,"autoCompactWindow":tokens,"env":env})
+                        .to_string(),
+                );
+                command
+                    .env("DISABLE_COMPACT", "0")
+                    .env("DISABLE_AUTO_COMPACT", "0")
+                    .env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "");
+            }
             let process = JsonLineProcess::spawn(command)?;
             let (stop, _) = watch::channel(false);
             let (terminal, _) = watch::channel(None);
             let shared = Arc::new(TurnState {
                 generation: Uuid::now_v7().to_string(),
                 thinking: request.thinking,
+                context_budget: request.context_budget,
                 sender: process.sender(),
                 process_shutdown: process.shutdown_handle(),
                 stop,
@@ -588,6 +620,35 @@ fn unsupported_thinking() -> ProviderError {
     }
 }
 
+fn unsupported_context_budget() -> ProviderError {
+    ProviderError::NotDispatched {
+        category: ProviderErrorCategory::UnsupportedContextBudget,
+    }
+}
+
+fn validate_context_budget(settings: &Value, budget: ContextBudget) -> Result<(), ProviderError> {
+    let Some(tokens) = budget.requested_tokens() else {
+        return Ok(());
+    };
+    let effective = &settings["effective"];
+    let env = &effective["env"];
+    let valid_errors = match settings.get("errors") {
+        None => true,
+        Some(Value::Array(errors)) => errors.is_empty(),
+        _ => false,
+    };
+    if effective["autoCompactEnabled"].as_bool() != Some(true)
+        || effective["autoCompactWindow"].as_u64() != Some(u64::from(tokens))
+        || env["DISABLE_COMPACT"].as_str() != Some("0")
+        || env["DISABLE_AUTO_COMPACT"].as_str() != Some("0")
+        || env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"].as_str() != Some("")
+        || !valid_errors
+    {
+        return Err(unsupported_context_budget());
+    }
+    Ok(())
+}
+
 // Initialize and get_settings include account/settings data. Only these allowlisted, bounded
 // capability fields survive startup; neither raw response is retained in the turn or audit.
 #[derive(Deserialize)]
@@ -733,8 +794,13 @@ async fn run_turn(
             if value["type"] == "control_response" && value["response"]["request_id"] == settings_id
             {
                 if value["response"]["subtype"] != "success" {
-                    return Err(unsupported_thinking());
+                    return Err(if state.context_budget.requested_tokens().is_some() {
+                        unsupported_context_budget()
+                    } else {
+                        unsupported_thinking()
+                    });
                 }
+                validate_context_budget(&value["response"]["response"], state.context_budget)?;
                 break thinking_configuration(
                     models,
                     &value["response"]["response"],

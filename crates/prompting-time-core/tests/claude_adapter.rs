@@ -503,7 +503,9 @@ record('get-settings', message)
 if (root / 'hold-settings').exists():
     barrier('settings')
 applied = {'model':'invented-model','effort':os.environ.get('CLAUDE_CODE_EFFORT_LEVEL', 'high')}
-emit({'type':'control_response','response':{'subtype':'success','request_id':message['request_id'],'response':{'applied':metadata.get('applied', applied), 'settings':{'secret':'MUST-NOT-RETAIN'}}}})
+settings = json.loads(sys.argv[sys.argv.index('--settings')+1]) if '--settings' in sys.argv else {}
+record('compaction-env', {key:os.environ.get(key) for key in ['DISABLE_COMPACT','DISABLE_AUTO_COMPACT','CLAUDE_CODE_AUTO_COMPACT_WINDOW']})
+emit({'type':'control_response','response':{'subtype':'success','request_id':message['request_id'],'response':{'applied':metadata.get('applied', applied), 'effective':metadata.get('effective', settings), 'errors':metadata.get('errors', []), 'settings':{'secret':'MUST-NOT-RETAIN'}}}})
 if (root / 'hold-prompt-read').exists():
     sys.stdin.read(1)
     barrier('prompt-read')
@@ -515,6 +517,307 @@ record('effort-env', os.environ.get('CLAUDE_CODE_EFFORT_LEVEL'))
 fn thinking_request(preference: ThinkingPreference) -> TurnRequest {
     TurnRequest::new("Review this code")
         .with_thinking(ThinkingDecision::resolve(preference, "Review this code").unwrap())
+}
+
+#[tokio::test]
+async fn context_budget_launch_settings_resume_change_and_reset() {
+    use prompting_time_core::context_budget::ContextBudget;
+    let fixture = Fixture::new("result()");
+    let session = fixture.session().await;
+    for tokens in [
+        Some(200_000),
+        Some(300_000),
+        Some(400_000),
+        Some(500_000),
+        None,
+    ] {
+        let budget = tokens.map_or(ContextBudget::ProviderDefault, |tokens| {
+            ContextBudget::Tokens { tokens }
+        });
+        let mut turn = fixture
+            .adapter
+            .start_turn(
+                &session,
+                TurnRequest::new("invented").with_context_budget(budget),
+            )
+            .await
+            .unwrap();
+        collect(&mut turn).await;
+        turn.shutdown().await.unwrap();
+        let args = fixture.read("args");
+        let args = args.as_array().unwrap();
+        if let Some(tokens) = tokens {
+            let index = args
+                .iter()
+                .position(|arg| arg == "--settings")
+                .expect("numeric budget needs inline settings");
+            let settings: Value = serde_json::from_str(args[index + 1].as_str().unwrap()).unwrap();
+            assert_eq!(
+                settings,
+                json!({"autoCompactEnabled":true,"autoCompactWindow":tokens,"env":{"DISABLE_COMPACT":"0","DISABLE_AUTO_COMPACT":"0","CLAUDE_CODE_AUTO_COMPACT_WINDOW":""}})
+            );
+            assert_eq!(fixture.read("compaction-env"), settings["env"]);
+        } else {
+            assert!(!args.iter().any(|arg| arg == "--settings"));
+        }
+        assert_eq!(fixture.read("prompt")["session_id"], session.native_id);
+    }
+}
+
+#[tokio::test]
+async fn context_budget_malformed_policy_or_validation_readback_never_dispatches() {
+    use prompting_time_core::context_budget::ContextBudget;
+    let valid = json!({"autoCompactEnabled":true,"autoCompactWindow":300000,"env":{"DISABLE_COMPACT":"0","DISABLE_AUTO_COMPACT":"0","CLAUDE_CODE_AUTO_COMPACT_WINDOW":""}});
+    let mut cases = vec![
+        json!({"effective":{}}),
+        json!({"effective":{"autoCompactEnabled":false,"autoCompactWindow":300000}}),
+        json!({"effective":valid,"errors":[{"message":"PRIVATE_POLICY_ERROR"}]}),
+        json!({"effective":valid,"errors":"PRIVATE_ERROR"}),
+    ];
+    for (field, value) in [
+        ("autoCompactEnabled", json!("true")),
+        ("autoCompactWindow", json!(200000)),
+        ("autoCompactWindow", json!("300000")),
+        ("env", Value::Null),
+    ] {
+        let mut effective = valid.clone();
+        effective[field] = value;
+        cases.push(json!({"effective":effective}));
+    }
+    for field in [
+        "DISABLE_COMPACT",
+        "DISABLE_AUTO_COMPACT",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    ] {
+        for value in [Value::Null, json!("1")] {
+            let mut effective = valid.clone();
+            effective["env"][field] = value;
+            cases.push(json!({"effective":effective}));
+        }
+    }
+    for metadata in cases {
+        let fixture = Fixture::new("result()");
+        fs::write(
+            fixture.directory.path().join("thinking-metadata"),
+            metadata.to_string(),
+        )
+        .unwrap();
+        let session = fixture.session().await;
+        let result = fixture
+            .adapter
+            .start_turn(
+                &session,
+                TurnRequest::new("never")
+                    .with_context_budget(ContextBudget::Tokens { tokens: 300000 }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProviderError::NotDispatched {
+                category:
+                    prompting_time_core::providers::ProviderErrorCategory::UnsupportedContextBudget
+            })
+        ));
+        assert!(!fixture.directory.path().join("prompt").exists());
+    }
+}
+
+#[tokio::test]
+async fn context_budget_requires_exact_supported_version_before_launch() {
+    use prompting_time_core::context_budget::ContextBudget;
+    for version in ["2.1.204", "2.1.206", "3.0.0", "invalid"] {
+        let fixture = Fixture::new("result()");
+        fs::write(fixture.directory.path().join("version"), version).unwrap();
+        let session = fixture.session().await;
+        let result = fixture
+            .adapter
+            .start_turn(
+                &session,
+                TurnRequest::new("never")
+                    .with_context_budget(ContextBudget::Tokens { tokens: 300000 }),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProviderError::NotDispatched {
+                category:
+                    prompting_time_core::providers::ProviderErrorCategory::UnsupportedContextBudget
+            })
+        ));
+        assert!(!fixture.directory.path().join("prompt").exists());
+        assert!(!fixture.directory.path().join("initialize").exists());
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("default"))
+            .await
+            .unwrap();
+        collect(&mut turn).await;
+        turn.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn context_budget_inherited_environment_resets_on_resume() {
+    use prompting_time_core::context_budget::ContextBudget;
+    if std::env::var_os("PROMPTING_TIME_COMPACTION_ENV_FIXTURE").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "context_budget_inherited_environment_resets_on_resume",
+                "--nocapture",
+            ])
+            .env("PROMPTING_TIME_COMPACTION_ENV_FIXTURE", "1")
+            .env("DISABLE_COMPACT", "1")
+            .env("DISABLE_AUTO_COMPACT", "1")
+            .env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "170000")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let inherited = json!({"DISABLE_COMPACT":"1","DISABLE_AUTO_COMPACT":"1","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"170000"});
+    let fixture = Fixture::new("result()");
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(
+            &session,
+            TurnRequest::new("numeric")
+                .with_context_budget(ContextBudget::Tokens { tokens: 300000 }),
+        )
+        .await
+        .unwrap();
+    collect(&mut turn).await;
+    turn.shutdown().await.unwrap();
+    assert_eq!(
+        fixture.read("compaction-env"),
+        json!({"DISABLE_COMPACT":"0","DISABLE_AUTO_COMPACT":"0","CLAUDE_CODE_AUTO_COMPACT_WINDOW":""})
+    );
+    let resumed = fixture.resume(&session).await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&resumed, TurnRequest::new("default"))
+        .await
+        .unwrap();
+    collect(&mut turn).await;
+    turn.shutdown().await.unwrap();
+    assert_eq!(fixture.read("compaction-env"), inherited);
+    assert_eq!(std::env::var("DISABLE_COMPACT").unwrap(), "1");
+    assert_eq!(std::env::var("DISABLE_AUTO_COMPACT").unwrap(), "1");
+    assert_eq!(
+        std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW").unwrap(),
+        "170000"
+    );
+    assert!(
+        fixture
+            .read("args")
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!("--resume={}", session.native_id)))
+    );
+}
+
+#[tokio::test]
+async fn compaction_observations_preserve_native_boundary_and_clear_without_success() {
+    use prompting_time_core::context_compaction::CompactionPhase;
+    let fixture = Fixture::new(
+        r#"
+for event in [
+    dict(subtype='compact_boundary', uuid='boundary-before-start'),
+    dict(subtype='status', status='compacting', uuid='status-1'),
+    dict(subtype='status', status='compacting', uuid='status-2'),
+    dict(subtype='status', status=None, compact_result='success', uuid='status-3'),
+    dict(subtype='compact_boundary', uuid='boundary-after-success'),
+    dict(subtype='status', status='compacting', uuid='status-4'),
+    dict(subtype='status', status=None, compact_result='failed', compact_error='PRIVATE_ERROR', uuid='status-5'),
+    dict(subtype='status', status=None, uuid='status-6'),
+    dict(subtype='compact_boundary', uuid='child-boundary', parent_tool_use_id='unproven-child')
+]:
+    emit(dict(type='system',session_id=session,**event))
+result()
+"#,
+    );
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&session, TurnRequest::new("invented"))
+        .await
+        .unwrap();
+    let events = collect(&mut turn).await;
+    assert!(events.iter().all(Result::is_ok));
+    let observations: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Ok(ProviderEvent::Compaction { observation }) => Some(observation),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        observations
+            .iter()
+            .map(|event| event.phase.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            CompactionPhase::Completed {
+                boundary_id: "boundary-before-start".into()
+            },
+            CompactionPhase::Started,
+            CompactionPhase::Started,
+            CompactionPhase::Cleared,
+            CompactionPhase::Completed {
+                boundary_id: "boundary-after-success".into()
+            },
+            CompactionPhase::Started,
+            CompactionPhase::Failed,
+            CompactionPhase::Cleared,
+        ]
+    );
+    assert!(
+        observations
+            .iter()
+            .all(|event| event.native_session_id == session.native_id
+                && event.native_turn_id.is_none()
+                && event.native_agent_id.is_none())
+    );
+    assert!(!format!("{events:?}").contains("PRIVATE_ERROR"));
+}
+
+#[tokio::test]
+async fn compaction_observations_require_bounded_matching_native_identity() {
+    for patch in [
+        json!({"session_id":null}),
+        json!({"session_id":"wrong"}),
+        json!({"uuid":null}),
+        json!({"uuid":""}),
+        json!({"uuid":"x".repeat(257)}),
+        json!({"uuid":"bad\nidentity"}),
+    ] {
+        let body = format!(
+            "event=dict(type='system',subtype='compact_boundary',session_id=session,uuid='boundary')\nevent.update(json.loads({:?}))\nemit(event)\nresult()",
+            patch.to_string()
+        );
+        let fixture = Fixture::new(&body);
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        let mut failed = false;
+        while let Some(event) = turn.recv().await {
+            match event {
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+                Ok(ProviderEvent::Compaction { .. }) => {
+                    panic!("invalid native identity must not publish compaction")
+                }
+                _ => {}
+            }
+        }
+        assert!(failed, "invalid identity must fail closed: {patch}");
+    }
 }
 
 #[tokio::test]

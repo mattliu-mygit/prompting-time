@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{protocol_error, rejected};
+use crate::context_compaction::{CompactionObservation, CompactionPhase};
 use crate::domain::MutationState;
 use crate::tool_operation::{MAX_OPERATION_TITLE_BYTES, ToolOperation};
 #[path = "operations.rs"]
@@ -216,14 +217,47 @@ impl Protocol {
                 // Only the result/lifecycle boundary can complete or fail the turn.
             }
             Some("system") => match value["subtype"].as_str() {
+                Some("status" | "compact_boundary") => {
+                    // This CLI does not establish a native owner for forwarded child compaction.
+                    // Never turn an unproven child's notice into root activity.
+                    if parent.is_none() {
+                        let session = required_id(&value, "session_id")?;
+                        if session != self.session {
+                            return Err(protocol_error("session-mismatch"));
+                        }
+                        let uuid = required_id(&value, "uuid")?;
+                        let phase = if value["subtype"] == "compact_boundary" {
+                            CompactionPhase::Completed {
+                                boundary_id: uuid.into(),
+                            }
+                        } else {
+                            match value.get("status") {
+                                Some(Value::String(status)) if status == "compacting" => {
+                                    CompactionPhase::Started
+                                }
+                                Some(Value::Null) if value["compact_result"] == "failed" => {
+                                    CompactionPhase::Failed
+                                }
+                                Some(Value::Null) => CompactionPhase::Cleared,
+                                _ => return Err(protocol_error("invalid-compaction-status")),
+                            }
+                        };
+                        events.push(ProviderEvent::Compaction {
+                            observation: CompactionObservation {
+                                native_session_id: session.into(),
+                                native_turn_id: None,
+                                native_agent_id: None,
+                                phase,
+                            },
+                        });
+                    }
+                }
                 Some("task_started" | "task_notification") => self.lifecycle(&value)?,
                 Some("task_updated") => self.task_update(&value)?,
                 Some(
                     "init"
-                    | "status"
                     | "thinking_tokens"
                     | "task_progress"
-                    | "compact_boundary"
                     | "hook_started"
                     | "hook_progress"
                     | "hook_response"
