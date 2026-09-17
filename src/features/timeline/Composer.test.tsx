@@ -10,6 +10,7 @@ import { Timeline } from "./Timeline";
 let testStore: AppStore;
 let currentActions: ConversationActions;
 let saveThinking: AppApi["setThinkingPreference"];
+let saveContextBudget: AppApi["setContextBudget"];
 
 beforeEach(async () => {
   currentActions = actions();
@@ -17,12 +18,16 @@ beforeEach(async () => {
   saveThinking = vi.fn(async ({ conversationId, preference }) => {
     savedConversations = savedConversations.map(item => item.id === conversationId ? { ...item, thinkingPreference: preference } : item);
   });
+  saveContextBudget = vi.fn(async ({ conversationId, preference }) => {
+    savedConversations = savedConversations.map(item => item.id === conversationId ? { ...item, contextBudget: preference } : item);
+  });
   testStore = createAppStore({
     ...currentActions,
     submitMessage: request => currentActions.submitMessage(request),
     steerRun: request => currentActions.steerRun(request),
     getBootstrap: vi.fn().mockResolvedValue({ providers, startupDiagnostic: null }),
     setThinkingPreference: request => saveThinking(request),
+    setContextBudget: request => saveContextBudget(request),
     listConversations: vi.fn(async () => ({ items: savedConversations, nextCursor: null })),
     loadConversation: vi.fn(async ({ conversationId }) => savedConversations.find(item => item.id === conversationId)!), listChildConversations: vi.fn(), loadConversationPath: vi.fn(),
     listenToAppEvents: vi.fn().mockResolvedValue(() => {}), listRunAudits: vi.fn(),
@@ -45,7 +50,7 @@ const providers: ProviderInstallation[] = [
 
 function conversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
-    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+    contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     id: "conversation-1", title: "Work", workspaceId: null, archived: false,
     parentId: null, hasChildren: false, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
@@ -65,6 +70,46 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 describe("Composer", () => {
+  it("blocks send during context save, preserves the draft and visibly rolls back a failed save", async () => {
+    let reject!: (reason: Error) => void;
+    saveContextBudget = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+    function ConnectedComposer() {
+      const snapshot = useSyncExternalStore(testStore.subscribe, testStore.getSnapshot);
+      return <Composer conversation={snapshot.conversationsById["conversation-1"]!} providers={providers} routingProfile="balanced" actions={currentActions} onMutation={vi.fn()} />;
+    }
+    render(<ConnectedComposer />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "keep draft" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Context budget" }), { target: { value: "500000" } });
+    expect(saveContextBudget).toHaveBeenCalledExactlyOnceWith({ conversationId: "conversation-1", preference: { kind: "tokens", tokens: 500000 } });
+    expect(screen.getByRole("combobox", { name: "Context budget" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter" });
+    expect(currentActions.submitMessage).not.toHaveBeenCalled();
+    await act(async () => reject(new Error("Context save failed")));
+    expect(screen.getByRole("alert")).toHaveTextContent("Context save failed");
+    expect(screen.getByRole("combobox", { name: "Context budget" })).toHaveValue("300000");
+    expect(screen.getByLabelText("Message")).toHaveValue("keep draft");
+  });
+
+  it("saves next-turn context while busy and sends unchanged steering", async () => {
+    render(<Composer conversation={conversation({ currentRunId: "run", runStatus: "running", provider: "codex" })} providers={providers} routingProfile="balanced" actions={currentActions} onMutation={vi.fn()} />);
+    expect(screen.getByText("Context budget · Next turn")).toBeVisible();
+    fireEvent.change(screen.getByRole("combobox", { name: "Context budget" }), { target: { value: "providerDefault" } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Context budget" })).toBeEnabled());
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "direction" } });
+    fireEvent.click(screen.getByRole("button", { name: "Steer Codex" }));
+    await waitFor(() => expect(currentActions.steerRun).toHaveBeenCalledExactlyOnceWith({ conversationId: "conversation-1", runId: "run", text: "direction" }));
+    expect(saveContextBudget).toHaveBeenCalledExactlyOnceWith({ conversationId: "conversation-1", preference: { kind: "providerDefault" } });
+    expect(currentActions.submitMessage).not.toHaveBeenCalled();
+  });
+  it("offers the five context budgets with the saved 300k default and qualified help", () => {
+    render(<Composer conversation={conversation()} providers={providers} routingProfile="balanced" actions={actions()} onMutation={vi.fn()} />);
+    const select = screen.getByRole("combobox", { name: "Context budget" });
+    expect(within(select).getAllByRole("option").map(option => option.textContent)).toEqual(["200k", "300k", "400k", "500k", "Provider default"]);
+    expect(select).toHaveValue("300000");
+    fireEvent.click(screen.getByRole("button", { name: "Composer help" }));
+    expect(screen.getByText(/Providers may compact earlier/)).toBeVisible();
+  });
   it("saves immediately, disables send and choice while pending, and restores choice on failure", async () => {
     let reject!: (reason: Error) => void;
     saveThinking = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
@@ -149,7 +194,7 @@ describe("Composer", () => {
       runId: "run-1", agentId: "child-execution", kind, role: kind === "message" ? "assistant" : null,
       presentation: "normal", provider: "codex", content: "Captured activity", contentBytes: "17", truncated: false, operation: null }];
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue({
-      items, nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+      items, nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
     }) });
     render(<><Timeline conversation={child} refreshVersion={0} actions={api} />
       <Composer conversation={child} providers={providers} routingProfile="balanced" actions={api} onMutation={vi.fn()} /></>);

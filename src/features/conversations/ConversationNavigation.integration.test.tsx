@@ -16,7 +16,7 @@ it("navigates a known descendant from palette to parent and root without changin
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   const root: ConversationSummary = {
-    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+    contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     id: "root", parentId: null, title: "Compiler", hasChildren: true, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
     routingProfile: "balanced", workspaceId: null, archived: false, projectRoot: null,
@@ -27,14 +27,14 @@ it("navigates a known descendant from palette to parent and root without changin
   const grandchild: ConversationSummary = { ...child, id: "grandchild", parentId: "child", title: "Researcher", hasChildren: false };
   const nodes: Record<string, ConversationSummary> = { root, child, grandchild };
   const api: AppApi = {
-    setThinkingPreference: vi.fn(),
+    setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({ providers: [], startupDiagnostic: null }),
     listConversations: vi.fn().mockResolvedValue({ items: [root], nextCursor: null }),
     loadConversation: vi.fn(({ conversationId }) => Promise.resolve(nodes[conversationId]!)),
     listChildConversations: vi.fn(({ parentId }) => Promise.resolve({ items: parentId === "root" ? [child] : [grandchild], nextCursor: null })),
     loadConversationPath: vi.fn(({ conversationId }) => Promise.resolve({ items: conversationId === "grandchild" ? [root, child, grandchild] : [root, child], truncated: false, ownerConversationId: "root" })),
     listenToAppEvents: vi.fn().mockResolvedValue(() => {}),
-    loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
+    loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null }),
     loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadEventDetail: vi.fn(), loadApprovalDetail: vi.fn(), loadApprovalQuestions: vi.fn(),

@@ -28,6 +28,7 @@ import {
   steerRun,
   submitMessage,
   setThinkingPreference,
+  setContextBudget,
 } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -38,6 +39,32 @@ const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 
 describe("desktop bridge", () => {
+  it.each([200000, 300000, 400000, 500000] as const)("saves the %i-token context budget", async (tokens) => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await setContextBudget({ conversationId: "fixture", preference: { kind: "tokens", tokens } });
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith("set_context_budget", { request: {
+      conversationId: "fixture", preference: { kind: "tokens", tokens },
+    } });
+  });
+
+  it("saves provider default without retaining a token override", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await setContextBudget({ conversationId: "fixture", preference: { kind: "providerDefault" } });
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith("set_context_budget", { request: {
+      conversationId: "fixture", preference: { kind: "providerDefault" },
+    } });
+  });
+
+  it("sends an explicit frozen context budget", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    const request = {
+      conversationId: "fixture", text: "hello", commandId: "command", providerOverride: null,
+      contextBudget: { kind: "tokens" as const, tokens: 400000 },
+    };
+    await submitMessage(request);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith("submit_message", { request });
+  });
+
   it("saves an explicit thinking preference without sending a message", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
     await setThinkingPreference({ conversationId: "fixture", preference: { kind: "manual", level: "high" } });

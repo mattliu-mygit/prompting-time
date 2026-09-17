@@ -87,6 +87,8 @@ impl From<CreateConversationRequest> for CoreConversationRequest {
 impl From<ConversationOverview> for ConversationSummary {
     fn from(value: ConversationOverview) -> Self {
         Self {
+            context_budget: value.context_budget.into(),
+            run_context_budget: value.run_context_budget.map(Into::into),
             thinking_preference: value.thinking_preference.into(),
             thinking_decision: value.thinking_decision.map(Into::into),
             thinking_configuration: value.thinking_configuration.map(Into::into),
@@ -215,6 +217,11 @@ impl From<Page<TimelineRecord>> for DiagnosticsPage {
 impl From<CoreTimelineSnapshot> for TimelinePage {
     fn from(value: CoreTimelineSnapshot) -> Self {
         Self {
+            active_compaction: value.active_compaction.map(|activity| CompactionActivity {
+                run_id: activity.run_id.to_string(),
+                agent_id: activity.agent_id.to_string(),
+                provider: activity.provider.into(),
+            }),
             items: value.events.items.into_iter().map(Into::into).collect(),
             next_cursor: value.events.next_cursor,
             approvals: value.approvals.items.into_iter().map(Into::into).collect(),
@@ -634,6 +641,28 @@ impl From<prompting_time_core::store::RunAuditDetailRecord> for RunAuditDetailSn
             routing_truncated: value.routing_truncated,
             handoff: value.handoff,
             handoff_truncated: value.handoff_truncated,
+        }
+    }
+}
+
+impl From<ContextBudget> for prompting_time_core::context_budget::ContextBudget {
+    fn from(value: ContextBudget) -> Self {
+        match value {
+            ContextBudget::ProviderDefault => Self::ProviderDefault,
+            ContextBudget::Tokens { tokens } => Self::Tokens { tokens },
+        }
+    }
+}
+
+impl From<prompting_time_core::context_budget::ContextBudget> for ContextBudget {
+    fn from(value: prompting_time_core::context_budget::ContextBudget) -> Self {
+        match value {
+            prompting_time_core::context_budget::ContextBudget::ProviderDefault => {
+                Self::ProviderDefault
+            }
+            prompting_time_core::context_budget::ContextBudget::Tokens { tokens } => {
+                Self::Tokens { tokens }
+            }
         }
     }
 }

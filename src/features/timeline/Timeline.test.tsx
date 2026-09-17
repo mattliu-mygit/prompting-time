@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ConversationSummary, TimelineItem } from "../../bridge/types";
+import type { ConversationSummary, TimelineItem, TimelinePage } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
 import { Timeline, type TimelineViewState } from "./Timeline";
 import { TimelineEntry } from "./TimelineEntry";
@@ -34,7 +34,7 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
       nextCursor: "older-page",
       approvals: [],
       approvalsTruncated: false,
-      approvalsNextCursor: null,
+      activeCompaction: null, approvalsNextCursor: null,
     }),
     loadEventDetail: vi.fn().mockResolvedValue({
       id: "tool-1",
@@ -55,13 +55,72 @@ function actions(overrides: Partial<ConversationActions> = {}): ConversationActi
 }
 
 function conversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
-  return { thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "conversation-1", title: "Work", parentId: null, hasChildren: false, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "codex", runStatus: "running", rollupStatus: "active", capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null }, ...overrides };
+  return { contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "conversation-1", title: "Work", parentId: null, hasChildren: false, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "codex", runStatus: "running", rollupStatus: "active", capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null }, ...overrides };
 }
 
 describe("Timeline", () => {
+  const compaction = { runId: "run-1", agentId: "root", provider: "codex" as const };
+
+  it("ignores compaction snapshots on older pages and clears on newest refresh failure", async () => {
+    const loadTimeline = vi.fn()
+      .mockResolvedValueOnce({ ...timelinePage([], "older"), activeCompaction: compaction })
+      .mockResolvedValueOnce({ ...timelinePage([event({ id: "old", sequence: "1", content: "older result" })], null), activeCompaction: null })
+      .mockRejectedValueOnce(new Error("Refresh unavailable"));
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversation={conversation()} refreshVersion={0} actions={api} />);
+    await screen.findByText("Compacting…");
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await screen.findByText("older result");
+    expect(screen.getAllByText("Compacting…")).toHaveLength(1);
+    view.rerender(<Timeline conversation={conversation()} refreshVersion={1} actions={api} />);
+    await screen.findByText("Refresh unavailable");
+    expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
+  });
+
+  it("clears on an explicit inactive snapshot and hides cached activity for terminal or changed runs", async () => {
+    const api = actions({ loadTimeline: vi.fn().mockResolvedValue({ ...timelinePage([], null), activeCompaction: compaction }) });
+    const view = render(<Timeline conversation={conversation()} refreshVersion={0} actions={api} />);
+    await screen.findByText("Compacting…");
+    view.rerender(<Timeline conversation={conversation({ runStatus: "completed" })} refreshVersion={0} actions={api} />);
+    expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
+    view.rerender(<Timeline conversation={conversation({ currentRunId: "run-2" })} refreshVersion={0} actions={api} />);
+    expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
+    vi.mocked(api.loadTimeline).mockResolvedValue(timelinePage([], null));
+    view.rerender(<Timeline conversation={conversation()} refreshVersion={1} actions={api} />);
+    await waitFor(() => expect(screen.queryByText("Compacting…")).not.toBeInTheDocument());
+  });
+
+  it("discards a stale child load after navigating to its parent", async () => {
+    let resolveChild!: (page: ReturnType<typeof timelinePage>) => void;
+    const loadTimeline = vi.fn().mockImplementationOnce(() => new Promise<ReturnType<typeof timelinePage>>(resolve => { resolveChild = resolve; }))
+      .mockResolvedValue(timelinePage([], null));
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversation={conversation({ id: "child", parentId: "parent" })} refreshVersion={0} actions={api} />);
+    await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(1));
+    view.rerender(<Timeline conversation={conversation({ id: "parent" })} refreshVersion={0} actions={api} />);
+    await act(async () => resolveChild({ ...timelinePage([], null), activeCompaction: compaction }));
+    await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(2));
+    await screen.findByText("No activity yet. Start with a message below.");
+    expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
+  });
+
+  it("does not cache a child's compaction when navigating to its parent", async () => {
+    const loadTimeline = vi.fn().mockResolvedValueOnce({ ...timelinePage([], null), activeCompaction: compaction }).mockResolvedValue(timelinePage([], null));
+    const api = actions({ loadTimeline });
+    const view = render(<Timeline conversation={conversation({ id: "child", parentId: "parent" })} refreshVersion={0} actions={api} />);
+    await screen.findByText("Compacting…");
+    view.rerender(<Timeline conversation={conversation({ id: "parent" })} refreshVersion={0} actions={api} />);
+    expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
+    await screen.findByText("No activity yet. Start with a message below.");
+  });
+  it("shows active compaction even when its start is outside the retained page", async () => {
+    const api = actions({ loadTimeline: vi.fn().mockResolvedValue({ ...timelinePage([], null), activeCompaction: { runId: "run-1", agentId: "root", provider: "codex" } }) });
+    render(<Timeline conversation={conversation()} refreshVersion={0} actions={api} />);
+    expect(await screen.findByText("Compacting…")).toHaveAttribute("role", "status");
+  });
   it("explains missing recorded child history without greeting or duplicate activity cards", async () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([], null)) });
-    const child: ConversationSummary = { thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "reviewer", title: "Reviewer", parentId: "conversation-1", hasChildren: true, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "claude", runStatus: "completed", rollupStatus: "completed", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } };
+    const child: ConversationSummary = { contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "reviewer", title: "Reviewer", parentId: "conversation-1", hasChildren: true, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "claude", runStatus: "completed", rollupStatus: "completed", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } };
     render(<Timeline conversation={child} refreshVersion={0} actions={api} />);
     expect(await screen.findByText("No recorded activity is available.")).toBeVisible();
     expect(screen.queryByText(/captured activity may be incomplete/i)).not.toBeInTheDocument();
@@ -581,7 +640,7 @@ describe("Timeline", () => {
     }));
     const api = actions({
       loadTimeline: vi.fn().mockResolvedValue({
-        items: [], nextCursor: null, approvals: first, approvalsTruncated: true, approvalsNextCursor: "approvals-2",
+        items: [], nextCursor: null, approvals: first, approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "approvals-2",
       }),
       loadApprovals: vi.fn().mockResolvedValue({ items: second, nextCursor: null }),
       loadApprovalDetail: vi.fn().mockResolvedValue({
@@ -621,7 +680,7 @@ describe("Timeline", () => {
     const api = actions({
       loadTimeline: vi.fn().mockResolvedValue({
         items: [], nextCursor: null, approvals: all.slice(0, 30),
-        approvalsTruncated: true, approvalsNextCursor: "30",
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "30",
       }),
       loadApprovals,
     });
@@ -693,8 +752,8 @@ describe("Timeline", () => {
     let resolvePage!: (value: { items: typeof stale[]; nextCursor: string | null }) => void;
     const page = new Promise<{ items: typeof stale[]; nextCursor: string | null }>((resolve) => { resolvePage = resolve; });
     const loadTimeline = vi.fn()
-      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, approvalsNextCursor: "older" })
-      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, approvalsNextCursor: "older" });
+      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" })
+      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" });
     const api = actions({ loadTimeline, loadApprovals: vi.fn(() => page) });
     const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
     fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
@@ -708,7 +767,7 @@ describe("Timeline", () => {
   it("preserves explicitly disclosed approval pages across newest refreshes", async () => {
     const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
     const older = { ...first, id: "older", operation: "Older" };
-    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, approvalsNextCursor: "older" });
+    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" });
     const api = actions({ loadTimeline, loadApprovals: vi.fn().mockResolvedValue({ items: [older], nextCursor: null }) });
     const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
     fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
@@ -721,7 +780,7 @@ describe("Timeline", () => {
   it("reconciles a resolved later approval page and restores focus", async () => {
     const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
     const older = { ...first, id: "older", operation: "Older" };
-    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, approvalsNextCursor: "older-page" });
+    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older-page" });
     const loadApprovals = vi.fn()
       .mockResolvedValueOnce({ items: [older], nextCursor: null })
       .mockResolvedValueOnce({ items: [], nextCursor: null });
@@ -740,12 +799,12 @@ describe("Timeline", () => {
       .mockResolvedValueOnce({
         items: [event({ id: "e2", sequence: "2", content: "second" })],
         nextCursor: "older",
-        approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+        approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       })
       .mockResolvedValueOnce({
         items: [event({ id: "e1", sequence: "1", role: "user", content: "first" })],
         nextCursor: null,
-        approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+        approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       })
       .mockResolvedValueOnce({
         items: [
@@ -753,7 +812,7 @@ describe("Timeline", () => {
           event({ id: "e3", sequence: "3", content: "third" }),
         ],
         nextCursor: "older",
-        approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+        approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       });
     const api = actions({ loadTimeline });
     const view = render(
@@ -779,7 +838,7 @@ describe("Timeline", () => {
           event({ id: "d", sequence: "2", kind: "diagnostic", role: null, content: "Provider protocol warning" }),
           event({ id: "l", sequence: "3", kind: "lifecycle", presentation: "failure", role: null, content: "Run failed: process exited" }),
         ],
-        nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+        nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       }),
     });
     render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
@@ -803,7 +862,7 @@ describe("Timeline", () => {
       id: eventId, content: `Full ${eventId} detail`, operation: null, contentBytes: "2000", truncated: false,
     }));
     const api = actions({
-      loadTimeline: vi.fn().mockResolvedValue({ items, nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
+      loadTimeline: vi.fn().mockResolvedValue({ items, nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null }),
       loadEventDetail,
     });
     render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
@@ -880,8 +939,8 @@ describe("Timeline", () => {
       content: `event ${start + offset}`,
     }));
     const loadTimeline = vi.fn()
-      .mockResolvedValueOnce({ items: page(1), nextCursor: "older-1", approvals: [], approvalsTruncated: false, approvalsNextCursor: null })
-      .mockResolvedValueOnce({ items: page(1_001), nextCursor: "older-2", approvals: [], approvalsTruncated: false, approvalsNextCursor: null });
+      .mockResolvedValueOnce({ items: page(1), nextCursor: "older-1", approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null })
+      .mockResolvedValueOnce({ items: page(1_001), nextCursor: "older-2", approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null });
     const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={actions({ loadTimeline })} />);
     await screen.findByText("event 1000");
     expect(view.container.querySelectorAll("[data-timeline-id]").length).toBeLessThanOrEqual(80);
@@ -998,11 +1057,11 @@ describe("Timeline", () => {
     const loadTimeline = vi.fn()
       .mockResolvedValueOnce({
         items: [event({ id: "new", sequence: "2", content: "newer" })],
-        nextCursor: "older", approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+        nextCursor: "older", approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       })
       .mockResolvedValueOnce({
         items: [event({ id: "old", sequence: "1", content: "older" })],
-        nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+        nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       });
     render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={actions({ loadTimeline })} />);
     await screen.findByText("newer");
@@ -1029,7 +1088,7 @@ describe("Timeline", () => {
           agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
           operation: "Edit file", scope: "One file", status: "pending", responsePending: false,
         }],
-        approvalsTruncated: false, approvalsNextCursor: null,
+        approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       }),
       loadApprovalDetail: vi.fn().mockResolvedValue({
         id: "approval", status: "pending", responsePending: false, operation: "Edit file", scope: "One file", input: null,
@@ -1061,7 +1120,7 @@ describe("Timeline", () => {
       loadTimeline: vi.fn().mockResolvedValue({
         items: [], nextCursor: null,
         approvals: [{ id: "first", runId: "run-1", agentId: "root", provider: "codex", agentPath: ["Root"], agentPathTruncated: false, operation: "First action", scope: "One action", status: "pending", responsePending: false }],
-        approvalsTruncated: true, approvalsNextCursor: "approval-page-2",
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "approval-page-2",
       }),
       loadApprovals: vi.fn().mockResolvedValue({
         items: [{ id: "later", runId: "run-1", agentId: "root", provider: "codex", agentPath: ["Root"], agentPathTruncated: false, operation: "Later action", scope: "One action", status: "pending", responsePending: false }],
@@ -1093,12 +1152,12 @@ describe("Timeline", () => {
     const loadTimeline = vi.fn()
       .mockResolvedValueOnce({
         items: [], nextCursor: null, approvals: Array.from({ length: 30 }, (_, index) => approval(index)),
-        approvalsTruncated: true, approvalsNextCursor: "old-page-2",
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "old-page-2",
       })
       .mockResolvedValueOnce({
         items: [], nextCursor: null,
         approvals: [newest("new-1"), newest("new-2"), ...Array.from({ length: 28 }, (_, index) => approval(index))],
-        approvalsTruncated: true, approvalsNextCursor: "new-page-2",
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "new-page-2",
       });
     const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
       if (cursor === "old-page-2") return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => approval(index + 30)), nextCursor: "old-page-3" });
@@ -1132,7 +1191,7 @@ describe("Timeline", () => {
     let resolvePage!: (value: { items: typeof later[]; nextCursor: string | null }) => void;
     const pendingPage = new Promise<{ items: typeof later[]; nextCursor: string | null }>((resolve) => { resolvePage = resolve; });
     const loadTimeline = vi.fn()
-      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, approvalsNextCursor: "page-2" })
+      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "page-2" })
       .mockRejectedValueOnce(new Error("Timeline refresh unavailable"));
     const loadApprovals = vi.fn()
       .mockReturnValueOnce(pendingPage)
@@ -1158,7 +1217,7 @@ describe("Timeline", () => {
     let resolveThird!: (value: { items: typeof third[]; nextCursor: string | null }) => void;
     const pendingThird = new Promise<{ items: typeof third[]; nextCursor: string | null }>((resolve) => { resolveThird = resolve; });
     const loadTimeline = vi.fn().mockResolvedValue({
-      items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, approvalsNextCursor: "page-2",
+      items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "page-2",
     });
     const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
       if (cursor === "page-2" && loadApprovals.mock.calls.length === 1) return Promise.resolve({ items: [second], nextCursor: "page-3" });
@@ -1188,7 +1247,7 @@ describe("Timeline", () => {
       loadTimeline: vi.fn().mockResolvedValue({
         items: [], nextCursor: null,
         approvals: [{ id: "deep", runId: "run-1", agentId: "unloaded", provider: "claude", agentPath: ["Root", "Orchestrator", "Reviewer"], agentPathTruncated: false, operation: "Edit deep file", scope: "One file", status: "pending", responsePending: false }],
-        approvalsTruncated: false, approvalsNextCursor: null,
+        approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       }),
       loadApprovalDetail: vi.fn().mockResolvedValue({
         id: "deep", status: "pending", responsePending: false,
@@ -1205,8 +1264,8 @@ describe("Timeline", () => {
   });
 });
 
-function timelinePage(items: TimelineItem[], nextCursor: string | null) {
-  return { items, nextCursor, approvals: [], approvalsTruncated: false, approvalsNextCursor: null };
+function timelinePage(items: TimelineItem[], nextCursor: string | null): TimelinePage {
+  return { items, nextCursor, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null };
 }
 
 function viewRow(activity: HTMLElement, id: string) {

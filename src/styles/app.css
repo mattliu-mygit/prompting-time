@@ -462,6 +462,7 @@ button:disabled {
 
 .composer-provider select,
 .composer-thinking select,
+.composer-context-budget select,
 .message-field textarea,
 .approval-question input[type="text"],
 .approval-question input[type="password"] {
@@ -531,7 +532,8 @@ button:disabled {
   font-size: var(--font-size-ui);
   padding: 0.3rem;
 }
-.composer-thinking {
+.composer-thinking,
+.composer-context-budget {
   display: flex;
   align-items: center;
   gap: var(--space-1);
@@ -540,7 +542,8 @@ button:disabled {
   font-size: var(--font-size-secondary);
   flex-wrap: wrap;
 }
-.composer-thinking select {
+.composer-thinking select,
+.composer-context-budget select {
   min-height: var(--control-target);
   max-width: 100%;
   width: 9rem;

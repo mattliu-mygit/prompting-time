@@ -7,7 +7,7 @@ import { ConversationTree } from "./ConversationTree";
 
 function node(id: string, title: string, parentId: string | null = null, overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return { id, title, parentId, hasChildren: false, summary: null,
-    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+    contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     capabilities: { canSend: parentId === null, canInterrupt: parentId === null, canArchive: parentId === null, canRoute: parentId === null, unavailableReason: parentId ? "Recorded activity only." : null },
     routingProfile: "balanced", workspaceId: null, archived: false, projectRoot: "/work/alpha",
     currentRunId: "run-1", provider: "codex", runStatus: "running", rollupStatus: "active", ...overrides };

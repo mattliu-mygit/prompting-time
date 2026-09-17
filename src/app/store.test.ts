@@ -11,6 +11,84 @@ import type {
 import { createAppStore, selectVisibleConversations, type AppApi } from "./store";
 
 describe("in-session drafts", () => {
+  it("acknowledges context saves into current metadata without undoing navigation or another draft", async () => {
+    const { api, emit } = createFakeApi();
+    let resolve!: () => void;
+    api.setContextBudget = vi.fn(() => new Promise<void>(finish => { resolve = finish; }));
+    let latest = conversation("c1");
+    api.loadConversation = vi.fn(async ({ conversationId }) => conversationId === "c1" ? latest : conversation(conversationId));
+    const store = createAppStore(api);
+    await store.initialize();
+    const saving = store.setContextBudget("c1", { kind: "tokens", tokens: 400000 });
+    await store.selectConversation("c2");
+    store.setDraft("c2", "keep current draft");
+    latest = conversation("c1", { currentRunId: "new-run", runStatus: "running", runContextBudget: { kind: "tokens", tokens: 200000 } });
+    emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
+    await waitFor(() => expect(store.getSnapshot().conversationsById.c1?.currentRunId).toBe("new-run"));
+    latest = { ...latest, contextBudget: { kind: "tokens", tokens: 400000 } };
+    resolve();
+    await saving;
+    expect(store.getSnapshot().selectedConversationId).toBe("c2");
+    expect(store.getSnapshot().draftsById.c2?.text).toBe("keep current draft");
+    expect(store.getSnapshot().conversationsById.c1).toMatchObject({ currentRunId: "new-run", runStatus: "running", contextBudget: { kind: "tokens", tokens: 400000 }, runContextBudget: { kind: "tokens", tokens: 200000 } });
+    store.dispose();
+  });
+  it("saves context independently across restart and preserves frozen uncertain retries", async () => {
+    const { api } = createFakeApi();
+    let saved = conversation("c1", { contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: { kind: "tokens", tokens: 200000 } });
+    api.listConversations = vi.fn(async () => ({ items: [saved], nextCursor: null }));
+    api.loadConversation = vi.fn(async () => saved);
+    api.setContextBudget = vi.fn(async ({ preference }) => { saved = { ...saved, contextBudget: preference }; });
+    api.submitMessage = vi.fn().mockRejectedValue(Object.assign(new Error("Unknown outcome"), { code: "outcome-unknown" }));
+    const store = createAppStore(api);
+    await store.initialize();
+    store.setDraft("c1", "review this");
+    await store.submitDraft("c1", null, null);
+    const original = vi.mocked(api.submitMessage).mock.calls[0]![0];
+    await store.setContextBudget("c1", { kind: "tokens", tokens: 500000 });
+    await store.submitDraft("c1", null, null);
+    expect(vi.mocked(api.submitMessage).mock.calls[1]![0]).toEqual(original);
+    expect(original.contextBudget).toEqual({ kind: "tokens", tokens: 300000 });
+    expect(store.getSnapshot().conversationsById.c1?.runContextBudget).toEqual({ kind: "tokens", tokens: 200000 });
+    store.setDraft("c1", "steering");
+    await store.submitDraft("c1", null, "run-active");
+    expect(api.steerRun).toHaveBeenCalledExactlyOnceWith({ conversationId: "c1", runId: "run-active", text: "steering" });
+    const restarted = createAppStore(api);
+    await restarted.initialize();
+    expect(restarted.getSnapshot().conversationsById.c1?.contextBudget).toEqual({ kind: "tokens", tokens: 500000 });
+    store.dispose(); restarted.dispose();
+  });
+
+  it("blocks new sends during context save and retains prior value and drafts on failure", async () => {
+    const { api } = createFakeApi();
+    let reject!: (reason: Error) => void;
+    api.setContextBudget = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+    const store = createAppStore(api);
+    await store.initialize();
+    store.setDraft("c1", "keep draft");
+    const saving = store.setContextBudget("c1", { kind: "providerDefault" });
+    expect(await store.submitDraft("c1", null, null)).toBe(false);
+    await store.setContextBudget("c1", { kind: "tokens", tokens: 200000 });
+    expect(api.setContextBudget).toHaveBeenCalledTimes(1);
+    await store.selectConversation("c2");
+    store.setDraft("c2", "other draft");
+    reject(new Error("Context save unavailable"));
+    await saving;
+    expect(store.getSnapshot().selectedConversationId).toBe("c2");
+    expect(store.getSnapshot().contextBudgetSavesById.c1).toMatchObject({ pending: false, error: "Context save unavailable" });
+    expect(store.getSnapshot().conversationsById.c1?.contextBudget).toEqual({ kind: "tokens", tokens: 300000 });
+    expect(store.getSnapshot().draftsById).toMatchObject({ c1: { text: "keep draft" }, c2: { text: "other draft" } });
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    store.dispose();
+  });
+  it("freezes the saved context budget in each new send", async () => {
+    const { api } = createFakeApi();
+    const store = createAppStore(api);
+    await store.initialize();
+    store.setDraft("c1", "review this");
+    await store.submitDraft("c1", null, null);
+    expect(vi.mocked(api.submitMessage).mock.calls[0]![0]).toMatchObject({ contextBudget: { kind: "tokens", tokens: 300000 } });
+  });
   it("saves thinking independently and freezes uncertain send retries", async () => {
     const { api } = createFakeApi();
     let saved = conversation("c1", { thinkingPreference: { kind: "manual", level: "high" } });
@@ -197,7 +275,7 @@ function conversation(
     provider: "codex",
     runStatus: "running",
     rollupStatus: "active",
-    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+    contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     ...overrides,
   };
 }
@@ -212,6 +290,7 @@ function conversationActions(): Pick<
   | "loadApprovalDetail"
   | "loadApprovalQuestions"
   | "submitMessage"
+  | "setContextBudget"
   | "steerRun"
   | "respondToApproval"
   | "interruptRun"
@@ -224,9 +303,9 @@ function conversationActions(): Pick<
   | "pickProjectDirectory"
 > {
   return {
-    setThinkingPreference: vi.fn(),
+    setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
-    loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null }),
+    loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null }),
     loadEventDetail: vi.fn(),
     loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadApprovalDetail: vi.fn(),
@@ -255,7 +334,7 @@ function createFakeApi() {
   };
 
   const api: AppApi = {
-    setThinkingPreference: vi.fn(),
+    setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({
       providers: [
         {
@@ -321,7 +400,7 @@ function createFakeApi() {
     })),
     loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadTimeline: vi.fn().mockResolvedValue({
-      items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+      items: [], nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
     }),
     loadEventDetail: vi.fn(),
     loadApprovals: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),

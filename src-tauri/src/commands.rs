@@ -233,7 +233,7 @@ pub async fn submit_message(
     let submission = state
         .service()?
         .submit(CoreSubmitRequest {
-            context_budget: None,
+            context_budget: request.context_budget.map(Into::into),
             thinking: request.thinking.map(Into::into),
             command_id: request.command_id,
             conversation_id,
@@ -261,6 +261,22 @@ pub async fn set_thinking_preference(
     state
         .service()?
         .set_thinking_preference(
+            parse_conversation_id(&request.conversation_id)?,
+            request.preference.into(),
+        )
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_context_budget(
+    state: State<'_, Arc<AppState>>,
+    request: SetContextBudgetRequest,
+) -> Result<(), CommandError> {
+    state
+        .service()?
+        .set_context_budget(
             parse_conversation_id(&request.conversation_id)?,
             request.preference.into(),
         )
@@ -406,6 +422,7 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             create_conversation,
             submit_message,
             set_thinking_preference,
+            set_context_budget,
             steer_run,
             respond_to_approval,
             interrupt_run,
@@ -548,6 +565,8 @@ mod tests {
         let id = overview.conversation.id.to_string();
         let json = serde_json::to_value(ConversationSummary::from(overview)).unwrap();
         assert_eq!(json["id"], id);
+        assert_eq!(json["contextBudget"], serde_json::json!({ "kind": "tokens", "tokens": 300000 }));
+        assert!(json.get("runContextBudget").is_some_and(serde_json::Value::is_null));
         assert_eq!(
             json["thinkingPreference"],
             serde_json::json!({ "kind": "auto" })
@@ -594,6 +613,9 @@ mod tests {
         }
         assert!(generated.contains("listChildConversations"));
         assert!(generated.contains("loadConversationPath"));
+        assert!(generated.contains("setContextBudget"));
+        assert!(generated.contains("export type ContextBudget"));
+        assert!(generated.contains("activeCompaction: CompactionActivity | null"));
     }
 
     #[tokio::test]
@@ -951,6 +973,55 @@ mod tests {
         assert!(detail.truncated);
         assert!(encoded.len() <= 256 * 1024);
         assert!(detail.input.is_none());
+    }
+
+    #[test]
+    fn context_budget_requests_round_trip_all_choices_and_legacy_omission() {
+        let legacy: SubmitMessageRequest = serde_json::from_value(serde_json::json!({
+            "conversationId": "fixture", "text": "hello", "providerOverride": null, "commandId": "command"
+        })).unwrap();
+        assert!(legacy.context_budget.is_none());
+        for preference in [
+            serde_json::json!({"kind": "providerDefault"}),
+            serde_json::json!({"kind": "tokens", "tokens": 200000}),
+            serde_json::json!({"kind": "tokens", "tokens": 300000}),
+            serde_json::json!({"kind": "tokens", "tokens": 400000}),
+            serde_json::json!({"kind": "tokens", "tokens": 500000}),
+        ] {
+            let request: SetContextBudgetRequest = serde_json::from_value(serde_json::json!({
+                "conversationId": "fixture", "preference": preference
+            })).unwrap();
+            let core: prompting_time_core::context_budget::ContextBudget = request.preference.into();
+            assert_eq!(serde_json::to_value(ContextBudget::from(core)).unwrap(), preference);
+            let submission: SubmitMessageRequest = serde_json::from_value(serde_json::json!({
+                "conversationId": "fixture", "text": "hello", "providerOverride": null,
+                "commandId": "command", "contextBudget": preference
+            })).unwrap();
+            assert_eq!(serde_json::to_value(submission.context_budget.unwrap()).unwrap(), preference);
+        }
+    }
+
+    #[test]
+    fn timeline_page_preserves_unpaged_compaction_owner() {
+        let run_id = RunId::new();
+        let agent_id = prompting_time_core::domain::AgentId::new();
+        let snapshot = CoreTimelineSnapshot {
+            events: Page { items: vec![], next_cursor: None },
+            approvals: prompting_time_core::store::ApprovalPage {
+                items: vec![], truncated: false, next_cursor: None,
+            },
+            active_compaction: Some(prompting_time_core::context_compaction::CompactionActivity {
+                run_id, agent_id, provider: CoreProviderId::Claude,
+            }),
+        };
+        let json = serde_json::to_value(TimelinePage::from(snapshot.clone())).unwrap();
+        assert_eq!(json["activeCompaction"], serde_json::json!({
+            "runId": run_id.to_string(), "agentId": agent_id.to_string(), "provider": "claude"
+        }));
+        let json = serde_json::to_value(TimelinePage::from(CoreTimelineSnapshot {
+            active_compaction: None, ..snapshot
+        })).unwrap();
+        assert!(json.get("activeCompaction").is_some_and(serde_json::Value::is_null));
     }
 
     #[test]

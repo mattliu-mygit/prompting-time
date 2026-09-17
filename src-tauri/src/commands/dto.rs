@@ -86,9 +86,25 @@ pub struct SetThinkingPreferenceRequest {
     pub preference: ThinkingPreference,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ContextBudget {
+    ProviderDefault,
+    Tokens { tokens: u32 },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SetContextBudgetRequest {
+    pub conversation_id: String,
+    pub preference: ContextBudget,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSummary {
+    pub context_budget: ContextBudget,
+    pub run_context_budget: Option<ContextBudget>,
     pub thinking_preference: ThinkingPreference,
     pub thinking_decision: Option<ThinkingDecision>,
     pub thinking_configuration: Option<ThinkingConfiguration>,
@@ -197,7 +213,16 @@ pub struct TimelineItem {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct CompactionActivity {
+    pub run_id: String,
+    pub agent_id: String,
+    pub provider: ProviderId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct TimelinePage {
+    pub active_compaction: Option<CompactionActivity>,
     pub items: Vec<TimelineItem>,
     pub next_cursor: Option<String>,
     pub approvals: Vec<ApprovalSnapshot>,
@@ -311,6 +336,8 @@ pub struct ProjectPathSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitMessageRequest {
+    #[specta(optional)]
+    pub context_budget: Option<ContextBudget>,
     #[specta(optional)]
     pub thinking: Option<ThinkingPreference>,
     pub conversation_id: String,

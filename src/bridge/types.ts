@@ -19,6 +19,7 @@ export const commands = {
 	createConversation: (request: CreateConversationRequest) => typedError<ConversationSummary, CommandError>(__TAURI_INVOKE("create_conversation", { request })),
 	submitMessage: (request: SubmitMessageRequest) => typedError<SubmissionSnapshot, CommandError>(__TAURI_INVOKE("submit_message", { request })),
 	setThinkingPreference: (request: SetThinkingPreferenceRequest) => typedError<null, CommandError>(__TAURI_INVOKE("set_thinking_preference", { request })),
+	setContextBudget: (request: SetContextBudgetRequest) => typedError<null, CommandError>(__TAURI_INVOKE("set_context_budget", { request })),
 	steerRun: (request: SteerRunRequest) => typedError<null, CommandError>(__TAURI_INVOKE("steer_run", { request })),
 	respondToApproval: (request: RespondToApprovalRequest) => typedError<null, CommandError>(__TAURI_INVOKE("respond_to_approval", { request })),
 	interruptRun: (request: InterruptRunRequest) => typedError<null, CommandError>(__TAURI_INVOKE("interrupt_run", { request })),
@@ -117,6 +118,14 @@ export type CommandError = {
 	action: string | null,
 };
 
+export type CompactionActivity = {
+	runId: string,
+	agentId: string,
+	provider: ProviderId,
+};
+
+export type ContextBudget = { kind: "providerDefault" } | { kind: "tokens"; tokens: number };
+
 export type ConversationCapabilities = {
 	canSend: boolean,
 	canInterrupt: boolean,
@@ -137,6 +146,8 @@ export type ConversationPath = {
 };
 
 export type ConversationSummary = {
+	contextBudget: ContextBudget,
+	runContextBudget: ContextBudget | null,
 	thinkingPreference: ThinkingPreference,
 	thinkingDecision: ThinkingDecision | null,
 	thinkingConfiguration: ThinkingConfiguration | null,
@@ -376,6 +387,11 @@ export type RunAuditSummarySnapshot = {
 
 export type RunStatus = "queued" | "running" | "waiting" | "completed" | "interrupted" | "failed";
 
+export type SetContextBudgetRequest = {
+	conversationId: string,
+	preference: ContextBudget,
+};
+
 export type SetThinkingPreferenceRequest = {
 	conversationId: string,
 	preference: ThinkingPreference,
@@ -399,6 +415,7 @@ export type SubmissionSnapshot = {
 };
 
 export type SubmitMessageRequest = {
+	contextBudget?: ContextBudget | null,
 	thinking?: ThinkingPreference | null,
 	conversationId: string,
 	text: string,
@@ -441,6 +458,7 @@ export type TimelineItem = {
 export type TimelineItemKind = "message" | "tool" | "progress" | "diagnostic" | "lifecycle";
 
 export type TimelinePage = {
+	activeCompaction: CompactionActivity | null,
 	items: TimelineItem[],
 	nextCursor: string | null,
 	approvals: ApprovalSnapshot[],

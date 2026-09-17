@@ -34,6 +34,7 @@ import type {
   SubmissionSnapshot,
   SubmitMessageRequest,
   SetThinkingPreferenceRequest,
+  SetContextBudgetRequest,
   TimelinePage,
   DiagnosticsPage,
   RunAuditPage,
@@ -170,6 +171,10 @@ export function submitMessage(request: SubmitMessageRequest): Promise<Submission
 
 export function setThinkingPreference(request: SetThinkingPreferenceRequest): Promise<void> {
   return call("set_thinking_preference", { request });
+}
+
+export function setContextBudget(request: SetContextBudgetRequest): Promise<void> {
+  return call("set_context_budget", { request });
 }
 
 export function steerRun(request: SteerRunRequest): Promise<void> {

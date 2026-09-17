@@ -52,7 +52,7 @@ const approval: ApprovalSnapshot = {
 };
 
 const conversation: ConversationSummary = {
-  thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+  contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
   parentId: null, hasChildren: false, summary: null,
   capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
   id: "conversation-1", title: "Work", workspaceId: "workspace-1", archived: false,

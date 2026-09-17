@@ -9,7 +9,7 @@ import type { ConversationSummary, ListChildConversationsRequest, LoadConversati
 
 function createdConversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
-    thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
+    contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
     id: "new-1", title: "synthetic-project", routingProfile: "bestFit", workspaceId: "w-1",
     parentId: null, hasChildren: false, summary: null,
     capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null },
@@ -56,7 +56,7 @@ describe("shared conversation hierarchy", () => {
             runId: root.currentRunId!, agentId: `execution-${conversationId}`, sequence: "1",
             kind: "message", presentation: "normal", role: "assistant", content,
             contentBytes: String(content.length), truncated: false, provider: "codex", operation: null };
-          return { items: [item], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null };
+          return { items: [item], nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null };
         }),
       }),
       listChildConversations: vi.fn(async ({ parentId }: ListChildConversationsRequest) => ({
@@ -295,7 +295,7 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
     capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false,
       unavailableReason: "Recorded child activity is read-only." } });
   return {
-    setThinkingPreference: vi.fn(),
+    setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({
       providers: [
         {
@@ -323,7 +323,7 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
       items: conversationId === child.id ? [root, child] : [root], truncated: false, ownerConversationId: root.id,
     })),
     loadTimeline: vi.fn().mockResolvedValue({
-      items: [], nextCursor: null, approvals: [], approvalsTruncated: false, approvalsNextCursor: null,
+      items: [], nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
     }),
     loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadEventDetail: vi.fn(),
@@ -680,6 +680,7 @@ describe("App", () => {
     await waitFor(() => expect(submitMessage).toHaveBeenCalledWith({
       conversationId: "new-1", text: "Explain the synthetic project", providerOverride: null, commandId: expect.any(String),
       thinking: { kind: "auto" },
+      contextBudget: { kind: "tokens", tokens: 300000 },
     }));
   });
 

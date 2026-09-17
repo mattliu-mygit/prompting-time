@@ -21,6 +21,7 @@ import type {
   TimelinePage,
   DiagnosticsPage,
   ThinkingPreference,
+  ContextBudget,
 } from "../bridge/types";
 
 const PAGE_SIZE = 200;
@@ -46,8 +47,9 @@ export type AppApi = {
   loadApprovals(request: { conversationId: string; cursor: string | null; limit: number; kind: "pending" | "history" }): Promise<ApprovalPage>;
   loadApprovalDetail(request: { approvalId: string }): Promise<ApprovalDetailSnapshot>;
   loadApprovalQuestions(request: { approvalId: string; cursor: string | null; limit: number }): Promise<ApprovalQuestionPage>;
-  submitMessage(request: { conversationId: string; text: string; providerOverride: ProviderId | null; commandId: string; thinking: ThinkingPreference }): Promise<SubmissionSnapshot>;
+  submitMessage(request: { conversationId: string; text: string; providerOverride: ProviderId | null; commandId: string; thinking: ThinkingPreference; contextBudget: ContextBudget }): Promise<SubmissionSnapshot>;
   setThinkingPreference(request: { conversationId: string; preference: ThinkingPreference }): Promise<void>;
+  setContextBudget(request: { conversationId: string; preference: ContextBudget }): Promise<void>;
   steerRun(request: { conversationId: string; runId: string; text: string }): Promise<void>;
   respondToApproval(request: RespondToApprovalRequest): Promise<void>;
   interruptRun(request: { conversationId: string; runId: string }): Promise<void>;
@@ -80,7 +82,7 @@ export type AppActions = ConversationActions & Pick<AppApi, "listRunAudits" | "l
 type DraftSubmission = Readonly<{
   pending: boolean;
   providerOverride: ProviderId | null;
-  command: Readonly<{ id: string; text: string; provider: ProviderId | null; thinking: ThinkingPreference }> | null;
+  command: Readonly<{ id: string; text: string; provider: ProviderId | null; thinking: ThinkingPreference; contextBudget: ContextBudget }> | null;
   error: string | null;
 }>;
 
@@ -114,6 +116,7 @@ export type AppSnapshot = Readonly<{
   composerViewsById: Readonly<Record<string, ComposerView>>;
   submissionsById: Readonly<Record<string, DraftSubmission>>;
   thinkingSavesById: Readonly<Record<string, Readonly<{ pending: boolean; preference: ThinkingPreference | null; error: string | null }>>>;
+  contextBudgetSavesById: Readonly<Record<string, Readonly<{ pending: boolean; preference: ContextBudget | null; error: string | null }>>>;
 }>;
 
 export type AppStore = {
@@ -135,6 +138,7 @@ export type AppStore = {
   setDraft(conversationId: string, text: string): void;
   resetDraftCommand(conversationId: string): void;
   setThinkingPreference(conversationId: string, preference: ThinkingPreference): Promise<void>;
+  setContextBudget(conversationId: string, preference: ContextBudget): Promise<void>;
   submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null): Promise<boolean>;
   readonly actions: AppActions;
 };
@@ -158,6 +162,7 @@ const emptySnapshot: AppSnapshot = freezeSnapshot({
   composerViewsById: {},
   submissionsById: {},
   thinkingSavesById: {},
+  contextBudgetSavesById: {},
 });
 
 export function createAppStore(api: AppApi): AppStore {
@@ -251,18 +256,47 @@ export function createAppStore(api: AppApi): AppStore {
     }
   }
 
+  async function setContextBudget(conversationId: string, preference: ContextBudget) {
+    if (disposed || snapshot.contextBudgetSavesById[conversationId]?.pending) return;
+    const setSave = (pending: boolean, error: string | null) => {
+      if (!disposed) update({ contextBudgetSavesById: { ...snapshot.contextBudgetSavesById,
+        [conversationId]: Object.freeze({ pending, preference: pending ? preference : null, error }) } });
+    };
+    const conversation = snapshot.conversationsById[conversationId];
+    if (!conversation?.capabilities.canSend || conversation.archived || conversation.parentId !== null) {
+      setSave(false, "This conversation is read-only.");
+      return;
+    }
+    setSave(true, null);
+    try {
+      await api.setContextBudget({ conversationId, preference });
+      if (disposed) return;
+      const current = snapshot.conversationsById[conversationId];
+      if (current) {
+        eventRevision += 1;
+        requestConversationRefresh(conversationId);
+        update({ conversationsById: { ...snapshot.conversationsById,
+          [conversationId]: Object.freeze({ ...current, contextBudget: Object.freeze({ ...preference }) }) } });
+      }
+      setSave(false, null);
+    } catch (reason) {
+      setSave(false, reason instanceof Error ? reason.message : "Context budget could not be saved.");
+    }
+  }
+
   async function submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null) {
     const draft = snapshot.draftsById[conversationId];
     const previous = snapshot.submissionsById[conversationId];
     const conversation = snapshot.conversationsById[conversationId];
     if (disposed || !conversation?.capabilities.canSend || !draft?.text.trim() || previous?.pending
-      || snapshot.thinkingSavesById[conversationId]?.pending) return false;
+      || snapshot.thinkingSavesById[conversationId]?.pending || snapshot.contextBudgetSavesById[conversationId]?.pending) return false;
     const command = runId ? null : previous?.command
       && previous.command.text === draft.text
       && previous.command.provider === providerOverride
       ? previous.command
       : Object.freeze({ id: globalThis.crypto.randomUUID(), text: draft.text, provider: providerOverride,
-        thinking: Object.freeze({ ...conversation.thinkingPreference }) });
+        thinking: Object.freeze({ ...conversation.thinkingPreference }),
+        contextBudget: Object.freeze({ ...conversation.contextBudget }) });
     setSubmission(conversationId, { pending: true, providerOverride, command, error: null });
     try {
       if (runId) await api.steerRun({ conversationId, runId, text: draft.text });
@@ -272,6 +306,7 @@ export function createAppStore(api: AppApi): AppStore {
         providerOverride: command.provider,
         commandId: command.id,
         thinking: command.thinking,
+        contextBudget: command.contextBudget,
       });
       if (disposed) return false;
       // Identity protects even an edit away from and back to the submitted text.
@@ -777,6 +812,7 @@ export function createAppStore(api: AppApi): AppStore {
     setDraft,
     resetDraftCommand,
     setThinkingPreference,
+    setContextBudget,
     submitDraft,
     loadChildPage,
     toggleConversation,
@@ -802,7 +838,7 @@ export function createAppStore(api: AppApi): AppStore {
       unlisten?.();
       unlisten = null;
       listeners.clear();
-      update({ draftsById: {}, composerViewsById: {}, submissionsById: {}, thinkingSavesById: {} });
+      update({ draftsById: {}, composerViewsById: {}, submissionsById: {}, thinkingSavesById: {}, contextBudgetSavesById: {} });
     },
     setStatusFilter(statusFilter) {
       if (snapshot.statusFilter !== statusFilter) update({ statusFilter });
@@ -909,6 +945,7 @@ function freezeSnapshot(snapshot: AppSnapshot): AppSnapshot {
     draftsById: Object.freeze(snapshot.draftsById),
     submissionsById: Object.freeze(snapshot.submissionsById),
     thinkingSavesById: Object.freeze(snapshot.thinkingSavesById),
+    contextBudgetSavesById: Object.freeze(snapshot.contextBudgetSavesById),
   });
 }
 

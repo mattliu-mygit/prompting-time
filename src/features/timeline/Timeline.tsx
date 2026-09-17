@@ -5,6 +5,7 @@ import type {
   ApprovalSnapshot,
   ProviderId,
   TimelineItem,
+  CompactionActivity,
 } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
 import { ApprovalCard } from "../inspector/ApprovalCard";
@@ -50,6 +51,7 @@ export function Timeline({ conversation, refreshVersion, actions, viewStates }: 
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [compaction, setCompaction] = useState<{ conversationId: string; activity: CompactionActivity } | null>(null);
   const requestGeneration = useRef(0);
   const historyRequestGeneration = useRef(0);
   const loadedConversation = useRef<string | null>(null);
@@ -81,6 +83,9 @@ export function Timeline({ conversation, refreshVersion, actions, viewStates }: 
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [expandedOperations, setExpandedOperations] = useState<ReadonlySet<string>>(() => new Set());
   const runStatus = conversation.runStatus;
+  const compacting = compaction?.conversationId === conversationId
+    && compaction.activity.runId === conversation.currentRunId
+    && (runStatus === "queued" || runStatus === "running" || runStatus === "waiting");
   const retainedView = useRef({ newestItems, olderPages, cursor, historyEvicted, expandedGroups, expandedOperations });
   const viewCommitted = useRef(false);
   useLayoutEffect(() => {
@@ -161,6 +166,7 @@ export function Timeline({ conversation, refreshVersion, actions, viewStates }: 
     const changesConversation = requestedConversation.current !== conversationId;
     requestedConversation.current = conversationId;
     if (changesConversation) {
+      setCompaction(null);
       const saved = viewStates?.get(conversationId);
       following.current = saved?.following ?? true;
       lastScrollTop.current = 0;
@@ -212,6 +218,7 @@ export function Timeline({ conversation, refreshVersion, actions, viewStates }: 
               generation !== requestGeneration.current
               || targetConversation !== requestedConversation.current
             ) continue;
+            setCompaction(page.activeCompaction ? { conversationId: targetConversation, activity: page.activeCompaction } : null);
             const box = scrollBox.current;
             scrollToEnd.current = replacesConversation
               || box === null
@@ -290,7 +297,10 @@ export function Timeline({ conversation, refreshVersion, actions, viewStates }: 
             if (
               generation === requestGeneration.current
               && targetConversation === requestedConversation.current
-            ) setError(messageFor(reason));
+            ) {
+              setCompaction(null);
+              setError(messageFor(reason));
+            }
           }
         }
       })().finally(() => {
@@ -513,6 +523,7 @@ export function Timeline({ conversation, refreshVersion, actions, viewStates }: 
     <section className="timeline-region" aria-labelledby="timeline-heading">
       <h2 className="sr-only" ref={heading} id="timeline-heading" tabIndex={-1}>Timeline</h2>
       {loading ? <span role="status">Loading activity…</span> : null}
+      {compacting ? <span role="status" className="compaction-status">Compacting…</span> : null}
       {error ? <p role="alert" className="inline-error">{error}</p> : null}
       <div ref={scrollBox} className="timeline-scroll" tabIndex={0} aria-label="Conversation activity" onScroll={onScroll}>
         {historyEvicted ? (
