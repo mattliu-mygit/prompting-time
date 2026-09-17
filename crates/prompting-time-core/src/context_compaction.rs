@@ -36,13 +36,12 @@ impl CompactionObservation {
             }
         }
         // A Codex boundary is a JSON tuple of two bounded native identifiers.
-        if let CompactionPhase::Completed { boundary_id } = &self.phase {
-            if boundary_id.is_empty()
+        if let CompactionPhase::Completed { boundary_id } = &self.phase
+            && (boundary_id.is_empty()
                 || boundary_id.len() > 4096
-                || boundary_id.chars().any(char::is_control)
-            {
-                return Err(CompactionObservationError);
-            }
+                || boundary_id.chars().any(char::is_control))
+        {
+            return Err(CompactionObservationError);
         }
         Ok(())
     }
