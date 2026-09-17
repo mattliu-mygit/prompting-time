@@ -333,7 +333,8 @@ printf '%s\n' '{{"method":"thread/started","params":{{"thread":{{"id":"child","p
 printf '%s\n' '{{"method":"turn/started","params":{{"threadId":"child","turn":{{"id":"child-turn"}}}}}}'
 {root_end}
 IFS= read -r line
-printf '%s' "$line" > '{}'
+printf '%s' "$line" > '{0}.tmp'
+mv '{0}.tmp' '{0}'
 {extract_id}
 printf '{{"id":%s,"result":{{}}}}\n' "$request_id"
 printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"child","turn":{{"id":"child-turn","status":"interrupted"}}}}}}'
