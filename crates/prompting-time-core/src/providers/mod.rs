@@ -514,7 +514,47 @@ pub enum ProviderError {
     NotDispatched { category: ProviderErrorCategory },
 }
 
+/// A statically allowlisted diagnostic; arbitrary provider text cannot construct one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderErrorCode {
+    code: &'static str,
+    content: &'static str,
+}
+
+impl ProviderErrorCode {
+    pub fn as_str(self) -> &'static str {
+        self.code
+    }
+
+    pub(crate) fn content(self) -> &'static str {
+        self.content
+    }
+}
+
 impl ProviderError {
+    pub fn diagnostic_code(&self) -> Option<ProviderErrorCode> {
+        let Self::Protocol { category } = self else {
+            return None;
+        };
+        macro_rules! allow_codes {
+            ($($code:literal),+ $(,)?) => {
+                match category.as_str() {
+                    $($code => Some(ProviderErrorCode {
+                        code: $code,
+                        content: concat!("Provider failed: protocol error (", $code, ")"),
+                    }),)+
+                    _ => None,
+                }
+            };
+        }
+        allow_codes!(
+            "claude-invalid-compaction-status",
+            "claude-unsupported-envelope",
+            "claude-unsupported-system-envelope",
+            "claude-result-failed-or-deferred",
+        )
+    }
+
     pub fn dispatch_certainty(&self) -> DispatchCertainty {
         match self {
             Self::NotDispatched { .. } => DispatchCertainty::NotDispatched,

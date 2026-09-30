@@ -84,6 +84,21 @@ advisory `rate_limit_event` and `thinking_tokens` estimates; neither payload is 
 adapter uses one process per active turn, default stdio permissions, empty settings sources, an
 empty strict MCP config, and no model override. The legacy hook-defer/restart path is not used.
 
+The compaction integration exposed a separate status regression on 2026-09-29. Installed
+2.1.205 emits `system/status` with `status: "requesting"` before a model request when partial
+messages are enabled. This is ordinary progress, not compaction or terminal evidence. The adapter
+accepts it without creating a compaction event; malformed identities and unknown status values
+still fail closed. Hermetic actual-adapter tests cover requesting before streamed text, interleaved
+compaction, successful results, and missing or failed results. This evidence does not establish
+authenticated high-context compaction or recover the discarded envelope from a past failed run.
+
+Failure diagnostics retain selected, statically allowlisted Claude reason codes in the existing
+terminal event and its displayed text. Generic error categories still control failure policy;
+unknown error strings remain generic. Raw native frames, settings, and arbitrary error text are
+not retained to explain a failure. A secondary shutdown error does not replace an already recorded
+failure cause; shutdown errors still fail otherwise successful or interrupted turns. Adding a
+diagnostic never retries or replays the request.
+
 Hermetic application composition tests exercise projectless automatic selection and explicit
 Claude override, persisted native-session resume after app reconstruction, canonical approval IDs
 and question answers, stale response rejection, and completed depth-two sidebar ancestry. Existing

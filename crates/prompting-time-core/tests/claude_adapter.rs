@@ -725,12 +725,14 @@ async fn compaction_observations_preserve_native_boundary_and_clear_without_succ
 for event in [
     dict(subtype='compact_boundary', uuid='boundary-before-start'),
     dict(subtype='status', status='compacting', uuid='status-1'),
+    dict(subtype='status', status='requesting', uuid='request-during-compaction'),
     dict(subtype='status', status='compacting', uuid='status-2'),
     dict(subtype='status', status=None, compact_result='success', uuid='status-3'),
     dict(subtype='compact_boundary', uuid='boundary-after-success'),
     dict(subtype='status', status='compacting', uuid='status-4'),
     dict(subtype='status', status=None, compact_result='failed', compact_error='PRIVATE_ERROR', uuid='status-5'),
     dict(subtype='status', status=None, uuid='status-6'),
+    dict(subtype='status', status='requesting', uuid='request-after-compaction'),
     dict(subtype='compact_boundary', uuid='child-boundary', parent_tool_use_id='unproven-child')
 ]:
     emit(dict(type='system',session_id=session,**event))
@@ -1262,6 +1264,113 @@ async fn malformed_questions_and_conflicting_native_identity_fail_closed() {
                 .iter()
                 .any(|event| matches!(event, Ok(ProviderEvent::TurnCompleted)))
         );
+    }
+}
+
+#[tokio::test]
+async fn requesting_status_allows_streaming_without_compaction_or_early_completion() {
+    let fixture = Fixture::new(
+        r#"
+emit(dict(type='system',subtype='status',status='requesting',session_id=session,uuid='request-1'))
+def stream(event):
+    emit(dict(type='stream_event',session_id=session,parent_tool_use_id=None,event=event))
+stream(dict(type='message_start',message=dict(id='message-1')))
+stream(dict(type='content_block_start',index=0,content_block=dict(type='text',text='')))
+stream(dict(type='content_block_delta',index=0,delta=dict(type='text_delta',text='READY')))
+stream(dict(type='content_block_stop',index=0))
+barrier('before-result')
+result()
+"#,
+    );
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(
+            &session,
+            TurnRequest::new("invented").with_context_budget(
+                prompting_time_core::context_budget::ContextBudget::Tokens { tokens: 300_000 },
+            ),
+        )
+        .await
+        .unwrap();
+    let events = async {
+        assert!(matches!(event(&mut turn).await?, ProviderEvent::TurnStarted { .. }));
+        assert!(matches!(event(&mut turn).await?, ProviderEvent::AssistantMessageDelta { content, .. } if content == "READY"));
+        wait_file(&fixture.directory.path().join("before-result.ready")).await;
+        fs::write(fixture.directory.path().join("before-result.release"), "").unwrap();
+        Ok::<_, ProviderError>(collect(&mut turn).await)
+    }
+    .await;
+    turn.shutdown().await.unwrap();
+    assert!(matches!(
+        events.unwrap().as_slice(),
+        [Ok(ProviderEvent::TurnCompleted)]
+    ));
+    reaped(fixture.read("pid").as_u64().unwrap()).await;
+}
+
+#[tokio::test]
+async fn requesting_status_does_not_hide_missing_or_failed_results() {
+    for (ending, expected) in [
+        ("", ProviderError::StreamClosed),
+        (
+            "emit(dict(type='result',session_id=session,subtype='error_during_execution',is_error=True))",
+            ProviderError::Protocol {
+                category: "claude-result-failed-or-deferred".into(),
+            },
+        ),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "emit(dict(type='system',subtype='status',status='requesting',session_id=session,uuid='request-1'))\n{ending}"
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        turn.shutdown().await.unwrap();
+        assert!(
+            matches!(events.as_slice(), [Ok(ProviderEvent::TurnStarted { .. }), Err(error)] if error == &expected),
+            "{events:?}"
+        );
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
+#[tokio::test]
+async fn requesting_status_keeps_identity_and_unknown_status_validation() {
+    for patch in [
+        json!({"session_id":"wrong-session"}),
+        json!({"session_id":null}),
+        json!({"uuid":""}),
+        json!({"status":"unknown"}),
+        json!({"status":42}),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "value=dict(type='system',subtype='status',status='requesting',session_id=session,uuid='request-1')\nvalue.update(json.loads({:?}))\nemit(value)\nresult()",
+            patch.to_string()
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        turn.shutdown().await.unwrap();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Ok(ProviderEvent::TurnStarted { .. }),
+                    Err(ProviderError::Protocol { .. })
+                ]
+            ),
+            "{patch}: {events:?}"
+        );
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
     }
 }
 

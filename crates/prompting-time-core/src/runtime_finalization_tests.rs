@@ -320,6 +320,52 @@ async fn recursive_interrupt_closes_descendants_deepest_first_after_owned_shutdo
 }
 
 #[tokio::test]
+async fn protocol_failure_details_are_allowlisted_and_persisted_after_start() {
+    for (code, allowed) in [
+        ("claude-invalid-compaction-status", true),
+        ("claude-unsupported-envelope", true),
+        ("claude-unsupported-system-envelope", true),
+        ("claude-result-failed-or-deferred", true),
+        ("claude-private-customer-token", false),
+        ("private-customer-token", false),
+        ("private prompt /private/example-secret", false),
+    ] {
+        let mut fixture = Fixture::new(false).await;
+        fixture
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(Err(ProviderError::Protocol {
+                category: code.into(),
+            }))
+            .await
+            .unwrap();
+        fixture.sender.take();
+        fixture.release_and_expect(RunStatus::Failed).await;
+        let timeline = fixture.timeline().await;
+        let mut failures = 0;
+        for event in timeline {
+            if let Some(payload) = fixture.store.load_event_payload(event.id).await.unwrap()
+                && payload.get("errorCategory").is_some()
+            {
+                failures += 1;
+                assert_eq!(payload["errorCategory"], "protocol");
+                if allowed {
+                    assert_eq!(payload["errorCode"], code);
+                    assert!(event.content.contains(code));
+                } else {
+                    assert!(payload.get("errorCode").is_none());
+                    assert_eq!(event.content, "Provider failed: protocol error");
+                    assert!(!payload.to_string().contains(code));
+                }
+            }
+        }
+        assert_eq!(failures, 1);
+        fixture.supervisor.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn recursive_failures_preserve_the_original_category() {
     for error in [
         Some(ProviderError::Protocol {
@@ -348,6 +394,40 @@ async fn recursive_failures_preserve_the_original_category() {
             .await;
         fixture.supervisor.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn recursive_primary_failure_detail_survives_shutdown_failure() {
+    let mut fixture = Fixture::new(true).await;
+    fixture.tree().await;
+    let code = "claude-invalid-compaction-status";
+    fixture
+        .sender
+        .as_ref()
+        .unwrap()
+        .send(Err(ProviderError::Protocol {
+            category: code.into(),
+        }))
+        .await
+        .unwrap();
+    fixture.sender.take();
+    fixture.release_and_expect(RunStatus::Failed).await;
+    fixture
+        .expect_tree(AgentStatus::Failed, Some(ProviderErrorCategory::Protocol))
+        .await;
+    let mut failures = 0;
+    for event in fixture.timeline().await {
+        if let Some(payload) = fixture.store.load_event_payload(event.id).await.unwrap()
+            && payload.get("errorCategory").is_some()
+        {
+            failures += 1;
+            assert_eq!(payload["errorCode"], code);
+            assert!(event.content.contains(code));
+            assert!(!payload.to_string().contains("fixture_shutdown"));
+        }
+    }
+    assert_eq!(failures, 3);
+    fixture.supervisor.shutdown().await.unwrap();
 }
 
 #[tokio::test]

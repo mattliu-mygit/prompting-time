@@ -353,6 +353,7 @@ pub enum ProviderEventRecord {
     },
     ProviderFailed {
         category: ProviderErrorCategory,
+        code: Option<crate::providers::ProviderErrorCode>,
         mutation: MutationState,
         dispatch_certainty: DispatchCertainty,
     },
@@ -533,6 +534,7 @@ impl ProviderEventRecord {
     ) -> Self {
         Self::ProviderFailed {
             category,
+            code: None,
             mutation,
             dispatch_certainty,
         }
@@ -578,9 +580,9 @@ impl ProviderEventRecord {
             (Self::FailedWithMutation { diagnostic, .. }, _) => {
                 (TimelineEventKind::Diagnostic, diagnostic)
             }
-            (Self::ProviderFailed { category, .. }, _) => (
+            (Self::ProviderFailed { category, code, .. }, _) => (
                 TimelineEventKind::Diagnostic,
-                provider_error_content(*category),
+                code.map_or_else(|| provider_error_content(*category), |code| code.content()),
             ),
         }
     }
@@ -706,16 +708,20 @@ impl ProviderEventRecord {
             }
             Self::ProviderFailed {
                 category,
+                code,
                 mutation,
                 dispatch_certainty,
-            } => Some(
-                serde_json::json!({
+            } => {
+                let mut payload = serde_json::json!({
                     "errorCategory": category,
                     "mutation": mutation,
                     "dispatchCertainty": dispatch_certainty,
-                })
-                .to_string(),
-            ),
+                });
+                if let Some(code) = code {
+                    payload["errorCode"] = serde_json::json!(code.as_str());
+                }
+                Some(payload.to_string())
+            }
             _ => None,
         }
     }

@@ -232,6 +232,11 @@ impl Protocol {
                             }
                         } else {
                             match value.get("status") {
+                                // Partial-message streaming emits this before each model request.
+                                // It is advisory, not a compaction transition or terminal result.
+                                Some(Value::String(status)) if status == "requesting" => {
+                                    return Ok(events);
+                                }
                                 Some(Value::String(status)) if status == "compacting" => {
                                     CompactionPhase::Started
                                 }

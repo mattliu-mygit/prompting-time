@@ -2564,6 +2564,7 @@ enum AttemptFinish {
     Interrupted(MutationState),
     Failed {
         category: ProviderErrorCategory,
+        code: Option<crate::providers::ProviderErrorCode>,
         mutation: MutationState,
         dispatch_certainty: DispatchCertainty,
     },
@@ -2649,6 +2650,7 @@ async fn execute_attempt(
                 ProviderErrorCategory::ContractViolation,
                 MutationState::Unknown,
                 DispatchCertainty::MayHaveDispatched,
+                None,
             )
             .await;
         }
@@ -2666,6 +2668,7 @@ async fn execute_attempt(
                 error.category(),
                 mutation,
                 certainty,
+                error.diagnostic_code(),
             )
             .await;
         }
@@ -2736,6 +2739,7 @@ async fn execute_attempt(
                 error.category(),
                 mutation,
                 certainty,
+                error.diagnostic_code(),
             )
             .await;
         }
@@ -2849,7 +2853,7 @@ async fn execute_attempt(
                                     &attempt,
                                     turn,
                                     &mut buffered,
-                                    active_failure(error.category(), MutationState::Unknown),
+                                    active_provider_failure(&error, MutationState::Unknown),
                                 ).await;
                             }
                         };
@@ -3162,8 +3166,8 @@ async fn execute_attempt(
                     &attempt,
                     turn,
                     &mut buffered,
-                    active_failure(
-                        error.category(),
+                    active_provider_failure(
+                        &error,
                         merge_mutation(mutation, MutationState::Unknown),
                     ),
                 )
@@ -3874,6 +3878,7 @@ async fn fail_attempt(
     category: ProviderErrorCategory,
     mutation: MutationState,
     dispatch_certainty: DispatchCertainty,
+    code: Option<crate::providers::ProviderErrorCode>,
 ) -> Result<AttemptResult, RuntimeError> {
     if mutation == MutationState::NoneObserved
         && dispatch_certainty == DispatchCertainty::NotDispatched
@@ -3913,7 +3918,12 @@ async fn fail_attempt(
             attempt.run_id,
             attempt.root_id,
             &attempt.dispatch_owner_id,
-            ProviderEventRecord::provider_failed(category, mutation, dispatch_certainty),
+            ProviderEventRecord::ProviderFailed {
+                category,
+                code,
+                mutation,
+                dispatch_certainty,
+            },
         )
         .await?;
     Ok(AttemptResult::Failed)
@@ -3922,6 +3932,16 @@ async fn fail_attempt(
 fn active_failure(category: ProviderErrorCategory, mutation: MutationState) -> AttemptFinish {
     AttemptFinish::Failed {
         category,
+        code: None,
+        mutation,
+        dispatch_certainty: DispatchCertainty::MayHaveDispatched,
+    }
+}
+
+fn active_provider_failure(error: &ProviderError, mutation: MutationState) -> AttemptFinish {
+    AttemptFinish::Failed {
+        category: error.category(),
+        code: error.diagnostic_code(),
         mutation,
         dispatch_certainty: DispatchCertainty::MayHaveDispatched,
     }
@@ -3975,6 +3995,7 @@ async fn finalize_attempt(
         if !stream_closed || approval_pending(active) {
             finish = AttemptFinish::Failed {
                 category: ProviderErrorCategory::ContractViolation,
+                code: None,
                 mutation: MutationState::Unknown,
                 dispatch_certainty: DispatchCertainty::MayHaveDispatched,
             };
@@ -3982,10 +4003,14 @@ async fn finalize_attempt(
     }
 
     if let Err(error) = shutdown_turn(turn).await
-        && !matches!(finish, AttemptFinish::RuntimeError(_))
+        && !matches!(
+            finish,
+            AttemptFinish::RuntimeError(_) | AttemptFinish::Failed { .. }
+        )
     {
         finish = AttemptFinish::Failed {
             category: error.category(),
+            code: error.diagnostic_code(),
             mutation: MutationState::Unknown,
             dispatch_certainty: DispatchCertainty::MayHaveDispatched,
         };
@@ -4017,11 +4042,14 @@ async fn finalize_attempt(
                 | AttemptFinish::ProviderTerminal(RunStatus::Interrupted) => {
                     ProviderEventRecord::interrupted_with_mutation(MutationState::Unknown)
                 }
-                AttemptFinish::Failed { category, .. } => ProviderEventRecord::provider_failed(
-                    *category,
-                    MutationState::Unknown,
-                    DispatchCertainty::MayHaveDispatched,
-                ),
+                AttemptFinish::Failed { category, code, .. } => {
+                    ProviderEventRecord::ProviderFailed {
+                        category: *category,
+                        code: *code,
+                        mutation: MutationState::Unknown,
+                        dispatch_certainty: DispatchCertainty::MayHaveDispatched,
+                    }
+                }
                 AttemptFinish::RuntimeError(_) => ProviderEventRecord::provider_failed(
                     ProviderErrorCategory::ContractViolation,
                     MutationState::Unknown,
@@ -4086,6 +4114,7 @@ async fn finalize_attempt(
         }
         AttemptFinish::Failed {
             category,
+            code,
             mutation,
             dispatch_certainty,
         } => {
@@ -4096,6 +4125,7 @@ async fn finalize_attempt(
                 category,
                 mutation,
                 dispatch_certainty,
+                code,
             )
             .await
         }
