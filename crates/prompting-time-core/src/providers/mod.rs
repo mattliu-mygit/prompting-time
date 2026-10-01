@@ -551,6 +551,12 @@ impl ProviderError {
             "claude-invalid-compaction-status",
             "claude-unsupported-envelope",
             "claude-unsupported-system-envelope",
+            "claude-invalid-system-advisory",
+            "claude-unsupported-system-informational",
+            "claude-unsupported-system-model-fallback",
+            "claude-unsupported-system-model-consent-fallback",
+            "claude-unsupported-system-model-refusal-fallback",
+            "claude-unsupported-system-model-refusal-no-fallback",
             "claude-result-failed-or-deferred",
         )
     }

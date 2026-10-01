@@ -92,6 +92,22 @@ still fail closed. Hermetic actual-adapter tests cover requesting before streame
 compaction, successful results, and missing or failed results. This evidence does not establish
 authenticated high-context compaction or recover the discarded envelope from a past failed run.
 
+A follow-up audit of the installed 2.1.205 schemas identified three more non-terminal
+system messages: `api_retry`, `notification`, and `memory_recall`. The adapter validates their
+session/UUID and native field types, then discards them. Native retrying continues without a host
+retry or prompt replay; display text and recalled memory paths/content never enter the timeline.
+This follows Claude's [native retry contract](https://code.claude.com/docs/en/headless#handle-api-retries).
+Version-matched fixtures preserve native edge cases such as fractional delays and repeated retry
+counters, and require a real successful result even after these notices. EOF and failed results
+still fail the turn. These are static-source and hermetic adapter checks, not authenticated
+end-to-end acceptance or attribution of an earlier discarded failure envelope.
+
+System events that change the model, retract messages, or stop continuation are not silently
+discarded. Unimplemented model-fallback/refusal and informational events remain failures with
+literal subtype-specific diagnostic codes. Unknown system types retain the generic safe code;
+malformed advisory payloads have their own static reason code. No native subtype or payload is
+copied into an error message dynamically.
+
 Failure diagnostics retain selected, statically allowlisted Claude reason codes in the existing
 terminal event and its displayed text. Generic error categories still control failure policy;
 unknown error strings remain generic. Raw native frames, settings, and arbitrary error text are

@@ -43,6 +43,68 @@ pub(super) fn validate_session(value: &Value, session: &str) -> Result<(), Provi
     Ok(())
 }
 
+fn validate_system_advisory(value: &Value, session: &str) -> Result<(), ProviderError> {
+    if required_id(value, "session_id")? != session {
+        return Err(protocol_error("session-mismatch"));
+    }
+    required_id(value, "uuid")?;
+    // Follow the 2.1.205 schemas, not UI assumptions. Retry counters can repeat or
+    // exceed the maximum, delays can be fractional, and display strings can be empty.
+    let valid = match value["subtype"].as_str() {
+        Some("api_retry") => {
+            ["attempt", "max_retries", "retry_delay_ms"]
+                .iter()
+                .all(|key| value[key].is_number())
+                && value
+                    .get("error_status")
+                    .is_some_and(|status| status.is_null() || status.is_number())
+                && matches!(
+                    value["error"].as_str(),
+                    Some(
+                        "authentication_failed"
+                            | "oauth_org_not_allowed"
+                            | "billing_error"
+                            | "rate_limit"
+                            | "overloaded"
+                            | "invalid_request"
+                            | "model_not_found"
+                            | "server_error"
+                            | "unknown"
+                            | "max_output_tokens"
+                    )
+                )
+        }
+        Some("notification") => {
+            value["key"].is_string()
+                && value["text"].is_string()
+                && matches!(
+                    value["priority"].as_str(),
+                    Some("low" | "medium" | "high" | "immediate")
+                )
+                && value.get("color").is_none_or(Value::is_string)
+                && value.get("timeout_ms").is_none_or(Value::is_number)
+        }
+        Some("memory_recall") => {
+            matches!(value["mode"].as_str(), Some("select" | "synthesize"))
+                && value["memories"].as_array().is_some_and(|memories| {
+                    memories.iter().all(|memory| {
+                        memory["path"].is_string()
+                            && matches!(
+                                memory["scope"].as_str(),
+                                Some("personal" | "team" | "organization")
+                            )
+                            && memory.get("content").is_none_or(Value::is_string)
+                    })
+                })
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(protocol_error("invalid-system-advisory"));
+    }
+    Ok(())
+}
+
 struct Tool {
     name: String,
     identified: bool,
@@ -217,6 +279,12 @@ impl Protocol {
                 // Only the result/lifecycle boundary can complete or fail the turn.
             }
             Some("system") => match value["subtype"].as_str() {
+                Some("api_retry" | "notification" | "memory_recall") => {
+                    validate_system_advisory(&value, &self.session)?;
+                    // Claude owns retrying. Display-only metadata is not transcript,
+                    // compaction, or terminal evidence; never retain its private payload.
+                    return Ok(events);
+                }
                 Some("status" | "compact_boundary") => {
                     // This CLI does not establish a native owner for forwarded child compaction.
                     // Never turn an unproven child's notice into root activity.
@@ -268,6 +336,25 @@ impl Protocol {
                     | "hook_response"
                     | "session_state_changed",
                 ) => {}
+                // These known types have continuation/model/transcript semantics we do
+                // not implement yet. Keep them failures, with literal, private-safe codes.
+                Some("informational") => {
+                    return Err(protocol_error("unsupported-system-informational"));
+                }
+                Some("model_fallback") => {
+                    return Err(protocol_error("unsupported-system-model-fallback"));
+                }
+                Some("model_consent_fallback") => {
+                    return Err(protocol_error("unsupported-system-model-consent-fallback"));
+                }
+                Some("model_refusal_fallback") => {
+                    return Err(protocol_error("unsupported-system-model-refusal-fallback"));
+                }
+                Some("model_refusal_no_fallback") => {
+                    return Err(protocol_error(
+                        "unsupported-system-model-refusal-no-fallback",
+                    ));
+                }
                 _ => return Err(protocol_error("unsupported-system-envelope")),
             },
             Some("result") => {
@@ -956,6 +1043,134 @@ pub(super) fn control(
         }),
         None,
     ))
+}
+
+#[cfg(test)]
+mod advisory_tests {
+    use super::*;
+
+    fn notices() -> [Value; 3] {
+        [
+            json!({"type":"system", "subtype":"api_retry", "session_id":"session", "uuid":"retry",
+                "attempt":1, "max_retries":0, "retry_delay_ms":123.5, "error_status":null, "error":"unknown"}),
+            json!({"type":"system", "subtype":"notification", "session_id":"session", "uuid":"notification",
+                "key":"", "text":"", "priority":"low"}),
+            json!({"type":"system", "subtype":"memory_recall", "session_id":"session", "uuid":"memory",
+                "mode":"select", "memories":[]}),
+        ]
+    }
+
+    #[test]
+    fn native_advisories_discard_private_fields_and_accept_native_variants() {
+        let mut protocol = Protocol::new("session".into());
+        for notice in notices() {
+            assert!(protocol.normalize(notice).unwrap().is_empty());
+        }
+        for error in [
+            "authentication_failed",
+            "oauth_org_not_allowed",
+            "billing_error",
+            "rate_limit",
+            "overloaded",
+            "invalid_request",
+            "model_not_found",
+            "server_error",
+            "unknown",
+            "max_output_tokens",
+        ] {
+            let mut notice = notices()[0].clone();
+            notice["error"] = json!(error);
+            // Native watchdogs repeat an attempt with decreasing, fractional delays.
+            // Their counter can exceed max_retries, including max_retries=0.
+            for delay in [123.5, 1.5, 0.0] {
+                notice["retry_delay_ms"] = json!(delay);
+                notice["error_status"] = json!(503);
+                assert!(protocol.normalize(notice.clone()).unwrap().is_empty());
+            }
+        }
+        for priority in ["low", "medium", "high", "immediate"] {
+            let mut notice = notices()[1].clone();
+            notice["priority"] = json!(priority);
+            notice["text"] = json!("PRIVATE_NOTICE");
+            notice["color"] = json!("PRIVATE_COLOR");
+            notice["timeout_ms"] = json!(0.5);
+            assert!(protocol.normalize(notice).unwrap().is_empty());
+        }
+        for mode in ["select", "synthesize"] {
+            let mut notice = notices()[2].clone();
+            notice["mode"] = json!(mode);
+            notice["parent_tool_use_id"] = json!("child-tool");
+            notice["memories"] = json!([
+                {"path":"PRIVATE_PATH", "scope":"personal"},
+                {"path":"PRIVATE_PATH", "scope":"team", "content":"PRIVATE_CONTENT"},
+                {"path":"PRIVATE_PATH", "scope":"organization", "content":"PRIVATE_CONTENT"}
+            ]);
+            assert!(protocol.normalize(notice).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn native_advisories_reject_missing_or_malformed_payload_fields() {
+        let required = [
+            vec![
+                "attempt",
+                "max_retries",
+                "retry_delay_ms",
+                "error_status",
+                "error",
+            ],
+            vec!["key", "text", "priority"],
+            vec!["mode", "memories"],
+        ];
+        for (notice, fields) in notices().into_iter().zip(required) {
+            for field in fields {
+                for missing in [false, true] {
+                    let mut invalid = notice.clone();
+                    if missing {
+                        invalid.as_object_mut().unwrap().remove(field);
+                    } else {
+                        invalid[field] = json!(true);
+                    }
+                    assert_eq!(
+                        Protocol::new("session".into())
+                            .normalize(invalid)
+                            .unwrap_err(),
+                        protocol_error("invalid-system-advisory"),
+                        "{field}, missing={missing}"
+                    );
+                }
+            }
+        }
+        for (index, patch) in [
+            (0, json!({"error":"unrecognized-error"})),
+            (1, json!({"priority":"unrecognized-priority"})),
+            (1, json!({"color":null})),
+            (1, json!({"timeout_ms":"5000"})),
+            (2, json!({"mode":"unrecognized-mode"})),
+            (2, json!({"memories":[{}]})),
+            (2, json!({"memories":[{"path":1,"scope":"personal"}]})),
+            (
+                2,
+                json!({"memories":[{"path":"invented","scope":"unrecognized-scope"}]}),
+            ),
+            (
+                2,
+                json!({"memories":[{"path":"invented","scope":"personal","content":null}]}),
+            ),
+        ] {
+            let mut invalid = notices()[index].clone();
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert_eq!(
+                Protocol::new("session".into())
+                    .normalize(invalid)
+                    .unwrap_err(),
+                protocol_error("invalid-system-advisory")
+            );
+        }
+    }
 }
 
 #[cfg(test)]

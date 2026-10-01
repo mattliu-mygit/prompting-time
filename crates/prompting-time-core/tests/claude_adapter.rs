@@ -1375,6 +1375,173 @@ async fn requesting_status_keeps_identity_and_unknown_status_validation() {
 }
 
 #[tokio::test]
+async fn native_system_advisories_preserve_streaming_and_wait_for_result() {
+    for advisory in native_system_advisories() {
+        let fixture = Fixture::new(&format!(
+            r#"
+notice = json.loads({advisory:?})
+notice.update(type='system', session_id=session, uuid='notice-1')
+emit(notice)
+emit(dict(type='system',subtype='status',status='requesting',session_id=session,uuid='request-1'))
+def stream(event):
+    emit(dict(type='stream_event',session_id=session,parent_tool_use_id=None,event=event))
+stream(dict(type='message_start',message=dict(id='message-1')))
+stream(dict(type='content_block_start',index=0,content_block=dict(type='text',text='')))
+stream(dict(type='content_block_delta',index=0,delta=dict(type='text_delta',text='READY')))
+stream(dict(type='content_block_stop',index=0))
+barrier('before-result')
+result()
+"#,
+            advisory = advisory.to_string(),
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(
+                &session,
+                TurnRequest::new("invented").with_context_budget(
+                    prompting_time_core::context_budget::ContextBudget::Tokens { tokens: 300_000 },
+                ),
+            )
+            .await
+            .unwrap();
+        let events = async {
+            assert!(matches!(event(&mut turn).await?, ProviderEvent::TurnStarted { .. }));
+            assert!(matches!(event(&mut turn).await?, ProviderEvent::AssistantMessageDelta { content, .. } if content == "READY"));
+            wait_file(&fixture.directory.path().join("before-result.ready")).await;
+            fs::write(fixture.directory.path().join("before-result.release"), "").unwrap();
+            Ok::<_, ProviderError>(collect(&mut turn).await)
+        }.await;
+        turn.shutdown().await.unwrap();
+        assert!(matches!(
+            events.unwrap().as_slice(),
+            [Ok(ProviderEvent::TurnCompleted)]
+        ));
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
+// Shapes from the installed CLI's stream-json producers; no native payload is retained.
+fn native_system_advisories() -> [Value; 3] {
+    [
+        json!({"subtype":"api_retry", "attempt":1, "max_retries":10,
+            "retry_delay_ms":512.5, "error_status":null, "error":"unknown"}),
+        json!({"subtype":"notification", "key":"invented-notice",
+            "text":"MUST-NOT-RETAIN", "priority":"high", "color":"yellow", "timeout_ms":5000}),
+        json!({"subtype":"memory_recall", "mode":"select",
+            "memories":[{"path":"/private/example-memory.md", "scope":"personal"}]}),
+    ]
+}
+
+#[tokio::test]
+async fn native_system_advisories_do_not_hide_missing_or_failed_results() {
+    for advisory in native_system_advisories() {
+        for ending in [
+            "",
+            "emit(dict(type='result',session_id=session,subtype='error_during_execution',is_error=True))",
+            "emit(dict(type='result',session_id=session,subtype='success',is_error=True))",
+        ] {
+            let fixture = Fixture::new(&format!(
+                "notice=json.loads({:?})\nnotice.update(type='system',session_id=session,uuid='notice-1')\nemit(notice)\n{ending}",
+                advisory.to_string()
+            ));
+            let session = fixture.session().await;
+            let mut turn = fixture
+                .adapter
+                .start_turn(&session, TurnRequest::new("invented"))
+                .await
+                .unwrap();
+            let events = collect(&mut turn).await;
+            turn.shutdown().await.unwrap();
+            let expected = if ending.is_empty() {
+                ProviderError::StreamClosed
+            } else {
+                ProviderError::Protocol {
+                    category: "claude-result-failed-or-deferred".into(),
+                }
+            };
+            assert!(
+                matches!(events.as_slice(), [Ok(ProviderEvent::TurnStarted { .. }), Err(error)] if error == &expected),
+                "{advisory}: {events:?}"
+            );
+            reaped(fixture.read("pid").as_u64().unwrap()).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_system_advisories_require_matching_identity() {
+    for advisory in native_system_advisories() {
+        for patch in [
+            "notice.pop('session_id')",
+            "notice['session_id']='wrong-session'",
+            "notice['session_id']=None",
+            "notice.pop('uuid')",
+            "notice['uuid']=''",
+            "notice['uuid']='invalid\\nidentity'",
+        ] {
+            let fixture = Fixture::new(&format!(
+                "notice=json.loads({:?})\nnotice.update(type='system',session_id=session,uuid='notice-1')\n{patch}\nemit(notice)\nresult()",
+                advisory.to_string()
+            ));
+            let session = fixture.session().await;
+            let mut turn = fixture
+                .adapter
+                .start_turn(&session, TurnRequest::new("invented"))
+                .await
+                .unwrap();
+            let events = collect(&mut turn).await;
+            turn.shutdown().await.unwrap();
+            assert!(
+                matches!(events.as_slice(), [Ok(ProviderEvent::TurnStarted { .. }), Err(ProviderError::Protocol { category })] if category == "claude-invalid-identity" || category == "claude-session-mismatch"),
+                "{advisory}, {patch}: {events:?}"
+            );
+            reaped(fixture.read("pid").as_u64().unwrap()).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unhandled_system_events_are_not_treated_as_advisories() {
+    for (subtype, code) in [
+        ("unknown-event", "claude-unsupported-system-envelope"),
+        ("informational", "claude-unsupported-system-informational"),
+        ("model_fallback", "claude-unsupported-system-model-fallback"),
+        (
+            "model_consent_fallback",
+            "claude-unsupported-system-model-consent-fallback",
+        ),
+        (
+            "model_refusal_fallback",
+            "claude-unsupported-system-model-refusal-fallback",
+        ),
+        (
+            "model_refusal_no_fallback",
+            "claude-unsupported-system-model-refusal-no-fallback",
+        ),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "emit(dict(type='system',subtype='{subtype}',session_id=session,uuid='notice-1',prevent_continuation=True))\nresult()"
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        turn.shutdown().await.unwrap();
+        assert!(
+            matches!(events.as_slice(), [Ok(ProviderEvent::TurnStarted { .. }), Err(ProviderError::Protocol { category })] if category == code),
+            "{subtype}: {events:?}"
+        );
+        let error = events.last().unwrap().as_ref().unwrap_err();
+        assert_eq!(error.diagnostic_code().unwrap().as_str(), code);
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
+}
+
+#[tokio::test]
 async fn rate_limit_events_are_advisory_until_terminal_result() {
     for status in ["allowed", "allowed_warning", "rejected"] {
         let fixture = Fixture::new(&format!(
