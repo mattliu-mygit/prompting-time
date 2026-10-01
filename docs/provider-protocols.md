@@ -129,9 +129,11 @@ An explicit 300k probe previously failed before dispatch with `UnsupportedContex
 the numeric-context contract then allowed only 2.1.205. The source now allows numbered budgets for
 exactly 2.1.205 and 2.1.286, with hermetic fixtures covering launch/change/reset settings,
 environment overrides, and malformed effective-settings readback for both versions. Provider
-default retains the baseline compatibility path. This source and fixture evidence does not establish
-native 2.1.286 readback or high-context compaction behavior. No tools, saved-session resume, or
-desktop UI flow was exercised by these probes, and no existing conversation was replayed.
+default retains the baseline compatibility path. A subsequent 300k probe through the production
+adapter passed the unchanged effective-settings checks, streamed the exact synthetic response,
+observed successful completion, and cleaned up successfully. This is configuration and normal-turn
+evidence, not high-context compaction proof. No tools, saved-session resume, or desktop UI flow
+was exercised by these probes, and no existing conversation was replayed.
 
 ### Application composition evidence
 
