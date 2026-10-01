@@ -522,45 +522,49 @@ fn thinking_request(preference: ThinkingPreference) -> TurnRequest {
 #[tokio::test]
 async fn context_budget_launch_settings_resume_change_and_reset() {
     use prompting_time_core::context_budget::ContextBudget;
-    let fixture = Fixture::new("result()");
-    let session = fixture.session().await;
-    for tokens in [
-        Some(200_000),
-        Some(300_000),
-        Some(400_000),
-        Some(500_000),
-        None,
-    ] {
-        let budget = tokens.map_or(ContextBudget::ProviderDefault, |tokens| {
-            ContextBudget::Tokens { tokens }
-        });
-        let mut turn = fixture
-            .adapter
-            .start_turn(
-                &session,
-                TurnRequest::new("invented").with_context_budget(budget),
-            )
-            .await
-            .unwrap();
-        collect(&mut turn).await;
-        turn.shutdown().await.unwrap();
-        let args = fixture.read("args");
-        let args = args.as_array().unwrap();
-        if let Some(tokens) = tokens {
-            let index = args
-                .iter()
-                .position(|arg| arg == "--settings")
-                .expect("numeric budget needs inline settings");
-            let settings: Value = serde_json::from_str(args[index + 1].as_str().unwrap()).unwrap();
-            assert_eq!(
-                settings,
-                json!({"autoCompactEnabled":true,"autoCompactWindow":tokens,"env":{"DISABLE_COMPACT":"0","DISABLE_AUTO_COMPACT":"0","CLAUDE_CODE_AUTO_COMPACT_WINDOW":""}})
-            );
-            assert_eq!(fixture.read("compaction-env"), settings["env"]);
-        } else {
-            assert!(!args.iter().any(|arg| arg == "--settings"));
+    for version in ["2.1.205 (Claude Code)", "2.1.286 (Claude Code)"] {
+        let fixture = Fixture::new("result()");
+        fs::write(fixture.directory.path().join("version"), version).unwrap();
+        let session = fixture.session().await;
+        for tokens in [
+            Some(200_000),
+            Some(300_000),
+            Some(400_000),
+            Some(500_000),
+            None,
+        ] {
+            let budget = tokens.map_or(ContextBudget::ProviderDefault, |tokens| {
+                ContextBudget::Tokens { tokens }
+            });
+            let mut turn = fixture
+                .adapter
+                .start_turn(
+                    &session,
+                    TurnRequest::new("invented").with_context_budget(budget),
+                )
+                .await
+                .unwrap();
+            collect(&mut turn).await;
+            turn.shutdown().await.unwrap();
+            let args = fixture.read("args");
+            let args = args.as_array().unwrap();
+            if let Some(tokens) = tokens {
+                let index = args
+                    .iter()
+                    .position(|arg| arg == "--settings")
+                    .expect("numeric budget needs inline settings");
+                let settings: Value =
+                    serde_json::from_str(args[index + 1].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    settings,
+                    json!({"autoCompactEnabled":true,"autoCompactWindow":tokens,"env":{"DISABLE_COMPACT":"0","DISABLE_AUTO_COMPACT":"0","CLAUDE_CODE_AUTO_COMPACT_WINDOW":""}})
+                );
+                assert_eq!(fixture.read("compaction-env"), settings["env"]);
+            } else {
+                assert!(!args.iter().any(|arg| arg == "--settings"));
+            }
+            assert_eq!(fixture.read("prompt")["session_id"], session.native_id);
         }
-        assert_eq!(fixture.read("prompt")["session_id"], session.native_id);
     }
 }
 
@@ -595,37 +599,42 @@ async fn context_budget_malformed_policy_or_validation_readback_never_dispatches
             cases.push(json!({"effective":effective}));
         }
     }
-    for metadata in cases {
-        let fixture = Fixture::new("result()");
-        fs::write(
-            fixture.directory.path().join("thinking-metadata"),
-            metadata.to_string(),
-        )
-        .unwrap();
-        let session = fixture.session().await;
-        let result = fixture
-            .adapter
-            .start_turn(
-                &session,
-                TurnRequest::new("never")
-                    .with_context_budget(ContextBudget::Tokens { tokens: 300000 }),
+    for version in ["2.1.205 (Claude Code)", "2.1.286 (Claude Code)"] {
+        for metadata in &cases {
+            let fixture = Fixture::new("result()");
+            fs::write(fixture.directory.path().join("version"), version).unwrap();
+            fs::write(
+                fixture.directory.path().join("thinking-metadata"),
+                metadata.to_string(),
             )
-            .await;
-        assert!(matches!(
-            result,
-            Err(ProviderError::NotDispatched {
-                category:
-                    prompting_time_core::providers::ProviderErrorCategory::UnsupportedContextBudget
-            })
-        ));
-        assert!(!fixture.directory.path().join("prompt").exists());
+            .unwrap();
+            let session = fixture.session().await;
+            let result = fixture
+                .adapter
+                .start_turn(
+                    &session,
+                    TurnRequest::new("never")
+                        .with_context_budget(ContextBudget::Tokens { tokens: 300000 }),
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(ProviderError::NotDispatched {
+                    category:
+                        prompting_time_core::providers::ProviderErrorCategory::UnsupportedContextBudget
+                })
+            ));
+            assert!(!fixture.directory.path().join("prompt").exists());
+        }
     }
 }
 
 #[tokio::test]
 async fn context_budget_requires_exact_supported_version_before_launch() {
     use prompting_time_core::context_budget::ContextBudget;
-    for version in ["2.1.204", "2.1.206", "3.0.0", "invalid"] {
+    for version in [
+        "2.1.204", "2.1.206", "2.1.285", "2.1.287", "2.2.0", "3.0.0", "invalid",
+    ] {
         let fixture = Fixture::new("result()");
         fs::write(fixture.directory.path().join("version"), version).unwrap();
         let session = fixture.session().await;

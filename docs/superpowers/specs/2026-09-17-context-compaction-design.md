@@ -83,7 +83,7 @@ the shared intent into native settings and normalize bounded compaction observat
 The frontend does not reproduce native token-estimation or summarization algorithms.
 
 Numbered budgets are supported on the verified Codex **0.153.4** and Claude Code
-**2.1.205** contracts. Other versions fail before dispatch rather than claiming an
+**2.1.205** and **2.1.286** contracts. Other versions fail before dispatch rather than claiming an
 unverified override; Provider default retains the adapter's baseline compatibility.
 Supporting another version requires revalidating its native configuration behavior.
 

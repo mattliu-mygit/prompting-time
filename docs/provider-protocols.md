@@ -75,8 +75,8 @@ The Rust `ClaudeAdapter` now implements the selected stdio transport and is regi
 desktop app when its health check succeeds. Health accepts major 2 at or above 2.1.205, checks
 `claude auth status --json` under bounded process and output limits, and parses only `loggedIn`.
 Account identifiers and the complete auth response are neither logged nor persisted. The version
-policy permits compatibility checks on newer major-2 releases; live verification is specifically
-2.1.205, and unknown or malformed runtime protocol data still fails closed.
+policy permits compatibility checks on newer major-2 releases; the full verification above is
+specific to 2.1.205, and unknown or malformed runtime protocol data still fails closed.
 
 The actual adapter passed two focused account-backed tests: streamed output with same-session
 process restart/context recall, and denied/allowed exact temporary Write. These tests exposed
@@ -114,6 +114,26 @@ unknown error strings remain generic. Raw native frames, settings, and arbitrary
 not retained to explain a failure. A secondary shutdown error does not replace an already recorded
 failure cause; shutdown errors still fail otherwise successful or interrupted turns. Adding a
 diagnostic never retries or replays the request.
+
+### Limited Claude 2.1.286 verification (2026-10-01)
+
+With authentication restored, a bounded no-tools probe through the production adapter returned
+the exact requested synthetic response in two fresh sessions using Provider default context.
+Both observed turn start, streamed text, a successful terminal result, and successful cleanup.
+These two probes recorded only statically allowlisted protocol labels, not native payloads.
+An earlier identical-prompt check without that stream instrumentation failed with
+`claude-unsupported-system-envelope`; its discriminator was not recovered. The two successful
+checks do not establish that the intermittent protocol failure or the earlier reported run is fixed.
+
+An explicit 300k probe previously failed before dispatch with `UnsupportedContextBudget` because
+the numeric-context contract then allowed only 2.1.205. The source now allows numbered budgets for
+exactly 2.1.205 and 2.1.286, with hermetic fixtures covering launch/change/reset settings,
+environment overrides, and malformed effective-settings readback for both versions. Provider
+default retains the baseline compatibility path. This source and fixture evidence does not establish
+native 2.1.286 readback or high-context compaction behavior. No tools, saved-session resume, or
+desktop UI flow was exercised by these probes, and no existing conversation was replayed.
+
+### Application composition evidence
 
 Hermetic application composition tests exercise projectless automatic selection and explicit
 Claude override, persisted native-session resume after app reconstruction, canonical approval IDs

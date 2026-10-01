@@ -315,13 +315,16 @@ impl ProviderAdapter for ClaudeAdapter {
             .validate()
             .map_err(|_| unsupported_context_budget())?;
         if request.context_budget.requested_tokens().is_some() {
-            // The process-local settings/environment contract was audited for this exact CLI.
+            // The process-local settings/environment contracts were audited for these exact CLIs.
             // Inspect version only: a turn must not add an authentication probe.
             let (version, success) = inspect(&self.inner.binary, &["--version"])
                 .await
                 .map_err(|_| unsupported_context_budget())?;
             if !success
-                || String::from_utf8_lossy(&version).split_whitespace().next() != Some("2.1.205")
+                || !matches!(
+                    String::from_utf8_lossy(&version).split_whitespace().next(),
+                    Some("2.1.205" | "2.1.286")
+                )
             {
                 return Err(unsupported_context_budget());
             }
