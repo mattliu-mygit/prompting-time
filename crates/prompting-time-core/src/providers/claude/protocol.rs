@@ -43,7 +43,7 @@ pub(super) fn validate_session(value: &Value, session: &str) -> Result<(), Provi
     Ok(())
 }
 
-fn validate_system_advisory(value: &Value, session: &str) -> Result<(), ProviderError> {
+pub(super) fn validate_system_advisory(value: &Value, session: &str) -> Result<(), ProviderError> {
     if required_id(value, "session_id")? != session {
         return Err(protocol_error("session-mismatch"));
     }
@@ -97,6 +97,19 @@ fn validate_system_advisory(value: &Value, session: &str) -> Result<(), Provider
                     })
                 })
         }
+        Some("commands_changed") => value["commands"].as_array().is_some_and(|commands| {
+            commands.iter().all(|command| {
+                command["name"].is_string()
+                    && command["description"].is_string()
+                    && command["argumentHint"].is_string()
+                    && command.get("aliases").is_none_or(|aliases| {
+                        aliases
+                            .as_array()
+                            .is_some_and(|aliases| aliases.iter().all(Value::is_string))
+                    })
+                    && command.get("builtin").is_none_or(Value::is_boolean)
+            })
+        }),
         _ => false,
     };
     if !valid {
@@ -279,7 +292,7 @@ impl Protocol {
                 // Only the result/lifecycle boundary can complete or fail the turn.
             }
             Some("system") => match value["subtype"].as_str() {
-                Some("api_retry" | "notification" | "memory_recall") => {
+                Some("api_retry" | "notification" | "memory_recall" | "commands_changed") => {
                     validate_system_advisory(&value, &self.session)?;
                     // Claude owns retrying. Display-only metadata is not transcript,
                     // compaction, or terminal evidence; never retain its private payload.
@@ -354,6 +367,32 @@ impl Protocol {
                     return Err(protocol_error(
                         "unsupported-system-model-refusal-no-fallback",
                     ));
+                }
+                Some("session_title_changed") => {
+                    return Err(protocol_error("unsupported-system-session-title-changed"));
+                }
+                Some("background_tasks_changed") => {
+                    return Err(protocol_error(
+                        "unsupported-system-background-tasks-changed",
+                    ));
+                }
+                Some("dev_intent") => {
+                    return Err(protocol_error("unsupported-system-dev-intent"));
+                }
+                Some("session_metadata") => {
+                    return Err(protocol_error("unsupported-system-session-metadata"));
+                }
+                Some("task_summary") => {
+                    return Err(protocol_error("unsupported-system-task-summary"));
+                }
+                Some("per_turn_effort_changed") => {
+                    return Err(protocol_error("unsupported-system-per-turn-effort-changed"));
+                }
+                Some("cloud_session_status") => {
+                    return Err(protocol_error("unsupported-system-cloud-session-status"));
+                }
+                Some("tool_host_result") => {
+                    return Err(protocol_error("unsupported-system-tool-host-result"));
                 }
                 _ => return Err(protocol_error("unsupported-system-envelope")),
             },

@@ -782,6 +782,10 @@ async fn run_turn(
                 }
                 break effort_models(&value["response"]["response"])?;
             }
+            if value["type"] == "system" && value["subtype"] == "commands_changed" {
+                protocol::validate_system_advisory(&value, &session)?;
+                continue;
+            }
             if value["type"] != "system" || value["subtype"] != "init" {
                 return Err(protocol_error("unexpected-initialize-envelope"));
             }
@@ -809,6 +813,10 @@ async fn run_turn(
                     &value["response"]["response"],
                     &state.thinking,
                 )?;
+            }
+            if value["type"] == "system" && value["subtype"] == "commands_changed" {
+                protocol::validate_system_advisory(&value, &session)?;
+                continue;
             }
             if value["type"] != "system" || value["subtype"] != "init" {
                 return Err(protocol_error("unexpected-settings-envelope"));

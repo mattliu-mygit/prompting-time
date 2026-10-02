@@ -557,6 +557,14 @@ impl ProviderError {
             "claude-unsupported-system-model-consent-fallback",
             "claude-unsupported-system-model-refusal-fallback",
             "claude-unsupported-system-model-refusal-no-fallback",
+            "claude-unsupported-system-session-title-changed",
+            "claude-unsupported-system-background-tasks-changed",
+            "claude-unsupported-system-dev-intent",
+            "claude-unsupported-system-session-metadata",
+            "claude-unsupported-system-task-summary",
+            "claude-unsupported-system-per-turn-effort-changed",
+            "claude-unsupported-system-cloud-session-status",
+            "claude-unsupported-system-tool-host-result",
             "claude-result-failed-or-deferred",
         )
     }

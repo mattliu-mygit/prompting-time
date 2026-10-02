@@ -496,6 +496,10 @@ if (root / 'hold-initialize').exists():
     barrier('initialize')
 models = [{'value':'default','resolvedModel':'invented-model','supportsEffort':True,'supportedEffortLevels':['low','medium','high','xhigh','max']}]
 metadata = json.loads((root / 'thinking-metadata').read_text()) if (root / 'thinking-metadata').exists() else {}
+if (root / 'before-initialize-response').exists():
+    emit(json.loads((root / 'before-initialize-response').read_text()))
+if (root / 'hold-after-initialize-advisory').exists():
+    barrier('initialize-advisory')
 emit({'type':'control_response','response':{'subtype':'success','request_id':initialize['request_id'],'response':{'models':metadata.get('models', models), 'account':'MUST-NOT-RETAIN'}}})
 message = receive()
 assert message.get('request', {}).get('subtype') == 'get_settings'
@@ -505,6 +509,10 @@ if (root / 'hold-settings').exists():
 applied = {'model':'invented-model','effort':os.environ.get('CLAUDE_CODE_EFFORT_LEVEL', 'high')}
 settings = json.loads(sys.argv[sys.argv.index('--settings')+1]) if '--settings' in sys.argv else {}
 record('compaction-env', {key:os.environ.get(key) for key in ['DISABLE_COMPACT','DISABLE_AUTO_COMPACT','CLAUDE_CODE_AUTO_COMPACT_WINDOW']})
+if (root / 'before-settings-response').exists():
+    emit(json.loads((root / 'before-settings-response').read_text()))
+if (root / 'hold-after-settings-advisory').exists():
+    barrier('settings-advisory')
 emit({'type':'control_response','response':{'subtype':'success','request_id':message['request_id'],'response':{'applied':metadata.get('applied', applied), 'effective':metadata.get('effective', settings), 'errors':metadata.get('errors', []), 'settings':{'secret':'MUST-NOT-RETAIN'}}}})
 if (root / 'hold-prompt-read').exists():
     sys.stdin.read(1)
@@ -1431,7 +1439,7 @@ result()
 }
 
 // Shapes from the installed CLI's stream-json producers; no native payload is retained.
-fn native_system_advisories() -> [Value; 3] {
+fn native_system_advisories() -> [Value; 5] {
     [
         json!({"subtype":"api_retry", "attempt":1, "max_retries":10,
             "retry_delay_ms":512.5, "error_status":null, "error":"unknown"}),
@@ -1439,7 +1447,209 @@ fn native_system_advisories() -> [Value; 3] {
             "text":"MUST-NOT-RETAIN", "priority":"high", "color":"yellow", "timeout_ms":5000}),
         json!({"subtype":"memory_recall", "mode":"select",
             "memories":[{"path":"/private/example-memory.md", "scope":"personal"}]}),
+        json!({"subtype":"commands_changed", "commands":[{"name":"private-sentinel-command",
+            "description":"private-sentinel-description", "argumentHint":"private-sentinel-hint",
+            "aliases":["private-sentinel-alias"], "builtin":false}]}),
+        json!({"subtype":"commands_changed", "commands":[{"name":"",
+            "description":"", "argumentHint":"", "aliases":[], "builtin":true}]}),
     ]
+}
+
+#[tokio::test]
+async fn commands_changed_empty_list_is_valid() {
+    let fixture = Fixture::new(
+        "emit(dict(type='system',subtype='commands_changed',session_id=session,uuid='notice-1',commands=[]))\nresult()",
+    );
+    let session = fixture.session().await;
+    let mut turn = fixture
+        .adapter
+        .start_turn(&session, TurnRequest::new("invented"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        collect(&mut turn).await.as_slice(),
+        [
+            Ok(ProviderEvent::TurnStarted { .. }),
+            Ok(ProviderEvent::TurnCompleted)
+        ]
+    ));
+}
+
+#[tokio::test]
+async fn commands_changed_rejects_malformed_metadata_without_leaking_it() {
+    let valid = json!({"type":"system","subtype":"commands_changed","commands":[{
+        "name":"private-sentinel-command","description":"private-sentinel-description",
+        "argumentHint":"private-sentinel-hint"}],"uuid":"notice-1"});
+    for (field, value) in [
+        ("commands", None),
+        ("commands", Some(json!("private-sentinel-invalid"))),
+        ("commands", Some(json!([{}]))),
+        (
+            "commands",
+            Some(json!([{"description":"","argumentHint":""}])),
+        ),
+        ("commands", Some(json!([{"name":"","argumentHint":""}]))),
+        ("commands", Some(json!([{"name":"","description":""}]))),
+        (
+            "commands",
+            Some(json!([{"name":1,"description":"","argumentHint":""}])),
+        ),
+        (
+            "commands",
+            Some(json!([{"name":"","description":1,"argumentHint":""}])),
+        ),
+        (
+            "commands",
+            Some(json!([{"name":"","description":"","argumentHint":1}])),
+        ),
+        (
+            "commands",
+            Some(
+                json!([{"name":"","description":"","argumentHint":"","aliases":"private-sentinel-invalid"}]),
+            ),
+        ),
+        (
+            "commands",
+            Some(json!([{"name":"","description":"","argumentHint":"","aliases":[1]}])),
+        ),
+        (
+            "commands",
+            Some(
+                json!([{"name":"","description":"","argumentHint":"","builtin":"private-sentinel-invalid"}]),
+            ),
+        ),
+    ] {
+        let mut advisory = valid.clone();
+        match value {
+            Some(value) => advisory[field] = value,
+            None => {
+                advisory.as_object_mut().unwrap().remove(field);
+            }
+        }
+        let fixture = Fixture::new(&format!(
+            "notice=json.loads({:?})\nnotice['session_id']=session\nemit(notice)\nresult()",
+            advisory.to_string()
+        ));
+        let session = fixture.session().await;
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        let events = collect(&mut turn).await;
+        assert!(
+            matches!(events.as_slice(), [Ok(ProviderEvent::TurnStarted { .. }), Err(ProviderError::Protocol { category })] if category == "claude-invalid-system-advisory"),
+            "{field}: {events:?}"
+        );
+        assert!(!format!("{events:?}").contains("private-sentinel"));
+    }
+}
+
+#[tokio::test]
+async fn commands_changed_during_startup_reaches_prompt_and_result() {
+    for phase in ["before-initialize-response", "before-settings-response"] {
+        let fixture = Fixture::new("result()");
+        let advisory = json!({"type":"system","subtype":"commands_changed",
+            "session_id":"replace-with-session","uuid":"notice-1","commands":[{
+                "name":"private-sentinel-command","description":"private-sentinel-description",
+                "argumentHint":"private-sentinel-hint","aliases":["private-sentinel-alias"],"builtin":true}]});
+        let session = fixture.session().await;
+        let mut advisory = advisory;
+        advisory["session_id"] = json!(session.native_id);
+        fs::write(fixture.directory.path().join(phase), advisory.to_string()).unwrap();
+        let mut turn = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("invented"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                collect(&mut turn).await.as_slice(),
+                [
+                    Ok(ProviderEvent::TurnStarted { .. }),
+                    Ok(ProviderEvent::TurnCompleted)
+                ]
+            ),
+            "{phase}"
+        );
+        assert_eq!(fixture.read("prompt")["type"], "user");
+    }
+}
+
+#[tokio::test]
+async fn malformed_commands_changed_during_startup_blocks_prompt() {
+    for phase in ["before-initialize-response", "before-settings-response"] {
+        let fixture = Fixture::new("result()");
+        let session = fixture.session().await;
+        fs::write(
+            fixture.directory.path().join(phase),
+            json!({
+                "type":"system","subtype":"commands_changed","session_id":session.native_id,
+                "uuid":"notice-1","commands":[{"name":"private-sentinel-command"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = fixture
+            .adapter
+            .start_turn(&session, TurnRequest::new("never dispatched"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProviderError::Protocol { ref category } if category == "claude-invalid-system-advisory"),
+            "{phase}: {error:?}"
+        );
+        assert!(!format!("{error:?}").contains("private-sentinel"));
+        assert!(!fixture.directory.path().join("prompt").exists());
+    }
+}
+
+#[tokio::test]
+async fn commands_changed_during_startup_does_not_fabricate_readiness() {
+    for (phase, hold, ready) in [
+        (
+            "before-initialize-response",
+            "hold-after-initialize-advisory",
+            "initialize-advisory.ready",
+        ),
+        (
+            "before-settings-response",
+            "hold-after-settings-advisory",
+            "settings-advisory.ready",
+        ),
+    ] {
+        let fixture = Fixture::new("result()");
+        let session = fixture.session().await;
+        fs::write(
+            fixture.directory.path().join(phase),
+            json!({
+                "type":"system","subtype":"commands_changed","session_id":session.native_id,
+                "uuid":"notice-1","commands":[]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(fixture.directory.path().join(hold), "").unwrap();
+        {
+            let start = fixture
+                .adapter
+                .start_turn(&session, TurnRequest::new("never dispatched"));
+            tokio::pin!(start);
+            let ready_path = fixture.directory.path().join(ready);
+            tokio::select! {
+                result = &mut start => panic!("{phase} became ready early: {result:?}"),
+                _ = wait_file(&ready_path) => {}
+            }
+            assert!(
+                timeout(Duration::from_millis(100), &mut start)
+                    .await
+                    .is_err(),
+                "{phase}"
+            );
+            assert!(!fixture.directory.path().join("prompt").exists());
+        }
+        reaped(fixture.read("pid").as_u64().unwrap()).await;
+    }
 }
 
 #[tokio::test]
@@ -1528,9 +1738,39 @@ async fn unhandled_system_events_are_not_treated_as_advisories() {
             "model_refusal_no_fallback",
             "claude-unsupported-system-model-refusal-no-fallback",
         ),
+        (
+            "session_title_changed",
+            "claude-unsupported-system-session-title-changed",
+        ),
+        (
+            "background_tasks_changed",
+            "claude-unsupported-system-background-tasks-changed",
+        ),
+        ("dev_intent", "claude-unsupported-system-dev-intent"),
+        (
+            "session_metadata",
+            "claude-unsupported-system-session-metadata",
+        ),
+        ("task_summary", "claude-unsupported-system-task-summary"),
+        (
+            "per_turn_effort_changed",
+            "claude-unsupported-system-per-turn-effort-changed",
+        ),
+        (
+            "cloud_session_status",
+            "claude-unsupported-system-cloud-session-status",
+        ),
+        (
+            "tool_host_result",
+            "claude-unsupported-system-tool-host-result",
+        ),
+        (
+            "private-sentinel-subtype",
+            "claude-unsupported-system-envelope",
+        ),
     ] {
         let fixture = Fixture::new(&format!(
-            "emit(dict(type='system',subtype='{subtype}',session_id=session,uuid='notice-1',prevent_continuation=True))\nresult()"
+            "emit(dict(type='system',subtype='{subtype}',session_id=session,uuid='notice-1',prevent_continuation=True,payload='private-sentinel-payload'))\nresult()"
         ));
         let session = fixture.session().await;
         let mut turn = fixture
@@ -1546,6 +1786,11 @@ async fn unhandled_system_events_are_not_treated_as_advisories() {
         );
         let error = events.last().unwrap().as_ref().unwrap_err();
         assert_eq!(error.diagnostic_code().unwrap().as_str(), code);
+        assert!(!format!("{error:?}").contains("private-sentinel"));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            Ok(ProviderEvent::MutationEvidence { .. } | ProviderEvent::TurnCompleted)
+        )));
         reaped(fixture.read("pid").as_u64().unwrap()).await;
     }
 }
