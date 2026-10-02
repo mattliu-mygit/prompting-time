@@ -3,6 +3,25 @@
 This document records version-specific observations that gate provider adapters. It contains no
 credentials, existing conversation content, private paths, or account identity.
 
+## Codex CLI 0.153.4 context-budget startup (2026-10-02)
+
+The initialize response contains a User-Agent, not the CLI's `--version` output.
+With this integration's client name, the native server reports `prompting_time/0.153.4`;
+an inherited desktop origin label can instead produce `Codex Desktop/0.153.4`.
+The adapter previously rejected both forms before creating a numbered-budget session.
+It now recognizes these two literal prefixes alongside the existing native/CLI forms,
+while still requiring exactly version `0.153.4`. Unknown product names, missing versions,
+neighboring releases and supported versions appearing only in client metadata do not
+authorize an override. Provider default is unchanged.
+
+Hermetic adapter checks exercise initial configuration, loaded change/reset, session
+isolation and rejection before dispatch. Two bounded native production-adapter probes,
+one per observed origin label, each created a fresh 300k session, streamed the exact
+invented response, reached successful completion, archived only the owned probe session
+and shut down successfully. Neither existing conversations nor global settings changed.
+These are configuration and normal-turn checks, not high-context compaction or native UI
+acceptance.
+
 ## Codex CLI 0.153.4 child integration (2026-09-08)
 
 Version-matched generated schemas and tagged source distinguish activity observations from
@@ -114,6 +133,31 @@ unknown error strings remain generic. Raw native frames, settings, and arbitrary
 not retained to explain a failure. A secondary shutdown error does not replace an already recorded
 failure cause; shutdown errors still fail otherwise successful or interrupted turns. Adding a
 diagnostic never retries or replays the request.
+
+### Command-list refresh compatibility (2026-10-02)
+
+Claude can push `system/commands_changed` asynchronously when available skills change,
+including before the first prompt. A metadata-only native 2.1.286 probe emitted it after
+an invented temporary skill was edited. A second probe forwarded the same native event
+through the production adapter and reproduced `claude-unsupported-system-envelope`.
+The previously reported conversation's discarded frame remains unavailable; this reproduces
+a concrete cause of that error rather than identifying its historical payload.
+
+The 2.1.205 and 2.1.286 schemas establish that this is command-list metadata, not execution,
+transcript, compaction or completion evidence. The adapter validates the owned session,
+event identity and command field types, then discards the metadata without retaining names,
+descriptions or aliases. It accepts the notice while awaiting initialization/settings and
+during a turn, without extending the startup deadline or replacing required native responses.
+Other unimplemented system events still fail; selected known types now retain literal
+subtype-specific reason codes while arbitrary subtype text stays generic.
+
+The exact live production-adapter reproduction passed after the fix: the native command-list
+push was observed, the invented prompt returned the exact response, successful completion was
+observed and owned cleanup succeeded. The probe delayed its invented prompt until the native
+notice arrived; it did not inject a frame, replay a user conversation, enable tools or persist
+a native transcript. Hermetic checks additionally cover both startup interleavings, malformed
+metadata and identity, missing/failed results, cancellation and private-safe failure codes.
+This verifies the reproduced metadata boundary, not every possible Claude system event.
 
 ### Limited Claude 2.1.286 verification (2026-10-01)
 
