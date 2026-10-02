@@ -57,6 +57,8 @@ impl CodexAdapter {
         version
             .strip_prefix("codex-cli ")
             .or_else(|| version.strip_prefix("codex_cli_rs/"))
+            .or_else(|| version.strip_prefix("prompting_time/"))
+            .or_else(|| version.strip_prefix("Codex Desktop/"))
             .and_then(|s| s.split_whitespace().next())
             == Some("0.153.4")
     }

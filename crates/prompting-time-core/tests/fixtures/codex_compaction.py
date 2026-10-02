@@ -16,7 +16,9 @@ for line in sys.stdin:
     method, p = msg.get('method'), msg.get('params', {})
     if 'id' not in msg: continue
     if method == 'initialize':
-        result = {'userAgent':'codex-cli ' + ('0.999.0' if mode == 'unsupported' else '0.153.4')}
+        user_agent = json.loads((root / 'user_agent.json').read_text())
+        result = {} if user_agent is None else {'userAgent':user_agent}
+        if mode == 'metadata-version': result['clientInfo'] = {'version':'0.153.4'}
     elif method == 'thread/start':
         if mode == 'reject-start':
             emit({'id':msg['id'],'error':{'code':-32600,'message':'PRIVATE CONFIG ERROR'}})

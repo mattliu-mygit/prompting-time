@@ -10,8 +10,24 @@ use serde_json::Value;
 use std::{fs, os::unix::fs::PermissionsExt};
 
 fn fixture(mode: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let user_agent = if mode == "unsupported" {
+        "codex-cli 0.999.0"
+    } else {
+        "prompting_time/0.153.4 (Mac OS 15.0.0; arm64)"
+    };
+    fixture_with_user_agent(mode, Some(user_agent))
+}
+fn fixture_with_user_agent(
+    mode: &str,
+    user_agent: Option<&str>,
+) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("codex-compaction");
+    fs::write(
+        dir.path().join("user_agent.json"),
+        serde_json::to_vec(&user_agent).unwrap(),
+    )
+    .unwrap();
     fs::write(
         &binary,
         include_str!("fixtures/codex_compaction.py").replace("FIXTURE_MODE", mode),
@@ -163,6 +179,94 @@ async fn unsupported_codex_version_rejects_number_before_session_creation() {
         !logs(dir.path())
             .iter()
             .any(|r| r["method"] == "thread/start")
+    );
+}
+
+#[tokio::test]
+async fn exact_initialize_user_agents_gate_numeric_budget_before_dispatch() {
+    let prefixes = [
+        "codex-cli ",
+        "codex_cli_rs/",
+        "prompting_time/",
+        "Codex Desktop/",
+    ];
+    for prefix in prefixes {
+        let user_agent = format!("{prefix}0.153.4 (Mac OS 15.0.0; arm64)");
+        let (dir, binary) = fixture_with_user_agent("normal", Some(&user_agent));
+        let adapter = CodexAdapter::connect(binary).await.unwrap();
+        adapter
+            .start_session(start(dir.path(), NUMERIC))
+            .await
+            .unwrap();
+        adapter.shutdown().await.unwrap();
+        let starts: Vec<_> = logs(dir.path())
+            .into_iter()
+            .filter(|row| row["method"] == "thread/start")
+            .collect();
+        assert_eq!(starts.len(), 1, "{user_agent}");
+        assert_eq!(
+            starts[0]["params"]["config"],
+            serde_json::json!({"model_auto_compact_token_limit":300000}),
+            "{user_agent}"
+        );
+    }
+
+    let mut rejected = Vec::new();
+    for prefix in prefixes {
+        for version in ["0.153.3", "0.153.5", "0.153.40", "0.153.4-rc.1"] {
+            rejected.push(Some(format!("{prefix}{version} (Mac OS 15.0.0; arm64)")));
+        }
+    }
+    rejected.extend([
+        Some(String::new()),
+        None,
+        Some("other-product/0.153.4 (Mac OS 15.0.0; arm64)".into()),
+    ]);
+    for user_agent in rejected {
+        let (dir, binary) = fixture_with_user_agent("normal", user_agent.as_deref());
+        let adapter = CodexAdapter::connect(binary).await.unwrap();
+        assert!(matches!(
+            adapter.start_session(start(dir.path(), NUMERIC)).await,
+            Err(ProviderError::NotDispatched {
+                category: prompting_time_core::providers::ProviderErrorCategory::UnsupportedContextBudget
+            })
+        ), "{user_agent:?}");
+        assert!(
+            !logs(dir.path())
+                .iter()
+                .any(|row| row["method"] == "thread/start" || row["method"] == "turn/start"),
+            "{user_agent:?}"
+        );
+        adapter
+            .start_session(start(dir.path(), ContextBudget::ProviderDefault))
+            .await
+            .unwrap();
+        adapter.shutdown().await.unwrap();
+        let starts: Vec<_> = logs(dir.path())
+            .into_iter()
+            .filter(|row| row["method"] == "thread/start")
+            .collect();
+        assert_eq!(starts.len(), 1, "{user_agent:?}");
+        assert!(
+            starts[0]["params"].get("config").is_none(),
+            "{user_agent:?}"
+        );
+    }
+
+    let (dir, binary) = fixture_with_user_agent("metadata-version", Some("codex-cli 0.153.3"));
+    let adapter = CodexAdapter::connect(binary).await.unwrap();
+    assert!(matches!(
+        adapter.start_session(start(dir.path(), NUMERIC)).await,
+        Err(ProviderError::NotDispatched {
+            category:
+                prompting_time_core::providers::ProviderErrorCategory::UnsupportedContextBudget
+        })
+    ));
+    adapter.shutdown().await.unwrap();
+    assert!(
+        !logs(dir.path())
+            .iter()
+            .any(|row| row["method"] == "thread/start" || row["method"] == "turn/start")
     );
 }
 
