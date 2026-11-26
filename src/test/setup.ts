@@ -19,3 +19,6 @@ globalThis.ResizeObserver ??= class {
   unobserve() {}
   disconnect() {}
 };
+
+// jsdom lays nothing out, so it has no scrollIntoView; the sidebar reveals the selected row with it.
+Element.prototype.scrollIntoView ??= function scrollIntoView() {};

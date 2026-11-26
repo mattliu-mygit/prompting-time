@@ -138,6 +138,13 @@ export function AllWork(props: Props) {
     if (resultsBox) resultsBox.scrollTop = 0;
   });
 
+  // When the selection moves to another row, as with Command-J or the next item after a decision,
+  // a row outside the visible part of its section scrolls into view, as VS Code reveals the file it
+  // opens. A row in a folded section isn't drawn, so its section stays folded.
+  createEffect(() => props.selectedReview ?? props.selectedId, (key) => {
+    if (key) items.get(key)?.scrollIntoView({ block: "nearest" });
+  });
+
   const sections = createMemo((): Section[] => {
     const reviewRow = (item: PluginReview): Entry => [{ kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 }];
     const chatEntries = (roots: readonly ConversationSummary[]): Entry[] => {

@@ -167,6 +167,19 @@ describe("All work and ⌘J", () => {
     expect(store.getSnapshot().selectedConversationId).toBe("first");
   });
 
+  it("scrolls the row ⌘J selects into view when it is outside the visible part of its section", async () => {
+    const { store } = renderApp(waitingApi());
+    await screen.findByRole("tree", { name: "Chats waiting on you" });
+    const reveal = vi.mocked(Element.prototype.scrollIntoView);
+    reveal.mockClear();
+    press("j");
+    await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("first"));
+    await settle();
+    // The browser scrolls the row's section only when the row is not already in view.
+    expect(reveal).toHaveBeenCalledWith({ block: "nearest" });
+    expect(reveal.mock.contexts.at(-1)).toBe(screen.getByRole("treeitem", { name: "Evaluation rows, Codex, waiting for you" }));
+  });
+
   it("does nothing on ⌘J when nothing waits on you", async () => {
     const { store } = renderApp(createApi());
     await screen.findByRole("treeitem", { name: /Auth refactor/ });
@@ -662,10 +675,15 @@ describe("triage", () => {
     renderApp(api);
     click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
     await settle();
+    const reveal = vi.mocked(Element.prototype.scrollIntoView);
+    reveal.mockClear();
     click(screen.getByRole("button", { name: "Skip" }));
     await waitFor(() => expect(notice()).toHaveTextContent("Skipped widgets#101 · now showing widgets#103"));
     expect(calls(pluginRequest, "skip")).toEqual([["20261126T150000Z-101"]]);
     expect(screen.getByRole("heading", { level: 1, name: "cap the upload retry delay" })).toBeInTheDocument();
+    // The next item's row scrolls into view if its section shows it lower down.
+    await settle();
+    expect(reveal.mock.contexts).toContain(screen.getByRole("treeitem", { name: /^cap the upload retry delay/ }));
 
     click(within(notice()!).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "separate cache configuration" })).toBeInTheDocument());
