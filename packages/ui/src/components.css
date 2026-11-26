@@ -378,6 +378,18 @@
   block-size: 100%;
 }
 
+/* An item with a description: the label, then one muted line under it. */
+.pt-menu-item-text {
+  display: grid;
+  padding-block: var(--s-space-4);
+  white-space: normal;
+}
+
+.pt-menu-item-description {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
 .pt-menu-item[data-highlighted] {
   background: var(--s-secondary-hover);
 }
@@ -763,4 +775,11 @@
 .pt-palette-empty {
   margin: 0;
   padding: var(--s-space-12);
+}
+
+.pt-diff-empty {
+  margin: 0;
+  padding: var(--s-space-8);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
 }

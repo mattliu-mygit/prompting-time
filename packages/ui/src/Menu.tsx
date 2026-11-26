@@ -16,6 +16,8 @@ export interface MenuItem {
   type?: "radio" | "checkbox";
   /** Whether a radio or checkbox item is on. The menu shows it; `onSelect` reports a choice. */
   checked?: boolean;
+  /** One line under the label that says what the item does, such as what a view shows. */
+  description?: string;
 }
 
 export interface MenuProps {
@@ -30,6 +32,8 @@ export interface MenuProps {
   text?: JSX.Element;
   items: readonly MenuItem[];
   onSelect: (value: string) => void;
+  /** Whether choosing an item closes the list, as it does by default; false keeps a list of switches open. */
+  closeOnSelect?: boolean;
 }
 
 /**
@@ -40,7 +44,7 @@ export interface MenuProps {
  */
 export function Menu(props: MenuProps) {
   const id = createUniqueId();
-  const api = useMachine(menu.machine, () => ({ id, onSelect: (details) => props.onSelect(details.value) }), menu.connect);
+  const api = useMachine(menu.machine, () => ({ id, closeOnSelect: props.closeOnSelect ?? true, onSelect: (details) => props.onSelect(details.value) }), menu.connect);
   const itemProps = (item: MenuItem) =>
     item.type
       ? api().getOptionItemProps({ type: item.type, value: item.value, checked: item.checked ?? false, disabled: item.disabled })
@@ -74,7 +78,12 @@ export function Menu(props: MenuProps) {
                       </Show>
                     </span>
                   </Show>
-                  {item().label}
+                  <Show when={item().description} fallback={item().label}>
+                    <span class="pt-menu-item-text">
+                      <span>{item().label}</span>
+                      <span class="pt-menu-item-description">{item().description}</span>
+                    </span>
+                  </Show>
                 </li>
               )}
             </For>

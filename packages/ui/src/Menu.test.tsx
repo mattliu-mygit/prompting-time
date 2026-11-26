@@ -100,4 +100,18 @@ describe("Menu", () => {
     fireEvent.click(screen.getByRole("menuitemradio", { name: "Review 1 · 0f1e2d3" }));
     await waitFor(() => expect(onSelect).toHaveBeenCalledExactlyOnceWith("1"));
   });
+
+  it("shows a switch's description under its label, and stays open after a choice when asked to", async () => {
+    const onSelect = vi.fn();
+    const switches = [{ value: "since", label: "Changes since you last looked", description: "New commits since you last read this PR.", type: "checkbox" as const, checked: true }];
+    render(() => <Menu label="Views" text="Views" items={switches} closeOnSelect={false} onSelect={onSelect} />);
+    fireEvent.click(screen.getByRole("button", { name: /Views/ }));
+    const item = await screen.findByRole("menuitemcheckbox", { name: /^Changes since you last looked/ });
+    expect(item).toHaveAttribute("aria-checked", "true");
+    expect(item).toHaveTextContent("New commits since you last read this PR.");
+    fireEvent.click(item);
+    await waitFor(() => expect(onSelect).toHaveBeenCalledWith("since"));
+    expect(screen.getByRole("menu", { name: "Views" })).toBeVisible();
+    expect(await axeViolations()).toEqual([]);
+  });
 });
