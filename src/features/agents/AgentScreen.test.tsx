@@ -73,7 +73,7 @@ describe("a background agent's screen", () => {
   it("lists rounds and every review run on Runs, filtered to failed or skipped, and opens a run", () => {
     const { onOpenReview } = renderAgent();
     const runs = within(screen.getByRole("tabpanel", { name: "Runs" }));
-    const names = () => runs.getAllByRole("row").slice(1).map((row) => [...row.querySelectorAll("td")].slice(1, 3).map((cell) => cell.textContent));
+    const names = () => runs.getAllByRole("row").slice(1).map((row) => [...row.querySelectorAll("td")].slice(1, 3).map((cell) => cell.firstChild?.textContent));
     expect(names()).toHaveLength(8);
     fireEvent.click(runs.getByRole("button", { name: "Failed" }));
     flush();
@@ -87,6 +87,30 @@ describe("a background agent's screen", () => {
     flush();
     fireEvent.click(runs.getByRole("button", { name: "Review gadgets#77" }));
     expect(onOpenReview).toHaveBeenCalledWith("20261125T100000Z-77");
+  });
+
+  it("searches Runs by pull request: number, title words, author, or repo, leaving the rounds out", async () => {
+    renderAgent();
+    const runs = within(screen.getByRole("tabpanel", { name: "Runs" }));
+    const shown = () => runs.queryAllByRole("row").slice(1).map((row) => row.querySelector("td:nth-child(2)")?.textContent);
+    const search = (text: string) => {
+      fireEvent.input(runs.getByRole("textbox", { name: "Search PRs" }), { target: { value: text } });
+      flush();
+    };
+    search("#101");
+    expect(shown()).toEqual(["Review widgets#101separate cache configuration · @sam-fixture", "Review widgets#101separate cache configuration"]);
+    search("projection");
+    expect(shown()).toEqual(["Review gadgets#55move the projection"]);
+    search("@sam-fixture");
+    expect(shown()).toEqual(["Review widgets#101separate cache configuration · @sam-fixture"]);
+    search("acme/gadgets");
+    expect(shown()).toEqual(["Review gadgets#77add the tags package", "Review gadgets#55move the projection"]);
+    fireEvent.click(runs.getByRole("button", { name: "Failed" }));
+    flush();
+    expect(shown()).toEqual(["Review gadgets#55move the projection"]);
+    search("nothing like this");
+    expect(runs.getByText("No runs of a matching pull request.")).toBeInTheDocument();
+    expect(await axeViolations()).toEqual([]);
   });
 
   it("shows the log with a search that keeps matching lines and a copy of them", async () => {

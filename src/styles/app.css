@@ -1861,3 +1861,22 @@ body {
   inline-size: var(--s-space-16);
   block-size: var(--s-space-16);
 }
+
+/* The Runs tab's search and filters, and each review run's title line. */
+.agent-runs-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-space-12);
+}
+
+.agent-runs-bar .pt-field {
+  flex: 1;
+  min-inline-size: 12rem;
+}
+
+.agent-run-pr {
+  display: block;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}

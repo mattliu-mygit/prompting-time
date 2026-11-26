@@ -307,7 +307,7 @@ describe("plugin pages", () => {
     expect(screen.queryByRole("button", { name: /^Past reviews/ })).not.toBeInTheDocument();
     click(within(await screen.findByRole("region", { name: "Background agents" })).getByRole("button", { name: "Whooper" }));
     const runs = within(screen.getByRole("tabpanel", { name: "Runs" }));
-    expect(runs.getAllByRole("row").slice(1).map((row) => row.querySelector("td:nth-child(2)")?.textContent))
+    expect(runs.getAllByRole("row").slice(1).map((row) => row.querySelector("td:nth-child(2)")?.firstChild?.textContent))
       .toEqual(["Review widgets#101", "Review widgets#102", "Review gadgets#77", "Review widgets#101", "Review gadgets#55"]);
 
     fireEvent.click(runs.getByRole("button", { name: "Review gadgets#77" }));
