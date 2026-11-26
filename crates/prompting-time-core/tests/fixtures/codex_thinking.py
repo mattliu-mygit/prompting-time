@@ -30,6 +30,8 @@ for line in sys.stdin:
     elif method == "model/list":
         if mode == "stall-once" and not stalled:
             stalled = True
+            # The test waits for this file, then cancels the turn this request belongs to.
+            log.with_name("model-list-held").touch()
             continue
         if not message["params"].get("cursor") or mode == "repeat-cursor":
             result = {"data": [{"model": "wrong-default", "isDefault": True}], "nextCursor": "page-two"}

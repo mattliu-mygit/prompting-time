@@ -322,21 +322,39 @@ async fn codex_thinking_revalidates_changed_thread_model_before_manual_dispatch(
 #[tokio::test]
 async fn codex_thinking_cancelled_discovery_never_dispatches_prompt_and_connection_reusable() {
     let (dir, binary) = fixture("stall-once");
+    let start = || StartSession {
+        context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
+        conversation_id: ConversationId::new(),
+        working_directory: "/tmp/invented-project".into(),
+    };
     let adapter = CodexAdapter::connect(binary).await.unwrap();
-    let session = adapter
-        .start_session(StartSession {
-            context_budget: prompting_time_core::context_budget::ContextBudget::provider_default(),
-            conversation_id: ConversationId::new(),
-            working_directory: "/tmp/invented-project".into(),
-        })
-        .await
-        .unwrap();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        adapter.start_turn(&session, request(ThinkingPreference::Auto)),
-    )
-    .await;
-    assert!(result.is_err());
+    let session = adapter.start_session(start()).await.unwrap();
+    let discovering_adapter = adapter.clone();
+    let discovering_session = session.clone();
+    let mut discovery = tokio::spawn(async move {
+        discovering_adapter
+            .start_turn(&discovering_session, request(ThinkingPreference::Auto))
+            .await
+    });
+    // The fixture never answers the first model/list, and creates this file when it arrives.
+    let held = dir.path().join("model-list-held");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !held.exists() {
+            tokio::select! {
+                result = &mut discovery => panic!("turn started without its model/list answer: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+            }
+        }
+    })
+    .await
+    .expect("fixture never received model/list");
+    // Completing a later request proves the dispatcher advanced model/list to awaiting-response,
+    // so the cancellation below finds the discovery waiting on its answer, not writing it.
+    adapter.start_session(start()).await.unwrap();
+    discovery.abort();
+    // Awaiting the cancelled task lets the dispatcher, which the cancellation woke first, drop the
+    // turn's registration before the next turn registers on the same thread.
+    assert!(matches!(discovery.await, Err(error) if error.is_cancelled()));
     let mut turn = adapter
         .start_turn(&session, request(ThinkingPreference::ProviderDefault))
         .await
