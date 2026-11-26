@@ -15,10 +15,6 @@ import { extname, join, resolve, sep } from "node:path";
  */
 export function developmentServer() {
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
-  const directives = { ...config.app.security.csp };
-  directives["connect-src"] += " ws://localhost:1420";
-  directives["frame-src"] += " 'self'";
-  const policy = Object.entries(directives).map(([name, sources]) => `${name} ${sources}`).join("; ");
   const pagePolicy = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'";
   const pageFolder = process.env.PROMPTING_TIME_FIXTURE_PAGE ? resolve(process.env.PROMPTING_TIME_FIXTURE_PAGE) : null;
   const types = {
@@ -44,6 +40,12 @@ export function developmentServer() {
     name: "prompting-time-development-server",
     apply: "serve",
     configureServer(server) {
+      // Vite's reload socket listens on the server's own port: 1420 for `pnpm tauri dev`, or the
+      // port a browser fixture session starts the server on.
+      const directives = { ...config.app.security.csp };
+      directives["connect-src"] += ` ws://localhost:${server.config.server.port}`;
+      directives["frame-src"] += " 'self'";
+      const policy = Object.entries(directives).map(([name, sources]) => `${name} ${sources}`).join("; ");
       server.middlewares.use((request, response, next) => {
         const { pathname } = new URL(request.url ?? "/", "http://localhost");
         if (pathname.startsWith("/plugin-page/")) {
