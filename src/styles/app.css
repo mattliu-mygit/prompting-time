@@ -181,6 +181,35 @@ body {
   margin-block: var(--s-space-8) var(--s-space-4);
 }
 
+/* A plugin's past reviews, under the plugin's own row */
+.agent-history-row {
+  margin-inline-start: var(--s-space-12);
+}
+
+/* A plugin's page fills the workspace; a notice above it says why it cannot show what you opened. */
+.plugin-page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.plugin-frame {
+  flex: 1;
+  inline-size: 100%;
+  min-block-size: 0;
+  border: 0;
+  background: var(--s-background);
+}
+
+.plugin-page-notice {
+  margin: 0;
+  padding: var(--s-space-8) var(--s-space-16);
+  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+}
+
 /* The conversation */
 .workspace-pane {
   display: flex;

@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { BotIcon, ListRow, Menu, PlusIcon } from "@prompting-time/ui";
+import { BotIcon, ListRow, Menu, PlusIcon, PullRequestIcon } from "@prompting-time/ui";
 import type { PluginsSnapshot } from "../../app/store";
 import { describeAgent } from "./status";
 
@@ -9,14 +9,20 @@ type Props = {
   plugins: PluginsSnapshot;
   /** The plugin whose settings the workspace shows. */
   selected: string | null;
+  /** How many past reviews each plugin's status lists, by plugin name. */
+  history: Readonly<Record<string, number>>;
+  /** The plugin whose past reviews the workspace shows. */
+  selectedHistory: string | null;
   onSelect(name: string): void;
+  onOpenHistory(name: string): void;
   onInstall(kind: InstallKind): void;
 };
 
 /**
  * "Background agents" at the bottom of All work: one quiet row per installed plugin, with its
  * icon, name, one gray line from its process and status action, and a status dot. A row opens the
- * plugin's settings. The menu installs a plugin for development.
+ * plugin's settings. A plugin that lists past reviews gets a row under its own that opens them. The
+ * menu installs a plugin for development.
  */
 export function BackgroundAgents(props: Props) {
   return (
@@ -51,6 +57,19 @@ export function BackgroundAgents(props: Props) {
                   selected={props.selected === plugin().name}
                   onClick={() => props.onSelect(plugin().name)}
                 />
+                <Show when={props.history[plugin().name]}>
+                  {(count) => (
+                    <ListRow
+                      class="agent-history-row"
+                      icon={<PullRequestIcon />}
+                      title="Past reviews"
+                      count={count()}
+                      meta="the last 30 days"
+                      selected={props.selectedHistory === plugin().name}
+                      onClick={() => props.onOpenHistory(plugin().name)}
+                    />
+                  )}
+                </Show>
               </li>
             );
           }}

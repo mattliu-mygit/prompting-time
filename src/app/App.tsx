@@ -1,10 +1,13 @@
-import { createMemo, createSignal, onSettled, Show, untrack } from "solid-js";
+import { createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
 import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
 import type { PluginSource, ProviderId } from "../bridge/types";
 import { BackgroundAgents, type InstallKind } from "../features/agents/BackgroundAgents";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { PluginInspector, PluginSettings } from "../features/agents/PluginSettings";
+import { ReviewHistory } from "../features/agents/ReviewHistory";
+import { pastReviews, pluginReviews, reviewKey, reviewsNeedingYou, reviewState, reviewTitle } from "../features/agents/reviews";
 import { describeAgent } from "../features/agents/status";
+import { PluginFrame } from "../features/plugins/PluginFrame";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
@@ -27,10 +30,13 @@ const statusWords = { idle: "ready", queued: "queued", running: "working", waiti
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const NARROW_INSPECTOR = "(max-width: 72rem)";
 
+/** What the workspace shows of a plugin instead of a conversation: its settings, its past reviews, or one review in its page. */
+type PluginView = { kind: "settings" | "history"; plugin: string } | { kind: "review"; plugin: string; runId: string };
+
 /**
  * The command center: the All work list with its background agents, the selected conversation's
- * timeline and composer or the selected agent's settings, and the inspector, with the dialogs that
- * create and archive conversations and install agents.
+ * timeline and composer or the selected agent's settings, past reviews, or page, and the inspector,
+ * with the dialogs that create and archive conversations and install agents.
  */
 export function App(props: { store: AppStore }) {
   // One store for the app's lifetime. Read once: a prop written as a call, such as
@@ -48,8 +54,8 @@ export function App(props: { store: AppStore }) {
   const [lifecycleError, setLifecycleError] = createSignal<string | null>(null);
   const [composerModalOpen, setComposerModalOpen] = createSignal(false);
   const [messageFocusRequested, setMessageFocusRequested] = createSignal(false);
-  // The background agent whose settings the workspace shows instead of the selected conversation.
-  const [selectedPluginName, setSelectedPluginName] = createSignal<string | null>(null);
+  // What the workspace shows of a background agent instead of the selected conversation.
+  const [pluginView, setPluginView] = createSignal<PluginView | null>(null);
   const [installTarget, setInstallTarget] = createSignal<{ kind: InstallKind; path: string } | null>(null);
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
@@ -60,7 +66,24 @@ export function App(props: { store: AppStore }) {
     return id ? snapshot().conversationsById[id] ?? null : null;
   });
   const selectedId = createMemo(() => selected()?.id ?? null);
-  const selectedPlugin = createMemo(() => snapshot().plugins.items.find(({ name }) => name === selectedPluginName()) ?? null);
+  const selectedPlugin = createMemo(() => snapshot().plugins.items.find(({ name }) => name === pluginView()?.plugin) ?? null);
+  const reviewsByPlugin = createMemo(() => pluginReviews(snapshot().plugins));
+  const needsYouReviews = createMemo(() => reviewsNeedingYou(reviewsByPlugin()));
+  const historyCounts = createMemo(() => Object.fromEntries(Object.entries(reviewsByPlugin()).map(([name, reviews]) => [name, pastReviews(reviews).length])));
+  const openRun = () => {
+    const view = pluginView();
+    return view?.kind === "review" ? view.runId : null;
+  };
+  const openReviewEntry = () => {
+    const view = pluginView();
+    return view?.kind === "review" ? reviewsByPlugin()[view.plugin]?.find((review) => review.run_id === view.runId) ?? null : null;
+  };
+  /** The key of what the list shows as selected: the open review, or the conversation when no plugin shows. */
+  const currentKey = () => {
+    const view = pluginView();
+    if (view?.kind === "review") return reviewKey(view.plugin, view.runId);
+    return view ? null : selectedId();
+  };
   const parent = () => {
     const parentId = selected()?.parentId;
     return parentId ? snapshot().conversationsById[parentId] : undefined;
@@ -68,19 +91,32 @@ export function App(props: { store: AppStore }) {
   const overlay = () => narrow() && inspectorOpen();
   const lifecycleModalOpen = () => creating() || archiveTarget() !== null || installTarget() !== null;
   const paletteAvailable = () => snapshot().phase === "ready" && !overlay() && !lifecycleModalOpen() && !composerModalOpen();
-  const waiting = () => waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []));
+  const workspaceLabel = () => {
+    const view = pluginView();
+    if (!view || !selectedPlugin()) return "Conversation workspace";
+    return { settings: "Background agent", history: "Past reviews", review: "Review" }[view.kind];
+  };
+  /** Everything under "Needs you", in list order: plugin reviews, then conversations. */
+  const waiting = () => [
+    ...needsYouReviews().map(({ plugin, review }) => ({ key: reviewKey(plugin, review.run_id), open: () => openReview(plugin, review.run_id) })),
+    ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []))
+      .map(({ id }) => ({ key: id, open: () => selectConversation(id) })),
+  ];
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
 
   function selectConversation(id: string) {
-    setSelectedPluginName(null);
+    setPluginView(null);
     void store.selectConversation(id);
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
 
-  function openPlugin(name: string) {
-    setSelectedPluginName(name);
+  function showPlugin(view: PluginView) {
+    setPluginView(view);
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
+
+  const openPlugin = (name: string) => showPlugin({ kind: "settings", plugin: name });
+  const openReview = (plugin: string, runId: string) => showPlugin({ kind: "review", plugin, runId });
 
   /** Picks the archive or folder, then asks in the install dialog; a cancelled pick does nothing. */
   async function startInstall(kind: InstallKind) {
@@ -99,13 +135,13 @@ export function App(props: { store: AppStore }) {
     openPlugin(installed.name);
   }
 
-  /** ⌘J: the next root waiting on you after the selected one, in list order, wrapping around. */
+  /** ⌘J: the next item waiting on you after the selected one, in list order, wrapping around. */
   function jumpToNextWaiting() {
-    const roots = waiting();
-    if (roots.length === 0) return;
-    const index = roots.findIndex(({ id }) => id === selectedId());
-    const next = roots[(index + 1) % roots.length]!;
-    if (next.id !== selectedId() || selectedPlugin()) selectConversation(next.id);
+    const items = waiting();
+    if (items.length === 0) return;
+    const index = items.findIndex(({ key }) => key === currentKey());
+    const next = items[(index + 1) % items.length]!;
+    if (next.key !== currentKey()) next.open();
   }
 
   function openNewConversation() {
@@ -269,10 +305,22 @@ export function App(props: { store: AppStore }) {
             }
           >
             {(plugin) => (
-              <div class="shell-title">
-                <h1>{plugin().title} settings</h1>
-                <span class="shell-meta">Background agent · {describeAgent(plugin(), snapshot().plugins.statuses[plugin().name]).meta}</span>
-              </div>
+              <Show
+                when={openReviewEntry()}
+                fallback={
+                  <div class="shell-title">
+                    <h1>{plugin().title} {pluginView()?.kind === "history" ? "past reviews" : pluginView()?.kind === "review" ? "review" : "settings"}</h1>
+                    <span class="shell-meta">Background agent · {describeAgent(plugin(), snapshot().plugins.statuses[plugin().name]).meta}</span>
+                  </div>
+                }
+              >
+                {(review) => (
+                  <div class="shell-title">
+                    <h1 title={reviewTitle(review())}>{reviewTitle(review())}</h1>
+                    <span class="shell-meta">{plugin().title} review · {review().repo}#{review().pr} · {reviewState(review()).words}</span>
+                  </div>
+                )}
+              </Show>
             )}
           </Show>
           <div class="toolbar-actions">
@@ -317,6 +365,9 @@ export function App(props: { store: AppStore }) {
               </div>
               <Show when={snapshot().queuedCount > 0}><p class="queue-count">{snapshot().queuedCount} queued</p></Show>
               <AllWork
+                reviews={snapshot().statusFilter === "all" || snapshot().statusFilter === "waiting" ? needsYouReviews() : []}
+                selectedReview={pluginView()?.kind === "review" ? currentKey() : null}
+                onOpenReview={openReview}
                 conversations={selectVisibleConversations(snapshot())}
                 conversationsById={snapshot().conversationsById}
                 childPagesById={snapshot().childPagesById}
@@ -329,18 +380,42 @@ export function App(props: { store: AppStore }) {
               />
               <BackgroundAgents
                 plugins={snapshot().plugins}
-                selected={selectedPlugin()?.name ?? null}
+                selected={pluginView()?.kind === "settings" ? selectedPlugin()?.name ?? null : null}
+                history={historyCounts()}
+                selectedHistory={pluginView()?.kind === "history" ? selectedPlugin()?.name ?? null : null}
                 onSelect={openPlugin}
+                onOpenHistory={(name) => showPlugin({ kind: "history", plugin: name })}
                 onInstall={(kind) => void startInstall(kind)}
               />
             </aside>
           </Show>
 
-          <main class="workspace-pane" aria-label={selectedPlugin() ? "Background agent" : "Conversation workspace"} inert={overlay()}>
+          <main class="workspace-pane" aria-label={workspaceLabel()} inert={overlay()}>
             <Show when={selectedPlugin()?.name} keyed fallback={conversationWorkspace()}>
               {(name: string) => (
                 <Show when={snapshot().plugins.items.find((plugin) => plugin.name === name)}>
-                  {(plugin) => <PluginSettings plugin={plugin()} status={snapshot().plugins.statuses[name]} actions={store.pluginActions} />}
+                  {(plugin) => (
+                    <Switch>
+                      <Match when={pluginView()?.kind === "review"}>
+                        <PluginFrame
+                          plugin={plugin()}
+                          status={snapshot().plugins.statuses[name]}
+                          runId={openRun()}
+                          actions={store.pluginActions}
+                          onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
+                          onShowReview={(runId) => {
+                            if (openRun() !== runId) setPluginView({ kind: "review", plugin: name, runId });
+                          }}
+                        />
+                      </Match>
+                      <Match when={pluginView()?.kind === "history"}>
+                        <ReviewHistory plugin={plugin()} status={snapshot().plugins.statuses[name]} onOpen={(runId) => openReview(name, runId)} />
+                      </Match>
+                      <Match when={pluginView()?.kind === "settings"}>
+                        <PluginSettings plugin={plugin()} status={snapshot().plugins.statuses[name]} actions={store.pluginActions} />
+                      </Match>
+                    </Switch>
+                  )}
                 </Show>
               )}
             </Show>

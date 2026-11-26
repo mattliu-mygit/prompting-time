@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChildPageSnapshot, SelectedPath } from "../../app/store";
 import type { ConversationSummary } from "../../bridge/types";
 import { axeViolations, render } from "../../test/render";
+import { fixtureReviews } from "../../test/plugins";
+import { readReviews, type PluginReview } from "../agents/reviews";
 import { AllWork, groupWork } from "./AllWork";
 
 function node(id: string, title: string, parentId: string | null = null, overrides: Partial<ConversationSummary> = {}): ConversationSummary {
@@ -27,6 +29,8 @@ type Options = {
   expandedById?: Record<string, boolean>;
   selectedId?: string | null;
   selectedPath?: SelectedPath | null;
+  reviews?: PluginReview[];
+  selectedReview?: string | null;
 };
 
 /** Renders All work with its disclosure and selection owned by signals, as App owns them through the store. */
@@ -39,8 +43,12 @@ function renderWork(options: Options = {}) {
   const onSelect = vi.fn((id: string) => setSelected(id));
   const onToggle = vi.fn((id: string) => setExpanded((current) => ({ ...current, [id]: !current[id] })));
   const onLoadChildPage = vi.fn();
+  const onOpenReview = vi.fn();
   const view = render(() => (
     <AllWork
+      reviews={options.reviews ?? []}
+      selectedReview={options.selectedReview ?? null}
+      onOpenReview={onOpenReview}
       conversations={conversations()}
       conversationsById={options.conversationsById ?? { root, child, grandchild, sibling }}
       childPagesById={childPagesById()}
@@ -52,7 +60,7 @@ function renderWork(options: Options = {}) {
       onLoadChildPage={onLoadChildPage}
     />
   ));
-  return { ...view, onSelect, onToggle, onLoadChildPage, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -60,6 +68,46 @@ const press = (element: HTMLElement, key: string) => {
 };
 
 describe("AllWork", () => {
+  const waitingReviews = (): PluginReview[] => readReviews({ reviews: fixtureReviews() })
+    .filter((review) => review.needs_you).map((review) => ({ plugin: "whooper", review }));
+
+  it("puts plugin reviews waiting on you first under Needs you, with their findings, verdict, and dot", async () => {
+    const waitingRoot = { ...root, id: "waiting", title: "Waiting conversation", rollupStatus: "needsAttention" as const };
+    const view = renderWork({ conversations: [waitingRoot, sibling], reviews: waitingReviews(), selectedReview: "review:whooper:20261124T090000Z-55" });
+
+    const needsYou = screen.getByRole("tree", { name: "Needs you" });
+    const items = [...needsYou.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")];
+    expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
+      "separate cache configuration, 2 findings, widgets#101 · approve once CI passes",
+      "move the projection, gadgets#55 · review failed",
+      expect.stringContaining("Waiting conversation"),
+    ]);
+    expect(items[0]).toHaveTextContent("2");
+    expect(items[0]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(items[1]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    expect(items[1]).toHaveAttribute("aria-selected", "true");
+    expect(items[0]).toHaveAttribute("aria-selected", "false");
+
+    fireEvent.click(items[0]!);
+    expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261126T150000Z-101");
+    expect(view.onSelect).not.toHaveBeenCalled();
+    expect(await axeViolations()).toEqual([]);
+  });
+
+  it("moves between review and conversation rows with the arrow keys and opens a review with Enter", () => {
+    const view = renderWork({ conversations: [sibling], reviews: waitingReviews(), selectedId: null });
+    const [first, second] = screen.getAllByRole("treeitem");
+    first!.focus();
+    press(first!, "ArrowDown");
+    expect(document.activeElement).toBe(second);
+    press(second!, "ArrowRight");
+    press(second!, "Enter");
+    expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261124T090000Z-55");
+    press(second!, "End");
+    expect(document.activeElement).toHaveAttribute("aria-label", expect.stringContaining(sibling.title));
+    expect(view.onToggle).not.toHaveBeenCalled();
+  });
+
   it("shows root, child and grandchild with their depth, status words, and selection", async () => {
     renderWork();
     const rows = screen.getAllByRole("treeitem");

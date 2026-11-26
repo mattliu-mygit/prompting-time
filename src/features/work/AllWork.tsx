@@ -1,7 +1,8 @@
 import { createMemo, createSignal, For, Show, untrack } from "solid-js";
-import { ChatIcon, ChevronDownIcon, ChevronRightIcon, ListRow, type Status } from "@prompting-time/ui";
+import { ChatIcon, ChevronDownIcon, ChevronRightIcon, ListRow, PullRequestIcon, type Status } from "@prompting-time/ui";
 import type { ConversationSummary, ProviderId } from "../../bridge/types";
 import { effectiveConversationStatus, type ChildPageSnapshot, type EffectiveStatus, type SelectedPath } from "../../app/store";
+import { reviewKey, reviewState, reviewTitle, shortPullRequest, type PluginReview } from "../agents/reviews";
 
 type Props = {
   /** Active roots in list order, already filtered by status. */
@@ -11,12 +12,19 @@ type Props = {
   expandedById: Readonly<Record<string, boolean>>;
   selectedId: string | null;
   selectedPath: SelectedPath | null;
+  /** Plugin reviews waiting on the user, shown first under "Needs you". */
+  reviews: readonly PluginReview[];
+  /** The key (reviewKey) of the review the workspace shows, if any. */
+  selectedReview: string | null;
   onSelect(id: string): void;
+  onOpenReview(plugin: string, runId: string): void;
   onToggle(id: string): void;
   onLoadChildPage(id: string, restart: boolean): void;
 };
 export type WorkGroup = { key: string; label: string; path: string | null; conversations: ConversationSummary[] };
-type Row = { conversation: ConversationSummary; depth: number };
+type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number };
+type ReviewRow = { kind: "review"; key: string; item: PluginReview; depth: 0 };
+type Row = ConversationRow | ReviewRow;
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const statusText: Record<EffectiveStatus, string> = {
@@ -29,19 +37,28 @@ const statusDots: Record<EffectiveStatus, Status> = {
 };
 
 /**
- * The All work list: roots waiting on you under "Needs you", then the rest grouped by project, each
- * root followed by its loaded children. It is a tree for keyboard users: arrow keys move and open
- * rows, Home and End jump, and Enter or Space opens a conversation.
+ * The All work list: plugin reviews and roots waiting on you under "Needs you", then the rest
+ * grouped by project, each root followed by its loaded children. It is a tree for keyboard users:
+ * arrow keys move and open rows, Home and End jump, and Enter or Space opens a conversation or a
+ * review.
  */
 export function AllWork(props: Props) {
   const [focusedId, setFocusedId] = createSignal<string | null>(null);
   const items = new Map<string, HTMLElement>();
-  const groups = createMemo(() => groupWork(props.conversations).map((group) => ({
-    ...group,
-    rows: visibleRows(group.conversations, props.conversationsById, props.childPagesById, props.expandedById, props.selectedPath),
-  })));
+  const groups = createMemo(() => {
+    const reviewRows: Row[] = props.reviews.map((item) => ({ kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 }));
+    const conversationGroups = groupWork(props.conversations).map((group) => ({
+      ...group,
+      rows: visibleRows(group.conversations, props.conversationsById, props.childPagesById, props.expandedById, props.selectedPath) as Row[],
+    }));
+    if (reviewRows.length === 0) return conversationGroups;
+    const [first, ...rest] = conversationGroups;
+    return first?.key === "needs-you"
+      ? [{ ...first, rows: [...reviewRows, ...first.rows] }, ...rest]
+      : [{ key: "needs-you", label: "Needs you", path: null, conversations: [], rows: reviewRows }, ...conversationGroups];
+  });
   const rows = createMemo(() => groups().flatMap((group) => group.rows));
-  const tabStop = () => (rows().some((row) => row.conversation.id === focusedId()) ? focusedId() : rows()[0]?.conversation.id);
+  const tabStop = () => (rows().some((row) => row.key === focusedId()) ? focusedId() : rows()[0]?.key);
 
   function focus(id: string | null | undefined) {
     if (!id) return;
@@ -50,19 +67,28 @@ export function AllWork(props: Props) {
   }
 
   function navigate(event: KeyboardEvent, row: Row) {
-    const id = row.conversation.id;
     const all = rows();
-    const index = all.findIndex((item) => item.conversation.id === id);
+    const index = all.findIndex((item) => item.key === row.key);
+    switch (event.key) {
+      case "ArrowDown": event.preventDefault(); focus(all[index + 1]?.key); return;
+      case "ArrowUp": event.preventDefault(); focus(all[index - 1]?.key); return;
+      case "Home": event.preventDefault(); focus(all[0]?.key); return;
+      case "End": event.preventDefault(); focus(all.at(-1)?.key); return;
+    }
+    if (row.kind === "review") {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        props.onOpenReview(row.item.plugin, row.item.review.run_id);
+      }
+      return;
+    }
+    const id = row.conversation.id;
     const expanded = props.expandedById[id] === true;
     switch (event.key) {
-      case "ArrowDown": event.preventDefault(); focus(all[index + 1]?.conversation.id); break;
-      case "ArrowUp": event.preventDefault(); focus(all[index - 1]?.conversation.id); break;
-      case "Home": event.preventDefault(); focus(all[0]?.conversation.id); break;
-      case "End": event.preventDefault(); focus(all.at(-1)?.conversation.id); break;
       case "ArrowRight":
         event.preventDefault();
         if (row.conversation.hasChildren && !expanded) props.onToggle(id);
-        else if (expanded && all[index + 1]?.depth === row.depth + 1) focus(all[index + 1]?.conversation.id);
+        else if (expanded && all[index + 1]?.depth === row.depth + 1) focus(all[index + 1]?.key);
         break;
       case "ArrowLeft":
         event.preventDefault();
@@ -81,11 +107,44 @@ export function AllWork(props: Props) {
             <section class={["work-group", { "work-group-needs-you": group().key === "needs-you" }]}>
               <h2 id={`work-group-${index()}`} class="work-group-heading" title={group().path ?? undefined}>{group().label}</h2>
               <ul role="tree" aria-labelledby={`work-group-${index()}`} class="work-rows">
-                <For each={group().rows} keyed={(row) => row.conversation.id}>
+                <For each={group().rows} keyed={(row) => row.key}>
                   {(row) => {
+                    const first = untrack(row);
+                    if (first.kind === "review") {
+                      // A review's key holds its plugin and run, so neither changes.
+                      const item = () => (row() as ReviewRow).item;
+                      const state = () => reviewState(item().review);
+                      const meta = () => `${shortPullRequest(item().review)} · ${state().words}`;
+                      const count = () => (item().review.findings > 0 ? item().review.findings : undefined);
+                      return (
+                        <ListRow
+                          element="li"
+                          role="treeitem"
+                          ref={(element: HTMLElement) => items.set(first.key, element)}
+                          aria-label={`${reviewTitle(item().review)}, ${count() === undefined ? "" : `${count()} ${count() === 1 ? "finding" : "findings"}, `}${meta()}`}
+                          aria-level={1}
+                          aria-selected={props.selectedReview === first.key ? "true" : "false"}
+                          tabindex={tabStop() === first.key ? 0 : -1}
+                          class="work-row"
+                          style={{ "--work-depth": "0" }}
+                          icon={<PullRequestIcon />}
+                          title={reviewTitle(item().review)}
+                          count={count()}
+                          status={state().status}
+                          meta={meta()}
+                          onFocus={(event: FocusEvent) => {
+                            if (event.target === event.currentTarget) setFocusedId(first.key);
+                          }}
+                          onClick={() => props.onOpenReview(item().plugin, item().review.run_id)}
+                          onKeyDown={(event: KeyboardEvent) => {
+                            if (event.target === event.currentTarget) navigate(event, row());
+                          }}
+                        />
+                      );
+                    }
                     // The row's key is its conversation id, so the id never changes.
-                    const id = untrack(() => row().conversation.id);
-                    const conversation = () => row().conversation;
+                    const id = first.key;
+                    const conversation = () => (row() as ConversationRow).conversation;
                     const status = () => effectiveConversationStatus(conversation());
                     const provider = () => (conversation().provider ? providerNames[conversation().provider!] : "No provider");
                     const expanded = () => props.expandedById[id] === true;
@@ -203,22 +262,23 @@ export function groupWork(conversations: readonly ConversationSummary[]): WorkGr
 }
 
 function visibleRows(roots: readonly ConversationSummary[], nodes: Props["conversationsById"],
-  pages: Props["childPagesById"], expanded: Props["expandedById"], selectedPath: SelectedPath | null): Row[] {
-  const rows: Row[] = [];
-  const stack = [...roots].reverse().map((conversation) => ({ conversation, depth: 0 }));
+  pages: Props["childPagesById"], expanded: Props["expandedById"], selectedPath: SelectedPath | null): ConversationRow[] {
+  const rows: ConversationRow[] = [];
+  const row = (conversation: ConversationSummary, depth: number): ConversationRow => ({ kind: "conversation", key: conversation.id, conversation, depth });
+  const stack = [...roots].reverse().map((conversation) => row(conversation, 0));
   const seen = new Set<string>();
   while (stack.length) {
-    const row = stack.pop()!;
-    const id = row.conversation.id;
+    const current = stack.pop()!;
+    const id = current.conversation.id;
     if (seen.has(id)) continue;
     seen.add(id);
-    rows.push(row);
+    rows.push(current);
     if (!expanded[id]) continue;
     const ids = new Set([...(pages[id]?.pages.flatMap((page) => page.ids) ?? []),
       ...(selectedPath?.ids.filter((childId) => nodes[childId]?.parentId === id) ?? [])]);
     for (const childId of [...ids].reverse()) {
       const child = nodes[childId];
-      if (child && child.parentId === id && !child.archived) stack.push({ conversation: child, depth: row.depth + 1 });
+      if (child && child.parentId === id && !child.archived) stack.push(row(child, current.depth + 1));
     }
   }
   return rows;

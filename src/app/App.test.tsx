@@ -6,7 +6,7 @@ import type { AppEvent, ConversationSummary, ListChildConversationsRequest, Load
 import { axeViolations, render, settle } from "../test/render";
 import { App } from "./App";
 import { createAppStore, type AppApi, type AppStore } from "./store";
-import { actionResult, fixturePlugin, fixtureSettings, fixtureStatus, noPlugins } from "../test/plugins";
+import { actionResult, fixturePlugin, fixtureReviews, fixtureSettings, fixtureShown, fixtureStatus, noPlugins, pageActions } from "../test/plugins";
 
 const click = (element: Element) => {
   fireEvent.click(element);
@@ -169,6 +169,91 @@ describe("All work and ⌘J", () => {
     press("j");
     await settle();
     expect(store.getSnapshot().selectedConversationId).toBe("c1");
+  });
+});
+
+describe("plugin pages", () => {
+  const OPEN = "20261126T150000Z-101";
+  const SUBMITTED = "20261125T100000Z-77";
+  const request = JSON.stringify({ event: "APPROVE", body: "", comments: [] }, null, 2);
+  const fingerprint = "9c".repeat(32);
+
+  /** Whooper with invented reviews; its page's actions answer as Whooper's commands would. */
+  function pagesApi() {
+    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
+      switch (sent.action) {
+        case "status": return actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews: fixtureReviews() })) });
+        case "show-review": return actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!)) });
+        case "submit": return sent.confirmedFingerprint === null
+          ? actionResult({ stdout: `printed the request; nothing posted\nfingerprint: ${fingerprint}\n`, fingerprint, preview: request })
+          : actionResult({ stdout: "posted the review: https://example.invalid/review/1\n" });
+        default: return actionResult({ stdout: JSON.stringify(fixtureSettings) });
+      }
+    });
+    return { pluginRequest, api: createApi({ listPlugins: vi.fn(async () => [fixturePlugin({ actions: pageActions })]), pluginRequest }) };
+  }
+
+  function frame() {
+    const element = document.querySelector<HTMLIFrameElement>("iframe.plugin-frame");
+    if (!element?.contentWindow) throw new Error("no plugin frame");
+    return { element, window: element.contentWindow, posted: vi.spyOn(element.contentWindow, "postMessage") };
+  }
+
+  async function fromPage(source: Window, data: unknown) {
+    window.dispatchEvent(new MessageEvent("message", { data, source }));
+    await settle();
+    await settle();
+  }
+
+  it("opens a review from Needs you in the plugin's sandboxed page and submits it through the confirmation", async () => {
+    const { api, pluginRequest } = pagesApi();
+    renderApp(api);
+    await settle();
+    await settle();
+
+    fireEvent.click(await screen.findByRole("treeitem", { name: /^separate cache configuration, 2 findings/ }));
+    await settle();
+    const page = frame();
+    expect(page.element).toHaveAttribute("sandbox", "allow-scripts");
+    expect(page.element).toHaveAttribute("src", "pt-plugin://whooper/index.html");
+    expect(screen.getByRole("heading", { level: 1, name: "separate cache configuration" })).toBeVisible();
+
+    await fromPage(window, { version: 1, type: "ready", id: 1 });
+    expect(page.posted).not.toHaveBeenCalled();
+    await fromPage(page.window, { version: 1, type: "ready", id: 1 });
+    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "status", reply_to: 1 }), "*");
+    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: OPEN }) }), "*");
+
+    await fromPage(page.window, { version: 1, type: "submit", id: 2, run_id: OPEN });
+    const dialog = await screen.findByRole("alertdialog", { name: "Submit review" });
+    expect(within(dialog).getByLabelText("What it will send")).toHaveTextContent('"event": "APPROVE"');
+    expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "submit", confirmedFingerprint: fingerprint }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Submit review" }));
+    await settle();
+    await settle();
+    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "submit", args: [OPEN], confirmedFingerprint: fingerprint });
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 1, type: "submit-result", reply_to: 2, run_id: OPEN, posted: true, message: "posted the review: https://example.invalid/review/1" }, "*");
+    expect(screen.queryByRole("alertdialog", { name: "Submit review" })).not.toBeInTheDocument();
+  });
+
+  it("lists past reviews under the agent and opens one with what was submitted", async () => {
+    const { api } = pagesApi();
+    renderApp(api);
+    await settle();
+    await settle();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Past reviews 3/ }));
+    await settle();
+    const rows = within(screen.getByRole("main", { name: "Past reviews" })).getAllByRole("button");
+    expect(rows.map((row) => row.querySelector(".pt-list-row-title")?.textContent)).toEqual(["separate cache configuration", "add the tags package", "move the projection"]);
+    expect(rows[1]).toHaveTextContent("gadgets#77 · commented");
+
+    fireEvent.click(rows[1]!);
+    await settle();
+    const page = frame();
+    await fromPage(page.window, { version: 1, type: "ready", id: 1 });
+    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: SUBMITTED }) }), "*");
+    expect(page.posted).toHaveBeenLastCalledWith(expect.objectContaining({ type: "submit-result", run_id: SUBMITTED, posted: true, message: expect.stringMatching(/^commented /) }), "*");
   });
 });
 
