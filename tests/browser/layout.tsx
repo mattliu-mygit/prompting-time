@@ -154,6 +154,9 @@ const api: AppApi = {
   savePluginSettings: unsupported,
   pickPluginFolder: async () => null,
   pickPluginArchive: async () => null,
+  stopPlugin: unsupported,
+  startPlugin: unsupported,
+  readPluginLog: unsupported,
 };
 
 const fixtureApi = treeScenario ? {

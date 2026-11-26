@@ -53,7 +53,7 @@ it("navigates a known descendant from the palette to its parent and root without
   async function openPalette() {
     fireEvent.click(screen.getByRole("button", { name: "Search (⌘K)" }));
     flush();
-    return screen.findByRole("combobox", { name: "Search conversations and commands" });
+    return screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
   }
   const search = await openPalette();
   expect(screen.getByRole("option", { name: /Go to parent conversation/ })).toHaveAttribute("aria-disabled", "true");

@@ -1,6 +1,6 @@
 import type { PluginActions, PluginStatusRead } from "../../app/store";
 import type { PluginActionResult, PluginSnapshot } from "../../bridge/types";
-import { readReviews, submittedText, type ReviewEntry } from "../agents/reviews";
+import { readReviews, submittedText, versionsOf, type ReviewEntry } from "../agents/reviews";
 import { PROTOCOL_VERSION, readPageMessage, type DraftChange, type HostUpdate, type PageMessage, type QueueItem } from "./protocol";
 
 /**
@@ -46,10 +46,14 @@ function messageOf(reason: unknown): string {
   return reason instanceof Error ? reason.message : "Prompting Time could not run the request.";
 }
 
-/** The page's queue from the plugin's reviews: what waits on the user, what runs, and what ended. */
+/**
+ * The page's queue from the plugin's reviews: what waits on the user, what runs, and what ended. A
+ * review waiting on a cause that blocks every review has no state in protocol 1, so it is left out.
+ */
 export function queueOf(reviews: readonly ReviewEntry[]): QueueItem[] {
   return reviews.flatMap((review): QueueItem[] => {
-    const state: QueueItem["state"] | null = review.outcome === "running" ? "reviewing"
+    const state: QueueItem["state"] | null = review.outcome === "waiting" ? null
+      : review.outcome === "running" ? "reviewing"
       : review.outcome === "failed" ? "failed"
       : review.submitted ? "submitted"
       : review.needs_you ? "decide" : null;
@@ -102,6 +106,16 @@ export function createPageBridge(options: PageBridgeOptions): PageBridge {
   function listed(runId: string): ReviewEntry {
     const review = readReviews(options.status()?.value).find((entry) => entry.run_id === runId);
     if (!review) throw new Error(`${title()} does not list the review ${runId}.`);
+    return review;
+  }
+
+  /** The review when it is the newest of its pull request's: only the newest can change or be submitted. */
+  function newest(runId: string): ReviewEntry {
+    const review = listed(runId);
+    const versions = versionsOf(readReviews(options.status()?.value), review);
+    if (versions.at(-1)?.run_id !== runId) {
+      throw new Error(`Review ${versions.findIndex((entry) => entry.run_id === runId) + 1} of ${review.repo}#${review.pr} is an earlier version, so it is read-only: only the newest review, review ${versions.length}, can change or be submitted.`);
+    }
     return review;
   }
 
@@ -191,13 +205,13 @@ export function createPageBridge(options: PageBridgeOptions): PageBridge {
         await sendReview(message.run_id, true, message.id);
         break;
       case "change-draft": {
-        const { run_id } = listed(message.run_id);
+        const { run_id } = newest(message.run_id);
         const result = await runToEnd(DRAFT, [run_id, ...changeArgs(message.change)]);
         post({ type: "drafts", run_id, drafts: printedObject(result.stdout, DRAFT) }, message.id);
         break;
       }
       case "submit": {
-        const { run_id } = listed(message.run_id);
+        const { run_id } = newest(message.run_id);
         const result = await run(SUBMIT, [run_id]);
         if (result === null) post({ type: "submit-result", run_id, posted: false, message: "cancelled" }, message.id);
         else if (result.exitCode === 0) post({ type: "submit-result", run_id, posted: true, message: result.stdout.trim() || "submitted" }, message.id);

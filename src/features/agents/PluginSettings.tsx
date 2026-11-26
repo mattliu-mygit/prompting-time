@@ -17,8 +17,9 @@ type Props = {
 };
 
 /**
- * A background agent's screen: where it came from, whether its process runs and who started it,
- * the programs it needs, and its settings in a form drawn from its settings schema. The plugin
+ * A background agent's Settings tab: what it is and where it came from, whether its process runs
+ * and who started it, the programs it needs, and its settings in a form drawn from its settings
+ * schema. The plugin
  * checks and saves the settings; a refusal shows the plugin's own words. The caller makes one per
  * plugin.
  */
@@ -103,15 +104,14 @@ export function PluginSettings(props: Props) {
 
   return (
     // novalidate: the plugin checks the values, so a number under the schema's minimum still goes to it and its refusal shows.
-    <form class="plugin-settings" aria-labelledby="plugin-title" aria-busy={saving() ? "true" : "false"} novalidate onSubmit={(event) => void save(event)}>
+    <form class="plugin-settings" aria-label={`${props.plugin.title} settings`} aria-busy={saving() ? "true" : "false"} novalidate onSubmit={(event) => void save(event)}>
       <div class="plugin-scroll">
         <div class="plugin-column">
-          <header class="plugin-heading">
-            <p class="eyebrow">Background agent</p>
-            <h2 id="plugin-title">{props.plugin.title}</h2>
+          <section class="plugin-section" aria-labelledby="plugin-about-heading">
+            <h3 id="plugin-about-heading" class="section-heading">About</h3>
             <p>{props.plugin.description}</p>
             <p class="plugin-meta">Version {props.plugin.version} · {sourceText(props.plugin.source)}</p>
-          </header>
+          </section>
           <ProcessState plugin={props.plugin} status={props.status} />
           <Programs plugin={props.plugin} />
           <section class="plugin-section" aria-labelledby="plugin-settings-heading">

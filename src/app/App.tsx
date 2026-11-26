@@ -1,19 +1,21 @@
 import { createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
 import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
 import type { PluginSource, ProviderId } from "../bridge/types";
+import { ACTIONS, messageOf, runPluginAction } from "../features/agents/actions";
+import { AgentScreen } from "../features/agents/AgentScreen";
+import { reviewsInProgress, type AgentAction, type AgentTab } from "../features/agents/agentMenu";
 import { BackgroundAgents, type InstallKind } from "../features/agents/BackgroundAgents";
-import { FailedReview } from "../features/agents/FailedReview";
+import { CauseScreen } from "../features/agents/CauseScreen";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
-import { PluginInspector, PluginSettings } from "../features/agents/PluginSettings";
-import { ReviewHistory } from "../features/agents/ReviewHistory";
-import { pastReviews, pluginReviews, reviewKey, reviewsNeedingYou, reviewState, reviewTitle, type ReviewEntry } from "../features/agents/reviews";
-import { describeAgent } from "../features/agents/status";
-import { PluginFrame } from "../features/plugins/PluginFrame";
+import { PluginInspector } from "../features/agents/PluginSettings";
+import { blockingCauses, causeKey, newestRuns, pluginReviews, readyToDecide, reviewKey, reviewState, reviewTitle, shortPullRequest, versionsOf, waitingText, type PluginReview } from "../features/agents/reviews";
+import { ReviewScreen } from "../features/agents/ReviewScreen";
+import { describeAgent, readAgentStatus, readBlocked } from "../features/agents/status";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
-import { AllWork, waitingRoots } from "../features/work/AllWork";
+import { AllWork, waitingRoots, type PluginCause } from "../features/work/AllWork";
 import { NewConversationDialog } from "./NewConversationDialog";
 import { createSnapshot, effectiveConversationStatus, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
 
@@ -31,13 +33,14 @@ const statusWords = { idle: "ready", queued: "queued", running: "working", waiti
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const NARROW_INSPECTOR = "(max-width: 72rem)";
 
-/** What the workspace shows of a plugin instead of a conversation: its settings, its past reviews, or one review in its page. */
-type PluginView = { kind: "settings" | "history"; plugin: string } | { kind: "review"; plugin: string; runId: string };
+/** What the workspace shows of a plugin instead of a conversation: its screen on a tab, one review, or one cause that blocks every review. */
+type PluginView = { kind: "agent"; plugin: string; tab: AgentTab } | { kind: "review"; plugin: string; runId: string } | { kind: "cause"; plugin: string; cause: string };
 
 /**
- * The command center: the All work list with its background agents, the selected conversation's
- * timeline and composer or the selected agent's settings, past reviews, or page, and the inspector,
- * with the dialogs that create and archive conversations and install agents.
+ * The command center: the All work list with its reviews and background agents, the selected
+ * conversation's timeline and composer, or an agent's screen, a review, or a cause that blocks every
+ * review, and the inspector, with the dialogs that create and archive conversations, install
+ * agents, and stop an agent.
  */
 export function App(props: { store: AppStore }) {
   // One store for the app's lifetime. Read once: a prop written as a call, such as
@@ -58,6 +61,10 @@ export function App(props: { store: AppStore }) {
   // What the workspace shows of a background agent instead of the selected conversation.
   const [pluginView, setPluginView] = createSignal<PluginView | null>(null);
   const [installTarget, setInstallTarget] = createSignal<{ kind: InstallKind; path: string } | null>(null);
+  // The control that runs for each agent, the last one's failure, and the agent Stop asks about.
+  const [agentPending, setAgentPending] = createSignal<Readonly<Record<string, AgentAction>>>({});
+  const [agentError, setAgentError] = createSignal<{ plugin: string; text: string } | null>(null);
+  const [stopTarget, setStopTarget] = createSignal<string | null>(null);
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
@@ -69,29 +76,27 @@ export function App(props: { store: AppStore }) {
   const selectedId = createMemo(() => selected()?.id ?? null);
   const selectedPlugin = createMemo(() => snapshot().plugins.items.find(({ name }) => name === pluginView()?.plugin) ?? null);
   const reviewsByPlugin = createMemo(() => pluginReviews(snapshot().plugins));
-  const needsYouReviews = createMemo(() => reviewsNeedingYou(reviewsByPlugin()));
-  const historyCounts = createMemo(() => Object.fromEntries(Object.entries(reviewsByPlugin()).map(([name, reviews]) => [name, pastReviews(reviews).length])));
-  const openRun = () => {
-    const view = pluginView();
-    return view?.kind === "review" ? view.runId : null;
-  };
+  /** The newest run of each pull request of every plugin: the reviews All work lists. */
+  const newestReviews = createMemo(() => Object.entries(reviewsByPlugin()).flatMap(([plugin, reviews]): PluginReview[] => newestRuns(reviews).map((review) => ({ plugin, review }))));
+  const causes = createMemo(() => snapshot().plugins.items.flatMap((plugin): PluginCause[] => blockingCauses(reviewsByPlugin()[plugin.name] ?? [], readBlocked(readAgentStatus(snapshot().plugins.statuses[plugin.name]))).map((cause) => ({ plugin: plugin.name, cause }))));
+  const needsYouReviews = createMemo(() => newestReviews().filter(({ review }) => readyToDecide(review)));
   const openReviewEntry = () => {
     const view = pluginView();
     return view?.kind === "review" ? reviewsByPlugin()[view.plugin]?.find((review) => review.run_id === view.runId) ?? null : null;
   };
-  /**
-   * The open review when it failed, which Prompting Time shows itself, since page protocol 1 shows
-   * only reviews with findings. It stays the same object while the same run stays open, so a new
-   * status does not make a new screen.
-   */
-  const failedReview = createMemo(() => {
-    const review = openReviewEntry();
-    return review?.outcome === "failed" ? review : null;
-  }, { equals: (previous, next) => previous?.run_id === next?.run_id });
-  /** The key of what the list shows as selected: the open review, or the conversation when no plugin shows. */
+  const openCause = () => {
+    const view = pluginView();
+    return view?.kind === "cause" ? causes().find((item) => item.plugin === view.plugin && item.cause.id === view.cause) ?? null : null;
+  };
+  /** The key of what the list shows as selected: the open review's pull request, the open cause, or the conversation when no plugin shows. */
   const currentKey = () => {
     const view = pluginView();
-    if (view?.kind === "review") return reviewKey(view.plugin, view.runId);
+    if (view?.kind === "review") {
+      const review = openReviewEntry();
+      const newest = review ? versionsOf(reviewsByPlugin()[view.plugin] ?? [], review).at(-1) : null;
+      return reviewKey(view.plugin, newest?.run_id ?? view.runId);
+    }
+    if (view?.kind === "cause") return causeKey(view.plugin, view.cause);
     return view ? null : selectedId();
   };
   const parent = () => {
@@ -104,10 +109,11 @@ export function App(props: { store: AppStore }) {
   const workspaceLabel = () => {
     const view = pluginView();
     if (!view || !selectedPlugin()) return "Conversation workspace";
-    return { settings: "Background agent", history: "Past reviews", review: "Review" }[view.kind];
+    return { agent: "Background agent", review: "Review", cause: "Blocked reviews" }[view.kind];
   };
-  /** Everything under "Needs you", in list order: plugin reviews, then conversations. */
+  /** Everything under "Needs you", in list order: causes that block every review, reviews to decide, then conversations. */
   const waiting = () => [
+    ...causes().map(({ plugin, cause }) => ({ key: causeKey(plugin, cause.id), open: () => showPlugin({ kind: "cause", plugin, cause: cause.id }) })),
     ...needsYouReviews().map(({ plugin, review }) => ({ key: reviewKey(plugin, review.run_id), open: () => openReview(plugin, review.run_id) })),
     ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []))
       .map(({ id }) => ({ key: id, open: () => selectConversation(id) })),
@@ -125,8 +131,35 @@ export function App(props: { store: AppStore }) {
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
 
-  const openPlugin = (name: string) => showPlugin({ kind: "settings", plugin: name });
+  const openPlugin = (name: string, tab: AgentTab = "runs") => showPlugin({ kind: "agent", plugin: name, tab });
   const openReview = (plugin: string, runId: string) => showPlugin({ kind: "review", plugin, runId });
+
+  /**
+   * Runs one of an agent's controls from its row menu or its screen: Poll now, Pause, and Resume
+   * run its round, pause, and resume actions; Stop asks first; Start and a confirmed Stop go to
+   * the plugin host. A failure shows the plugin's own words.
+   */
+  async function runAgentAction(name: string, action: AgentAction) {
+    const plugin = snapshot().plugins.items.find((item) => item.name === name);
+    if (!plugin) return;
+    if (action === "settings" || action === "logs") return openPlugin(name, action);
+    if (action === "stop" && stopTarget() !== name) return setStopTarget(name);
+    setAgentError(null);
+    setAgentPending({ ...agentPending(), [name]: action });
+    try {
+      if (action === "stop") await store.stopPlugin(name);
+      else if (action === "start") await store.startPlugin(name);
+      else {
+        await runPluginAction(store.pluginActions, plugin, action === "poll" ? ACTIONS.round : action === "pause" ? ACTIONS.pause : ACTIONS.resume);
+        void store.refreshPlugins();
+      }
+    } catch (reason) {
+      setAgentError({ plugin: name, text: messageOf(reason) });
+    } finally {
+      setAgentPending(Object.fromEntries(Object.entries(agentPending()).filter(([key]) => key !== name)));
+      if (action === "stop") setStopTarget(null);
+    }
+  }
 
   /** Picks the archive or folder, then asks in the install dialog; a cancelled pick does nothing. */
   async function startInstall(kind: InstallKind) {
@@ -318,10 +351,20 @@ export function App(props: { store: AppStore }) {
               <Show
                 when={openReviewEntry()}
                 fallback={
-                  <div class="shell-title">
-                    <h1>{plugin().title} {pluginView()?.kind === "history" ? "past reviews" : pluginView()?.kind === "review" ? "review" : "settings"}</h1>
-                    <span class="shell-meta">Background agent · {describeAgent(plugin(), snapshot().plugins.statuses[plugin().name]).meta}</span>
-                  </div>
+                  <Show
+                    when={pluginView()?.kind === "cause"}
+                    fallback={
+                      <div class="shell-title">
+                        <h1>{plugin().title}</h1>
+                        <span class="shell-meta">Background agent · {describeAgent(plugin(), snapshot().plugins.statuses[plugin().name]).meta}</span>
+                      </div>
+                    }
+                  >
+                    <div class="shell-title">
+                      <h1>{openCause()?.cause.summary ?? "Blocked reviews"}</h1>
+                      <span class="shell-meta">{plugin().title} · {waitingText(openCause()?.cause.reviews.length ?? 0)}</span>
+                    </div>
+                  </Show>
                 }
               >
                 {(review) => (
@@ -375,9 +418,11 @@ export function App(props: { store: AppStore }) {
               </div>
               <Show when={snapshot().queuedCount > 0}><p class="queue-count">{snapshot().queuedCount} queued</p></Show>
               <AllWork
-                reviews={snapshot().statusFilter === "all" || snapshot().statusFilter === "waiting" ? needsYouReviews() : []}
-                selectedReview={pluginView()?.kind === "review" ? currentKey() : null}
+                reviews={snapshot().statusFilter === "all" ? newestReviews() : snapshot().statusFilter === "waiting" ? needsYouReviews() : []}
+                causes={snapshot().statusFilter === "all" || snapshot().statusFilter === "waiting" ? causes() : []}
+                selectedReview={pluginView()?.kind === "review" || pluginView()?.kind === "cause" ? currentKey() : null}
                 onOpenReview={openReview}
+                onOpenCause={(plugin, cause) => showPlugin({ kind: "cause", plugin, cause })}
                 conversations={selectVisibleConversations(snapshot())}
                 conversationsById={snapshot().conversationsById}
                 childPagesById={snapshot().childPagesById}
@@ -390,11 +435,10 @@ export function App(props: { store: AppStore }) {
               />
               <BackgroundAgents
                 plugins={snapshot().plugins}
-                selected={pluginView()?.kind === "settings" ? selectedPlugin()?.name ?? null : null}
-                history={historyCounts()}
-                selectedHistory={pluginView()?.kind === "history" ? selectedPlugin()?.name ?? null : null}
-                onSelect={openPlugin}
-                onOpenHistory={(name) => showPlugin({ kind: "history", plugin: name })}
+                selected={pluginView()?.kind === "agent" ? selectedPlugin()?.name ?? null : null}
+                pending={agentPending()}
+                onSelect={(name) => openPlugin(name)}
+                onAction={(name, action) => void runAgentAction(name, action)}
                 onInstall={(kind) => void startInstall(kind)}
               />
             </aside>
@@ -406,31 +450,52 @@ export function App(props: { store: AppStore }) {
                 <Show when={snapshot().plugins.items.find((plugin) => plugin.name === name)}>
                   {(plugin) => (
                     <Switch>
-                      <Match when={pluginView()?.kind === "review"}>
-                        <Show
-                          when={failedReview()}
-                          keyed
-                          fallback={
-                            <PluginFrame
-                              plugin={plugin()}
-                              status={snapshot().plugins.statuses[name]}
-                              runId={openRun()}
-                              actions={store.pluginActions}
-                              onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
-                              onShowReview={(runId) => {
-                                if (openRun() !== runId) setPluginView({ kind: "review", plugin: name, runId });
-                              }}
-                            />
-                          }
-                        >
-                          {(review: ReviewEntry) => <FailedReview plugin={plugin()} review={review} actions={store.pluginActions} />}
-                        </Show>
+                      <Match when={pluginView()?.kind === "review" && (pluginView() as { runId: string }).runId}>
+                        {(runId) => (
+                          <ReviewScreen
+                            plugin={plugin()}
+                            status={snapshot().plugins.statuses[name]}
+                            runId={runId()}
+                            actions={store.pluginActions}
+                            controls={store}
+                            onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
+                            onOpenReview={(next) => setPluginView({ kind: "review", plugin: name, runId: next })}
+                            onOpenCause={(cause) => showPlugin({ kind: "cause", plugin: name, cause })}
+                          />
+                        )}
                       </Match>
-                      <Match when={pluginView()?.kind === "history"}>
-                        <ReviewHistory plugin={plugin()} status={snapshot().plugins.statuses[name]} onOpen={(runId) => openReview(name, runId)} />
+                      <Match when={pluginView()?.kind === "cause" && (pluginView() as { cause: string }).cause}>
+                        {(cause) => (
+                          <Show when={cause()} keyed>
+                            {(id: string) => (
+                              <CauseScreen
+                                plugin={plugin()}
+                                status={snapshot().plugins.statuses[name]}
+                                cause={id}
+                                actions={store.pluginActions}
+                                onOpenReview={(runId) => openReview(name, runId)}
+                                onOpenLogs={() => openPlugin(name, "logs")}
+                              />
+                            )}
+                          </Show>
+                        )}
                       </Match>
-                      <Match when={pluginView()?.kind === "settings"}>
-                        <PluginSettings plugin={plugin()} status={snapshot().plugins.statuses[name]} actions={store.pluginActions} />
+                      <Match when={pluginView()?.kind === "agent" && (pluginView() as { tab: AgentTab }).tab}>
+                        {(tab) => (
+                          <AgentScreen
+                            plugin={plugin()}
+                            status={snapshot().plugins.statuses[name]}
+                            tab={tab()}
+                            onTab={(next) => setPluginView({ kind: "agent", plugin: name, tab: next })}
+                            pending={agentPending()[name] ?? null}
+                            error={agentError()?.plugin === name ? agentError()!.text : null}
+                            onAction={(action) => void runAgentAction(name, action)}
+                            actions={store.pluginActions}
+                            controls={store}
+                            onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
+                            onOpenReview={(runId) => openReview(name, runId)}
+                          />
+                        )}
                       </Match>
                     </Switch>
                   )}
@@ -477,6 +542,34 @@ export function App(props: { store: AppStore }) {
         </div>
         <Show when={snapshot().error}><p role="alert" class="inline-error lifecycle-error">{snapshot().error}</p></Show>
         <Show when={lifecycleError() && !creating() && !archiveTarget()}><p role="alert" class="inline-error lifecycle-error">{lifecycleError()}</p></Show>
+        {/* A control run from an agent's row menu fails here; its screen shows the failure itself. */}
+        <Show when={agentError() && !(pluginView()?.kind === "agent" && pluginView()?.plugin === agentError()!.plugin)}>
+          <p role="alert" class="inline-error lifecycle-error">{agentError()!.text}</p>
+        </Show>
+        <Show when={snapshot().plugins.items.find((plugin) => plugin.name === stopTarget())}>
+          {(plugin) => (
+            <ConfirmDialog
+              open
+              busy={agentPending()[plugin().name] === "stop"}
+              title={`Stop ${plugin().title}?`}
+              cancelLabel="Keep running"
+              confirmLabel={`Stop ${plugin().title}`}
+              onConfirm={() => void runAgentAction(plugin().name, "stop")}
+              onCancel={() => setStopTarget(null)}
+            >
+              <Show
+                when={reviewsInProgress(snapshot().plugins.statuses[plugin().name]).length > 0}
+                fallback={<p>Stopping ends {plugin().title}'s process now. No review is in progress.</p>}
+              >
+                <p>Stopping ends {plugin().title}'s process now, and with it the {reviewsInProgress(snapshot().plugins.statuses[plugin().name]).length === 1 ? "review" : "reviews"} in progress:</p>
+                <ul class="stop-reviews">
+                  {reviewsInProgress(snapshot().plugins.statuses[plugin().name]).map((review) => <li>{shortPullRequest(review)} · {reviewTitle(review)}</li>)}
+                </ul>
+              </Show>
+              <p>Pause instead lets reviews in progress finish and skips polls until you resume. Prompting Time starts {plugin().title} again the next time it opens.</p>
+            </ConfirmDialog>
+          )}
+        </Show>
         <Show when={installTarget()} keyed>
           {(target) => <InstallPluginDialog kind={target.kind} path={target.path} onInstall={install} onCancel={() => setInstallTarget(null)} />}
         </Show>
@@ -509,9 +602,9 @@ export function App(props: { store: AppStore }) {
         </ConfirmDialog>
         <CommandPalette
           open={paletteOpen()}
-          label="Search conversations and commands"
-          placeholder="Search conversations and commands…"
-          emptyText="No conversations or commands found."
+          label="Search conversations, reviews, and commands"
+          placeholder="Search conversations, reviews, and commands…"
+          emptyText="No conversations, reviews, or commands found."
           groups={[
             {
               heading: "Conversations",
@@ -525,6 +618,16 @@ export function App(props: { store: AppStore }) {
                   current: conversation.id === selectedId(),
                 };
               }),
+            },
+            {
+              heading: "Reviews",
+              items: newestReviews().map(({ plugin, review }) => ({
+                id: `review:${plugin}:${review.run_id}`,
+                label: reviewTitle(review),
+                detail: `${shortPullRequest(review)} · ${reviewState(review).words}`,
+                keywords: [review.repo, `#${review.pr}`, shortPullRequest(review)],
+                current: currentKey() === reviewKey(plugin, review.run_id),
+              })),
             },
             {
               heading: "Commands",
@@ -544,7 +647,10 @@ export function App(props: { store: AppStore }) {
           ]}
           onClose={() => setPaletteOpen(false)}
           onSelect={(id) => {
-            if (id.startsWith("conversation:")) {
+            if (id.startsWith("review:")) {
+              const [, plugin = "", ...run] = id.split(":");
+              openReview(plugin, run.join(":"));
+            } else if (id.startsWith("conversation:")) {
               const conversationId = id.slice("conversation:".length);
               selectConversation(conversationId);
               if (snapshot().conversationsById[conversationId]?.capabilities.canSend) setMessageFocusRequested(true);

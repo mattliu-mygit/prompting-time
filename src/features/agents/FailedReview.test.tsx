@@ -5,7 +5,7 @@ import type { PluginActionRequest, PluginActionResult } from "../../bridge/types
 import { actionResult, fixturePlugin, fixtureReviews, fixtureShown, pageActions } from "../../test/plugins";
 import { axeViolations, render, settle } from "../../test/render";
 import { FailedReview } from "./FailedReview";
-import { readReviews } from "./reviews";
+import { readReviews, type ReviewEntry } from "./reviews";
 
 const FAILED = "20261124T090000Z-55";
 /** An earlier run of #101 that failed without recording why. */
@@ -16,8 +16,8 @@ const REASON = "the review run exited 1 without findings; see runs/20261124T0900
  * Renders the screen for a failed review over a fake Whooper. `answer` may answer an action in place
  * of the fake: show-review prints the run as fixtureShown does, and retry, round, and ask succeed.
  */
-function renderFailed(runId = FAILED, answer: (request: PluginActionRequest) => PluginActionResult | undefined = () => undefined) {
-  const review = readReviews({ reviews: fixtureReviews() }).find((entry) => entry.run_id === runId)!;
+function renderFailed(runId = FAILED, answer: (request: PluginActionRequest) => PluginActionResult | undefined = () => undefined, overrides: Partial<ReviewEntry> = {}, sameCause: { count: number; open(): void } | null = null) {
+  const review = { ...readReviews({ reviews: fixtureReviews() }).find((entry) => entry.run_id === runId)!, ...overrides };
   const pluginRequest = vi.fn(async (request: PluginActionRequest): Promise<PluginActionResult> => {
     const answered = answer(request);
     if (answered) return answered;
@@ -29,7 +29,7 @@ function renderFailed(runId = FAILED, answer: (request: PluginActionRequest) => 
       default: throw new Error(`unexpected ${request.action}`);
     }
   });
-  render(() => <FailedReview plugin={fixturePlugin({ actions: pageActions })} review={review} actions={{ pluginRequest, savePluginSettings: vi.fn() }} />);
+  render(() => <FailedReview plugin={fixturePlugin({ actions: pageActions })} review={review} actions={{ pluginRequest, savePluginSettings: vi.fn() }} sameCause={sameCause} />);
   return { pluginRequest };
 }
 
@@ -66,20 +66,18 @@ describe("a failed review", () => {
     expect(screen.queryByRole("list", { name: "Answers" })).not.toBeInTheDocument();
   });
 
-  it("retries with the run ID and shows what Whooper printed, then runs a round with Run now", async () => {
-    const { pluginRequest } = renderFailed();
-    await settle();
-
-    click("Retry");
-    expect(await screen.findByText("queued acme/gadgets#55 for the next round")).toBeInTheDocument();
-    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "retry", args: [FAILED], confirmedFingerprint: null });
-    expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "round" }));
+  it("names a cause that blocks every review, says the review waits, and opens every review waiting on it", async () => {
+    const open = vi.fn();
+    renderFailed(FAILED, () => undefined, { outcome: "waiting", cause: { id: "docker", summary: "Docker isn't running", scope: "all" } }, { count: 3, open });
+    expect(screen.getByRole("heading", { name: "Waiting · Docker isn't running" })).toBeInTheDocument();
+    expect(screen.getByText(/so this review waits for the next round/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
-
-    click("Run now");
-    expect(await screen.findByLabelText("What the round printed")).toHaveTextContent("acme/gadgets#55: approve once CI passes");
-    expect(pluginRequest).toHaveBeenLastCalledWith({ plugin: "whooper", action: "round", args: [], confirmedFingerprint: null });
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    click("See all 3 reviews waiting");
+    expect(open).toHaveBeenCalledOnce();
+    click("Ask why");
+    await settle();
+    expect(screen.getByRole("textbox", { name: "Question" })).toHaveValue("Why is this review waiting?");
+    expect(await axeViolations()).toEqual([]);
   });
 
   it("asks why with the question typed and adds the answer", async () => {
@@ -103,26 +101,14 @@ describe("a failed review", () => {
   });
 
   it("shows Whooper's own words when an action fails", async () => {
-    let retries = 0;
     renderFailed(FAILED, (request) => {
       switch (request.action) {
         case "show-review": return actionResult({ exitCode: 1, stderr: "whooper-show: no run 20261124T090000Z-55 in runs\n" });
-        case "retry": return (retries += 1) === 1 ? actionResult({ exitCode: 1, stderr: "whooper-retry: acme/gadgets#55 is being reviewed now\n" }) : undefined;
-        case "round": return actionResult({ exitCode: 1, stderr: "whooper-round: a round is already running, in process 4242\n" });
         case "ask": return actionResult({ exitCode: 1, stderr: "whooper-ask: the ask run passed its 5-minute limit\n" });
         default: return undefined;
       }
     });
     expect(await screen.findByText("whooper-show: no run 20261124T090000Z-55 in runs")).toHaveAttribute("role", "alert");
-
-    click("Retry");
-    expect(await screen.findByText("whooper-retry: acme/gadgets#55 is being reviewed now")).toHaveAttribute("role", "alert");
-    click("Retry");
-    await screen.findByText("queued acme/gadgets#55 for the next round");
-    expect(screen.queryByText("whooper-retry: acme/gadgets#55 is being reviewed now")).not.toBeInTheDocument();
-    click("Run now");
-    expect(await screen.findByText("whooper-round: a round is already running, in process 4242")).toHaveAttribute("role", "alert");
-    expect(screen.getByRole("button", { name: "Run now" })).toBeEnabled();
 
     click("Ask why");
     click("Ask");

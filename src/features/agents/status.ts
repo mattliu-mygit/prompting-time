@@ -4,7 +4,8 @@ import type { PluginStatusRead } from "../../app/store";
 
 /**
  * What a plugin's status action prints, in the format of `whooper-status --json` version 1, which
- * Whooper's header describes field by field. Times are local ISO 8601 with an offset.
+ * Whooper's header describes field by field. Times are local ISO 8601 with an offset. `blocked`
+ * and `rounds` came later in version 1, so a status without them reads as having neither.
  */
 export type AgentStatus = {
   version: 1;
@@ -19,6 +20,19 @@ export type AgentStatus = {
     selected: number | null;
     reviews: { pr: string; outcome: "reviewed" | "failed" | "interrupted" }[];
   } | null;
+  /** The cause that stops every review now, such as Docker not running: since when, and how many reviews wait on it. */
+  blocked?: { id: string; summary: string; scope: "all"; since: string | null; waiting: number } | null;
+  /** The last 50 rounds, newest first. */
+  rounds?: Round[];
+};
+
+/** One round: a poll and the reviews it started. `reason` says why it failed or was skipped. */
+export type Round = {
+  started_at: string;
+  ended_at: string | null;
+  result: "done" | "poll_failed" | "interrupted" | "skipped";
+  selected: number | null;
+  reason: string | null;
 };
 
 /** The status, when the plugin printed one in a format this version of Prompting Time reads. */
@@ -35,6 +49,28 @@ export function readAgentStatus(read: PluginStatusRead | undefined): AgentStatus
   return fits ? (status as AgentStatus) : null;
 }
 
+const ROUND_RESULTS = new Set(["done", "poll_failed", "interrupted", "skipped"]);
+
+/** The cause that blocks every review now, or null when none does or it does not fit. */
+export function readBlocked(status: AgentStatus | null): NonNullable<AgentStatus["blocked"]> | null {
+  const blocked = status?.blocked;
+  return blocked && typeof blocked.id === "string" && typeof blocked.summary === "string" && typeof blocked.waiting === "number"
+    ? { ...blocked, since: typeof blocked.since === "string" ? blocked.since : null }
+    : null;
+}
+
+/** The rounds the status lists, newest first, leaving out any that does not fit. */
+export function readRounds(status: AgentStatus | null): Round[] {
+  const rounds: unknown = status?.rounds;
+  if (!Array.isArray(rounds)) return [];
+  return rounds.flatMap((round: Partial<Round> | null): Round[] => (
+    round && typeof round.started_at === "string" && typeof round.result === "string" && ROUND_RESULTS.has(round.result)
+      ? [{ started_at: round.started_at, ended_at: typeof round.ended_at === "string" ? round.ended_at : null, result: round.result,
+        selected: typeof round.selected === "number" ? round.selected : null, reason: typeof round.reason === "string" && round.reason ? round.reason : null }]
+      : []
+  )).sort((left, right) => right.started_at.localeCompare(left.started_at));
+}
+
 /** The programs the plugin needs with its current settings that Prompting Time did not find. */
 export function missingPrograms(plugin: PluginSnapshot): string[] {
   return plugin.prerequisites.filter((prerequisite) => prerequisite.needed && prerequisite.path === null).map(({ command }) => command);
@@ -49,29 +85,33 @@ export function shortTime(iso: string, now: Date): string {
 }
 
 /**
- * The one gray line and the dot of a background agent's row, such as "running · next poll 3:45 PM"
- * with a green dot. What stops the plugin from running comes first, then what its status says.
+ * The one gray line and the dot of a background agent's row, which its screen repeats, such as
+ * "Running · next poll 3:45 PM" with a green dot, or "Can't review · Docker isn't running" in red.
+ * What stops the plugin from running comes first, then a cause that blocks every review, then what
+ * its status says.
  */
 export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | undefined, now = new Date()): { meta: string; status: Status } {
   const process = plugin.process;
   if (process.kind === "notRunning") {
     const missing = missingPrograms(plugin);
-    if (plugin.settingsError) return { meta: "can't read its settings", status: "error" };
-    if (missing.length > 0) return { meta: `missing ${missing.join(", ")}`, status: "attention" };
+    if (plugin.settingsError) return { meta: "Can't read its settings", status: "error" };
+    if (missing.length > 0) return { meta: `Missing ${missing.join(", ")}`, status: "attention" };
     if (process.exit && process.exit.code !== 0) {
-      return { meta: process.exit.code === null ? "stopped by a signal" : `exited with code ${process.exit.code}`, status: "error" };
+      return { meta: process.exit.code === null ? "Stopped by a signal" : `Exited with code ${process.exit.code}`, status: "error" };
     }
-    return { meta: "not running", status: "idle" };
+    return { meta: "Stopped", status: "idle" };
   }
   const status = readAgentStatus(read);
-  if (!status) return { meta: "running", status: "success" };
+  if (!status) return { meta: "Running", status: "success" };
+  const blocked = readBlocked(status);
+  if (blocked) return { meta: `Can't review · ${blocked.summary}`, status: "error" };
   if (status.round.running) {
-    return { meta: status.round.reviewing ? `reviewing ${status.round.reviewing}` : "polling now", status: "running" };
+    return { meta: status.round.reviewing ? `Reviewing ${status.round.reviewing}` : "Polling now", status: "running" };
   }
-  if (status.paused) return { meta: "paused", status: "idle" };
+  if (status.paused) return { meta: "Paused", status: "idle" };
   const next = status.next_round ? shortTime(status.next_round, now) : null;
   if (status.last_round?.result === "poll_failed") {
-    return { meta: `poll failed ${shortTime(status.last_round.ended_at, now)}${next ? ` · next try ${next}` : ""}`, status: "error" };
+    return { meta: `Poll failed ${shortTime(status.last_round.ended_at, now)}${next ? ` · next try ${next}` : ""}`, status: "error" };
   }
-  return { meta: next ? `running · next poll ${next}` : "running", status: "success" };
+  return { meta: next ? `Running · next poll ${next}` : "Running", status: "success" };
 }

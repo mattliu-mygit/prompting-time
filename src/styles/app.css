@@ -181,9 +181,53 @@ body {
   margin-block: var(--s-space-8) var(--s-space-4);
 }
 
-/* A plugin's past reviews, under the plugin's own row */
-.agent-history-row {
-  margin-inline-start: var(--s-space-12);
+/* An agent's row, with its menu at the end of the title line. */
+.agent-row {
+  position: relative;
+}
+
+.agent-row .pt-list-row {
+  inline-size: 100%;
+  padding-inline-end: var(--s-space-32);
+}
+
+.agent-row-menu {
+  position: absolute;
+  inset-block-start: var(--s-space-4);
+  inset-inline-end: var(--s-space-4);
+}
+
+/* Quiet like a work row's disclosure: the menu shows on the row you point at, focus, or open. */
+.agent-row:not(:hover, :focus-within, :has([aria-current="true"], [aria-expanded="true"])) .agent-row-menu {
+  opacity: 0;
+}
+
+/* Done folds to its heading, which holds the toggle and the count. */
+.work-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.work-group-toggle:hover {
+  color: var(--s-text);
+}
+
+.work-group-toggle svg {
+  inline-size: var(--s-space-12);
+  block-size: var(--s-space-12);
+}
+
+.work-group-count {
+  color: var(--s-text-subtle);
 }
 
 /* A plugin's page fills the workspace; a notice above it says why it cannot show what you opened. */
@@ -1137,6 +1181,307 @@ body {
 
 .review-answer-question {
   color: var(--s-text-muted);
+}
+
+/* A background agent's screen: its header and health, then tabs whose panel fills the rest. */
+.agent-screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--s-space-16);
+  inline-size: min(100%, var(--s-content-max));
+  min-block-size: 0;
+  margin-inline: auto;
+  padding: var(--s-space-24) var(--s-space-16) 0;
+}
+
+.agent-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-space-12);
+}
+
+.agent-icon {
+  display: grid;
+  place-items: center;
+  inline-size: var(--s-space-32);
+  block-size: var(--s-space-32);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  color: var(--s-text-muted);
+}
+
+.agent-icon svg {
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+}
+
+.agent-heading {
+  display: grid;
+  flex: 1;
+  gap: var(--s-space-4);
+  min-inline-size: 0;
+}
+
+.agent-heading h2 {
+  margin: 0;
+  font-size: var(--s-size-xl);
+  font-weight: var(--s-heading-weight);
+}
+
+.agent-heading p {
+  margin: 0;
+}
+
+.agent-status {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+}
+
+.agent-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.agent-health {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.agent-health-cell {
+  display: grid;
+  align-content: start;
+  gap: var(--s-space-4);
+  padding: var(--s-space-12) var(--s-space-16);
+  font-size: var(--s-size-sm);
+}
+
+.agent-health-cell + .agent-health-cell {
+  border-inline-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.agent-health-cell small {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  letter-spacing: var(--s-tracking-wider);
+  text-transform: uppercase;
+}
+
+.agent-health-cell span {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.agent-health-cell span[data-bad] {
+  color: var(--s-error);
+}
+
+.agent-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-space-4);
+  block-size: var(--s-space-32);
+}
+
+.agent-bar {
+  display: flex;
+  flex: 1;
+  flex-direction: column-reverse;
+  block-size: 100%;
+  background: var(--s-surface);
+}
+
+.agent-bar-done {
+  background: var(--s-success);
+}
+
+.agent-bar-failed {
+  background: var(--s-error);
+}
+
+.agent-bar-skipped {
+  background: var(--s-border-strong);
+}
+
+.agent-tabs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.agent-tabs > .pt-tabpanel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.agent-panel {
+  display: grid;
+  align-content: start;
+  gap: var(--s-space-12);
+  min-block-size: 0;
+  padding-block: var(--s-space-12);
+  overflow-y: auto;
+}
+
+.agent-filters {
+  display: flex;
+  gap: var(--s-space-4);
+}
+
+.agent-filters .pt-button[aria-pressed="true"] {
+  border-color: var(--s-border-strong);
+  background: var(--s-secondary-hover);
+  color: var(--s-text);
+}
+
+.agent-table {
+  inline-size: 100%;
+  border-collapse: collapse;
+  font-size: var(--s-size-sm);
+}
+
+.agent-table th {
+  padding: var(--s-space-4) var(--s-space-8);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+  text-align: start;
+}
+
+.agent-table td {
+  padding: var(--s-space-4) var(--s-space-8);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.agent-muted {
+  color: var(--s-text-muted);
+}
+
+.agent-result {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.agent-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--s-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.agent-link:hover {
+  text-decoration: underline;
+}
+
+.agent-log {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.agent-log-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-space-12);
+}
+
+.agent-log-bar .pt-field {
+  flex: 1;
+}
+
+.agent-log-text.plugin-log {
+  max-block-size: none;
+  min-block-size: 12rem;
+}
+
+.agent-tabs .plugin-settings .plugin-column {
+  padding-inline: 0;
+}
+
+/* A review: its header bar and banners over the plugin's page or Prompting Time's own screen. */
+.review-screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.review-header {
+  display: grid;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-16);
+  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.review-header-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  min-inline-size: 0;
+}
+
+.review-version {
+  font-size: var(--s-size-sm);
+}
+
+.review-header-spacer {
+  flex: 1;
+}
+
+.review-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
+  background: var(--s-surface);
+  font-size: var(--s-size-sm);
+}
+
+.review-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.run-now {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.run-now p {
+  margin: 0;
+}
+
+.cause-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.cause-title svg {
+  flex: none;
+  inline-size: var(--s-space-20);
+  block-size: var(--s-space-20);
+  color: var(--s-error);
+}
+
+.cause-refusals,
+.stop-reviews {
+  margin: var(--s-space-4) 0 0;
+  padding-inline-start: var(--s-space-16);
 }
 
 .install-path code {

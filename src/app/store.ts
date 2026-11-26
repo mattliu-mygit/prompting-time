@@ -25,6 +25,7 @@ import type {
   InstallPluginRequest,
   PluginActionRequest,
   PluginActionResult,
+  PluginLog,
   PluginSnapshot,
   PluginSource,
   SavePluginSettingsRequest,
@@ -80,6 +81,9 @@ export type AppApi = {
   savePluginSettings(request: SavePluginSettingsRequest): Promise<PluginActionResult>;
   pickPluginFolder(): Promise<string | null>;
   pickPluginArchive(): Promise<string | null>;
+  stopPlugin(request: { plugin: string }): Promise<PluginSnapshot>;
+  startPlugin(request: { plugin: string }): Promise<PluginSnapshot>;
+  readPluginLog(request: { plugin: string }): Promise<PluginLog>;
 };
 
 export type ConversationActions = Pick<
@@ -102,6 +106,9 @@ export type AppActions = ConversationActions & Pick<AppApi, "listRunAudits" | "l
 /** What a plugin's screens run: its actions, and saving its settings. */
 export type PluginActions = Pick<AppApi, "pluginRequest" | "savePluginSettings">;
 
+/** What a background agent's controls run besides its actions: stop, start, its log, and reading its status again. */
+export type AgentControls = Pick<AppStore, "stopPlugin" | "startPlugin" | "readPluginLog" | "refreshPlugins">;
+
 /** Files changed in a plugin's state folder: their paths relative to it, or null for any of them. */
 export type PluginFilesChange = Readonly<{ plugin: string; files: readonly string[] | null }>;
 
@@ -115,7 +122,7 @@ export type PluginsSnapshot = Readonly<{
   error: string | null;
   /** Installed plugins by name, as list_plugins returns them. */
   items: readonly PluginSnapshot[];
-  /** The status of each running plugin that has a status action, by plugin name. */
+  /** The status of each plugin that has a status action and can run it, by plugin name. */
   statuses: Readonly<Record<string, PluginStatusRead>>;
 }>;
 
@@ -187,6 +194,14 @@ export type AppStore = {
   pickPluginArchive(): Promise<string | null>;
   /** Calls the listener with each change to a plugin's state folder, until the returned function is called. */
   onPluginFilesChange(listener: (change: PluginFilesChange) => void): () => void;
+  /** Stops the copy of a plugin Prompting Time started; a refusal, such as for a copy started elsewhere, is thrown. */
+  stopPlugin(name: string): Promise<void>;
+  /** Starts a stopped or exited plugin unless something keeps it from starting, which its snapshot then shows. */
+  startPlugin(name: string): Promise<void>;
+  /** The end of what a plugin's start command printed since Prompting Time last started it. */
+  readPluginLog(name: string): Promise<PluginLog>;
+  /** Reads the plugins and their statuses again, as after a change in their state folders. */
+  refreshPlugins(): Promise<void>;
   readonly actions: AppActions;
   readonly pluginActions: PluginActions;
 };
@@ -407,11 +422,11 @@ export function createAppStore(api: AppApi): AppStore {
       }
       return;
     }
-    // A plugin that is not running reports nothing new, and its status command may need a program
-    // that is missing.
-    const running = items.filter((plugin) => plugin.process.kind !== "notRunning"
-      && plugin.actions.some((action) => action.name === STATUS_ACTION && !action.confirm));
-    const statuses = Object.fromEntries(await Promise.all(running.map(async (plugin) => [plugin.name, await readPluginStatus(plugin.name)] as const)));
+    // The status action reads the plugin's files, so a stopped plugin still lists its reviews; one
+    // that cannot start may lack a program its status command needs, so it is not asked.
+    const readable = items.filter((plugin) => plugin.actions.some((action) => action.name === STATUS_ACTION && !action.confirm)
+      && (plugin.process.kind !== "notRunning" || (!plugin.settingsError && !plugin.prerequisites.some((program) => program.needed && program.path === null))));
+    const statuses = Object.fromEntries(await Promise.all(readable.map(async (plugin) => [plugin.name, await readPluginStatus(plugin.name)] as const)));
     if (!disposed) update({ plugins: { loaded: true, error: null, items, statuses } });
   }
 
@@ -428,14 +443,18 @@ export function createAppStore(api: AppApi): AppStore {
     }
   }
 
+  /** Puts a plugin's new snapshot in the list, then reads the plugins and their statuses again. */
+  function replacePlugin(plugin: PluginSnapshot) {
+    if (disposed) return;
+    const items = [...snapshot.plugins.items.filter(({ name }) => name !== plugin.name), plugin]
+      .sort((left, right) => left.name.localeCompare(right.name));
+    update({ plugins: { ...snapshot.plugins, items } });
+    void requestPluginRefresh();
+  }
+
   async function installPlugin(source: PluginSource): Promise<PluginSnapshot> {
     const installed = await api.installPlugin({ source });
-    if (!disposed) {
-      const items = [...snapshot.plugins.items.filter(({ name }) => name !== installed.name), installed]
-        .sort((left, right) => left.name.localeCompare(right.name));
-      update({ plugins: { ...snapshot.plugins, items } });
-      void requestPluginRefresh();
-    }
+    replacePlugin(installed);
     return installed;
   }
 
@@ -954,6 +973,10 @@ export function createAppStore(api: AppApi): AppStore {
       pluginFilesListeners.add(listener);
       return () => pluginFilesListeners.delete(listener);
     },
+    stopPlugin: async (plugin) => replacePlugin(await api.stopPlugin({ plugin })),
+    startPlugin: async (plugin) => replacePlugin(await api.startPlugin({ plugin })),
+    readPluginLog: (plugin) => api.readPluginLog({ plugin }),
+    refreshPlugins: () => requestPluginRefresh(),
     retry: async () => {
       if (disposed) return;
       if (!unlisten) {

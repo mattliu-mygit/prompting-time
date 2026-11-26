@@ -93,7 +93,7 @@ describe("a background agent's settings", () => {
     }));
     await screen.findByRole("spinbutton", { name: "Poll every" });
     expect(screen.getByText(/^Version 0\.1\.0 · local archive \/synthetic\/release\/whooper-0\.1\.0\.tar\.gz, SHA-256 bbbbbbbbbbbb…$/)).toBeInTheDocument();
-    expect(screen.getByText("missing slackdump")).toBeInTheDocument();
+    expect(screen.getByText("Missing slackdump")).toBeInTheDocument();
     expect(screen.getByText("Prompting Time starts it when it opens once nothing below is missing.")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Missing: slackdump. Install it on the PATH, then reopen Prompting Time to start Whooper.");
     const programs = screen.getByRole("list");

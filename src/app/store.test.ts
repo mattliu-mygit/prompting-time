@@ -685,12 +685,13 @@ describe("app store", () => {
     await waitFor(() => expect(fake.api.listPlugins).toHaveBeenCalledTimes(2));
   });
 
-  it("lists plugins and reads the status of each running one", async () => {
+  it("lists plugins and reads the status of each one that can run it, stopped or not", async () => {
     const fake = createFakeApi();
     const status = fixtureStatus("2026-11-26T15:45:00-05:00");
     fake.api.listPlugins = vi.fn().mockResolvedValue([
       fixturePlugin(),
       fixturePlugin({ name: "stopped-agent", process: { kind: "notRunning", exit: null } }),
+      fixturePlugin({ name: "broken-agent", process: { kind: "notRunning", exit: null }, prerequisites: [{ command: "gh", purpose: "Reads pull requests.", needed: true, path: null }] }),
     ]);
     fake.api.pluginRequest = vi.fn().mockResolvedValue(actionResult({ stdout: JSON.stringify(status) }));
     const store = createAppStore(fake.api);
@@ -698,9 +699,34 @@ describe("app store", () => {
 
     await waitFor(() => expect(store.getSnapshot().plugins.loaded).toBe(true));
     const plugins = store.getSnapshot().plugins;
-    expect(plugins.items.map(({ name }) => name)).toEqual(["whooper", "stopped-agent"]);
-    expect(plugins.statuses).toEqual({ whooper: { value: status, error: null } });
-    expect(fake.api.pluginRequest).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper", action: "status", args: [], confirmedFingerprint: null });
+    expect(plugins.items.map(({ name }) => name)).toEqual(["whooper", "stopped-agent", "broken-agent"]);
+    expect(plugins.statuses).toEqual({ whooper: { value: status, error: null }, "stopped-agent": { value: status, error: null } });
+    expect(fake.api.pluginRequest).toHaveBeenCalledTimes(2);
+    expect(fake.api.pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ plugin: "broken-agent" }));
+  });
+
+  it("stops and starts a plugin and shows its new snapshot before reading the plugins again", async () => {
+    const fake = createFakeApi();
+    const stopped = fixturePlugin({ process: { kind: "notRunning", exit: null } });
+    fake.api.listPlugins = vi.fn().mockResolvedValue([fixturePlugin()]);
+    fake.api.pluginRequest = vi.fn().mockResolvedValue(actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T15:45:00-05:00")) }));
+    fake.api.stopPlugin = vi.fn().mockResolvedValue(stopped);
+    fake.api.startPlugin = vi.fn().mockResolvedValue(fixturePlugin({ process: { kind: "started", pid: 77 } }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await waitFor(() => expect(store.getSnapshot().plugins.loaded).toBe(true));
+
+    fake.api.listPlugins = vi.fn().mockResolvedValue([stopped]);
+    await store.stopPlugin("whooper");
+    expect(fake.api.stopPlugin).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper" });
+    expect(store.getSnapshot().plugins.items[0]!.process).toEqual({ kind: "notRunning", exit: null });
+    await waitFor(() => expect(fake.api.listPlugins).toHaveBeenCalled());
+
+    await store.startPlugin("whooper");
+    expect(fake.api.startPlugin).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper" });
+    expect(store.getSnapshot().plugins.items[0]!.process).toEqual({ kind: "started", pid: 77 });
+    fake.api.stopPlugin = vi.fn().mockRejectedValue(new Error("whooper runs as process 9, which Prompting Time did not start."));
+    await expect(store.stopPlugin("whooper")).rejects.toThrow("did not start");
   });
 
   it("keeps a failed status and unavailable plugins from stopping the conversations", async () => {

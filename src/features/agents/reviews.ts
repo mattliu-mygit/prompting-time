@@ -2,10 +2,19 @@ import type { Status } from "@prompting-time/ui";
 import type { PluginSnapshot } from "../../bridge/types";
 import type { PluginsSnapshot } from "../../app/store";
 
+/** Why a review failed or waits, as the plugin names it: a cause that blocks every review ("all"), such as Docker not running, or one pull request's ("pr"). */
+export type ReviewCause = { id: string; summary: string; scope: "all" | "pr" };
+
 /**
- * One review in the `reviews` of `whooper-status --json`: Whooper's runs of the last 30 days,
- * newest first. `pr` is the pull request's number in `repo`, and times are ISO 8601. Whooper
- * decides `needs_you`: whether the review waits on the user.
+ * One review in the `reviews` of `whooper-status --json`: one run of Whooper's review of a pull
+ * request in the last 30 days, newest first. `pr` is the pull request's number in `repo`, and times
+ * are ISO 8601. Whooper decides `needs_you`: whether the review waits on the user. A rerun is a new
+ * run of the same pull request: the newest is the review the lists show, the rest are its earlier
+ * versions. `head_sha` is the commit the run reviewed and `pr_head_sha` the pull request's head as
+ * Whooper last saw it. A run "waiting" did not start because a cause that blocks every review
+ * stopped its round. `skipped_by_user` says the user skipped it; `skipped` that Whooper's review
+ * skipped the change. The fields after `needs_you` came later in format version 1, so an entry
+ * without them reads as having none.
  */
 export type ReviewEntry = {
   run_id: string;
@@ -15,23 +24,35 @@ export type ReviewEntry = {
   url: string | null;
   started_at: string;
   ended_at: string | null;
-  outcome: "running" | "reviewed" | "failed";
+  outcome: "running" | "reviewed" | "failed" | "waiting";
   verdict: string | null;
   skipped: boolean;
   findings: number;
   submitted: { event: "APPROVE" | "COMMENT"; at: string } | null;
   needs_you: boolean;
+  head_sha: string | null;
+  pr_head_sha: string | null;
+  cause: ReviewCause | null;
+  skipped_by_user: boolean;
 };
 
 /** A review and the plugin that lists it. */
 export type PluginReview = { plugin: string; review: ReviewEntry };
 
-const OUTCOMES = new Set(["running", "reviewed", "failed"]);
+const OUTCOMES = new Set(["running", "reviewed", "failed", "waiting"]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const stringOrNull = (value: unknown) => value === null || typeof value === "string";
+const optional = (value: unknown, fits: (value: unknown) => boolean) => value === undefined || fits(value);
 
-function fitsReview(value: unknown): value is ReviewEntry {
+/** A cause the plugin printed, or null when it does not fit. */
+export function readCause(value: unknown): ReviewCause | null {
+  return isRecord(value) && typeof value.id === "string" && value.id !== "" && typeof value.summary === "string" && (value.scope === "all" || value.scope === "pr")
+    ? { id: value.id, summary: value.summary, scope: value.scope }
+    : null;
+}
+
+function fitsReview(value: unknown): value is Omit<ReviewEntry, "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user"> & Partial<ReviewEntry> {
   if (!isRecord(value)) return false;
   const submitted = value.submitted;
   return typeof value.run_id === "string" && value.run_id !== ""
@@ -41,27 +62,98 @@ function fitsReview(value: unknown): value is ReviewEntry {
     && typeof value.outcome === "string" && OUTCOMES.has(value.outcome)
     && stringOrNull(value.verdict) && typeof value.skipped === "boolean"
     && typeof value.findings === "number" && typeof value.needs_you === "boolean"
-    && (submitted === null || (isRecord(submitted) && (submitted.event === "APPROVE" || submitted.event === "COMMENT") && typeof submitted.at === "string"));
+    && (submitted === null || (isRecord(submitted) && (submitted.event === "APPROVE" || submitted.event === "COMMENT") && typeof submitted.at === "string"))
+    && optional(value.head_sha, stringOrNull) && optional(value.pr_head_sha, stringOrNull)
+    && optional(value.cause, (cause) => cause === null || readCause(cause) !== null)
+    && optional(value.skipped_by_user, (skipped) => typeof skipped === "boolean");
 }
 
 /** The reviews a plugin's status lists, leaving out any entry that does not fit the format. */
 export function readReviews(status: unknown): ReviewEntry[] {
-  return isRecord(status) && Array.isArray(status.reviews) ? status.reviews.filter(fitsReview) : [];
+  if (!isRecord(status) || !Array.isArray(status.reviews)) return [];
+  return status.reviews.filter(fitsReview).map((review) => ({
+    ...review,
+    head_sha: review.head_sha ?? null,
+    pr_head_sha: review.pr_head_sha ?? null,
+    cause: readCause(review.cause),
+    skipped_by_user: review.skipped_by_user ?? false,
+  }));
 }
 
-/** The plugins' reviews by plugin, from each running plugin's latest status. */
+/** The plugins' reviews by plugin, from each plugin's latest status. */
 export function pluginReviews(plugins: PluginsSnapshot): Record<string, ReviewEntry[]> {
   return Object.fromEntries(plugins.items.map((plugin: PluginSnapshot) => [plugin.name, readReviews(plugins.statuses[plugin.name]?.value)]));
 }
 
-/** The reviews waiting on the user, in each plugin's order, for "Needs you". */
-export function reviewsNeedingYou(reviews: Record<string, ReviewEntry[]>): PluginReview[] {
-  return Object.entries(reviews).flatMap(([plugin, entries]) => entries.filter((review) => review.needs_you).map((review) => ({ plugin, review })));
+const pullRequestOf = (review: ReviewEntry) => `${review.repo}#${review.pr}`;
+const newestFirst = (left: ReviewEntry, right: ReviewEntry) => right.started_at.localeCompare(left.started_at);
+
+/** The newest run of each pull request, newest first: the reviews the lists show. */
+export function newestRuns(reviews: readonly ReviewEntry[]): ReviewEntry[] {
+  const seen = new Set<string>();
+  return [...reviews].sort(newestFirst).filter((review) => {
+    const key = pullRequestOf(review);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-/** The reviews that ended, newest first, for the history list. */
-export function pastReviews(reviews: readonly ReviewEntry[]): ReviewEntry[] {
-  return reviews.filter((review) => review.outcome !== "running");
+/** Every run of the review's pull request, oldest first, so the first is "Review 1". */
+export function versionsOf(reviews: readonly ReviewEntry[], review: ReviewEntry): ReviewEntry[] {
+  return reviews.filter((entry) => pullRequestOf(entry) === pullRequestOf(review)).sort((left, right) => newestFirst(right, left));
+}
+
+/** Whether the user is done with the review: submitted, skipped, or finished without needing them. */
+export function isFinished(review: ReviewEntry): boolean {
+  return review.submitted !== null || review.skipped_by_user || (review.outcome === "reviewed" && !review.needs_you);
+}
+
+/** A finished review that waits on the user's decision: what "Needs you" lists. */
+export function readyToDecide(review: ReviewEntry): boolean {
+  return review.outcome === "reviewed" && review.needs_you && !isFinished(review);
+}
+
+/**
+ * Where All work lists a pull request's newest run: under "Needs you" while it waits on a decision,
+ * in Done once the user finished with it before today, and otherwise in its repository's group:
+ * running, waiting, failed, or finished today.
+ */
+export function reviewPlace(review: ReviewEntry, now = new Date()): "needs-you" | "project" | "done" {
+  if (readyToDecide(review)) return "needs-you";
+  if (isFinished(review) && new Date(reviewTime(review)).toDateString() !== now.toDateString()) return "done";
+  return "project";
+}
+
+/** A cause that blocks every review, with the newest runs it stopped, waiting or failed, newest first. */
+export type BlockingCause = { id: string; summary: string; since: string | null; reviews: ReviewEntry[] };
+
+/**
+ * One entry per cause that blocks every review: the cause the status reports in `blocked`, even
+ * with no review waiting yet, and each other cause of a waiting or failed newest run, in order of
+ * first appearance.
+ */
+export function blockingCauses(reviews: readonly ReviewEntry[], blocked: { id: string; summary: string; since: string | null } | null): BlockingCause[] {
+  const causes = new Map<string, BlockingCause>();
+  if (blocked) causes.set(blocked.id, { id: blocked.id, summary: blocked.summary, since: blocked.since, reviews: [] });
+  for (const review of newestRuns(reviews)) {
+    const cause = review.cause;
+    if (!cause || cause.scope !== "all" || review.skipped_by_user || (review.outcome !== "waiting" && review.outcome !== "failed")) continue;
+    const entry = causes.get(cause.id) ?? { id: cause.id, summary: cause.summary, since: null, reviews: [] };
+    entry.reviews.push(review);
+    causes.set(cause.id, entry);
+  }
+  return [...causes.values()];
+}
+
+/** The key of one plugin's blocking cause, such as "cause:whooper:docker". */
+export function causeKey(plugin: string, cause: string): string {
+  return `cause:${plugin}:${cause}`;
+}
+
+/** "36 reviews waiting", "1 review waiting", or "no reviews waiting". */
+export function waitingText(count: number): string {
+  return count === 0 ? "no reviews waiting" : `${count} ${count === 1 ? "review" : "reviews"} waiting`;
 }
 
 /** An earlier question about a review and the plugin's answer, from the `asks` that show-review prints. */
@@ -108,19 +200,31 @@ export function shortPullRequest(review: ReviewEntry): string {
   return `${review.repo.split("/").at(-1)}#${review.pr}`;
 }
 
-function verdictWords(verdict: string | null): string {
+/** The verdict in words, such as "approve once CI passes". */
+export function verdictWords(verdict: string | null): string {
   if (verdict === "approve_once_ci_passes") return "approve once CI passes";
   if (verdict === "look_first") return "look first";
   return verdict ? verdict.replaceAll("_", " ") : "waiting for you";
 }
 
-/** What the review's row says about where it stands, and its dot. */
-export function reviewState(review: ReviewEntry): { words: string; status: Status } {
-  if (review.outcome === "running") return { words: "Whooper is reviewing", status: "running" };
-  if (review.outcome === "failed") return { words: "review failed", status: review.needs_you ? "error" : "idle" };
-  if (review.submitted) return { words: review.submitted.event === "APPROVE" ? "approved" : "commented", status: "idle" };
+/**
+ * What the review's row says about where it stands, and its dot: "Reviewing…", the verdict while it
+ * waits on a decision, "Approved · 2:25 PM", "Waiting · Docker isn't running", or "Review failed"
+ * in red.
+ */
+export function reviewState(review: ReviewEntry, now = new Date()): { words: string; status: Status } {
+  if (review.submitted) return { words: `${review.submitted.event === "APPROVE" ? "Approved" : "Commented"} · ${shortDate(review.submitted.at, now)}`, status: "idle" };
+  if (review.skipped_by_user) return { words: "Skipped", status: "idle" };
+  if (review.outcome === "running") return { words: "Reviewing…", status: "running" };
+  if (review.outcome === "waiting") return { words: `Waiting · ${review.cause?.summary ?? "blocked"}`, status: "idle" };
+  if (review.outcome === "failed") return { words: "Review failed", status: "error" };
   if (review.needs_you) return { words: review.skipped ? "skipped, look first" : verdictWords(review.verdict), status: "attention" };
-  return { words: review.skipped ? "skipped" : "not submitted", status: "idle" };
+  return { words: "Not submitted", status: "idle" };
+}
+
+/** A commit as the review header shows it: its first 7 characters. */
+export function shortSha(sha: string | null): string | null {
+  return sha ? sha.slice(0, 7) : null;
 }
 
 /** A date as the history shows it: "3:12 PM" today, "Nov 24" this year, "Nov 24, 2025" before. */

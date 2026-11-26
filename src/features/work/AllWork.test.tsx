@@ -5,8 +5,8 @@ import type { ChildPageSnapshot, SelectedPath } from "../../app/store";
 import type { ConversationSummary } from "../../bridge/types";
 import { axeViolations, render } from "../../test/render";
 import { fixtureReviews } from "../../test/plugins";
-import { readReviews, type PluginReview } from "../agents/reviews";
-import { AllWork, groupWork } from "./AllWork";
+import { blockingCauses, newestRuns, readReviews, type PluginReview, type ReviewEntry } from "../agents/reviews";
+import { AllWork, groupWork, type PluginCause } from "./AllWork";
 
 function node(id: string, title: string, parentId: string | null = null, overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return { id, title, parentId, hasChildren: false, summary: null,
@@ -30,6 +30,7 @@ type Options = {
   selectedId?: string | null;
   selectedPath?: SelectedPath | null;
   reviews?: PluginReview[];
+  causes?: PluginCause[];
   selectedReview?: string | null;
 };
 
@@ -44,11 +45,14 @@ function renderWork(options: Options = {}) {
   const onToggle = vi.fn((id: string) => setExpanded((current) => ({ ...current, [id]: !current[id] })));
   const onLoadChildPage = vi.fn();
   const onOpenReview = vi.fn();
+  const onOpenCause = vi.fn();
   const view = render(() => (
     <AllWork
       reviews={options.reviews ?? []}
+      causes={options.causes ?? []}
       selectedReview={options.selectedReview ?? null}
       onOpenReview={onOpenReview}
+      onOpenCause={onOpenCause}
       conversations={conversations()}
       conversationsById={options.conversationsById ?? { root, child, grandchild, sibling }}
       childPagesById={childPagesById()}
@@ -60,7 +64,7 @@ function renderWork(options: Options = {}) {
       onLoadChildPage={onLoadChildPage}
     />
   ));
-  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -68,34 +72,73 @@ const press = (element: HTMLElement, key: string) => {
 };
 
 describe("AllWork", () => {
-  const waitingReviews = (): PluginReview[] => readReviews({ reviews: fixtureReviews() })
-    .filter((review) => review.needs_you).map((review) => ({ plugin: "whooper", review }));
+  /** The fixture's reviews, today's being those of Nov 26, 2026, plus a review of acme/gadgets waiting on Docker. */
+  const docker = { id: "docker", summary: "Docker isn't running", scope: "all" as const };
+  const today = new Date();
+  const todayAt = (hours: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours).toISOString();
+  const entries = (): ReviewEntry[] => readReviews({ reviews: [
+    ...fixtureReviews().map((review) => ({ ...review, ...(review.started_at.startsWith("2026-11-26") ? { started_at: todayAt(9), ended_at: review.ended_at && todayAt(10) } : {}) })),
+    { ...fixtureReviews()[1]!, run_id: "waiting-60", pr: 60, repo: "acme/gadgets", title: "speed up the gadget index", outcome: "waiting", cause: docker, started_at: todayAt(8), ended_at: null },
+    { ...fixtureReviews()[2]!, run_id: "skipped-9", pr: 9, repo: "acme/sprockets", title: "drop the sprocket shim", submitted: null, skipped_by_user: true, started_at: todayAt(7), ended_at: todayAt(8) },
+  ] });
+  const pluginEntries = (): PluginReview[] => newestRuns(entries()).map((review) => ({ plugin: "whooper", review }));
+  const causes = (): PluginCause[] => blockingCauses(entries(), null).map((cause) => ({ plugin: "whooper", cause }));
+  const names = (tree: HTMLElement) => [...tree.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")].map((item) => item.getAttribute("aria-label"));
 
-  it("puts plugin reviews waiting on you first under Needs you, with their findings, verdict, and dot", async () => {
+  it("puts a cause that blocks every review and the reviews to decide under Needs you, with their findings, verdict, and dot", async () => {
     const waitingRoot = { ...root, id: "waiting", title: "Waiting conversation", rollupStatus: "needsAttention" as const };
-    const view = renderWork({ conversations: [waitingRoot, sibling], reviews: waitingReviews(), selectedReview: "review:whooper:20261124T090000Z-55" });
+    const view = renderWork({ conversations: [waitingRoot, sibling], reviews: pluginEntries(), causes: causes(), selectedReview: "cause:whooper:docker" });
 
     const needsYou = screen.getByRole("tree", { name: "Needs you" });
-    const items = [...needsYou.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")];
-    expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
+    expect(names(needsYou)).toEqual([
+      "Docker isn't running, 1 review waiting",
       "separate cache configuration, 2 findings, widgets#101 · approve once CI passes",
-      "move the projection, gadgets#55 · review failed",
       expect.stringContaining("Waiting conversation"),
     ]);
-    expect(items[0]).toHaveTextContent("2");
-    expect(items[0]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
-    expect(items[1]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-    expect(items[1]).toHaveAttribute("aria-selected", "true");
-    expect(items[0]).toHaveAttribute("aria-selected", "false");
+    const items = [...needsYou.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")];
+    expect(items[0]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    expect(items[0]).toHaveAttribute("aria-selected", "true");
+    expect(items[1]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
 
     fireEvent.click(items[0]!);
+    expect(view.onOpenCause).toHaveBeenCalledWith("whooper", "docker");
+    fireEvent.click(items[1]!);
     expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261126T150000Z-101");
     expect(view.onSelect).not.toHaveBeenCalled();
     expect(await axeViolations()).toEqual([]);
   });
 
+  it("puts the other reviews in their repository's project, else a group named after it, and those finished before today in a folded Done", async () => {
+    const widgets = node("widgets-chat", "Retry budget", null, { projectRoot: "/work/widgets" });
+    const view = renderWork({ conversations: [widgets, sibling], conversationsById: { widgets, sibling }, reviews: pluginEntries(), causes: causes() });
+
+    expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
+      .toEqual(["Needs you", "gadgets", "sprockets", "widgets", "No project"]);
+    expect(names(screen.getByRole("tree", { name: "widgets" }))).toEqual([
+      "Retry budget, Codex, working",
+      "acme/widgets#102, widgets#102 · Reviewing…",
+    ]);
+    expect(names(screen.getByRole("tree", { name: "gadgets" }))).toEqual([
+      "speed up the gadget index, gadgets#60 · Waiting · Docker isn't running",
+      "move the projection, gadgets#55 · Review failed",
+    ]);
+    expect(screen.getByRole("treeitem", { name: /gadgets#55 · Review failed/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    expect(names(screen.getByRole("tree", { name: "sprockets" }))).toEqual(["drop the sprocket shim, sprockets#9 · Skipped"]);
+
+    const done = screen.getByRole("button", { name: "Done 1" });
+    expect(done).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("treeitem", { name: /add the tags package/ })).not.toBeInTheDocument();
+    fireEvent.click(done);
+    flush();
+    expect(done).toHaveAttribute("aria-expanded", "true");
+    const commented = screen.getByRole("treeitem", { name: /^add the tags package, gadgets#77 · Commented · Nov 25/ });
+    fireEvent.click(commented);
+    expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261125T100000Z-77");
+    expect(await axeViolations()).toEqual([]);
+  });
+
   it("moves between review and conversation rows with the arrow keys and opens a review with Enter", () => {
-    const view = renderWork({ conversations: [sibling], reviews: waitingReviews(), selectedId: null });
+    const view = renderWork({ conversations: [sibling], reviews: pluginEntries().filter(({ review }) => review.pr === 101 || review.pr === 55), selectedId: null });
     const [first, second] = screen.getAllByRole("treeitem");
     first!.focus();
     press(first!, "ArrowDown");

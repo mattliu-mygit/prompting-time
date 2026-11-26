@@ -3,7 +3,7 @@ import type { AppApi } from "../app/store";
 import type { PluginActionResult, PluginSnapshot } from "../bridge/types";
 
 /** The plugin half of a fake bridge with no plugins installed, for tests about other things. */
-export function noPlugins(): Pick<AppApi, "listPlugins" | "installPlugin" | "pluginRequest" | "savePluginSettings" | "pickPluginFolder" | "pickPluginArchive"> {
+export function noPlugins(): Pick<AppApi, "listPlugins" | "installPlugin" | "pluginRequest" | "savePluginSettings" | "pickPluginFolder" | "pickPluginArchive" | "stopPlugin" | "startPlugin" | "readPluginLog"> {
   return {
     listPlugins: vi.fn().mockResolvedValue([]),
     installPlugin: vi.fn(),
@@ -11,6 +11,9 @@ export function noPlugins(): Pick<AppApi, "listPlugins" | "installPlugin" | "plu
     savePluginSettings: vi.fn(),
     pickPluginFolder: vi.fn().mockResolvedValue(null),
     pickPluginArchive: vi.fn().mockResolvedValue(null),
+    stopPlugin: vi.fn(),
+    startPlugin: vi.fn(),
+    readPluginLog: vi.fn().mockResolvedValue({ path: "/synthetic/plugins/whooper.log", text: "", truncated: false }),
   };
 }
 

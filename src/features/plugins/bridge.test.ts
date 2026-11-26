@@ -195,6 +195,18 @@ describe("the page bridge", () => {
     expect(page.posted.at(-1)).toEqual({ version: 1, type: "error", reply_to: 4, message: "whooper-submit: nothing posted: the PR has new commits" });
   });
 
+  it("refuses to change or submit an earlier version of a review, which is read-only", async () => {
+    const page = setup();
+    await page.send({ type: "ready", id: 1 });
+    await page.send({ type: "submit", id: 2, run_id: UNRECORDED });
+    expect(page.posted.at(-1)).toEqual({ version: 1, type: "error", reply_to: 2,
+      message: "Review 1 of acme/widgets#101 is an earlier version, so it is read-only: only the newest review, review 2, can change or be submitted." });
+    await page.send({ type: "change-draft", id: 3, run_id: UNRECORDED, change: { op: "approve" } });
+    expect(page.posted.at(-1)).toMatchObject({ type: "error", reply_to: 3 });
+    expect(page.confirm).not.toHaveBeenCalled();
+    expect(page.pluginRequest.mock.calls.some(([request]) => request.action === "draft")).toBe(false);
+  });
+
   it("runs any action the manifest marks confirm through the confirmation, and others directly", async () => {
     const actions = pageActions.map((action) => (action.name === "draft" ? { ...action, confirm: true } : { ...action, confirm: action.name === "submit" ? false : action.confirm }));
     const page = setup({ actions, confirm: async () => actionResult({ stdout: JSON.stringify({ event: "APPROVE", message: "", findings: {} }) }) });
