@@ -137,12 +137,14 @@ export function fixtureReviews() {
   ];
 }
 
-/** What the show-review action prints for one invented run. */
+/** What the show-review action prints for one invented run, with the title the status lists for it. */
 export function fixtureShown(runId: string, overrides: Record<string, unknown> = {}) {
   return {
     version: 1,
     run_id: runId,
     run: { repo: "acme/widgets", pr: 101 },
+    title: fixtureReviews().find((review) => review.run_id === runId)?.title ?? null,
+    author: "fixture-author",
     outcome: "reviewed",
     findings: { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Invented reason." }, findings: [{ id: "1", path: "src/a.rs", line: 3, side: "RIGHT", title: "A nit", draft: "**nit:** invented", kind: "nit" }] },
     drafts: { event: "APPROVE", message: "", findings: { "1": { included: true } } },

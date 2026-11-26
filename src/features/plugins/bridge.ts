@@ -150,7 +150,9 @@ export function createPageBridge(options: PageBridgeOptions): PageBridge {
     post({
       type: "review",
       review: {
-        run_id: runId, repo: review.repo, pr: review.pr, title: review.title, author: null,
+        run_id: runId, repo: review.repo, pr: review.pr,
+        title: typeof shown.title === "string" ? shown.title : review.title,
+        author: typeof shown.author === "string" ? shown.author : null,
         findings: shown.findings, drafts: shown.drafts, patch: typeof shown.diff === "string" ? shown.diff : "",
       },
     }, replyTo);

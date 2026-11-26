@@ -98,7 +98,7 @@ describe("the page bridge", () => {
     expect(page.pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [SUBMITTED], confirmedFingerprint: null });
     expect(review).toMatchObject({
       version: 1, type: "review",
-      review: { run_id: SUBMITTED, repo: "acme/gadgets", pr: 77, title: "add the tags package", author: null, patch: "diff --git a/src/a.rs b/src/a.rs\n" },
+      review: { run_id: SUBMITTED, repo: "acme/gadgets", pr: 77, title: "add the tags package", author: "fixture-author", patch: "diff --git a/src/a.rs b/src/a.rs\n" },
     });
     expect(review).not.toHaveProperty("reply_to");
     expect(submitted).toMatchObject({ type: "submit-result", run_id: SUBMITTED, posted: true });
@@ -120,6 +120,23 @@ describe("the page bridge", () => {
       { version: 1, type: "error", reply_to: 3, message: "Whooper does not list the review ../../elsewhere." },
       { version: 1, type: "error", reply_to: 4, message: "Whooper does not list the review --approve-anyway." },
     ]);
+  });
+
+  it("gives the page the title and author show-review prints, and the status's title when it prints none", async () => {
+    async function opened(reviews: unknown[], shown: Record<string, unknown>) {
+      const page = setup({ status: { value: fixtureStatus("2026-11-26T15:45:00Z", { reviews }), error: null } });
+      await page.send({ type: "ready", id: 1 });
+      page.pluginRequest.mockResolvedValueOnce(actionResult({ stdout: JSON.stringify(shown) }));
+      await page.send({ type: "open-review", id: 2, run_id: OPEN });
+      return page.posted.at(-1);
+    }
+    const untitled = fixtureReviews().map((review) => (review.run_id === OPEN ? { ...review, title: null } : review));
+
+    expect(await opened(untitled, fixtureShown(OPEN))).toMatchObject({ type: "review", review: { title: "separate cache configuration", author: "fixture-author" } });
+    expect(await opened(untitled, fixtureShown(OPEN, { title: null, author: null }))).toMatchObject({ type: "review", review: { title: null, author: null } });
+    // An older Whooper's show-review prints neither field; JSON.stringify leaves out the undefined ones.
+    const older = fixtureShown(OPEN, { title: undefined, author: undefined });
+    expect(await opened(fixtureReviews(), older)).toMatchObject({ type: "review", review: { title: "separate cache configuration", author: null } });
   });
 
   it("says why a failed review cannot be shown, to the page and above it", async () => {

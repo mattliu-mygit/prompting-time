@@ -131,7 +131,7 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
       if (!entry) return refused(`whooper-show: no run ${runId}`);
       const found = findings[runId];
       return result({ stdout: JSON.stringify({
-        version: 1, run_id: runId, run: { repo: entry.repo, pr: entry.pr }, outcome: entry.outcome,
+        version: 1, run_id: runId, run: { repo: entry.repo, pr: entry.pr }, title: entry.title, author: "fixture-author", outcome: entry.outcome,
         findings: found ? { status: "reviewed", skip_reason: "", approval: { verdict: found.verdict, reason: found.reason }, findings: found.findings } : null,
         drafts: drafts[runId] ?? null, diff: found ? patch : null,
         failure: entry.outcome === "failed" ? "Devin's agent shut down before it read the PR: Agent connection lost" : null,
