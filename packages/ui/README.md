@@ -9,11 +9,14 @@ Whooper's.
   token object (`src/theme/tokens.ts`). Prompting Time is dark only, so the dark colors apply.
 - **Fonts:** the Katagami WOFF2 files and their license are in `fonts/`, so pages work offline.
 - **Components:** Solid 2.0 components that read the theme's `--s-*` variables and nothing else:
-  `Button`, `IconButton`, `Checkbox`, `TextField`, `NumberField`, `Select`, `StatusDot`, `ListRow`,
-  `ConfirmDialog`, `Menu`, and `Diff`. The dialog and the menu get their focus and keyboard
-  behavior from Zag.js state machines, run through Zag's framework-free `VanillaMachine` in
-  `src/zag.ts`, because Zag's Solid adapter targets Solid 1. `Diff` wraps `@pierre/diffs` and draws
-  comment threads from its own Solid tree, one keyed portal per thread.
+  `Button`, `IconButton`, `CopyButton`, `Checkbox`, `TextField`, `NumberField`, `Select`,
+  `StatusDot`, `ListRow`, `ConfirmDialog`, `Menu`, `CommandPalette`, `Markdown`, and `Diff`, plus
+  the icons in `src/icons.tsx` (Lucide's paths; license in `src/icons.LICENSE`). The dialogs and the
+  menu get their focus and keyboard behavior from Zag.js state machines, run through Zag's
+  framework-free `VanillaMachine` in `src/zag.ts`, because Zag's Solid adapter targets Solid 1.
+  `Diff` wraps `@pierre/diffs` and draws comment threads from its own Solid tree, one keyed portal
+  per thread. `Markdown` parses with `unified` (remark and GitHub's extensions) and highlights code
+  with the same Shiki highlighter and Sigil theme as `Diff`, so a page has one highlighter.
 
 ## Use
 

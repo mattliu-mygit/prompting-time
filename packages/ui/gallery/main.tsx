@@ -18,7 +18,7 @@ import {
   type Status,
 } from "../src";
 import { drafts, newFile, oldFile, type DraftComment } from "./fixtures";
-import { BotIcon, ChatIcon, EllipsisIcon, ExternalIcon, FilterIcon, PanelRightIcon, PullRequestIcon, SearchIcon } from "./icons";
+import { BotIcon, ChatIcon, EllipsisIcon, ExternalIcon, FilterIcon, PanelRightIcon, PullRequestIcon, SearchIcon } from "../src";
 
 // The gallery shows every component with invented data. `?dialog` opens the dialog at load, for screenshots.
 const params = new URLSearchParams(location.search);
