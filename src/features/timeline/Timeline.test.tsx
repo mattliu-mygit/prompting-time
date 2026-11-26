@@ -859,14 +859,17 @@ describe("Timeline", () => {
       .mockImplementationOnce(() => Promise.resolve(pages[4]!))
       .mockImplementationOnce(() => Promise.resolve(pages[5]!));
     const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: actions({ loadTimeline }) });
+    // With up to 400 rows, a role query computes the name and visibility of every row's buttons,
+    // which took seconds, so this test finds its two buttons by their text.
+    const button = (text: string) => screen.getByText(text, { selector: "button" });
     await screen.findByText("event 1000");
     for (const oldest of [841, 761, 681, 601, 521]) {
-      click(screen.getByRole("button", { name: "Load older activity" }));
+      click(button("Load older activity"));
       await screen.findByText(`event ${oldest}`);
     }
 
     expect(view.container.querySelectorAll("[data-timeline-id]").length).toBeLessThanOrEqual(400);
-    click(screen.getByRole("button", { name: "Reload newest history" }));
+    click(button("Reload newest history"));
     expect(view.container.querySelectorAll("[data-timeline-id]").length).toBeLessThanOrEqual(80);
     expect(screen.queryByText("event 521")).not.toBeInTheDocument();
   });
