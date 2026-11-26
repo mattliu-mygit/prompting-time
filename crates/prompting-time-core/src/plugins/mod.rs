@@ -3,8 +3,8 @@
 //! by its SHA-256, or, for development, from a local archive or folder; checks the programs it
 //! needs; starts its start command when PT opens, unless a copy already holds the plugin's run lock;
 //! runs its actions and returns their output and exit code; serves its page's files; watches its
-//! state folder; and stops the process group it started when PT quits, leaving a copy started
-//! elsewhere running.
+//! state folder; stops and starts the start command on demand; reads the end of its output; and
+//! stops the process group it started when PT quits, leaving a copy started elsewhere running.
 //!
 //! Beyond the manifest, PT relies on conventions that Whooper follows:
 //! - A plugin keeps its state in `$XDG_STATE_HOME/<name>` (default `~/.local/state/<name>`), and PT
@@ -54,6 +54,9 @@ const SETTINGS_TIMEOUT: Duration = Duration::from_secs(120);
 /// The largest request file PT reads for a confirmation. Whooper's review requests are a few
 /// kilobytes; a request past this cannot be confirmed.
 const PREVIEW_LIMIT: u64 = 1024 * 1024;
+/// The most of a start command's log PT returns for its Logs tab. Whooper writes a few lines per
+/// round, so this holds days of rounds; the whole file stays on disk for an editor.
+const LOG_READ_LIMIT: u64 = 256 * 1024;
 
 pub struct PluginHostConfig {
     /// Where PT keeps installed plugins and its records of them, such as
@@ -169,6 +172,17 @@ pub struct PluginChange {
     pub files: Option<Vec<String>>,
 }
 
+/// The end of what a plugin's start command printed since PT last started it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginLog {
+    /// `<plugins folder>/<name>.log`, which each start empties.
+    pub path: PathBuf,
+    /// The end of the file, from its first whole line; empty when the file does not exist.
+    pub text: String,
+    /// Whether the file holds more than `text`.
+    pub truncated: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PluginError {
     #[error("{0}")]
@@ -191,6 +205,10 @@ pub enum PluginError {
         "{0} named no file in its state folder whose SHA-256 is its fingerprint, so there is nothing to show for confirmation"
     )]
     MissingPreview(String),
+    #[error(
+        "{plugin} runs as process {pid}, which Prompting Time did not start, so it leaves that copy running"
+    )]
+    StartedElsewhere { plugin: String, pid: u32 },
     #[error("Prompting Time is quitting")]
     Quitting,
     #[error("{context}: {source}")]
@@ -383,6 +401,65 @@ impl PluginHost {
         Ok(output)
     }
 
+    /// Stops the start command PT started for `name`, as quitting does: SIGTERM to its process
+    /// group, then SIGKILL after the grace period, which ends a review in progress. It stays stopped
+    /// until `start` or the next time PT opens. PT refuses to stop a copy started elsewhere, and
+    /// stopping a plugin that does not run changes nothing.
+    pub async fn stop(&self, name: &str) -> Result<PluginSnapshot, PluginError> {
+        let _operations = self.inner.operations.lock().await;
+        let (state_dir, start_program, started) = {
+            let plugins = self.inner.plugins();
+            let plugin = plugins
+                .get(name)
+                .ok_or_else(|| PluginError::UnknownPlugin(name.to_owned()))?;
+            (
+                plugin.state_dir.clone(),
+                plugin.installed.manifest.start_program().to_owned(),
+                plugin.started.is_some(),
+            )
+        };
+        if !started && let Some(pid) = run::run_lock_holder(&state_dir, &start_program).await {
+            return Err(PluginError::StartedElsewhere {
+                plugin: name.to_owned(),
+                pid,
+            });
+        }
+        self.inner.stop_started(name).await;
+        self.inner
+            .snapshot(name)
+            .await
+            .ok_or_else(|| PluginError::UnknownPlugin(name.to_owned()))
+    }
+
+    /// Starts the start command of a plugin that is stopped or exited, as PT does when it opens:
+    /// unless a needed program is missing, its settings cannot be read, or a copy holds the run
+    /// lock. The snapshot says whether it started, and why not.
+    pub async fn start(&self, name: &str) -> Result<PluginSnapshot, PluginError> {
+        let _operations = self.inner.operations.lock().await;
+        if *self.inner.quitting.borrow() {
+            return Err(PluginError::Quitting);
+        }
+        self.inner.installed(name)?;
+        self.inner.apply_start_rule(name).await;
+        self.inner
+            .snapshot(name)
+            .await
+            .ok_or_else(|| PluginError::UnknownPlugin(name.to_owned()))
+    }
+
+    /// The end of what the plugin's start command printed since PT last started it, for its Logs
+    /// tab. A copy started elsewhere prints where it was started, not here.
+    pub fn read_log(&self, name: &str) -> Result<PluginLog, PluginError> {
+        self.inner.installed(name)?;
+        let path = self.inner.log_path(name);
+        let (text, truncated) = run::log_tail(&path, LOG_READ_LIMIT);
+        Ok(PluginLog {
+            path,
+            text,
+            truncated,
+        })
+    }
+
     /// Runs the plugin's save-settings action with `values`, a JSON object of the settings to
     /// change. The plugin checks and saves them; a refusal comes back as its exit code and stderr.
     /// A saved change can change which prerequisites are needed, so PT checks them again.
@@ -475,6 +552,11 @@ impl Inner {
 
     fn staging(&self) -> PathBuf {
         self.config.plugins_dir.join(STAGING_DIR)
+    }
+
+    /// Where the start command's output goes.
+    fn log_path(&self, name: &str) -> PathBuf {
+        self.config.plugins_dir.join(format!("{name}.log"))
     }
 
     fn insert(&self, installed: Installed) {
@@ -586,7 +668,7 @@ impl Inner {
             &installed.folder,
             &self.config.state_home,
         );
-        let log = self.config.plugins_dir.join(format!("{name}.log"));
+        let log = self.log_path(name);
         // The lock stays held from the spawn until Started is stored, so the supervisor cannot
         // record an exit before PT records the start.
         let mut plugins = self.plugins();
@@ -621,7 +703,8 @@ impl Inner {
         }
     }
 
-    fn record_exit(&self, name: &str, generation: u64, exit: PluginExit) {
+    /// Records how the copy PT started ended: `None` when PT stopped it on purpose.
+    fn record_exit(&self, name: &str, generation: u64, exit: Option<PluginExit>) {
         let mut plugins = self.plugins();
         let Some(plugin) = plugins.get_mut(name) else {
             return;
@@ -632,7 +715,7 @@ impl Inner {
             Some(_) => plugin.started = None,
             None => {}
         }
-        plugin.last_exit = Some(exit);
+        plugin.last_exit = exit;
     }
 
     async fn check_prerequisites(
@@ -752,20 +835,22 @@ async fn supervise(
     mut stop: oneshot::Receiver<()>,
     log: PathBuf,
 ) {
-    let status = tokio::select! {
-        status = process.wait() => status,
+    let (status, stopped) = tokio::select! {
+        status = process.wait() => (status, false),
         // A dropped sender stops the process too, so no copy outlives its record.
-        _ = &mut stop => process.stop(run::STOP_GRACE).await,
+        _ = &mut stop => (process.stop(run::STOP_GRACE).await, true),
     };
     let exit = match status {
-        Ok(status) => PluginExit {
+        // PT stopped it on purpose: on request, on quitting, or to replace it, so it did not fail.
+        Ok(_) if stopped => None,
+        Ok(status) => Some(PluginExit {
             code: status.code(),
-            output: run::log_tail(&log),
-        },
-        Err(error) => PluginExit {
+            output: run::log_tail(&log, run::EXIT_LOG_LIMIT).0,
+        }),
+        Err(error) => Some(PluginExit {
             code: None,
             output: format!("Prompting Time could not wait for the process: {error}"),
-        },
+        }),
     };
     if let Some(host) = host.upgrade() {
         host.record_exit(&name, generation, exit);

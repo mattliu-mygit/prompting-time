@@ -22,8 +22,8 @@ pub(crate) const STOP_GRACE: Duration = Duration::from_secs(5);
 /// The most of each output stream PT keeps: the start of stdout, which holds JSON results, and the
 /// end of stderr, which holds the reason a command failed.
 const OUTPUT_LIMIT: u64 = 1024 * 1024;
-/// The end of the start command's log PT shows when the command exits.
-const LOG_TAIL_LIMIT: u64 = 4 * 1024;
+/// The end of the start command's log PT keeps when the command exits.
+pub(crate) const EXIT_LOG_LIMIT: u64 = 4 * 1024;
 
 /// `program` with `args`, run in the plugin's folder, with the PATH PT gives every CLI it starts and
 /// the XDG state home PT watches, so the plugin and PT agree on its state folder.
@@ -116,21 +116,23 @@ pub(crate) fn spawn_start(mut command: Command, log: &Path) -> io::Result<OwnedP
     OwnedProcess::spawn(&mut command)
 }
 
-/// The end of the start command's log, from its first whole line.
-pub(crate) fn log_tail(log: &Path) -> String {
+/// The last `limit` bytes of the start command's log, from its first whole line, and whether the
+/// file holds more. Empty when the file cannot be read, such as before the first start.
+pub(crate) fn log_tail(log: &Path, limit: u64) -> (String, bool) {
     let Ok(mut file) = File::open(log) else {
-        return String::new();
+        return (String::new(), false);
     };
     let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    let Ok(tail) = read_tail(&mut file, LOG_TAIL_LIMIT) else {
-        return String::new();
+    let Ok(tail) = read_tail(&mut file, limit) else {
+        return (String::new(), false);
     };
+    let truncated = length > limit;
     let text = String::from_utf8_lossy(&tail);
     let whole_lines = match text.split_once('\n') {
-        Some((_, rest)) if length > LOG_TAIL_LIMIT => rest,
+        Some((_, rest)) if truncated => rest,
         _ => &text,
     };
-    whole_lines.trim().to_owned()
+    (whole_lines.trim().to_owned(), truncated)
 }
 
 /// The process holding `<state folder>/run.lock/pid`, the lock a running start command holds,

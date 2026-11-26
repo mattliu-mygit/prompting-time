@@ -776,3 +776,174 @@ async fn a_change_in_the_state_folder_reaches_subscribers_as_its_relative_path()
     assert_eq!(seen.plugin, NAME);
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn pt_stops_the_copy_it_started_on_request_and_starts_it_again() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let PluginProcess::Started { pid } = host
+        .install(PluginSource::Folder {
+            path: fixture.plugin(json!([])),
+        })
+        .await
+        .unwrap()
+        .process
+    else {
+        panic!("PT starts the plugin it installs");
+    };
+    eventually("the round-like child runs", || {
+        fixture.state_dir().join("child.pid").exists()
+    })
+    .await;
+    let child: u32 = fs::read_to_string(fixture.state_dir().join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let stopped = host.stop(NAME).await.unwrap();
+
+    assert_eq!(
+        stopped.process,
+        PluginProcess::NotRunning { exit: None },
+        "a stop PT asked for is not an exit to report"
+    );
+    assert!(!alive(pid), "the start command stopped");
+    assert!(!alive(child), "SIGTERM reached the round in progress");
+    assert_eq!(fixture.lock_pid(), None, "it released the run lock");
+    assert_eq!(
+        host.stop(NAME).await.unwrap().process,
+        PluginProcess::NotRunning { exit: None },
+        "stopping a stopped plugin changes nothing"
+    );
+
+    let started = host.start(NAME).await.unwrap();
+    let PluginProcess::Started { pid: again } = started.process else {
+        panic!("start runs the start command again: {:?}", started.process);
+    };
+    assert_ne!(again, pid);
+    eventually("the new copy holds the run lock", || {
+        fixture.lock_pid() == Some(again)
+    })
+    .await;
+    assert_eq!(
+        host.start(NAME).await.unwrap().process,
+        PluginProcess::Started { pid: again },
+        "starting a running plugin starts no second copy"
+    );
+    host.shutdown().await;
+    assert!(!alive(again));
+    assert!(matches!(host.start(NAME).await, Err(PluginError::Quitting)));
+}
+
+#[tokio::test]
+async fn pt_neither_stops_nor_starts_over_a_copy_started_elsewhere() {
+    let fixture = Fixture::new();
+    let folder = fixture.plugin(json!([]));
+    let elsewhere = fixture.start_elsewhere(&folder);
+    let pid = elsewhere.id();
+    eventually("the terminal copy holds the run lock", || {
+        fixture.lock_pid() == Some(pid)
+    })
+    .await;
+    let host = fixture.host();
+    host.install(PluginSource::Folder { path: folder })
+        .await
+        .unwrap();
+
+    match host.stop(NAME).await {
+        Err(PluginError::StartedElsewhere {
+            plugin,
+            pid: holder,
+        }) => {
+            assert_eq!(plugin, NAME);
+            assert_eq!(holder, pid);
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(alive(pid), "the copy PT did not start keeps running");
+    assert_eq!(
+        host.start(NAME).await.unwrap().process,
+        PluginProcess::RunningElsewhere { pid },
+        "start honors the run lock"
+    );
+    assert_eq!(fixture.lock_pid(), Some(pid));
+    assert!(matches!(
+        host.stop("other").await,
+        Err(PluginError::UnknownPlugin(_))
+    ));
+    host.shutdown().await;
+    stop_elsewhere(elsewhere);
+}
+
+#[tokio::test]
+async fn start_runs_a_plugin_whose_start_command_exited() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("state")).unwrap();
+    fs::write(fixture.path("state").join("fail-start"), "").unwrap();
+    let host = fixture.host();
+    host.install(PluginSource::Folder {
+        path: fixture.plugin(json!([])),
+    })
+    .await
+    .unwrap();
+    let mut exited = false;
+    for _ in 0..200 {
+        if let PluginProcess::NotRunning { exit: Some(exit) } = only_plugin(&host).await.process {
+            assert_eq!(exit.code, Some(3));
+            exited = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(exited, "the failed start is recorded");
+    fs::remove_file(fixture.path("state").join("fail-start")).unwrap();
+
+    let PluginProcess::Started { pid } = host.start(NAME).await.unwrap().process else {
+        panic!("start runs an exited plugin again");
+    };
+    eventually("it holds the run lock", || fixture.lock_pid() == Some(pid)).await;
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_log_returns_the_end_of_what_the_start_command_printed() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    host.install(PluginSource::Folder {
+        path: fixture.plugin(json!([])),
+    })
+    .await
+    .unwrap();
+    let log_path = fixture.path("plugins").join(format!("{NAME}.log"));
+    eventually("the start command printed its first line", || {
+        host.read_log(NAME)
+            .is_ok_and(|log| log.text == "fake-run started")
+    })
+    .await;
+    let log = host.read_log(NAME).unwrap();
+    assert_eq!(log.path, log_path);
+    assert!(!log.truncated);
+    host.stop(NAME).await.unwrap();
+
+    // A log past the limit comes back from its first whole line, with its end.
+    let lines: Vec<String> = (0..20_000)
+        .map(|index| format!("round {index}: done"))
+        .collect();
+    fs::write(&log_path, lines.join("\n") + "\n").unwrap();
+    let long = host.read_log(NAME).unwrap();
+    assert!(long.truncated);
+    assert!(long.text.len() <= 256 * 1024);
+    let first = long.text.lines().next().unwrap();
+    assert!(lines.iter().any(|line| line == first), "{first:?}");
+    assert_eq!(long.text.lines().last(), Some("round 19999: done"));
+
+    fs::remove_file(&log_path).unwrap();
+    let empty = host.read_log(NAME).unwrap();
+    assert_eq!((empty.text.as_str(), empty.truncated), ("", false));
+    assert!(matches!(
+        host.read_log("other"),
+        Err(PluginError::UnknownPlugin(_))
+    ));
+    host.shutdown().await;
+}
