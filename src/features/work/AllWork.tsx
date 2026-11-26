@@ -1,10 +1,11 @@
 import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { AlertIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, CloseIcon, ListRow, PullRequestIcon, type Status } from "@prompting-time/ui";
+import { AlertIcon, BotIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, CloseIcon, EllipsisIcon, ListRow, Menu, PullRequestIcon, type Status } from "@prompting-time/ui";
 import type { ConversationSummary, ProviderId } from "../../bridge/types";
 import { effectiveConversationStatus, type ChildPageSnapshot, type EffectiveStatus, type SelectedPath } from "../../app/store";
 import { readPreference, savePreference } from "../../app/preferences";
 import { causeKey, needsYou, reviewCategory, reviewKey, reviewMatches, reviewRowMeta, reviewState, reviewTime, reviewTitle, searchTokens, shortDate, shortPullRequest, waitingText, type BlockingCause, type PluginReview, type ReviewCategory } from "../agents/reviews";
+import { blockerKey, groupKey, itemKey, type PluginGroup, type StatusV2Blocker, type StatusV2Item, type StatusV2Work } from "../agents/statusV2";
 
 type Props = {
   /** Active roots in list order, already filtered by status. */
@@ -29,6 +30,17 @@ type Props = {
   canRemove(plugin: string): boolean;
   /** Remove on a review's row, which shows while the pointer is on the row. */
   onRemoveReview(plugin: string, runId: string): void;
+  /**
+   * What plugins that print status format 2 add: their blockers, first under Needs you; the items
+   * of their Needs you groups, as parts of it; and their other groups, as sections of their own.
+   */
+  pluginWork: StatusV2Work;
+  /** The title the plugin's manifest gives an action, for a row's ⋯ menu. */
+  actionTitle(plugin: string, action: string): string;
+  /** A click on a format-2 item or blocker, by its key (itemKey or blockerKey). */
+  onOpenEntry(plugin: string, key: string): void;
+  /** A choice in a format-2 row's ⋯ menu: an item's action with `--item <id>`, a blocker's with no arguments. */
+  onEntryAction(plugin: string, action: string, args: string[], label: string): void;
   onToggle(id: string): void;
   onLoadChildPage(id: string, restart: boolean): void;
 };
@@ -39,7 +51,9 @@ export type PluginCause = { plugin: string; cause: BlockingCause };
 type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number; found?: boolean };
 type ReviewRow = { kind: "review"; key: string; item: PluginReview; depth: 0 };
 type CauseRow = { kind: "cause"; key: string; item: PluginCause; depth: 0 };
-type Row = ConversationRow | ReviewRow | CauseRow;
+/** An item or a blocker of a plugin that prints status format 2. */
+type EntryRow = { kind: "entry"; key: string; plugin: string; pluginTitle: string; entry: { item: StatusV2Item } | { blocker: StatusV2Blocker }; depth: 0 };
+type Row = ConversationRow | ReviewRow | CauseRow | EntryRow;
 /** One item of a part: a review, a cause, or a root with its loaded children. */
 type Entry = Row[];
 /**
@@ -127,7 +141,10 @@ function readOpenSections(): Record<string, boolean> {
  * review ready to approve, review that needs a look, review that failed for a reason of its own,
  * and root waiting on you. Then Reviewing, one section per cause that blocks every review with its
  * one row, the chats of each project and those without a folder, each root followed by its loaded
- * children, and Done. The sections the user opens or folds stay so across launches. The rows are a
+ * children, and Done. A plugin that prints status format 2 puts its blockers first under Needs you,
+ * the items of its Needs you groups there after the reviews, and each of its other groups in a
+ * section after the causes, open unless its manifest says `folded`; each of its rows has a ⋯ menu
+ * of the item's actions. The sections the user opens or folds stay so across launches. The rows are a
  * tree for keyboard users: arrow keys move and open rows across the open sections, Home and End
  * jump, and Enter or Space opens a conversation, a review, or a cause.
  */
@@ -138,7 +155,9 @@ export function AllWork(props: Props) {
   let opened = readOpenSections();
   const [openSections, setOpenSections] = createSignal(opened);
   const items = new Map<string, HTMLElement>();
-  const openIn = (sections: Record<string, boolean>, key: string) => sections[key] ?? key === "needs-you";
+  // A format-2 group's section starts open unless its manifest says `folded`.
+  const openByDefault = createMemo(() => new Set(props.pluginWork.groups.filter(({ group }) => !group.folded).map(({ plugin, group }) => groupKey(plugin, group.id))));
+  const openIn = (sections: Record<string, boolean>, key: string) => sections[key] ?? (key === "needs-you" || openByDefault().has(key));
   const isOpen = (key: string) => openIn(openSections(), key);
   // The section whose heading had the focus when it opened or folded. Its heading moves between the
   // open sections and the stack, which draws a new one, so the new heading takes the focus back.
@@ -177,10 +196,15 @@ export function AllWork(props: Props) {
     const groups = groupWork(props.conversations);
     const waitingChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
     const { ready, look, failed } = needsYou(props.reviews);
+    const work = props.pluginWork;
+    const blockerEntries = work.blockers.map(({ plugin, pluginTitle, blocker }): Entry => [{ kind: "entry", key: blockerKey(plugin, blocker.id), plugin, pluginTitle, entry: { blocker }, depth: 0 }]);
+    const groupEntries = ({ plugin, pluginTitle, items: groupItems }: PluginGroup): Entry[] => groupItems.map((item) => [{ kind: "entry", key: itemKey(plugin, item.id), plugin, pluginTitle, entry: { item }, depth: 0 }]);
     const needsParts: Part[] = ([
+      { key: "blockers", label: null, entries: blockerEntries },
       { key: "ready", label: "Ready to approve", hint: "The plugin judges each safe to approve, or, when it doesn't say, says approve once CI passes.", named: "success", entries: ready.map(reviewRow) },
       { key: "look", label: "Needs a look", hint: "The plugin judges each not safe to approve, or, when it doesn't say, says look first or skipped part of the change.", named: "attention", entries: look.map(reviewRow) },
       { key: "failed", label: "Review failed", hint: "Each failed for a reason of its own; open one for the reason, Retry review, and Ask why.", named: "error", entries: failed.map(reviewRow) },
+      ...work.needsYou.map((group): Part => ({ key: groupKey(group.plugin, group.group.id), label: group.label, hint: group.pluginTitle, entries: groupEntries(group) })),
       { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", named: "attention", entries: chatEntries(waitingChats) },
     ] satisfies Part[]).filter((part) => part.entries.length > 0);
     const reviewing = props.reviews.filter(({ review }) => reviewCategory(review) === "reviewing")
@@ -194,6 +218,10 @@ export function AllWork(props: Props) {
       ...props.causes.filter(({ cause }) => cause.reviews.length > 0).map(({ plugin, cause }): Section => {
         const key = causeKey(plugin, cause.id);
         return { key: `waiting:${key}`, label: `Waiting · ${cause.summary}`, count: cause.reviews.length, parts: single(key, [[{ kind: "cause", key, item: { plugin, cause }, depth: 0 }]]) };
+      }),
+      ...work.groups.map((group): Section => {
+        const key = groupKey(group.plugin, group.group.id);
+        return { key, label: group.label, title: group.pluginTitle, count: group.items.length, parts: single(key, groupEntries(group)) };
       }),
       ...groups.filter((group) => group.key !== "needs-you").map((group): Section => {
         const key = `chats:${group.path ?? "no-folder"}`;
@@ -231,9 +259,10 @@ export function AllWork(props: Props) {
     items.get(id)?.focus();
   }
 
-  function open(row: ReviewRow | CauseRow) {
+  function open(row: ReviewRow | CauseRow | EntryRow) {
     if (row.kind === "review") props.onOpenReview(row.item.plugin, row.item.review.run_id);
-    else props.onOpenCause(row.item.plugin, row.item.cause.id);
+    else if (row.kind === "cause") props.onOpenCause(row.item.plugin, row.item.cause.id);
+    else props.onOpenEntry(row.plugin, row.key);
   }
 
   function navigate(event: KeyboardEvent, row: Row) {
@@ -292,6 +321,61 @@ export function AllWork(props: Props) {
   function renderRow(row: () => Row, named: () => Status | undefined): JSX.Element {
     const first = untrack(row);
     const dot = (status: Status): Status => (status === named() ? "idle" : status);
+    if (first.kind === "entry") {
+      // An entry's key holds its plugin and ID, so neither changes; nor does whether it is a blocker.
+      const current = () => row() as EntryRow;
+      const item = () => {
+        const entry = current().entry;
+        return "item" in entry ? entry.item : null;
+      };
+      const blocker = () => {
+        const entry = current().entry;
+        return "blocker" in entry ? entry.blocker : null;
+      };
+      const title = () => item()?.title ?? blocker()?.title ?? "";
+      // An item says its detail, project, and when it changed; a blocker that it blocks every job.
+      const meta = () => {
+        const shown = item();
+        if (!shown) return `${current().pluginTitle} · blocks every job`;
+        return [shown.detail, shown.project ? folderName(shown.project) : null, shortDate(shown.updated_at)].filter(Boolean).join(" · ");
+      };
+      const menuItems = () => {
+        const names = item()?.actions ?? (blocker()?.action ? [blocker()!.action!] : []);
+        return names.map((name) => ({ value: name, label: props.actionTitle(current().plugin, name) }));
+      };
+      const isBlocker = "blocker" in first.entry;
+      return (
+        <ListRow
+          {...treeItem(first.key, row)}
+          aria-label={`${title()}, ${meta()}`}
+          aria-level={1}
+          aria-selected={props.selectedReview === first.key ? "true" : "false"}
+          class="work-row work-entry"
+          style={{ "--work-depth": "0" }}
+          icon={isBlocker ? <AlertIcon /> : <BotIcon />}
+          title={title()}
+          status={dot(item()?.dot ?? blocker()?.dot ?? "idle")}
+          meta={meta()}
+          trailing={
+            <Show when={menuItems().length > 0}>
+              {/* The menu opens on a click and runs the choice; neither opens the row. */}
+              <span class="work-entry-menu" onClick={(event) => event.stopPropagation()}>
+                <Menu
+                  label={`Actions for ${title()}`}
+                  icon={<EllipsisIcon />}
+                  items={menuItems()}
+                  onSelect={(action) => {
+                    const shown = item();
+                    props.onEntryAction(current().plugin, action, shown ? ["--item", shown.id] : [], title());
+                  }}
+                />
+              </span>
+            </Show>
+          }
+          onClick={() => open(current())}
+        />
+      );
+    }
     if (first.kind === "cause") {
       // A cause's key holds its plugin and ID, so neither changes. Its red dot comes with the
       // words for it; the section's heading counts the reviews waiting.

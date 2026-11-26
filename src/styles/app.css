@@ -1773,6 +1773,32 @@ body {
   opacity: 0;
 }
 
+/*
+ * The ⋯ menu of a plugin item's row (status format 2), the size of Remove. It shows on the row you
+ * point at, focus, or open, and while its menu is open; it opens only on a click.
+ */
+.work-entry-menu {
+  display: inline-flex;
+}
+
+.work-entry-menu .pt-icon-button {
+  inline-size: var(--s-space-20);
+  min-inline-size: 0;
+  block-size: var(--s-space-20);
+  min-block-size: 0;
+  padding: 0;
+  color: var(--s-text-muted);
+}
+
+.work-entry-menu .pt-icon-button svg {
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+}
+
+.work-entry:not(:hover, :focus-within, [aria-selected="true"]):not(:has([data-state="open"])) .work-entry-menu {
+  opacity: 0;
+}
+
 .cause-row {
   position: relative;
 }

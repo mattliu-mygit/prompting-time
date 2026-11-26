@@ -6,7 +6,7 @@ import type { AppEvent, ConversationSummary, ListChildConversationsRequest, Load
 import { axeViolations, render, settle } from "../test/render";
 import { App } from "./App";
 import { createAppStore, type AppApi, type AppStore } from "./store";
-import { actionResult, fixturePlugin, fixtureReviews, fixtureSettings, fixtureShown, fixtureStatus, noPlugins, pageActions } from "../test/plugins";
+import { actionResult, fixturePlugin, fixtureReviews, fixtureSettings, fixtureShown, fixtureStatus, fixtureV2Plugin, fixtureV2Status, noPlugins, pageActions } from "../test/plugins";
 
 const click = (element: Element) => {
   fireEvent.click(element);
@@ -669,6 +669,84 @@ describe("menu bar", () => {
     await runCommand("Show background agents in the menu bar");
     await waitFor(() => expect(lastRequest()?.visible).toBe(true));
     expect(window.localStorage.getItem("prompting-time.menu-bar")).toBe("on");
+  });
+});
+
+describe("status format 2", () => {
+  const fingerprint = "d".repeat(64);
+  const failedTitle = "Review this stack of PRs · acme/widgets#60";
+  /** The invented format-2 plugin: Rerun succeeds, and Delete previews, then deletes with the fingerprint. */
+  function v2Api() {
+    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
+      if (sent.action === "status") return actionResult({ stdout: JSON.stringify(fixtureV2Status()) });
+      if (sent.action === "delete") {
+        return sent.confirmedFingerprint === null
+          ? actionResult({ stdout: `printed the request; nothing deleted\nfingerprint: ${fingerprint}\n`, fingerprint, preview: "delete run-74c91b1d" })
+          : actionResult({ stdout: "deleted\n" });
+      }
+      return actionResult({ stdout: "queued again\n" });
+    });
+    let handler: (command: MenuBarCommand) => void = () => {};
+    const api = createApi({
+      listPlugins: vi.fn(async () => [fixtureV2Plugin()]),
+      pluginRequest,
+      listenToMenuBar: vi.fn(async (next: (command: MenuBarCommand) => void) => {
+        handler = next;
+        return () => {};
+      }),
+    });
+    const choose = (command: MenuBarCommand) => {
+      handler(command);
+      flush();
+    };
+    return { api, pluginRequest, choose, lastRequest: () => vi.mocked(api.updateMenuBar).mock.lastCall?.[0] };
+  }
+  const selected = () => document.querySelector('.all-work [role=treeitem][aria-selected="true"]')?.getAttribute("aria-label");
+
+  it("steps through its blockers and Needs you items with Command-J, and counts the items in the menu bar", async () => {
+    const { api, choose, lastRequest } = v2Api();
+    renderApp(api);
+    await screen.findByRole("treeitem", { name: /^Codex is signed out/ });
+    await waitFor(() => expect(lastRequest()).toMatchObject({
+      reviewsNeedingYou: 2,
+      agents: [{ plugin: "fixture-runs", status: "Idle · last run 2 min ago", cause: null, alert: true }],
+    }));
+
+    press("j");
+    expect(selected()).toMatch(/^Codex is signed out/);
+    expect(screen.getByRole("main", { name: "Background agent" })).toBeInTheDocument();
+    press("j");
+    expect(selected()).toMatch(new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`));
+    press("j");
+    expect(selected()).toMatch(/^Tighten upload retries/);
+    press("j");
+    expect(selected()).toMatch(/^Codex is signed out/);
+
+    // The menu bar's count opens the first item, not a blocker.
+    choose({ kind: "openNeedsYou" });
+    expect(selected()).toMatch(new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`));
+  });
+
+  it("runs a row's action with --item and the item's id, and one marked confirm only after the confirmation", async () => {
+    const { api, pluginRequest } = v2Api();
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: `Actions for ${failedTitle}` }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rerun" }));
+    await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "fixture-runs", action: "rerun", args: ["--item", "run-74c91b1d"], confirmedFingerprint: null }));
+    await waitFor(() => expect(document.querySelector(".app-notice")).toHaveTextContent(`Rerun · ${failedTitle}`));
+
+    fireEvent.click(screen.getByRole("button", { name: `Actions for ${failedTitle}` }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete run" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Delete run" });
+    expect(await within(dialog).findByLabelText("What it will send")).toHaveTextContent("delete run-74c91b1d");
+    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "fixture-runs", action: "delete", args: ["--item", "run-74c91b1d"], confirmedFingerprint: null });
+    expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "delete", confirmedFingerprint: fingerprint }));
+
+    const confirm = within(dialog).getByRole("button", { name: "Delete run" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "fixture-runs", action: "delete", args: ["--item", "run-74c91b1d"], confirmedFingerprint: fingerprint }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 });
 

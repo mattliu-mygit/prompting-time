@@ -1,11 +1,12 @@
-import { fireEvent, screen, within } from "@testing-library/dom";
+import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { createSignal, flush } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type { ChildPageSnapshot, SelectedPath } from "../../app/store";
 import type { ConversationSummary } from "../../bridge/types";
 import { axeViolations, render, settle } from "../../test/render";
-import { fixtureReviews } from "../../test/plugins";
+import { fixtureReviews, fixtureV2Plugin, fixtureV2Status } from "../../test/plugins";
 import { blockingCauses, newestRuns, readReviews, type PluginReview, type ReviewEntry } from "../agents/reviews";
+import { NO_STATUS_V2_WORK, statusV2Work, type StatusV2Work } from "../agents/statusV2";
 import { AllWork, groupWork, type PluginCause } from "./AllWork";
 
 function node(id: string, title: string, parentId: string | null = null, overrides: Partial<ConversationSummary> = {}): ConversationSummary {
@@ -36,6 +37,8 @@ type Options = {
   open?: Record<string, boolean> | null;
   /** Whether the plugin has a remove action, which puts Remove on review rows. */
   canRemove?: boolean;
+  /** What plugins that print status format 2 add. */
+  pluginWork?: StatusV2Work;
 };
 const SECTIONS = "prompting-time.sidebar-sections";
 
@@ -55,6 +58,8 @@ function renderWork(options: Options = {}) {
   const onOpenReview = vi.fn();
   const onOpenCause = vi.fn();
   const onRemoveReview = vi.fn();
+  const onOpenEntry = vi.fn();
+  const onEntryAction = vi.fn();
   const view = render(() => (
     <AllWork
       reviews={options.reviews ?? []}
@@ -65,6 +70,10 @@ function renderWork(options: Options = {}) {
       onOpenCause={onOpenCause}
       canRemove={() => options.canRemove ?? false}
       onRemoveReview={onRemoveReview}
+      pluginWork={options.pluginWork ?? NO_STATUS_V2_WORK}
+      actionTitle={(_plugin, action) => `${action[0]!.toUpperCase()}${action.slice(1)}`}
+      onOpenEntry={onOpenEntry}
+      onEntryAction={onEntryAction}
       conversations={conversations()}
       conversationsById={options.conversationsById ?? { root, child, grandchild, sibling }}
       childPagesById={childPagesById()}
@@ -81,7 +90,7 @@ function renderWork(options: Options = {}) {
     setQuery(text);
     flush();
   };
-  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, onRemoveReview, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, onRemoveReview, onOpenEntry, onEntryAction, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -284,6 +293,59 @@ describe("AllWork", () => {
     view.search("keep focus");
     expect(screen.getByRole("treeitem", { name: /^keep focus in the date picker, removed/ })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Remove widgets#8" })).not.toBeInTheDocument();
+  });
+
+  describe("a plugin that prints status format 2", () => {
+    const work = (status: Record<string, unknown> = fixtureV2Status()) => statusV2Work({
+      loaded: true, error: null, items: [fixtureV2Plugin()], statuses: { "fixture-runs": { value: status, error: null } },
+    });
+    const failedTitle = "Review this stack of PRs · acme/widgets#60";
+
+    it("draws its blockers first under Needs you, its Needs you groups after them, and its other groups as sections, folded as the manifest says", async () => {
+      const view = renderWork({ conversations: [], pluginWork: work(), selectedReview: "item:fixture-runs:run-review-2", open: {} });
+
+      expect(toggles()).toEqual(["Needs you 3 true", "Running 1 true", "Done 1 false"]);
+      expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
+        .toEqual(["Needs you", "Run failed", "Review needed", "Running"]);
+      const blocker = screen.getByRole("treeitem", { name: "Codex is signed out, Fixture runs · blocks every job" });
+      expect(blocker.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+      const failed = screen.getByRole("treeitem", { name: (name) => name.startsWith(`${failedTitle}, Verification Discipline: the model could not run · `) });
+      expect(failed.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+      const review = screen.getByRole("treeitem", { name: /^Tighten upload retries, 2 rubrics below threshold · alpha · / });
+      expect(review).toHaveAttribute("aria-selected", "true");
+      expect(review.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+      expect(screen.getByRole("treeitem", { name: /^Score yesterday's sessions, / }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
+      expect(screen.queryByRole("treeitem", { name: /Compare judge panels/ })).not.toBeInTheDocument();
+      // An item with no actions has no menu.
+      expect(screen.queryByRole("button", { name: "Actions for Score yesterday's sessions" })).not.toBeInTheDocument();
+
+      fireEvent.click(failed);
+      expect(view.onOpenEntry).toHaveBeenCalledExactlyOnceWith("fixture-runs", "item:fixture-runs:run-74c91b1d");
+      press(blocker, "Enter");
+      expect(view.onOpenEntry).toHaveBeenLastCalledWith("fixture-runs", "blocker:fixture-runs:codex-signed-out");
+      expect(await axeViolations()).toEqual([]);
+    });
+
+    it("runs an item's action with --item and its id, and a blocker's with no arguments, from the row's menu without opening the row", async () => {
+      const view = renderWork({ conversations: [], pluginWork: work(), open: {} });
+
+      fireEvent.click(screen.getByRole("button", { name: `Actions for ${failedTitle}` }));
+      expect(await screen.findByRole("menuitem", { name: "Rerun" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+      await waitFor(() => expect(view.onEntryAction).toHaveBeenCalledExactlyOnceWith("fixture-runs", "delete", ["--item", "run-74c91b1d"], failedTitle));
+      await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+      fireEvent.click(screen.getByRole("button", { name: "Actions for Codex is signed out" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Check-providers" }));
+      await waitFor(() => expect(view.onEntryAction).toHaveBeenLastCalledWith("fixture-runs", "check-providers", [], "Codex is signed out"));
+      expect(view.onOpenEntry).not.toHaveBeenCalled();
+    });
+
+    it("draws nothing of its own when its status lists nothing", () => {
+      renderWork({ conversations: [], pluginWork: work({ ...fixtureV2Status(), blockers: [], items: [] }), open: {} });
+      expect(toggles()).toEqual(["Needs you 0 true"]);
+      expect(screen.getByText("Nothing needs you right now.")).toBeInTheDocument();
+    });
   });
 
   it("moves between review and conversation rows with the arrow keys, past folded sections, and opens a review with Enter", () => {
