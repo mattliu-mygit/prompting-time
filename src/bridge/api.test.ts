@@ -24,6 +24,12 @@ import {
   loadTimeline,
   loadDiagnostics,
   pickProjectDirectory,
+  pickPluginArchive,
+  pickPluginFolder,
+  installPlugin,
+  listPlugins,
+  pluginRequest,
+  savePluginSettings,
   respondToApproval,
   steerRun,
   submitMessage,
@@ -85,6 +91,17 @@ describe("desktop bridge", () => {
       multiple: false,
       title: "Choose a project folder",
     });
+  });
+
+  it("selects one plugin folder, or one release archive", async () => {
+    vi.mocked(open).mockResolvedValueOnce("/tmp/synthetic-plugin").mockResolvedValueOnce("/tmp/synthetic-plugin.tar.gz");
+
+    expect(await pickPluginFolder()).toBe("/tmp/synthetic-plugin");
+    expect(await pickPluginArchive()).toBe("/tmp/synthetic-plugin.tar.gz");
+    expect(vi.mocked(open).mock.calls).toEqual([
+      [{ directory: true, multiple: false, title: "Choose a plugin folder" }],
+      [{ directory: false, multiple: false, title: "Choose a plugin release archive", filters: [{ name: "Release archive", extensions: ["gz", "tgz"] }] }],
+    ]);
   });
 
   it("preserves native cancellation", async () => {
@@ -154,6 +171,10 @@ describe("desktop bridge", () => {
     await inspectProject({ path: "/repo" });
     await listRunAudits({ conversationId: "c-1", cursor: null, limit: 10 });
     await loadRunAudit({ conversationId: "c-1", runId: "run-1" });
+    await listPlugins();
+    await installPlugin({ source: { kind: "folder", path: "/tmp/plugin" } });
+    await pluginRequest({ plugin: "fixture", action: "submit", args: ["run-1"], confirmedFingerprint: null });
+    await savePluginSettings({ plugin: "fixture", values: "{}" });
 
     expect(invokeMock.mock.calls).toEqual([
       ["bootstrap"],
@@ -214,6 +235,10 @@ describe("desktop bridge", () => {
       ["inspect_project", { request: { path: "/repo" } }],
       ["list_run_audits", { request: { conversationId: "c-1", cursor: null, limit: 10 } }],
       ["load_run_audit", { request: { conversationId: "c-1", runId: "run-1" } }],
+      ["list_plugins"],
+      ["install_plugin", { request: { source: { kind: "folder", path: "/tmp/plugin" } } }],
+      ["plugin_request", { request: { plugin: "fixture", action: "submit", args: ["run-1"], confirmedFingerprint: null } }],
+      ["save_plugin_settings", { request: { plugin: "fixture", values: "{}" } }],
     ]);
   });
 

@@ -164,6 +164,23 @@ body {
   margin: 0;
 }
 
+/* Background agents, below the work groups, as in the agreed mock */
+.agents-group {
+  margin-block-start: var(--s-space-12);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.agents-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-space-4);
+}
+
+.agents-heading .work-group-heading {
+  margin-block: var(--s-space-8) var(--s-space-4);
+}
+
 /* The conversation */
 .workspace-pane {
   display: flex;
@@ -848,6 +865,194 @@ body {
 
 .provider-indicator[data-available="true"] {
   background: var(--s-success);
+}
+
+/* A background agent's settings: a scrolling column and a save bar under it. */
+.plugin-settings {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.plugin-scroll {
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.plugin-column {
+  display: grid;
+  gap: var(--s-space-24);
+  inline-size: min(100%, var(--s-content-max-narrow));
+  margin-inline: auto;
+  padding: var(--s-space-24) var(--s-space-16);
+}
+
+.plugin-heading {
+  display: grid;
+  gap: var(--s-space-4);
+}
+
+.plugin-heading h2 {
+  margin: 0;
+  font-size: var(--s-size-xl);
+  font-weight: var(--s-heading-weight);
+}
+
+.plugin-heading p,
+.plugin-section p {
+  margin: 0;
+}
+
+.plugin-meta,
+.plugin-note {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.plugin-section {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.plugin-state {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.plugin-log,
+.plugin-preview {
+  max-block-size: 16rem;
+  margin: 0;
+  padding: var(--s-code-padding);
+  overflow: auto;
+  border: var(--s-code-border);
+  border-radius: var(--s-code-border-radius);
+  background: var(--s-code-bg);
+  color: var(--s-text);
+  font-family: var(--s-code-font-family);
+  font-size: var(--s-code-font-size);
+  line-height: var(--s-code-line-height);
+}
+
+.plugin-log,
+.plugin-preview-text {
+  white-space: pre-wrap;
+}
+
+.plugin-programs {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--s-size-sm);
+}
+
+.plugin-programs li {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  gap: var(--s-space-8);
+  color: var(--s-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.plugin-programs code {
+  color: var(--s-text);
+  font-family: var(--s-font-mono);
+}
+
+.plugin-programs li[data-state="missing"] span {
+  color: var(--s-error);
+}
+
+.settings-fields,
+.settings-group {
+  display: grid;
+  gap: var(--s-space-16);
+}
+
+.settings-group,
+.settings-choices {
+  min-inline-size: 0;
+  margin: 0;
+  padding: var(--s-space-12) var(--s-space-16) var(--s-space-16);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.settings-group .settings-group {
+  padding-inline: var(--s-space-12);
+}
+
+.settings-group legend,
+.settings-choices legend {
+  padding-inline: var(--s-space-4);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  letter-spacing: var(--s-tracking-wider);
+  text-transform: uppercase;
+}
+
+.settings-choices {
+  display: grid;
+  gap: var(--s-space-8);
+  padding: 0;
+  border: 0;
+}
+
+.settings-choices legend {
+  padding: 0 0 var(--s-input-label-spacing);
+  color: var(--s-text);
+  font-size: var(--s-input-label-size);
+  font-weight: var(--s-input-label-weight);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.settings-choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-space-8) var(--s-space-16);
+}
+
+.settings-list,
+.settings-switch {
+  display: grid;
+  gap: var(--s-input-label-spacing);
+}
+
+.settings-label {
+  font-size: var(--s-input-label-size);
+  font-weight: var(--s-input-label-weight);
+}
+
+.plugin-save-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  inline-size: min(100%, var(--s-content-max-narrow));
+  margin: 0 auto var(--s-space-12);
+  padding: var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
+  background: var(--s-surface);
+}
+
+.plugin-save-text {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.plugin-refusal {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.install-path code {
+  font-family: var(--s-font-mono);
+  overflow-wrap: anywhere;
 }
 
 /* Small windows: All work covers the conversation while it is open. */

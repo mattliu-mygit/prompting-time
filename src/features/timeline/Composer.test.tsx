@@ -7,6 +7,7 @@ import { createAppStore, createSnapshot, type AppApi, type AppStore, type Conver
 import { render, settle } from "../../test/render";
 import { Composer } from "./Composer";
 import { Timeline } from "./Timeline";
+import { noPlugins } from "../../test/plugins";
 
 let testStore: AppStore;
 let currentActions: ConversationActions;
@@ -23,6 +24,7 @@ beforeEach(async () => {
     savedConversations = savedConversations.map(item => item.id === conversationId ? { ...item, contextBudget: preference } : item);
   });
   testStore = createAppStore({
+    ...noPlugins(),
     ...currentActions,
     submitMessage: request => currentActions.submitMessage(request),
     steerRun: request => currentActions.steerRun(request),

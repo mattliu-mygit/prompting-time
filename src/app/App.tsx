@@ -1,6 +1,10 @@
 import { createMemo, createSignal, onSettled, Show, untrack } from "solid-js";
 import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
-import type { ProviderId } from "../bridge/types";
+import type { PluginSource, ProviderId } from "../bridge/types";
+import { BackgroundAgents, type InstallKind } from "../features/agents/BackgroundAgents";
+import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
+import { PluginInspector, PluginSettings } from "../features/agents/PluginSettings";
+import { describeAgent } from "../features/agents/status";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
@@ -24,8 +28,9 @@ const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Cla
 const NARROW_INSPECTOR = "(max-width: 72rem)";
 
 /**
- * The command center: the All work list, the selected conversation's timeline and composer, and the
- * inspector, with the dialogs that create and archive conversations.
+ * The command center: the All work list with its background agents, the selected conversation's
+ * timeline and composer or the selected agent's settings, and the inspector, with the dialogs that
+ * create and archive conversations and install agents.
  */
 export function App(props: { store: AppStore }) {
   // One store for the app's lifetime. Read once: a prop written as a call, such as
@@ -43,6 +48,9 @@ export function App(props: { store: AppStore }) {
   const [lifecycleError, setLifecycleError] = createSignal<string | null>(null);
   const [composerModalOpen, setComposerModalOpen] = createSignal(false);
   const [messageFocusRequested, setMessageFocusRequested] = createSignal(false);
+  // The background agent whose settings the workspace shows instead of the selected conversation.
+  const [selectedPluginName, setSelectedPluginName] = createSignal<string | null>(null);
+  const [installTarget, setInstallTarget] = createSignal<{ kind: InstallKind; path: string } | null>(null);
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
@@ -52,19 +60,43 @@ export function App(props: { store: AppStore }) {
     return id ? snapshot().conversationsById[id] ?? null : null;
   });
   const selectedId = createMemo(() => selected()?.id ?? null);
+  const selectedPlugin = createMemo(() => snapshot().plugins.items.find(({ name }) => name === selectedPluginName()) ?? null);
   const parent = () => {
     const parentId = selected()?.parentId;
     return parentId ? snapshot().conversationsById[parentId] : undefined;
   };
   const overlay = () => narrow() && inspectorOpen();
-  const lifecycleModalOpen = () => creating() || archiveTarget() !== null;
+  const lifecycleModalOpen = () => creating() || archiveTarget() !== null || installTarget() !== null;
   const paletteAvailable = () => snapshot().phase === "ready" && !overlay() && !lifecycleModalOpen() && !composerModalOpen();
   const waiting = () => waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []));
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
 
   function selectConversation(id: string) {
+    setSelectedPluginName(null);
     void store.selectConversation(id);
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
+  }
+
+  function openPlugin(name: string) {
+    setSelectedPluginName(name);
+    if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
+  }
+
+  /** Picks the archive or folder, then asks in the install dialog; a cancelled pick does nothing. */
+  async function startInstall(kind: InstallKind) {
+    setLifecycleError(null);
+    try {
+      const path = kind === "archive" ? await store.pickPluginArchive() : await store.pickPluginFolder();
+      if (path) setInstallTarget({ kind, path });
+    } catch (reason) {
+      setLifecycleError(reason instanceof Error ? reason.message : "Prompting Time could not open the picker.");
+    }
+  }
+
+  async function install(source: PluginSource) {
+    const installed = await store.installPlugin(source);
+    setInstallTarget(null);
+    openPlugin(installed.name);
   }
 
   /** ⌘J: the next root waiting on you after the selected one, in list order, wrapping around. */
@@ -73,7 +105,7 @@ export function App(props: { store: AppStore }) {
     if (roots.length === 0) return;
     const index = roots.findIndex(({ id }) => id === selectedId());
     const next = roots[(index + 1) % roots.length]!;
-    if (next.id !== selectedId()) selectConversation(next.id);
+    if (next.id !== selectedId() || selectedPlugin()) selectConversation(next.id);
   }
 
   function openNewConversation() {
@@ -153,6 +185,50 @@ export function App(props: { store: AppStore }) {
     }
   }
 
+  /** The selected conversation's path, timeline, and composer. */
+  const conversationWorkspace = () => (
+    <Show
+      when={selectedId()}
+      keyed
+      fallback={
+        <section class="empty-workspace">
+          <h2>No conversation selected</h2>
+          <p>Choose a conversation from All work.</p>
+        </section>
+      }
+    >
+      {(id: string) => (
+        <>
+          <ConversationNavigation
+            conversation={snapshot().conversationsById[id]!}
+            conversationsById={snapshot().conversationsById}
+            path={snapshot().selectedPath}
+            onSelect={(id) => {
+              selectConversation(id);
+              queueMicrotask(() => document.getElementById("timeline-heading")?.focus({ preventScroll: true }));
+            }}
+          />
+          <SelectedTimeline store={store} snapshot={snapshot} conversationId={id} views={timelineViews} />
+          <Show when={snapshot().conversationsById[id]}>
+            {(conversation) => (
+              <Composer
+                conversation={conversation()}
+                providers={snapshot().bootstrap?.providers ?? []}
+                routingProfile={conversation().routingProfile}
+                actions={store.actions}
+                store={store}
+                onMutation={() => store.refreshConversation(id)}
+                onModalChange={setComposerModalOpen}
+                focusRequested={messageFocusRequested()}
+                onFocusHandled={() => setMessageFocusRequested(false)}
+              />
+            )}
+          </Show>
+        </>
+      )}
+    </Show>
+  );
+
   const conversationActions = () => (
     <>
       <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
@@ -176,17 +252,29 @@ export function App(props: { store: AppStore }) {
           >
             <PanelLeftIcon />
           </IconButton>
-          <div class="shell-title">
-            <h1 title={selected()?.title ?? "Prompting Time"}>{selected()?.title ?? "Prompting Time"}</h1>
-            <Show when={selected()}>
-              {(conversation) => (
-                <span class="shell-meta">
-                  {conversation().provider ? providerNames[conversation().provider!] : "No provider"} · {statusWords[effectiveConversationStatus(conversation())]}
-                  {conversation().projectRoot ? ` · ${conversation().projectRoot!.split(/[\\/]/).filter(Boolean).at(-1)}` : ""}
-                </span>
-              )}
-            </Show>
-          </div>
+          <Show
+            when={selectedPlugin()}
+            fallback={
+              <div class="shell-title">
+                <h1 title={selected()?.title ?? "Prompting Time"}>{selected()?.title ?? "Prompting Time"}</h1>
+                <Show when={selected()}>
+                  {(conversation) => (
+                    <span class="shell-meta">
+                      {conversation().provider ? providerNames[conversation().provider!] : "No provider"} · {statusWords[effectiveConversationStatus(conversation())]}
+                      {conversation().projectRoot ? ` · ${conversation().projectRoot!.split(/[\\/]/).filter(Boolean).at(-1)}` : ""}
+                    </span>
+                  )}
+                </Show>
+              </div>
+            }
+          >
+            {(plugin) => (
+              <div class="shell-title">
+                <h1>{plugin().title} settings</h1>
+                <span class="shell-meta">Background agent · {describeAgent(plugin(), snapshot().plugins.statuses[plugin().name]).meta}</span>
+              </div>
+            )}
+          </Show>
           <div class="toolbar-actions">
             <Show when={!sidebarOpen()}>{conversationActions()}</Show>
             <IconButton
@@ -198,7 +286,7 @@ export function App(props: { store: AppStore }) {
             >
               <PanelRightIcon />
             </IconButton>
-            <Show when={selected()?.capabilities.canArchive}>
+            <Show when={!selectedPlugin() && selected()?.capabilities.canArchive}>
               <Menu
                 label="More"
                 icon={<EllipsisIcon />}
@@ -233,54 +321,27 @@ export function App(props: { store: AppStore }) {
                 conversationsById={snapshot().conversationsById}
                 childPagesById={snapshot().childPagesById}
                 expandedById={snapshot().expandedById}
-                selectedId={selectedId()}
+                selectedId={selectedPlugin() ? null : selectedId()}
                 selectedPath={snapshot().selectedPath}
                 onSelect={selectConversation}
                 onToggle={(id) => store.toggleConversation(id)}
                 onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
               />
+              <BackgroundAgents
+                plugins={snapshot().plugins}
+                selected={selectedPlugin()?.name ?? null}
+                onSelect={openPlugin}
+                onInstall={(kind) => void startInstall(kind)}
+              />
             </aside>
           </Show>
 
-          <main class="workspace-pane" aria-label="Conversation workspace" inert={overlay()}>
-            <Show
-              when={selectedId()}
-              keyed
-              fallback={
-                <section class="empty-workspace">
-                  <h2>No conversation selected</h2>
-                  <p>Choose a conversation from All work.</p>
-                </section>
-              }
-            >
-              {(id: string) => (
-                <>
-                  <ConversationNavigation
-                    conversation={snapshot().conversationsById[id]!}
-                    conversationsById={snapshot().conversationsById}
-                    path={snapshot().selectedPath}
-                    onSelect={(id) => {
-                      selectConversation(id);
-                      queueMicrotask(() => document.getElementById("timeline-heading")?.focus({ preventScroll: true }));
-                    }}
-                  />
-                  <SelectedTimeline store={store} snapshot={snapshot} conversationId={id} views={timelineViews} />
-                  <Show when={snapshot().conversationsById[id]}>
-                    {(conversation) => (
-                      <Composer
-                        conversation={conversation()}
-                        providers={snapshot().bootstrap?.providers ?? []}
-                        routingProfile={conversation().routingProfile}
-                        actions={store.actions}
-                        store={store}
-                        onMutation={() => store.refreshConversation(id)}
-                        onModalChange={setComposerModalOpen}
-                        focusRequested={messageFocusRequested()}
-                        onFocusHandled={() => setMessageFocusRequested(false)}
-                      />
-                    )}
-                  </Show>
-                </>
+          <main class="workspace-pane" aria-label={selectedPlugin() ? "Background agent" : "Conversation workspace"} inert={overlay()}>
+            <Show when={selectedPlugin()?.name} keyed fallback={conversationWorkspace()}>
+              {(name: string) => (
+                <Show when={snapshot().plugins.items.find((plugin) => plugin.name === name)}>
+                  {(plugin) => <PluginSettings plugin={plugin()} status={snapshot().plugins.statuses[name]} actions={store.pluginActions} />}
+                </Show>
               )}
             </Show>
           </main>
@@ -301,21 +362,31 @@ export function App(props: { store: AppStore }) {
                 </IconButton>
               </div>
               <StartupDiagnostic snapshot={snapshot()} />
-              <Show when={selectedId()} keyed fallback={<ProviderList snapshot={snapshot()} />}>
-                {(id) => (
-                  <Inspector
-                    conversation={snapshot().conversationsById[id]!}
-                    providers={snapshot().bootstrap?.providers ?? []}
-                    refreshVersion={snapshot().conversationVersions[id] ?? 0}
-                    actions={store.actions}
-                  />
-                )}
+              <Show
+                when={selectedPlugin()}
+                fallback={
+                  <Show when={selectedId()} keyed fallback={<ProviderList snapshot={snapshot()} />}>
+                    {(id) => (
+                      <Inspector
+                        conversation={snapshot().conversationsById[id]!}
+                        providers={snapshot().bootstrap?.providers ?? []}
+                        refreshVersion={snapshot().conversationVersions[id] ?? 0}
+                        actions={store.actions}
+                      />
+                    )}
+                  </Show>
+                }
+              >
+                {(plugin) => <PluginInspector plugin={plugin()} />}
               </Show>
             </aside>
           </Show>
         </div>
         <Show when={snapshot().error}><p role="alert" class="inline-error lifecycle-error">{snapshot().error}</p></Show>
         <Show when={lifecycleError() && !creating() && !archiveTarget()}><p role="alert" class="inline-error lifecycle-error">{lifecycleError()}</p></Show>
+        <Show when={installTarget()} keyed>
+          {(target) => <InstallPluginDialog kind={target.kind} path={target.path} onInstall={install} onCancel={() => setInstallTarget(null)} />}
+        </Show>
         <Show when={creating()}>
           <NewConversationDialog
             pickProjectDirectory={() => store.pickProjectDirectory()}

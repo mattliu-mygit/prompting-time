@@ -5,6 +5,7 @@ import { App } from "../../app/App";
 import { createAppStore, type AppApi } from "../../app/store";
 import type { ConversationSummary } from "../../bridge/types";
 import { render } from "../../test/render";
+import { noPlugins } from "../../test/plugins";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -26,6 +27,7 @@ it("navigates a known descendant from the palette to its parent and root without
   const grandchild: ConversationSummary = { ...child, id: "grandchild", parentId: "child", title: "Researcher", hasChildren: false };
   const nodes: Record<string, ConversationSummary> = { root, child, grandchild };
   const api: AppApi = {
+    ...noPlugins(),
     setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({ providers: [], startupDiagnostic: null }),
     listConversations: vi.fn().mockResolvedValue({ items: [root], nextCursor: null }),

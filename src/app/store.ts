@@ -22,6 +22,12 @@ import type {
   DiagnosticsPage,
   ThinkingPreference,
   ContextBudget,
+  InstallPluginRequest,
+  PluginActionRequest,
+  PluginActionResult,
+  PluginSnapshot,
+  PluginSource,
+  SavePluginSettingsRequest,
 } from "../bridge/types";
 
 const PAGE_SIZE = 200;
@@ -30,6 +36,14 @@ const CHILD_PAGE_SIZE = 20;
 const MAX_RETAINED_CHILDREN = 80;
 const MAX_PAGES = 10_000;
 const MAX_SEQUENCE = (1n << 64n) - 1n;
+/** The action a plugin, such as Whooper, names `status`: it prints its status as JSON. */
+const STATUS_ACTION = "status";
+/**
+ * While a plugin's state folder keeps changing, plugins are read again at most this often. A
+ * review writes its transcript several times a second, and each read runs the status action as a
+ * process; if that costs too much, read again only for changes to the files the status reads.
+ */
+const PLUGIN_REFRESH_INTERVAL_MS = 2000;
 
 export type EffectiveStatus = "idle" | RunStatus;
 export type StatusFilter = "all" | EffectiveStatus;
@@ -60,6 +74,12 @@ export type AppApi = {
   archiveConversation(request: { conversationId: string }): Promise<void>;
   listRunAudits(request: { conversationId: string; cursor: string | null; limit: number }): Promise<RunAuditPage>;
   loadRunAudit(request: { conversationId: string; runId: string }): Promise<RunAuditDetailSnapshot>;
+  listPlugins(): Promise<PluginSnapshot[]>;
+  installPlugin(request: InstallPluginRequest): Promise<PluginSnapshot>;
+  pluginRequest(request: PluginActionRequest): Promise<PluginActionResult>;
+  savePluginSettings(request: SavePluginSettingsRequest): Promise<PluginActionResult>;
+  pickPluginFolder(): Promise<string | null>;
+  pickPluginArchive(): Promise<string | null>;
 };
 
 export type ConversationActions = Pick<
@@ -78,6 +98,23 @@ export type ConversationActions = Pick<
 >;
 
 export type AppActions = ConversationActions & Pick<AppApi, "listRunAudits" | "loadRunAudit">;
+
+/** What a plugin's screens run: its actions, and saving its settings. */
+export type PluginActions = Pick<AppApi, "pluginRequest" | "savePluginSettings">;
+
+/** What a plugin's status action printed, read as JSON, or why it could not be read. */
+export type PluginStatusRead = Readonly<{ value: unknown; error: null } | { value: null; error: string }>;
+
+export type PluginsSnapshot = Readonly<{
+  /** False until Prompting Time has listed its plugins once. */
+  loaded: boolean;
+  /** Why the plugins could not be listed, such as plugins being unavailable in this session. */
+  error: string | null;
+  /** Installed plugins by name, as list_plugins returns them. */
+  items: readonly PluginSnapshot[];
+  /** The status of each running plugin that has a status action, by plugin name. */
+  statuses: Readonly<Record<string, PluginStatusRead>>;
+}>;
 
 type DraftSubmission = Readonly<{
   pending: boolean;
@@ -117,6 +154,7 @@ export type AppSnapshot = Readonly<{
   submissionsById: Readonly<Record<string, DraftSubmission>>;
   thinkingSavesById: Readonly<Record<string, Readonly<{ pending: boolean; preference: ThinkingPreference | null; error: string | null }>>>;
   contextBudgetSavesById: Readonly<Record<string, Readonly<{ pending: boolean; preference: ContextBudget | null; error: string | null }>>>;
+  plugins: PluginsSnapshot;
 }>;
 
 export type AppStore = {
@@ -140,7 +178,12 @@ export type AppStore = {
   setThinkingPreference(conversationId: string, preference: ThinkingPreference): Promise<void>;
   setContextBudget(conversationId: string, preference: ContextBudget): Promise<void>;
   submitDraft(conversationId: string, providerOverride: ProviderId | null, runId: string | null): Promise<boolean>;
+  /** Installs a plugin and adds it to the list; the error of a refused install is thrown. */
+  installPlugin(source: PluginSource): Promise<PluginSnapshot>;
+  pickPluginFolder(): Promise<string | null>;
+  pickPluginArchive(): Promise<string | null>;
   readonly actions: AppActions;
+  readonly pluginActions: PluginActions;
 };
 
 const emptySnapshot: AppSnapshot = freezeSnapshot({
@@ -163,6 +206,7 @@ const emptySnapshot: AppSnapshot = freezeSnapshot({
   submissionsById: {},
   thinkingSavesById: {},
   contextBudgetSavesById: {},
+  plugins: { loaded: false, error: null, items: [], statuses: {} },
 });
 
 export function createAppStore(api: AppApi): AppStore {
@@ -190,6 +234,8 @@ export function createAppStore(api: AppApi): AppStore {
     resolve(value: InspectorSnapshot): void;
     reject(reason: unknown): void;
   }> = [];
+  let pluginRefreshPromise: Promise<void> | null = null;
+  let pluginRefreshRequested = false;
   let disposed = false;
   let unlisten: (() => void) | null = null;
 
@@ -326,7 +372,69 @@ export function createAppStore(api: AppApi): AppStore {
     }
   }
 
+  /** Reads the plugins and their status again; requests during a read wait for the next one. */
+  function requestPluginRefresh(): Promise<void> {
+    pluginRefreshRequested = true;
+    if (pluginRefreshPromise) return pluginRefreshPromise;
+    pluginRefreshPromise = (async () => {
+      while (pluginRefreshRequested && !disposed) {
+        pluginRefreshRequested = false;
+        await refreshPlugins();
+        if (pluginRefreshRequested && !disposed) {
+          await new Promise((resolve) => setTimeout(resolve, PLUGIN_REFRESH_INTERVAL_MS));
+        }
+      }
+    })().finally(() => {
+      pluginRefreshPromise = null;
+    });
+    return pluginRefreshPromise;
+  }
+
+  async function refreshPlugins() {
+    let items: PluginSnapshot[];
+    try {
+      items = await api.listPlugins();
+    } catch (reason) {
+      if (!disposed) {
+        update({ plugins: { ...snapshot.plugins, loaded: true,
+          error: reason instanceof Error ? reason.message : "Prompting Time could not list its background agents." } });
+      }
+      return;
+    }
+    // A plugin that is not running reports nothing new, and its status command may need a program
+    // that is missing.
+    const running = items.filter((plugin) => plugin.process.kind !== "notRunning"
+      && plugin.actions.some((action) => action.name === STATUS_ACTION && !action.confirm));
+    const statuses = Object.fromEntries(await Promise.all(running.map(async (plugin) => [plugin.name, await readPluginStatus(plugin.name)] as const)));
+    if (!disposed) update({ plugins: { loaded: true, error: null, items, statuses } });
+  }
+
+  async function readPluginStatus(plugin: string): Promise<PluginStatusRead> {
+    try {
+      const result = await api.pluginRequest({ plugin, action: STATUS_ACTION, args: [], confirmedFingerprint: null });
+      if (result.exitCode !== 0) {
+        return { value: null, error: result.stderr.trim() || `The status action exited with ${result.exitCode ?? "a signal"}.` };
+      }
+      return { value: JSON.parse(result.stdout) as unknown, error: null };
+    } catch (reason) {
+      if (reason instanceof SyntaxError) return { value: null, error: "The status action did not print JSON." };
+      return { value: null, error: reason instanceof Error ? reason.message : "Prompting Time could not read the status." };
+    }
+  }
+
+  async function installPlugin(source: PluginSource): Promise<PluginSnapshot> {
+    const installed = await api.installPlugin({ source });
+    if (!disposed) {
+      const items = [...snapshot.plugins.items.filter(({ name }) => name !== installed.name), installed]
+        .sort((left, right) => left.name.localeCompare(right.name));
+      update({ plugins: { ...snapshot.plugins, items } });
+      void requestPluginRefresh();
+    }
+    return installed;
+  }
+
   async function synchronize() {
+    void requestPluginRefresh();
     fullRefreshEpoch += 1;
     const epoch = fullRefreshEpoch;
     const revisionAtStart = eventRevision;
@@ -559,8 +667,9 @@ export function createAppStore(api: AppApi): AppStore {
     update({ lastSequence: nextSequence.toString() });
     if (fullRefresh) {
       void requestRefresh();
-    } else if (event.kind !== "pluginChanged") {
-      // This app shows no plugins, so a plugin change only advances the sequence.
+    } else if (event.kind === "pluginChanged") {
+      void requestPluginRefresh();
+    } else {
       requestConversationRefresh(event.conversationId);
       for (const conversation of Object.values(snapshot.conversationsById)) {
         if (conversation.id === event.conversationId || snapshot.executionOwners[conversation.id] !== event.conversationId) continue;
@@ -829,6 +938,9 @@ export function createAppStore(api: AppApi): AppStore {
     archiveConversation,
     inspectProject: (path) => api.inspectProject({ path }),
     pickProjectDirectory: () => api.pickProjectDirectory(),
+    installPlugin,
+    pickPluginFolder: () => api.pickPluginFolder(),
+    pickPluginArchive: () => api.pickPluginArchive(),
     retry: async () => {
       if (disposed) return;
       if (!unlisten) {
@@ -868,6 +980,10 @@ export function createAppStore(api: AppApi): AppStore {
       inspectWorkspace,
       listRunAudits: api.listRunAudits,
       loadRunAudit: api.loadRunAudit,
+    },
+    pluginActions: {
+      pluginRequest: api.pluginRequest,
+      savePluginSettings: api.savePluginSettings,
     },
   };
 }
@@ -953,6 +1069,7 @@ function freezeSnapshot(snapshot: AppSnapshot): AppSnapshot {
     submissionsById: Object.freeze(snapshot.submissionsById),
     thinkingSavesById: Object.freeze(snapshot.thinkingSavesById),
     contextBudgetSavesById: Object.freeze(snapshot.contextBudgetSavesById),
+    plugins: Object.freeze({ ...snapshot.plugins, items: Object.freeze([...snapshot.plugins.items]), statuses: Object.freeze(snapshot.plugins.statuses) }),
   });
 }
 

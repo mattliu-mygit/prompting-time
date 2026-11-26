@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, type OpenDialogOptions } from "@tauri-apps/plugin-dialog";
 import type {
   AppEvent,
   ApprovalDetailSnapshot,
@@ -39,6 +39,11 @@ import type {
   DiagnosticsPage,
   RunAuditPage,
   RunAuditDetailSnapshot,
+  InstallPluginRequest,
+  PluginActionRequest,
+  PluginActionResult,
+  PluginSnapshot,
+  SavePluginSettingsRequest,
 } from "./types";
 
 const APP_EVENT_NAME = "prompting-time://app-event";
@@ -149,20 +154,34 @@ export function createConversation(request: CreateConversationRequest): Promise<
   return call("create_conversation", { request });
 }
 
-export async function pickProjectDirectory(): Promise<string | null> {
+/** Opens the native picker for one file or folder; null when the user cancels. */
+async function pickPath(options: OpenDialogOptions & { multiple: false }, what: "folder" | "archive"): Promise<string | null> {
   try {
-    return await open({
-      directory: true,
-      multiple: false,
-      title: "Choose a project folder",
-    });
+    return await open(options);
   } catch {
     throw new BridgeError(
       "folder-picker",
-      "Prompting Time could not open the folder picker.",
-      "Try choosing the folder again.",
+      `Prompting Time could not open the ${what} picker.`,
+      `Try choosing the ${what} again.`,
     );
   }
+}
+
+export function pickProjectDirectory(): Promise<string | null> {
+  return pickPath({ directory: true, multiple: false, title: "Choose a project folder" }, "folder");
+}
+
+export function pickPluginFolder(): Promise<string | null> {
+  return pickPath({ directory: true, multiple: false, title: "Choose a plugin folder" }, "folder");
+}
+
+export function pickPluginArchive(): Promise<string | null> {
+  return pickPath({
+    directory: false,
+    multiple: false,
+    title: "Choose a plugin release archive",
+    filters: [{ name: "Release archive", extensions: ["gz", "tgz"] }],
+  }, "archive");
 }
 
 export function submitMessage(request: SubmitMessageRequest): Promise<SubmissionSnapshot> {
@@ -207,6 +226,22 @@ export function listRunAudits(request: ListRunAuditsRequest): Promise<RunAuditPa
 
 export function loadRunAudit(request: LoadRunAuditRequest): Promise<RunAuditDetailSnapshot> {
   return call("load_run_audit", { request });
+}
+
+export function listPlugins(): Promise<PluginSnapshot[]> {
+  return call("list_plugins");
+}
+
+export function installPlugin(request: InstallPluginRequest): Promise<PluginSnapshot> {
+  return call("install_plugin", { request });
+}
+
+export function pluginRequest(request: PluginActionRequest): Promise<PluginActionResult> {
+  return call("plugin_request", { request });
+}
+
+export function savePluginSettings(request: SavePluginSettingsRequest): Promise<PluginActionResult> {
+  return call("save_plugin_settings", { request });
 }
 
 export async function listenToAppEvents(handler: (event: AppEvent) => void): Promise<() => void> {

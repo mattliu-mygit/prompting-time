@@ -2,10 +2,11 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { flush } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BridgeError } from "../bridge/api";
-import type { ConversationSummary, ListChildConversationsRequest, LoadConversationRequest, TimelineItem } from "../bridge/types";
+import type { AppEvent, ConversationSummary, ListChildConversationsRequest, LoadConversationRequest, PluginActionRequest, TimelineItem } from "../bridge/types";
 import { axeViolations, render, settle } from "../test/render";
 import { App } from "./App";
 import { createAppStore, type AppApi, type AppStore } from "./store";
+import { actionResult, fixturePlugin, fixtureSettings, fixtureStatus, noPlugins } from "../test/plugins";
 
 const click = (element: Element) => {
   fireEvent.click(element);
@@ -168,6 +169,124 @@ describe("All work and ⌘J", () => {
     press("j");
     await settle();
     expect(store.getSnapshot().selectedConversationId).toBe("c1");
+  });
+});
+
+describe("background agents", () => {
+  const nextPoll = () => {
+    const next = new Date();
+    next.setHours(23, 45, 0, 0);
+    return next;
+  };
+  const shortTime = (date: Date) => date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  /** A fake bridge with Whooper installed; `status` answers its status action. */
+  function agentsApi(plugin = fixturePlugin(), status: () => unknown = () => fixtureStatus(nextPoll().toISOString())) {
+    let handler: ((event: AppEvent) => void) | null = null;
+    const api = createApi({
+      listPlugins: vi.fn(async () => [plugin]),
+      pluginRequest: vi.fn(async (request: PluginActionRequest) => request.action === "status"
+        ? actionResult({ stdout: JSON.stringify(status()) })
+        : actionResult({ stdout: JSON.stringify(fixtureSettings) })),
+      listenToAppEvents: vi.fn(async (listener: (event: AppEvent) => void) => {
+        handler = listener;
+        return () => {};
+      }),
+    });
+    return { api, emit: (event: AppEvent) => handler?.(event) };
+  }
+
+  it("shows each agent as a quiet row after the work groups, from its process and status", async () => {
+    renderApp(agentsApi().api);
+    const row = await screen.findByRole("button", { name: `Whooper running · next poll ${shortTime(nextPoll())}` });
+    expect(row.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
+    const heading = screen.getByRole("heading", { name: "Background agents" });
+    const workHeading = screen.getByRole("heading", { name: "No project" });
+    expect(workHeading.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("reads the agent again when a pluginChanged event arrives", async () => {
+    let reviewing: string | null = null;
+    const fake = agentsApi(fixturePlugin(), () => fixtureStatus(nextPoll().toISOString(),
+      reviewing ? { round: { running: true, started_at: null, reviewing } } : {}));
+    renderApp(fake.api);
+    await screen.findByRole("button", { name: /^Whooper running/ });
+    reviewing = "acme/widgets#101";
+    fake.emit({ kind: "pluginChanged", sequence: "1", plugin: "whooper", files: ["round.lock/round.json"] });
+
+    const row = await screen.findByRole("button", { name: "Whooper reviewing acme/widgets#101" });
+    expect(row.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
+  });
+
+  it("shows what is missing on an agent that cannot start", async () => {
+    const stopped = fixturePlugin({
+      process: { kind: "notRunning", exit: null },
+      prerequisites: [{ command: "slackdump", purpose: "Reads the review asks.", needed: true, path: null }],
+    });
+    const { api } = agentsApi(stopped);
+    renderApp(api);
+    const row = await screen.findByRole("button", { name: "Whooper missing slackdump" });
+    expect(row.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(api.pluginRequest).not.toHaveBeenCalled();
+  });
+
+  it("opens an agent's settings from its row and goes back to a conversation from All work", async () => {
+    renderApp(agentsApi().api);
+    click(await screen.findByRole("button", { name: /^Whooper running/ }));
+
+    expect(await screen.findByRole("heading", { name: "Whooper settings", level: 1 })).toBeInTheDocument();
+    expect(await screen.findByRole("spinbutton", { name: "Poll every" })).toHaveValue(15);
+    expect(screen.getByRole("button", { name: /^Whooper running/ })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("treeitem", { name: /Auth refactor/ })).toHaveAttribute("aria-selected", "false");
+    click(screen.getByRole("button", { name: "Show inspector" }));
+    expect(within(screen.getByRole("complementary", { name: "Inspector" })).getByText("Asks you first")).toBeInTheDocument();
+
+    click(screen.getByRole("treeitem", { name: /Auth refactor/ }));
+    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Poll every" })).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "Auth refactor", level: 1 })).toBeInTheDocument();
+  });
+
+  it("installs from a release archive only with its SHA-256, then opens the new agent", async () => {
+    const { api } = agentsApi();
+    const installed = fixturePlugin({ source: { kind: "archive", path: "/synthetic/release/whooper-0.1.0.tar.gz", sha256: "c".repeat(64) } });
+    api.listPlugins = vi.fn().mockResolvedValue([]);
+    api.pickPluginArchive = vi.fn().mockResolvedValue("/synthetic/release/whooper-0.1.0.tar.gz");
+    api.installPlugin = vi.fn(async () => {
+      api.listPlugins = vi.fn().mockResolvedValue([installed]);
+      return installed;
+    });
+    renderApp(api);
+    expect(await screen.findByText("None installed.")).toBeInTheDocument();
+    click(screen.getByRole("button", { name: "Add background agent" }));
+    click(await screen.findByRole("menuitem", { name: "Install from a release archive…" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Install from a release archive" });
+    expect(dialog).toHaveTextContent("/synthetic/release/whooper-0.1.0.tar.gz");
+    const install = within(dialog).getByRole("button", { name: "Install" });
+    expect(install).toBeDisabled();
+    fireEvent.input(within(dialog).getByRole("textbox", { name: "SHA-256" }), { target: { value: ` ${"C".repeat(64)} ` } });
+    flush();
+    click(install);
+
+    expect(await screen.findByRole("heading", { name: "Whooper settings", level: 1 })).toBeInTheDocument();
+    expect(api.installPlugin).toHaveBeenCalledExactlyOnceWith({ source: { kind: "archive", path: "/synthetic/release/whooper-0.1.0.tar.gz", sha256: "c".repeat(64) } });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("runs a plugin folder in place, and keeps a refused install in its dialog", async () => {
+    const { api } = agentsApi();
+    api.pickPluginFolder = vi.fn().mockResolvedValue("/synthetic/whooper");
+    api.installPlugin = vi.fn().mockRejectedValue(new BridgeError("plugin-manifest-invalid", "The plugin's manifest is invalid: fixture reason", null));
+    renderApp(api);
+    click(await screen.findByRole("button", { name: "Add background agent" }));
+    click(await screen.findByRole("menuitem", { name: "Run a plugin folder in place…" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Run a plugin folder in place" });
+    click(within(dialog).getByRole("button", { name: "Install" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("The plugin's manifest is invalid: fixture reason");
+    expect(api.installPlugin).toHaveBeenCalledExactlyOnceWith({ source: { kind: "folder", path: "/synthetic/whooper" } });
+    click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 });
 
@@ -854,6 +973,7 @@ function createApi(overrides: Partial<AppApi> = {}): AppApi {
     capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false,
       unavailableReason: "Recorded child activity is read-only." } });
   return {
+    ...noPlugins(),
     setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({
       providers: [

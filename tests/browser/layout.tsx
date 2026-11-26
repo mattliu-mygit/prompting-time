@@ -147,6 +147,12 @@ const api: AppApi = {
   },
   archiveConversation: unsupported,
   loadRunAudit: unsupported,
+  listPlugins: async () => [],
+  installPlugin: unsupported,
+  pluginRequest: unsupported,
+  savePluginSettings: unsupported,
+  pickPluginFolder: async () => null,
+  pickPluginArchive: async () => null,
 };
 
 const fixtureApi = treeScenario ? {

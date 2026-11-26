@@ -9,6 +9,7 @@ import type {
   InspectorSnapshot,
 } from "../bridge/types";
 import { createAppStore, selectVisibleConversations, type AppApi } from "./store";
+import { actionResult, fixturePlugin, fixtureStatus, noPlugins } from "../test/plugins";
 
 describe("in-session drafts", () => {
   it("keeps acknowledged preferences and newer run metadata when an older ancestry load completes", async () => {
@@ -352,8 +353,10 @@ function conversationActions(): Pick<
   | "archiveConversation"
   | "inspectProject"
   | "pickProjectDirectory"
+  | keyof ReturnType<typeof noPlugins>
 > {
   return {
+    ...noPlugins(),
     setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     loadTimeline: vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null }),
@@ -385,6 +388,7 @@ function createFakeApi() {
   };
 
   const api: AppApi = {
+    ...noPlugins(),
     setContextBudget: vi.fn(), setThinkingPreference: vi.fn(),
     getBootstrap: vi.fn().mockResolvedValue({
       providers: [
@@ -678,6 +682,59 @@ describe("app store", () => {
     await waitFor(() => expect(fake.api.loadConversation).toHaveBeenCalledTimes(2));
     expect(store.getSnapshot().lastSequence).toBe("3");
     expect(fake.calls.conversations).toBe(listedAtStart);
+    await waitFor(() => expect(fake.api.listPlugins).toHaveBeenCalledTimes(2));
+  });
+
+  it("lists plugins and reads the status of each running one", async () => {
+    const fake = createFakeApi();
+    const status = fixtureStatus("2026-11-26T15:45:00-05:00");
+    fake.api.listPlugins = vi.fn().mockResolvedValue([
+      fixturePlugin(),
+      fixturePlugin({ name: "stopped-agent", process: { kind: "notRunning", exit: null } }),
+    ]);
+    fake.api.pluginRequest = vi.fn().mockResolvedValue(actionResult({ stdout: JSON.stringify(status) }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+
+    await waitFor(() => expect(store.getSnapshot().plugins.loaded).toBe(true));
+    const plugins = store.getSnapshot().plugins;
+    expect(plugins.items.map(({ name }) => name)).toEqual(["whooper", "stopped-agent"]);
+    expect(plugins.statuses).toEqual({ whooper: { value: status, error: null } });
+    expect(fake.api.pluginRequest).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper", action: "status", args: [], confirmedFingerprint: null });
+  });
+
+  it("keeps a failed status and unavailable plugins from stopping the conversations", async () => {
+    const fake = createFakeApi();
+    fake.api.listPlugins = vi.fn().mockResolvedValue([fixturePlugin()]);
+    fake.api.pluginRequest = vi.fn().mockResolvedValue(actionResult({ exitCode: 1, stderr: "status: no state folder\n" }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await waitFor(() => expect(store.getSnapshot().plugins.statuses.whooper).toEqual({ value: null, error: "status: no state folder" }));
+
+    const unavailable = createFakeApi();
+    unavailable.api.listPlugins = vi.fn().mockRejectedValue(new Error("Plugins are unavailable in this session."));
+    const other = createAppStore(unavailable.api);
+    await other.initialize();
+    await waitFor(() => expect(other.getSnapshot().plugins.error).toBe("Plugins are unavailable in this session."));
+    expect(other.getSnapshot().phase).toBe("ready");
+    expect(other.getSnapshot().conversationIds.length).toBeGreaterThan(0);
+  });
+
+  it("adds an installed plugin and reads the plugins again", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    await waitFor(() => expect(fake.api.listPlugins).toHaveBeenCalledTimes(1));
+    const installed = fixturePlugin({ source: { kind: "folder", path: "/synthetic/whooper" }, process: { kind: "notRunning", exit: null } });
+    fake.api.installPlugin = vi.fn().mockResolvedValue(installed);
+    const listed = vi.fn().mockResolvedValue([installed]);
+    fake.api.listPlugins = listed;
+
+    const install = store.installPlugin({ kind: "folder", path: "/synthetic/whooper" });
+    expect(fake.api.installPlugin).toHaveBeenCalledWith({ source: { kind: "folder", path: "/synthetic/whooper" } });
+    await expect(install).resolves.toBe(installed);
+    expect(store.getSnapshot().plugins.items).toEqual([installed]);
+    await waitFor(() => expect(listed).toHaveBeenCalledTimes(1));
   });
 
   it("derives queued count, selection, and status-filtered conversations", async () => {
