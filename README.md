@@ -78,9 +78,12 @@ A single compact header holds the conversation title, provider, current status,
 and pane controls. **More → Archive conversation** keeps archival out of the main
 reading area. The sidebar starts with the pinned background agents, then **Search PRs
 and chats**, **New chat**, and the status filter above its list; New chat moves into the
-header when the sidebar is hidden, and the palette's **Search** stays in the header. Drag
-the sidebar's right edge, or focus it and use the arrow keys, to make it 220 to 520 pixels
-wide; the width, like which of its sections are open, is remembered on this device.
+header when the sidebar is hidden, and the palette's **Search** stays in the header. The
+list's sections work like VS Code's sidebar panes: every section's heading, with its count,
+stays on screen, the folded sections stack at the bottom, and the open ones share the space
+above them, each scrolling on its own. Drag the sidebar's right edge, or focus it and use
+the arrow keys, to make it 220 to 520 pixels wide; the width, like which of its sections are
+open, is remembered on this device.
 
 On macOS, **⌘+** (or **⌘=**) zooms the whole app in, **⌘−** zooms out, and
 **⌘0** resets to 100%. Zoom ranges from 75% to 200% in 25-point steps and is
@@ -178,7 +181,7 @@ leaves the outcome unconfirmed, with no replay.
 Prompting Time can host background agents, such as Whooper, as plugins. The Rust core installs,
 checks, starts, and stops them, and the window shows them.
 
-- **Screens.** Installed plugins sit pinned at the top of the sidebar, outside its scrolling list,
+- **Screens.** Installed plugins sit pinned at the top of the sidebar, above its sections,
   one compact row each: the name, which opens the plugin's screen; Pause or Resume (`pause`,
   `resume`), Start while it is stopped, and Poll now (`round`) as buttons; a ⋯ menu with Stop,
   Settings, and Open logs; and its status in words from its process and its `status` action, such
@@ -241,12 +244,14 @@ checks, starts, and stops them, and the window shows them.
   to the shown run's files.
 - **Reviews.** A plugin's status may list `reviews`, as `whooper-status --json` does: the runs of the
   last 30 days, each with the commit it reviewed (`head_sha`), the pull request's head
-  (`pr_head_sha`), its `author`, a `cause` when it failed or waits, and whether you skipped or
-  removed it (`skipped_by_user`, `removed_by_user`). The sidebar lists the newest run of each pull
-  request in sections that fold to a heading with a count; only "Needs you" starts open. It holds
-  Ready to approve (the plugin says approve once CI passes and read the whole change), Needs a look,
-  Review failed (a cause of the pull request's own), and Chats waiting on you, five items each
-  before "Show N more". Then come Reviewing, one "Waiting · <cause>" section per cause that blocks
+  (`pr_head_sha`), its `author`, a `cause` when it failed or waits, whether you skipped or removed
+  it (`skipped_by_user`, `removed_by_user`), and whether the plugin judges it safe to approve
+  (`safe_to_approve`). The sidebar lists the newest run of each pull request in sections that fold
+  to a heading with a count, stacked at the bottom of the sidebar; only "Needs you" starts open,
+  and it lists every item and scrolls on its own. It holds Ready to approve (the plugin judges the
+  run safe to approve, or, in a status without `safe_to_approve`, says approve once CI passes and
+  read the whole change), Needs a look, Review failed (a cause of the pull request's own), and
+  Chats waiting on you. Then come Reviewing, one "Waiting · <cause>" section per cause that blocks
   every review (`blocked`, or a cause with scope `all`), the chats of each project, and Done. A
   review's row has a two-line title and "widgets#101 · @author · 2 findings". "Search PRs and
   chats" finds a pull request by number, title words, author, or repo in every state, removed ones

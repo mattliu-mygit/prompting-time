@@ -22,10 +22,11 @@ snapshot ref before running the long-pane check:
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-layout.ts")).checkLayout()'
 ```
 
-Using fresh snapshot refs, expand Synthetic conversation 0 and select Synthetic
-child 0. Confirm the selected tree item and repeat the measurement command. The
-check throws if the shell/composer escape the viewport or any long pane cannot
-scroll internally. Close only this session with
+Using fresh snapshot refs, open **Chats · no folder** in the sidebar, expand Synthetic
+conversation 0, and select Synthetic child 0. Confirm the selected tree item and repeat
+the measurement command. The check throws if the shell/composer escape the viewport or
+the timeline or inspector cannot scroll internally; the sidebar's sections have their own
+check, under All work. Close only this session with
 `playwright-cli -s=layout-check close`, then stop the dev server you started.
 
 The fixture also supports folder-first creation entirely in browser memory. Open
@@ -50,6 +51,22 @@ by its heading, and it stays open after a reload. Combine it with a chat scenari
 `?work=1&chat=reading`, for timeline content. Command-J (Control-J) moves to the next
 root waiting on you; Command-K (Control-K) opens the palette.
 
+The sections work like VS Code's sidebar panes: the folded ones' headings stack at the
+bottom of the sidebar, and the open ones share the space above them, each scrolling on its
+own. With `?agents=reviews&work=1` at 1440 × 900, where Needs you is longer than its space,
+measure them:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-sidebar-panes.ts")).checkSidebarPanes()'
+```
+
+The check throws unless every heading is on screen, the stack of folded ones reaches the
+bottom, and each open section with more rows than room scrolls on its own. Open Done from
+the stack and repeat: it takes only the space its rows need, and Needs you keeps the rest.
+Resize to 1440 × 640 and repeat: Needs you and Done share the space evenly, and each scrolls.
+Tab reaches every heading, and Enter or Space on one opens or folds its section with the
+focus staying on it.
+
 ## Background agents
 
 Use `?agents=1` for an invented Whooper pinned at the top of the sidebar, running with its
@@ -67,14 +84,16 @@ first. The fixture answers in browser memory and runs no plugin.
 Use `?agents=reviews` for invented Whooper reviews. Whooper's pinned row reads "Can't review ·
 Docker isn't running" in red and opens the cause screen: Retry all prints what each retry queued,
 then Run now prints an invented round, and Remove all asks first, then removes the five waiting
-reviews with Undo. "Needs you" shows five of seven reviews ready to approve with "Show 2 more",
-two that need a look, and two failed ones; Reviewing, "Waiting · Docker isn't running", and Done
-start folded. "Search PRs and chats" finds a review by number, title words, author, or repo, and
-"keep focus" finds a removed review, whose page offers Restore. Remove on a row or in a review's
-header, Skip, and Submit open the next item in Needs you and say so in a notice with Undo.
-Whooper's Runs tab has its own search. "add a retry policy for uploads" is review 2, with a
-new-commits banner and review 1 in its versions menu, read-only. Drag the sidebar's right edge to
-resize it; the width stays after a reload. Start the server with `PROMPTING_TIME_FIXTURE_PAGE`
+reviews with Undo. "Needs you" lists six reviews ready to approve, three that need a look, and two
+failed ones, and scrolls on its own; acme/widgets#106 says approve once CI passes, but its one
+finding is a question, so Whooper's `safe_to_approve` is false and it needs a look. Reviewing,
+"Waiting · Docker isn't running", the chats, and Done start folded at the bottom. "Search PRs and
+chats" finds a review by number, title words, author, or repo, and "keep focus" finds a removed
+review, whose page offers Restore. Remove on a row or in a review's header, Skip, and Submit open
+the next item in Needs you and say so in a notice with Undo. Whooper's Runs tab has its own
+search. "add a retry policy for uploads" is review 2, with a new-commits banner and review 1 in its
+versions menu, read-only. Drag the sidebar's right edge to resize it; the width stays after a
+reload. Start the server with `PROMPTING_TIME_FIXTURE_PAGE`
 set to a built plugin page folder, such as Whooper's `page/dist` after `npm ci && npm run build`
 in its `page/`, and the server serves it at `/plugin-page/` with the headers the app's
 `pt-plugin://` scheme sends. Open a finished review to see it in the page; Submit review opens the
