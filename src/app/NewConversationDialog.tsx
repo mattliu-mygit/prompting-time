@@ -32,10 +32,12 @@ export function NewConversationDialog(props: Props) {
   const [busy, setBusy] = createSignal(false);
   let pending = false;
   let active = true;
-  let firstPlace: HTMLButtonElement | undefined;
+  let places: HTMLUListElement | undefined;
+  // The first place is the most recent folder, or Another folder… when there is none.
+  const focusFirstPlace = () => places?.querySelector("button")?.focus();
 
   onSettled(() => {
-    firstPlace?.focus();
+    focusFirstPlace();
     return () => {
       active = false;
     };
@@ -70,14 +72,10 @@ export function NewConversationDialog(props: Props) {
       pending = false;
       if (active) {
         setBusy(false);
-        queueMicrotask(() => firstPlace?.focus());
+        queueMicrotask(focusFirstPlace);
       }
     }
   }
-
-  const placeRef = (index: number) => (element: HTMLButtonElement) => {
-    if (index === 0) firstPlace = element;
-  };
 
   return (
     <div class="dialog-backdrop">
@@ -93,11 +91,11 @@ export function NewConversationDialog(props: Props) {
         <h2 id="new-conversation-title">New chat</h2>
         <p id="new-conversation-question">Where should the agent work?</p>
         <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>
-        <ul class="new-chat-places">
+        <ul ref={places} class="new-chat-places">
           <For each={props.recentFolders}>
-            {(folder, index) => (
+            {(folder) => (
               <li>
-                <button ref={placeRef(index())} type="button" class="new-chat-place" disabled={busy()} onClick={() => void create({ folder })}>
+                <button type="button" class="new-chat-place" disabled={busy()} onClick={() => void create({ folder })}>
                   <FolderIcon />
                   <span class="new-chat-place-name">{folderName(folder)}</span>
                   <span class="new-chat-place-detail new-chat-place-path">{folder}</span>
@@ -106,7 +104,7 @@ export function NewConversationDialog(props: Props) {
             )}
           </For>
           <li>
-            <button ref={placeRef(props.recentFolders.length)} type="button" class="new-chat-place" disabled={busy()} onClick={() => void create("another")}>
+            <button type="button" class="new-chat-place" disabled={busy()} onClick={() => void create("another")}>
               <FolderOpenIcon />
               <span class="new-chat-place-name">Another folder…</span>
             </button>

@@ -257,6 +257,31 @@ describe("plugin pages", () => {
     expect(screen.getByRole("heading", { level: 1, name: "move the projection" })).toBeInTheDocument();
   });
 
+  it("keeps the page loaded and sends it the next finished review the user opens", async () => {
+    const { api } = pagesApi();
+    renderApp(api);
+    await settle();
+    await settle();
+
+    fireEvent.click(await screen.findByRole("treeitem", { name: /^separate cache configuration, widgets#101/ }));
+    await settle();
+    const page = frame();
+    await fromPage(page.window, { version: 1, type: "ready", id: 1 });
+    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: OPEN }) }), "*");
+
+    // The page is ready, so opening another finished review sends it from the frame's effect.
+    const search = screen.getByRole("searchbox", { name: "Search PRs and chats" });
+    fireEvent.input(search, { target: { value: "#77" } });
+    flush();
+    fireEvent.keyDown(search, { key: "Enter" });
+    flush();
+    await settle();
+    await settle();
+    expect(screen.getByRole("heading", { level: 1, name: "add the tags package" })).toBeInTheDocument();
+    expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
+    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: SUBMITTED }) }), "*");
+  });
+
   it("searches PRs and chats from the sidebar: Enter opens the first result, and Escape clears", async () => {
     const { api } = pagesApi();
     renderApp(api);

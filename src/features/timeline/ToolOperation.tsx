@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { CopyButton } from "@prompting-time/ui";
 import type { EventDetailSnapshot, TimelineItem, ToolOperationStatus } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
@@ -30,9 +30,9 @@ export function ToolOperation(props: {
   createEffect(request, (current) => {
     if (current === null) return;
     let active = true;
-    const id = props.item.id;
-    const expected = operation() ? version() : null;
-    props.actions.loadEventDetail({ eventId: id }).then((result) => {
+    // The request decides when to load; read the item as it is now.
+    const expected = untrack(() => (operation() ? version() : null));
+    untrack(() => props.actions.loadEventDetail({ eventId: props.item.id })).then((result) => {
       if (!active) return;
       if (expected !== null && (!result.operation || result.operation.detailRevision !== expected)) {
         setLoaded({ request: current, detail: null, error: "Activity changed while loading. Retry detail." });

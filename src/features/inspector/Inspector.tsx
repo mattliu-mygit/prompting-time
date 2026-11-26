@@ -55,7 +55,8 @@ export function Inspector(props: InspectorProps) {
   const refreshAvailable = () => snapshot() !== null && props.refreshVersion !== renderedVersion();
 
   function refreshRunAudits(reset: boolean) {
-    if (!props.conversation.capabilities.canSend) return;
+    // Also called from the effect for a new run, which must rerun only for the run.
+    if (!untrack(() => props.conversation.capabilities.canSend)) return;
     runListRefreshQueued = true;
     runListResetQueued ||= reset;
     if (runListInFlight) return;

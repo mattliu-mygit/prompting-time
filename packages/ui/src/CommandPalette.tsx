@@ -1,5 +1,5 @@
 import * as dialog from "@zag-js/dialog";
-import { createEffect, createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import { Portal } from "@solidjs/web";
 import { spread, useMachine } from "./zag";
 
@@ -97,7 +97,8 @@ export function CommandPalette(props: CommandPaletteProps) {
         chosen = null;
         returnFocus?.focus();
         returnFocus = null;
-        if (item !== null) props.onSelect(item);
+        // The caller's handler reads its own state as it is now, as a click handler would.
+        if (item !== null) untrack(() => props.onSelect(item));
       }
     },
   );

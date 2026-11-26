@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
 import { Button, Menu, StatusDot } from "@prompting-time/ui";
 import type { AgentControls, PluginActions, PluginFilesChange, PluginStatusRead } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
@@ -39,7 +39,8 @@ export function ReviewStateWords(props: { plugin: PluginSnapshot; review: Review
   createEffect(() => (notSafeToApprove(props.review) ? props.review.run_id : null), (runId) => {
     if (runId === null) return;
     let current = true;
-    runPluginAction(props.actions, props.plugin, ACTIONS.showReview, [runId])
+    // Only a new run reads again; the plugin's actions are read as they are now.
+    untrack(() => runPluginAction(props.actions, props.plugin, ACTIONS.showReview, [runId]))
       .then((stdout) => readFindingKinds(stdout, runId))
       .then((kinds) => {
         if (current) setShown({ runId, kinds });

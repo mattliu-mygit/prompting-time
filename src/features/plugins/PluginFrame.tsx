@@ -32,8 +32,10 @@ export function PluginFrame(props: Props) {
   const [confirmation, setConfirmation] = createSignal<Confirmation | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const bridge = createPageBridge({
-    plugin: () => props.plugin,
-    status: () => props.status,
+    // The bridge reads the latest plugin and status each time it acts, also from the effects
+    // below, which run it when the review or the status changes; each read is a snapshot.
+    plugin: () => untrack(() => props.plugin),
+    status: () => untrack(() => props.status),
     actions: props.actions,
     // The sandboxed page's origin is opaque, so no origin names it; the message goes to this frame's window only.
     post: (message) => frame?.contentWindow?.postMessage(message, "*"),

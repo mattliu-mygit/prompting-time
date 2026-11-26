@@ -683,7 +683,8 @@ export function App(props: { store: AppStore }) {
                 <IconButton
                   ref={(element: HTMLButtonElement) => {
                     inspectorClose = element;
-                    if (narrow()) queueMicrotask(() => inspectorClose?.focus());
+                    // An inspector that opens as an overlay takes the focus as it opens.
+                    if (untrack(narrow)) queueMicrotask(() => inspectorClose?.focus());
                   }}
                   label="Close inspector"
                   onClick={closeInspector}

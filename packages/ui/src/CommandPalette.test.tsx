@@ -4,10 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { CommandPalette, type PaletteGroup } from "./CommandPalette";
 import { axeViolations, render } from "./test/render";
 
-async function renderPalette(groups: readonly PaletteGroup[]) {
+async function renderPalette(groups: readonly PaletteGroup[], onSelect: (id: string) => unknown = vi.fn()) {
   const [open, setOpen] = createSignal(false);
   const onClose = vi.fn(() => setOpen(false));
-  const onSelect = vi.fn();
   render(() => (
     <main>
       <button type="button">Search</button>
@@ -48,6 +47,16 @@ describe("CommandPalette", () => {
     await waitFor(() => expect(onSelect).toHaveBeenCalledExactlyOnceWith("last"));
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Search" })).toHaveFocus();
+  });
+
+  it("runs the chosen item's handler as a click would, so the handler can read the caller's signals", async () => {
+    const [shown] = createSignal("Compiler");
+    // The test setup fails a test in which Solid reports this read as one that cannot update.
+    const onSelect = vi.fn((id: string) => `${id} from ${shown()}`);
+    await renderPalette([{ heading: "Commands", items: [{ id: "next", label: "Next" }] }], onSelect);
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+    flush();
+    await waitFor(() => expect(onSelect).toHaveReturnedWith("next from Compiler"));
   });
 
   it("is a named dialog with a search field, grouped options, and the current item marked", async () => {
