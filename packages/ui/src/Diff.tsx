@@ -116,11 +116,14 @@ export function Diff<T>(props: DiffProps<T>) {
     cell.scrollIntoView?.({ block: "center" });
   }
 
-  const options = (layout: "split" | "unified", css: string): FileDiffOptions<T, undefined> => ({
+  const options = (layout: "split" | "unified", css: string, excerpted: boolean): FileDiffOptions<T, undefined> => ({
     theme: DIFF_THEME,
     themeType: "dark",
     diffStyle: layout,
     unsafeCSS: css,
+    // Between an excerpt's hunks, the lines left out may hold changes too, so they get a plain
+    // separator rather than Pierre's "10 unmodified lines".
+    ...(excerpted ? { hunkSeparators: "simple" as const } : {}),
     onLineNumberClick: ({ lineNumber, annotationSide }) => {
       if ((annotationSide === "deletions") !== untrack(deleted)) return;
       const mark = untrack(() => props.marks)?.find((item) => lineNumber >= item.start && lineNumber <= item.end);
@@ -151,12 +154,13 @@ export function Diff<T>(props: DiffProps<T>) {
       layout: props.layout ?? "split",
       annotations: props.annotations ?? [],
       css: markStyles(props.marks ?? [], props.target ?? null, deleted()),
+      excerpted: props.excerpt !== undefined,
     }),
-    ({ source, layout, annotations, css }) => {
+    ({ source, layout, annotations, css, excerpted }) => {
       if (!source) return;
       // setOptions replaces every option, so the callbacks above go in each time.
-      if (instance) instance.setOptions(options(layout, css));
-      else instance = new FileDiff<T>(options(layout, css));
+      if (instance) instance.setOptions(options(layout, css, excerpted));
+      else instance = new FileDiff<T>(options(layout, css, excerpted));
       instance.render({ ...source, lineAnnotations: [...annotations], containerWrapper: wrapper, forceRender: true });
     },
   );
