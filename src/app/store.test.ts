@@ -664,6 +664,22 @@ describe("app store", () => {
     expect(fake.calls.conversations).toBeGreaterThanOrEqual(4);
   });
 
+  it("advances the sequence on plugin changes without refreshing conversations", async () => {
+    const fake = createFakeApi();
+    const store = createAppStore(fake.api);
+    await store.initialize();
+    const listedAtStart = fake.calls.conversations;
+
+    fake.emit({ kind: "conversationChanged", sequence: "1", conversationId: "c1" });
+    await waitFor(() => expect(fake.api.loadConversation).toHaveBeenCalledTimes(1));
+    fake.emit({ kind: "pluginChanged", sequence: "2", plugin: "fixture-agent", files: ["runs/run-1/drafts.json"] });
+    fake.emit({ kind: "conversationChanged", sequence: "3", conversationId: "c1" });
+
+    await waitFor(() => expect(fake.api.loadConversation).toHaveBeenCalledTimes(2));
+    expect(store.getSnapshot().lastSequence).toBe("3");
+    expect(fake.calls.conversations).toBe(listedAtStart);
+  });
+
   it("derives queued count, selection, and status-filtered conversations", async () => {
     const fake = createFakeApi();
     const store = createAppStore(fake.api);

@@ -559,7 +559,8 @@ export function createAppStore(api: AppApi): AppStore {
     update({ lastSequence: nextSequence.toString() });
     if (fullRefresh) {
       void requestRefresh();
-    } else {
+    } else if (event.kind !== "pluginChanged") {
+      // This app shows no plugins, so a plugin change only advances the sequence.
       requestConversationRefresh(event.conversationId);
       for (const conversation of Object.values(snapshot.conversationsById)) {
         if (conversation.id === event.conversationId || snapshot.executionOwners[conversation.id] !== event.conversationId) continue;

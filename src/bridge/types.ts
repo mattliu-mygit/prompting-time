@@ -28,10 +28,33 @@ export const commands = {
 	inspectProject: (request: InspectProjectRequest) => typedError<ProjectPathSnapshot, CommandError>(__TAURI_INVOKE("inspect_project", { request })),
 	listRunAudits: (request: ListRunAuditsRequest) => typedError<RunAuditPage, CommandError>(__TAURI_INVOKE("list_run_audits", { request })),
 	loadRunAudit: (request: LoadRunAuditRequest) => typedError<RunAuditDetailSnapshot, CommandError>(__TAURI_INVOKE("load_run_audit", { request })),
+	/**
+	 *  Installs a plugin in place of any plugin of the same name and starts it as Prompting Time does
+	 *  when it opens. Nothing changes when the download, checksum, archive, or manifest fails.
+	 */
+	installPlugin: (request: InstallPluginRequest) => typedError<PluginSnapshot, CommandError>(__TAURI_INVOKE("install_plugin", { request })),
+	listPlugins: () => typedError<PluginSnapshot[], CommandError>(__TAURI_INVOKE("list_plugins")),
+	/**
+	 *  Runs one of a plugin's actions to its end. A failure the plugin reports, such as a refused
+	 *  submit, comes back as its exit code and stderr rather than as an error.
+	 */
+	pluginRequest: (request: PluginActionRequest) => typedError<PluginActionResult, CommandError>(__TAURI_INVOKE("plugin_request", { request })),
+	/**
+	 *  Saves settings through the plugin, which checks them; a refusal comes back as its exit code
+	 *  and stderr.
+	 */
+	savePluginSettings: (request: SavePluginSettingsRequest) => typedError<PluginActionResult, CommandError>(__TAURI_INVOKE("save_plugin_settings", { request })),
 };
 
 /* Types */
-export type AppEvent = { kind: "conversationChanged"; sequence: string; conversationId: string } | { kind: "runChanged"; sequence: string; conversationId: string; runId: string } | { kind: "reloadRequired"; sequence: string };
+export type AppEvent = { kind: "conversationChanged"; sequence: string; conversationId: string } | { kind: "runChanged"; sequence: string; conversationId: string; runId: string } | { kind: "reloadRequired"; sequence: string } | { kind: "pluginChanged"; sequence: string; plugin: string; 
+/**
+ *  Paths relative to the plugin's state folder of the files that changed there, such as
+ *  "runs/<run>/drafts.json". Empty when Prompting Time changed the plugin itself: installed
+ *  it, checked its prerequisites, or its start command started or ended. Null when more
+ *  files changed than one event lists.
+ */
+files: string[] | null };
 
 export type ApprovalDetailSnapshot = {
 	id: string,
@@ -226,6 +249,10 @@ export type InspectorSnapshot = {
 	activeDescendantCount: number,
 };
 
+export type InstallPluginRequest = {
+	source: PluginSource,
+};
+
 export type InterruptRunRequest = {
 	conversationId: string,
 	runId: string,
@@ -298,6 +325,77 @@ export type PermissionProfile = {
 	write: string[] | null,
 	networkEnabled: boolean | null,
 };
+
+export type PluginAction = {
+	name: string,
+	title: string,
+	description: string,
+	/**  The user confirms what the action will do before it runs for real. */
+	confirm: boolean,
+};
+
+export type PluginActionRequest = {
+	plugin: string,
+	action: string,
+	args: string[],
+	/**
+	 *  For an action that needs confirmation: null runs it with --print, which changes nothing and
+	 *  returns the fingerprint to confirm; the confirmed fingerprint then runs it for real.
+	 */
+	confirmedFingerprint: string | null,
+};
+
+export type PluginActionResult = {
+	exitCode: number | null,
+	stdout: string,
+	stderr: string,
+	fingerprint: string | null,
+};
+
+export type PluginExit = {
+	code: number | null,
+	output: string,
+};
+
+export type PluginPrerequisite = {
+	command: string,
+	purpose: string,
+	needed: boolean,
+	/**  Where the program was found, or null when it is missing. */
+	path: string | null,
+};
+
+export type PluginProcess = 
+/**  Prompting Time started it and stops it when Prompting Time quits. */
+{ kind: "started"; pid: number } | 
+/**  Another copy holds the run lock, such as one started from a terminal. */
+{ kind: "runningElsewhere"; pid: number } | { kind: "notRunning"; exit: PluginExit | null };
+
+export type PluginSnapshot = {
+	name: string,
+	title: string,
+	version: string,
+	description: string,
+	source: PluginSource,
+	folder: string,
+	stateFolder: string,
+	/**  The settings' JSON Schema, as JSON text. */
+	settingsSchema: string,
+	actions: PluginAction[],
+	prerequisites: PluginPrerequisite[],
+	/**
+	 *  Why the settings that decide which programs are needed could not be read; the plugin
+	 *  does not start until they can be.
+	 */
+	settingsError: string | null,
+	process: PluginProcess,
+};
+
+/**
+ *  Where a plugin comes from. A release or archive must match its SHA-256 (64 hexadecimal
+ *  digits); a folder runs in place, for developing a plugin. Paths are absolute.
+ */
+export type PluginSource = { kind: "release"; url: string; sha256: string } | { kind: "archive"; path: string; sha256: string } | { kind: "folder"; path: string };
 
 export type ProjectPathSnapshot = {
 	isGit: boolean,
@@ -386,6 +484,12 @@ export type RunAuditSummarySnapshot = {
 };
 
 export type RunStatus = "queued" | "running" | "waiting" | "completed" | "interrupted" | "failed";
+
+export type SavePluginSettingsRequest = {
+	plugin: string,
+	/**  The settings to change, as JSON object text. */
+	values: string,
+};
 
 export type SetContextBudgetRequest = {
 	conversationId: string,

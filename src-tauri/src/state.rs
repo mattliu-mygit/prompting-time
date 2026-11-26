@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use prompting_time_core::app::{ConversationOverview, PromptingTime};
 use prompting_time_core::domain::{ConversationId, RollupStatus};
+use prompting_time_core::plugins::{PluginHost, PluginHostConfig};
 use prompting_time_core::providers::claude::ClaudeAdapter;
 use prompting_time_core::providers::codex::CodexAdapter;
 use prompting_time_core::providers::{
@@ -25,12 +26,13 @@ use tokio::task::JoinSet;
 use crate::commands::{APP_EVENT_NAME, AppEvent};
 
 const DATABASE_FILE: &str = "prompting-time.sqlite3";
+const PLUGINS_DIR: &str = "plugins";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const STALE_RECOVERY_INTERVAL: Duration = Duration::from_secs(120);
 const NOTIFICATION_RESYNC_PAGE_SIZE: u32 = 200;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum AppInvalidation {
     Conversation {
         conversation_id: prompting_time_core::domain::ConversationId,
@@ -38,6 +40,10 @@ enum AppInvalidation {
     Run {
         conversation_id: prompting_time_core::domain::ConversationId,
         run_id: prompting_time_core::domain::RunId,
+    },
+    Plugin {
+        plugin: String,
+        files: Option<Vec<String>>,
     },
 }
 
@@ -63,6 +69,8 @@ pub struct StartupDiagnostic {
 pub enum StateError {
     #[error("application services are unavailable")]
     Unavailable,
+    #[error("plugins are unavailable")]
+    PluginsUnavailable,
 }
 
 pub struct AppState {
@@ -74,6 +82,7 @@ pub struct AppState {
     event_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     focused: AtomicBool,
     notifications: Mutex<NotificationTracker>,
+    plugins: Option<PluginHost>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,6 +198,7 @@ impl AppState {
             event_task: Mutex::new(None),
             focused: AtomicBool::new(true),
             notifications: Mutex::new(NotificationTracker::new(Arc::new(NoopNotifier))),
+            plugins: None,
         })
     }
 
@@ -210,6 +220,9 @@ impl AppState {
                 event_task: Mutex::new(None),
                 focused: AtomicBool::new(true),
                 notifications: Mutex::new(NotificationTracker::new(notifier)),
+                // Plugins stay unavailable when their folder cannot be set up; conversations work.
+                plugins: PluginHostConfig::from_environment(app_data_dir.join(PLUGINS_DIR))
+                    .and_then(|config| PluginHost::new(config).ok()),
             }),
             Err(diagnostic) => Self::failed(diagnostic),
         }
@@ -315,6 +328,10 @@ impl AppState {
             .ok_or(StateError::Unavailable)
     }
 
+    pub fn plugins(&self) -> Result<&PluginHost, StateError> {
+        self.plugins.as_ref().ok_or(StateError::PluginsUnavailable)
+    }
+
     pub fn providers(&self) -> &[ProviderDiagnostic] {
         &self.providers
     }
@@ -328,6 +345,12 @@ impl AppState {
             return;
         };
         let mut changes = service.subscribe_changes();
+        let mut plugin_changes = self.plugins.as_ref().map(PluginHost::subscribe);
+        // Plugins start once the window can hear about them, as Prompting Time opens.
+        let mut plugin_start = self
+            .plugins
+            .clone()
+            .map(|plugins| Box::pin(async move { plugins.start_installed().await }));
         let mut shutdown = self.event_shutdown.subscribe();
         let state = Arc::clone(self);
         let task = tauri::async_runtime::spawn(async move {
@@ -356,6 +379,29 @@ impl AppState {
                         });
                     }
                     _ = recoveries.join_next(), if !recoveries.is_empty() => {}
+                    _ = async {
+                        match &mut plugin_start {
+                            Some(start) => start.await,
+                            None => std::future::pending().await,
+                        }
+                    } => plugin_start = None,
+                    change = async {
+                        match &mut plugin_changes {
+                            Some(changes) => changes.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => match change {
+                        Ok(change) => events.emit(&app, AppInvalidation::Plugin {
+                            plugin: change.plugin,
+                            files: change.files,
+                        }),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            events.emit_reload(&app);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            plugin_changes = None;
+                        }
+                    },
                     change = changes.recv() => match change {
                         Ok(change) => {
                             let invalidation = match change.run_id {
@@ -465,14 +511,23 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        if let Some(service) = service {
-            let shutdown_service = Arc::clone(&service);
-            let task =
-                tauri::async_runtime::spawn(async move { shutdown_service.shutdown().await });
-            if !matches!(finish_owned_task(task, SHUTDOWN_TIMEOUT).await, Ok(Ok(()))) {
-                let _ = service.force_shutdown().await;
+        let service_shutdown = async {
+            if let Some(service) = service {
+                let shutdown_service = Arc::clone(&service);
+                let task =
+                    tauri::async_runtime::spawn(async move { shutdown_service.shutdown().await });
+                if !matches!(finish_owned_task(task, SHUTDOWN_TIMEOUT).await, Ok(Ok(()))) {
+                    let _ = service.force_shutdown().await;
+                }
             }
-        }
+        };
+        // Plugins stop the process groups Prompting Time started, within their own grace period.
+        let plugin_shutdown = async {
+            if let Some(plugins) = &self.plugins {
+                plugins.shutdown().await;
+            }
+        };
+        tokio::join!(service_shutdown, plugin_shutdown);
     }
 }
 
@@ -535,6 +590,11 @@ impl AppEventSequencer {
                 sequence: sequence.to_string(),
                 conversation_id: conversation_id.to_string(),
                 run_id: run_id.to_string(),
+            },
+            AppInvalidation::Plugin { plugin, files } => AppEvent::PluginChanged {
+                sequence: sequence.to_string(),
+                plugin,
+                files,
             },
         }
     }
@@ -1026,6 +1086,7 @@ mod tests {
             event_task: Mutex::new(None),
             focused: AtomicBool::new(false),
             notifications: Mutex::new(NotificationTracker::new(notifier.clone())),
+            plugins: None,
         };
 
         state.resync_notifications(&service, false).await;
@@ -1175,6 +1236,17 @@ mod tests {
                 sequence: "2".to_owned(),
                 conversation_id: conversation_id.to_string(),
                 run_id: run_id.to_string(),
+            }
+        );
+        assert_eq!(
+            sequencer.next(AppInvalidation::Plugin {
+                plugin: "fixture-agent".to_owned(),
+                files: Some(vec!["runs/run-1/drafts.json".to_owned()]),
+            }),
+            AppEvent::PluginChanged {
+                sequence: "3".to_owned(),
+                plugin: "fixture-agent".to_owned(),
+                files: Some(vec!["runs/run-1/drafts.json".to_owned()]),
             }
         );
     }

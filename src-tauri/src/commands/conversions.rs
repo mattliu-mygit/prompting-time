@@ -859,11 +859,183 @@ impl From<CoreRoutingCriterion> for RoutingCriterion {
 }
 
 impl From<StateError> for CommandError {
-    fn from(_: StateError) -> Self {
+    fn from(error: StateError) -> Self {
+        match error {
+            StateError::Unavailable => Self {
+                code: "startup-unavailable",
+                message: "Prompting Time application services are unavailable.".to_owned(),
+                action: Some(
+                    "Resolve the startup diagnostic and restart Prompting Time.".to_owned(),
+                ),
+            },
+            StateError::PluginsUnavailable => Self {
+                code: "plugins-unavailable",
+                message: "Plugins are unavailable in this session.".to_owned(),
+                action: Some(
+                    "Resolve any startup diagnostic and restart Prompting Time.".to_owned(),
+                ),
+            },
+        }
+    }
+}
+
+impl From<PluginSource> for CorePluginSource {
+    fn from(source: PluginSource) -> Self {
+        match source {
+            PluginSource::Release { url, sha256 } => Self::Release { url, sha256 },
+            PluginSource::Archive { path, sha256 } => Self::Archive {
+                path: PathBuf::from(path),
+                sha256,
+            },
+            PluginSource::Folder { path } => Self::Folder {
+                path: PathBuf::from(path),
+            },
+        }
+    }
+}
+
+impl From<CorePluginSource> for PluginSource {
+    fn from(source: CorePluginSource) -> Self {
+        match source {
+            CorePluginSource::Release { url, sha256 } => Self::Release { url, sha256 },
+            CorePluginSource::Archive { path, sha256 } => Self::Archive {
+                path: path.display().to_string(),
+                sha256,
+            },
+            CorePluginSource::Folder { path } => Self::Folder {
+                path: path.display().to_string(),
+            },
+        }
+    }
+}
+
+impl From<CorePluginSnapshot> for PluginSnapshot {
+    fn from(snapshot: CorePluginSnapshot) -> Self {
+        let manifest = snapshot.manifest;
         Self {
-            code: "startup-unavailable",
-            message: "Prompting Time application services are unavailable.".to_owned(),
-            action: Some("Resolve the startup diagnostic and restart Prompting Time.".to_owned()),
+            name: manifest.name,
+            title: manifest.title,
+            version: manifest.version,
+            description: manifest.description,
+            source: snapshot.source.into(),
+            folder: snapshot.folder.display().to_string(),
+            state_folder: snapshot.state_folder.display().to_string(),
+            settings_schema: snapshot.settings_schema,
+            actions: manifest
+                .actions
+                .into_iter()
+                .map(|action| PluginAction {
+                    name: action.name,
+                    title: action.title,
+                    description: action.description,
+                    confirm: action.confirm,
+                })
+                .collect(),
+            prerequisites: snapshot
+                .prerequisites
+                .into_iter()
+                .map(|prerequisite| PluginPrerequisite {
+                    command: prerequisite.command,
+                    purpose: prerequisite.purpose,
+                    needed: prerequisite.needed,
+                    path: prerequisite.path.map(|path| path.display().to_string()),
+                })
+                .collect(),
+            settings_error: snapshot.settings_error,
+            process: match snapshot.process {
+                CorePluginProcess::Started { pid } => PluginProcess::Started { pid },
+                CorePluginProcess::RunningElsewhere { pid } => {
+                    PluginProcess::RunningElsewhere { pid }
+                }
+                CorePluginProcess::NotRunning { exit } => PluginProcess::NotRunning {
+                    exit: exit.map(|exit| PluginExit {
+                        code: exit.code,
+                        output: exit.output,
+                    }),
+                },
+            },
+        }
+    }
+}
+
+impl From<PluginActionRequest> for CoreActionRequest {
+    fn from(request: PluginActionRequest) -> Self {
+        Self {
+            plugin: request.plugin,
+            action: request.action,
+            args: request.args,
+            confirmed_fingerprint: request.confirmed_fingerprint,
+        }
+    }
+}
+
+impl From<CoreActionOutput> for PluginActionResult {
+    fn from(output: CoreActionOutput) -> Self {
+        Self {
+            exit_code: output.exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            fingerprint: output.fingerprint,
+        }
+    }
+}
+
+impl From<PluginError> for CommandError {
+    fn from(error: PluginError) -> Self {
+        let (code, message, action) = match error {
+            PluginError::InvalidRequest(message) => ("invalid-request", message, None),
+            PluginError::Download(detail) => (
+                "plugin-download-failed",
+                format!("The plugin could not be downloaded: {detail}"),
+                Some("Check the release URL and the network, then retry."),
+            ),
+            PluginError::ChecksumMismatch { expected, actual } => (
+                "plugin-checksum-mismatch",
+                format!(
+                    "The archive's SHA-256 is {actual}, not the expected {expected}, so nothing was installed."
+                ),
+                Some("Check the SHA-256 published with the release."),
+            ),
+            PluginError::Archive(detail) => (
+                "plugin-archive-invalid",
+                format!("The plugin archive could not be unpacked: {detail}"),
+                None,
+            ),
+            PluginError::Manifest(error) => (
+                "plugin-manifest-invalid",
+                format!("The plugin's manifest is invalid: {error}"),
+                None,
+            ),
+            PluginError::UnknownPlugin(name) => (
+                "not-found",
+                format!("No plugin named {name} is installed."),
+                Some("Refresh the plugin list."),
+            ),
+            PluginError::UnknownAction { plugin, action } => (
+                "not-found",
+                format!("{plugin} has no action named {action}."),
+                None,
+            ),
+            PluginError::MissingFingerprint(action) => (
+                "plugin-protocol-error",
+                format!("{action} printed no fingerprint, so there is nothing to confirm."),
+                None,
+            ),
+            PluginError::Quitting => (
+                "shutting-down",
+                "Prompting Time is quitting.".to_owned(),
+                None,
+            ),
+            PluginError::Io { context, source } => (
+                "plugin-io-error",
+                format!("Prompting Time {context}: {source}"),
+                None,
+            ),
+        };
+        Self {
+            code,
+            message,
+            action: action.map(str::to_owned),
         }
     }
 }

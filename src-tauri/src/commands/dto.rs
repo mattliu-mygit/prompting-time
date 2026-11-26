@@ -877,4 +877,124 @@ pub enum AppEvent {
     ReloadRequired {
         sequence: String,
     },
+    PluginChanged {
+        sequence: String,
+        plugin: String,
+        /// Paths relative to the plugin's state folder of the files that changed there, such as
+        /// "runs/<run>/drafts.json". Empty when Prompting Time changed the plugin itself: installed
+        /// it, checked its prerequisites, or its start command started or ended. Null when more
+        /// files changed than one event lists.
+        files: Option<Vec<String>>,
+    },
+}
+
+/// Where a plugin comes from. A release or archive must match its SHA-256 (64 hexadecimal
+/// digits); a folder runs in place, for developing a plugin. Paths are absolute.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PluginSource {
+    Release { url: String, sha256: String },
+    Archive { path: String, sha256: String },
+    Folder { path: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPluginRequest {
+    pub source: PluginSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSnapshot {
+    pub name: String,
+    pub title: String,
+    pub version: String,
+    pub description: String,
+    pub source: PluginSource,
+    pub folder: String,
+    pub state_folder: String,
+    /// The settings' JSON Schema, as JSON text.
+    pub settings_schema: String,
+    pub actions: Vec<PluginAction>,
+    pub prerequisites: Vec<PluginPrerequisite>,
+    /// Why the settings that decide which programs are needed could not be read; the plugin
+    /// does not start until they can be.
+    pub settings_error: Option<String>,
+    pub process: PluginProcess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAction {
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    /// The user confirms what the action will do before it runs for real.
+    pub confirm: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPrerequisite {
+    pub command: String,
+    pub purpose: String,
+    pub needed: bool,
+    /// Where the program was found, or null when it is missing.
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum PluginProcess {
+    /// Prompting Time started it and stops it when Prompting Time quits.
+    Started {
+        pid: u32,
+    },
+    /// Another copy holds the run lock, such as one started from a terminal.
+    RunningElsewhere {
+        pid: u32,
+    },
+    NotRunning {
+        exit: Option<PluginExit>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginExit {
+    pub code: Option<i32>,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginActionRequest {
+    pub plugin: String,
+    pub action: String,
+    pub args: Vec<String>,
+    /// For an action that needs confirmation: null runs it with --print, which changes nothing and
+    /// returns the fingerprint to confirm; the confirmed fingerprint then runs it for real.
+    pub confirmed_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginActionResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePluginSettingsRequest {
+    pub plugin: String,
+    /// The settings to change, as JSON object text.
+    pub values: String,
 }

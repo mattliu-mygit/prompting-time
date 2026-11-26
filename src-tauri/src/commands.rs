@@ -17,6 +17,11 @@ use prompting_time_core::domain::{
     TimelineEventKind as CoreTimelineEventKind,
 };
 use prompting_time_core::handoff::HandoffError;
+use prompting_time_core::plugins::{
+    ActionOutput as CoreActionOutput, ActionRequest as CoreActionRequest, PluginError,
+    PluginProcess as CorePluginProcess, PluginSnapshot as CorePluginSnapshot,
+    PluginSource as CorePluginSource,
+};
 use prompting_time_core::providers::{
     ApprovalResponse as CoreApprovalResponse, ProviderId as CoreProviderId,
 };
@@ -405,6 +410,61 @@ pub async fn load_run_audit(
         .into())
 }
 
+/// Installs a plugin in place of any plugin of the same name and starts it as Prompting Time does
+/// when it opens. Nothing changes when the download, checksum, archive, or manifest fails.
+#[tauri::command]
+#[specta::specta]
+pub async fn install_plugin(
+    state: State<'_, Arc<AppState>>,
+    request: InstallPluginRequest,
+) -> Result<PluginSnapshot, CommandError> {
+    Ok(state
+        .plugins()?
+        .install(request.source.into())
+        .await?
+        .into())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_plugins(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<PluginSnapshot>, CommandError> {
+    Ok(state
+        .plugins()?
+        .list()
+        .await
+        .into_iter()
+        .map(Into::into)
+        .collect())
+}
+
+/// Runs one of a plugin's actions to its end. A failure the plugin reports, such as a refused
+/// submit, comes back as its exit code and stderr rather than as an error.
+#[tauri::command]
+#[specta::specta]
+pub async fn plugin_request(
+    state: State<'_, Arc<AppState>>,
+    request: PluginActionRequest,
+) -> Result<PluginActionResult, CommandError> {
+    Ok(state.plugins()?.run_action(request.into()).await?.into())
+}
+
+/// Saves settings through the plugin, which checks them; a refusal comes back as its exit code
+/// and stderr.
+#[tauri::command]
+#[specta::specta]
+pub async fn save_plugin_settings(
+    state: State<'_, Arc<AppState>>,
+    request: SavePluginSettingsRequest,
+) -> Result<PluginActionResult, CommandError> {
+    Ok(state
+        .plugins()?
+        .save_settings(&request.plugin, &request.values)
+        .await?
+        .into())
+}
+
 pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(tauri_specta::collect_commands![
@@ -431,6 +491,10 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             inspect_project,
             list_run_audits,
             load_run_audit,
+            install_plugin,
+            list_plugins,
+            plugin_request,
+            save_plugin_settings,
         ])
         .typ::<AppEvent>()
 }
