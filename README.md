@@ -16,8 +16,6 @@ The current release candidate integrates Codex App Server and Claude Code. Suppo
 
 The interface is Solid 2.0 and TypeScript, built from the shared components in `packages/ui` (`@prompting-time/ui`), and talks to a typed Tauri command boundary. Rust owns provider processes, routing, lifecycle supervision, SQLite persistence, and Git worktree safety. Provider-specific protocol data is normalized at adapter boundaries before it reaches the shared application model.
 
-The Solid interface is arriving in two halves. The first, on this branch, only reads: All work, timelines, the inspector, and the command palette. Sending, steering, answering approvals and questions, creating, and archiving conversations return with the second half; until then, use a build of the main branch for those actions.
-
 ## Runtime compatibility
 
 - The current development bundle is an Apple Silicon artifact. Its application binary declares macOS 11.0 as its deployment target; that inspection is not a blanket compatibility claim for every macOS 11+ machine.
@@ -70,7 +68,7 @@ Archiving removes a conversation from active navigation but keeps its durable hi
 ## Conversation continuity
 
 The default layout gives the conversation room to breathe: the inspector starts
-closed and opens on demand. Chat and draft text use a comfortable 17px size at
+closed and opens on demand. Chat and draft text use Sigil's 16px large size at
 standard display scaling, controls and sidebar labels use 14px, and secondary text
 is at least 13px. The new-window default is 1440 × 900; smaller windows remain
 supported, with the inspector opening as an overlay when it would crowd the chat.

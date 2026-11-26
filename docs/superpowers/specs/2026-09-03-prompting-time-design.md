@@ -510,7 +510,7 @@ it is the authoritative specification for this feature.
 
 Switching providers occurs only at a turn boundary. Steering an active turn stays with its current provider. To switch during active work, the user first interrupts the run.
 
-Interrupt and provider-switch confirmation is a portaled modal surface. While it is open, the complete application background is inert to pointer, keyboard, and assistive-technology navigation; interruption failures remain inside the active dialog, and closing it restores normal interaction and focus.
+Interrupt and provider-switch confirmation is a portaled modal surface, `@prompting-time/ui`'s ConfirmDialog, which starts on the button that keeps the run going. While it is open, the complete application background is inert to pointer, keyboard, and assistive-technology navigation; interruption failures remain inside the active dialog, and closing it restores normal interaction and focus.
 
 The canonical conversation remains continuous, but each provider has its own native session. On a provider's first turn in a conversation, Prompting Time creates a native session and supplies a handoff capsule. When returning to an existing provider session, Prompting Time resumes it and supplies only canonical activity that session has not seen.
 

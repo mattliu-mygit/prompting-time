@@ -1,9 +1,7 @@
 # Browser layout regression
 
-This Vite-only fixture renders the real App, store, timeline, All work list, and
-inspector with invented data. The Solid interface only reads for now, so the
-scenarios below that send, steer, answer approvals, create, or archive have nothing
-to act on until the second half of the rewrite returns those controls. It never connects to Tauri or providers and is
+This Vite-only fixture renders the real App, store, timeline, composer, All work list,
+and inspector with invented data. It never connects to Tauri or providers and is
 not included in the production entry point. Type-check it with
 `pnpm exec tsc --project tests/browser/tsconfig.json`. Use an installed Playwright CLI or
 the Codex Playwright wrapper; no browser test runner dependency is required.

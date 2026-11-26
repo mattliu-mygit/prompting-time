@@ -352,7 +352,7 @@ export function Composer(props: ComposerProps) {
               <option value="providerDefault">Provider default</option>
             </select>
           </label>
-          <IconButton label="Composer help" aria-expanded={helpOpen() ? "true" : "false"} aria-controls={helpId} onClick={() => setHelpOpen((open) => !open)}>
+          <IconButton class="composer-help" label="Composer help" aria-expanded={helpOpen() ? "true" : "false"} aria-controls={helpId} onClick={() => setHelpOpen((open) => !open)}>
             <HelpIcon />
           </IconButton>
           <Button
