@@ -19,7 +19,8 @@ const cut = (text: string) => (text.length > LABEL_CHARACTERS ? `${text.slice(0,
 export function FlowDiagram(props: { flow: Flow; onOpen(path: string, line: number): void }) {
   const actors = () => [...new Set(props.flow.calls.flatMap((call) => [call.from, call.to]))];
   const x = (name: string) => LANE / 2 + actors().indexOf(name) * LANE;
-  const width = () => actors().length * LANE;
+  // A call to itself writes its label right of its lane, so the last lane gets room for one.
+  const width = () => actors().length * LANE + (props.flow.calls.some((call) => call.from === call.to) ? LANE : 0);
   const height = () => TOP + props.flow.calls.length * ROW + 12;
   const name = (call: FlowCall) => `${call.from} to ${call.to}: ${call.status === "changed" && call.old_label ? `${call.old_label}, now ` : ""}${call.label}${STATUS_WORDS[call.status] ? `, ${STATUS_WORDS[call.status]}` : ""}`;
   return (

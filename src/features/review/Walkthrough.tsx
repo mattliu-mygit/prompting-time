@@ -244,7 +244,8 @@ export function Walkthrough(props: Props) {
     const marks = createMemo((): DiffMark[] => fileProps.file.places.map((entry) => ({ id: entry.place.id, label: String(entry.number), start: entry.place.start_line, end: entry.place.end_line })));
     const placeNotes = createMemo(() => new Map(fileProps.file.places.map((entry): [string, DiffLineAnnotation<Note>] => [entry.place.id, { side: side(), lineNumber: entry.place.end_line, metadata: { kind: "place", entry } }])));
     const draftNotes = createMemo(() => props.shown.findings
-      .filter((finding) => finding.path === fileProps.file.path && fileProps.file.ranges.some((range) => finding.line >= range.start - 3 && finding.line <= range.end + 3))
+      // Only in the layer whose lines hold it, not in another's context lines, so each shows once.
+      .filter((finding) => finding.path === fileProps.file.path && fileProps.file.ranges.some((range) => finding.line >= range.start && finding.line <= range.end))
       .map((finding): DiffLineAnnotation<Note> => {
         const choice = props.shown.drafts?.findings[finding.id];
         return { side: finding.side === "LEFT" ? "deletions" : "additions", lineNumber: finding.line, metadata: { kind: "draft", finding, included: choice?.included ?? false, text: choice?.text ?? finding.draft } };

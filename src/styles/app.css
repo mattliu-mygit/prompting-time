@@ -2872,3 +2872,8 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
 .work-rail-dot:hover {
   background: var(--s-surface);
 }
+
+/* With the walkthrough showing, the page waits hidden below it and takes no height. */
+.review-screen:has(> .walkthrough) > .review-body {
+  flex: none;
+}
