@@ -2,7 +2,7 @@ import { createUniqueId, For, Show } from "solid-js";
 import { BotIcon, Button, EllipsisIcon, Menu, PlusIcon, StatusDot, type MenuItem } from "@prompting-time/ui";
 import type { PluginsSnapshot, PluginStatusRead } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
-import { agentControls, agentMenuItems, type AgentAction } from "./agentMenu";
+import { agentControls, agentMenuItems, rowButtons, type AgentAction } from "./agentMenu";
 import { causeKey } from "./reviews";
 import { describeAgent } from "./status";
 
@@ -88,8 +88,7 @@ function AgentRow(props: RowProps) {
   const statusId = createUniqueId();
   const words = () => describeAgent(props.plugin, props.status);
   const controls = () => agentControls(props.plugin, props.status, props.pending);
-  // Start takes Pause's place while the agent is stopped, so the menu keeps only Stop.
-  const first = () => (controls().power.action === "start" ? controls().power : controls().pause);
+  const buttons = () => rowButtons(props.plugin, props.status, props.pending);
   return (
     <li class="agent-pin" data-blocked={words().cause ? "" : undefined}>
       <div class="agent-pin-top">
@@ -105,12 +104,13 @@ function AgentRow(props: RowProps) {
           <span>{props.plugin.title}</span>
         </button>
         <span class="agent-pin-actions">
-          <Show when={first()}>
+          <Show when={buttons()[0]}>
             {(control) => <Button disabled={control().disabled} onClick={() => props.onAction(control().action)}>{control().label}</Button>}
           </Show>
-          <Show when={controls().poll}>
+          <Show when={buttons()[1]}>
             {(control) => <Button disabled={control().disabled} onClick={() => props.onAction(control().action)}>{control().label}</Button>}
           </Show>
+          {/* Start sits on the row while the agent is stopped, so the menu offers only Stop. */}
           <Menu
             label={`${props.plugin.title} actions`}
             icon={<EllipsisIcon />}

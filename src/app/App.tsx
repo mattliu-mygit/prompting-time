@@ -1,12 +1,13 @@
-import { createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
 import { Button, CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
-import type { PluginSource, ProviderId } from "../bridge/types";
+import type { MenuBarCommand, PluginSource, ProviderId } from "../bridge/types";
 import { ACTIONS, hasAction, messageOf, runPluginAction } from "../features/agents/actions";
 import { AgentScreen } from "../features/agents/AgentScreen";
 import { reviewsInProgress, type AgentAction, type AgentTab } from "../features/agents/agentMenu";
 import { BackgroundAgents, INSTALL_ITEMS, type InstallKind } from "../features/agents/BackgroundAgents";
 import { CauseScreen } from "../features/agents/CauseScreen";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
+import { menuBarRequest, readMenuBarEnabled, saveMenuBarEnabled } from "../features/agents/menuBar";
 import { PluginInspector } from "../features/agents/PluginSettings";
 import { blockingCauses, causeKey, needsYou, newestRuns, pluginReviews, reviewKey, reviewState, reviewTitle, shortPullRequest, versionsOf, waitingText, type PluginReview, type ReviewEntry } from "../features/agents/reviews";
 import { ReviewScreen } from "../features/agents/ReviewScreen";
@@ -77,6 +78,8 @@ export function App(props: { store: AppStore }) {
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   // What the sidebar's search holds; its results replace the sections while it has words.
   const [query, setQuery] = createSignal("");
+  // Whether the background agents show in the macOS menu bar, which the palette turns off and on.
+  const [menuBarEnabled, setMenuBarEnabled] = createSignal(readMenuBarEnabled());
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
@@ -96,6 +99,8 @@ export function App(props: { store: AppStore }) {
     const { ready, look, failed } = needsYou(newestReviews());
     return [...ready, ...look, ...failed];
   });
+  // The menu bar extra shows what the pinned agents and Needs you show, and changes with them.
+  createEffect(() => menuBarRequest(snapshot().plugins, agentPending(), needsYouReviews().length, menuBarEnabled()), (request) => store.updateMenuBar(request));
   const openReviewEntry = () => {
     const view = pluginView();
     return view?.kind === "review" ? reviewsByPlugin()[view.plugin]?.find((review) => review.run_id === view.runId) ?? null : null;
@@ -177,6 +182,17 @@ export function App(props: { store: AppStore }) {
     } finally {
       setAgentPending(Object.fromEntries(Object.entries(agentPending()).filter(([key]) => key !== name)));
       if (action === "stop") setStopTarget(null);
+    }
+  }
+
+  /** A choice in the menu bar extra: an agent's button runs as on its row, and the rest open what their sidebar rows open. */
+  function runMenuBarCommand(command: MenuBarCommand) {
+    if (command.kind === "agent") void runAgentAction(command.plugin, command.action);
+    else if (command.kind === "openAgent") openPlugin(command.plugin);
+    else if (command.kind === "openCause") showPlugin({ kind: "cause", plugin: command.plugin, cause: command.cause });
+    else {
+      const first = needsYouReviews()[0];
+      if (first) openReview(first.plugin, first.review.run_id);
     }
   }
 
@@ -357,10 +373,12 @@ export function App(props: { store: AppStore }) {
       }
     };
     window.addEventListener("keydown", onKeyDown);
+    const stopMenuBar = store.onMenuBarCommand(runMenuBarCommand);
     return () => {
       clearTimeout(noticeTimer);
       query?.removeEventListener("change", updateNarrow);
       window.removeEventListener("keydown", onKeyDown);
+      stopMenuBar();
     };
   });
 
@@ -812,6 +830,7 @@ export function App(props: { store: AppStore }) {
                 { id: "command:parent", label: "Go to parent conversation", disabled: !parent() },
                 { id: "command:sidebar", label: sidebarOpen() ? "Hide All work" : "Show All work" },
                 ...INSTALL_ITEMS.map((item) => ({ id: `command:install-${item.value}`, label: `Add background agent: ${item.label}` })),
+                { id: "command:menu-bar", label: menuBarEnabled() ? "Hide background agents from the menu bar" : "Show background agents in the menu bar" },
                 { id: "command:inspector", label: inspectorOpen() ? "Hide inspector" : "Show inspector" },
                 {
                   id: "command:message",
@@ -838,6 +857,12 @@ export function App(props: { store: AppStore }) {
               if (target) selectConversation(target.id);
             } else if (id === "command:sidebar") setSidebarOpen((open) => !open);
             else if (id === "command:inspector") setInspectorOpen((open) => !open);
+            else if (id === "command:menu-bar") {
+              // Solid applies the write on its next flush, so read the new value first.
+              const enabled = !menuBarEnabled();
+              setMenuBarEnabled(enabled);
+              saveMenuBarEnabled(enabled);
+            }
             else if (id.startsWith("command:install-")) void startInstall(id.slice("command:install-".length) as InstallKind);
           }}
         />

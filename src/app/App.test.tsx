@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { flush } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BridgeError } from "../bridge/api";
-import type { AppEvent, ConversationSummary, ListChildConversationsRequest, LoadConversationRequest, PluginActionRequest, TimelineItem } from "../bridge/types";
+import type { AppEvent, ConversationSummary, ListChildConversationsRequest, LoadConversationRequest, MenuBarCommand, PluginActionRequest, TimelineItem } from "../bridge/types";
 import { axeViolations, render, settle } from "../test/render";
 import { App } from "./App";
 import { createAppStore, type AppApi, type AppStore } from "./store";
@@ -551,6 +551,82 @@ describe("agent controls and blocking causes", () => {
     await settle();
     expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
     expect(api.readPluginLog).toHaveBeenCalledWith({ plugin: "whooper" });
+  });
+});
+
+describe("menu bar", () => {
+  const docker = { id: "docker", summary: "Docker isn't running", scope: "all" };
+  /** Whooper blocked by Docker, with a review ready to approve and one failed; its controls succeed, and `choose` makes a choice in the menu bar. */
+  function menuBarApi() {
+    const status = fixtureStatus("2026-11-26T23:45:00Z", { reviews: fixtureReviews(), blocked: { ...docker, since: null, waiting: 0 } });
+    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => (sent.action === "status"
+      ? actionResult({ stdout: JSON.stringify(status) })
+      : sent.action === "show-review" ? actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!)) }) : actionResult({ stdout: "done\n" })));
+    const plugin = fixturePlugin({ actions: [...pageActions, { name: "pause", title: "Pause", description: "Pauses the schedule.", confirm: false }, { name: "resume", title: "Resume", description: "Resumes the schedule.", confirm: false }] });
+    let handler: (command: MenuBarCommand) => void = () => {};
+    const api = createApi({
+      listPlugins: vi.fn(async () => [plugin]),
+      pluginRequest,
+      listenToMenuBar: vi.fn(async (next: (command: MenuBarCommand) => void) => {
+        handler = next;
+        return () => {};
+      }),
+    });
+    const lastRequest = () => vi.mocked(api.updateMenuBar).mock.lastCall?.[0];
+    const choose = (command: MenuBarCommand) => {
+      handler(command);
+      flush();
+    };
+    return { api, pluginRequest, lastRequest, choose };
+  }
+
+  it("shows the pinned agent's words and buttons and how many reviews need you, and runs its choices as the sidebar does", async () => {
+    const { api, pluginRequest, lastRequest, choose } = menuBarApi();
+    renderApp(api);
+    await screen.findByRole("button", { name: "Can't review · Docker isn't running" });
+    await waitFor(() => expect(lastRequest()).toEqual({
+      visible: true,
+      // widgets#101 is ready to approve and gadgets#55 failed for a reason of its own.
+      reviewsNeedingYou: 2,
+      agents: [{
+        plugin: "whooper", title: "Whooper", status: "Can't review · Docker isn't running", cause: "docker", alert: true,
+        controls: [{ action: "pause", label: "Pause", enabled: true }, { action: "poll", label: "Poll now", enabled: true }],
+      }],
+    }));
+    const sent = vi.mocked(api.updateMenuBar).mock.calls.length;
+
+    choose({ kind: "agent", plugin: "whooper", action: "poll" });
+    await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "round", args: [], confirmedFingerprint: null }));
+    // While the round runs, the menu says so, as the row does.
+    expect(vi.mocked(api.updateMenuBar).mock.calls.slice(sent).some(([request]) => request.agents[0]?.controls[1]?.label === "Polling…")).toBe(true);
+
+    choose({ kind: "openCause", plugin: "whooper", cause: "docker" });
+    expect(screen.getByRole("main", { name: "Blocked reviews" })).toBeInTheDocument();
+    choose({ kind: "openNeedsYou" });
+    expect(screen.getByRole("main", { name: "Review" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "separate cache configuration" })).toBeInTheDocument();
+    choose({ kind: "openAgent", plugin: "whooper" });
+    expect(screen.getByRole("main", { name: "Background agent" })).toBeInTheDocument();
+  });
+
+  it("turns the menu bar extra off and on from the palette, and remembers the choice", async () => {
+    const { api, lastRequest } = menuBarApi();
+    renderApp(api);
+    await waitFor(() => expect(lastRequest()?.visible).toBe(true));
+    const runCommand = async (label: string) => {
+      press("k");
+      const input = await screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
+      fireEvent.input(input, { target: { value: label } });
+      flush();
+      fireEvent.keyDown(input, { key: "Enter" });
+      flush();
+    };
+    await runCommand("Hide background agents from the menu bar");
+    await waitFor(() => expect(lastRequest()?.visible).toBe(false));
+    expect(window.localStorage.getItem("prompting-time.menu-bar")).toBe("off");
+    await runCommand("Show background agents in the menu bar");
+    await waitFor(() => expect(lastRequest()?.visible).toBe(true));
+    expect(window.localStorage.getItem("prompting-time.menu-bar")).toBe("on");
   });
 });
 

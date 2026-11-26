@@ -21,6 +21,7 @@ import {
   listRunAudits,
   loadRunAudit,
   listenToAppEvents,
+  listenToMenuBar,
   loadTimeline,
   loadDiagnostics,
   pickProjectDirectory,
@@ -38,6 +39,7 @@ import {
   submitMessage,
   setThinkingPreference,
   setContextBudget,
+  updateMenuBar,
 } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -326,6 +328,24 @@ describe("desktop bridge", () => {
       expect.any(Function),
     );
     expect(handler).toHaveBeenCalledWith(event);
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("updates the menu bar extra and hears its choices on their own event", async () => {
+    invokeMock.mockResolvedValueOnce(null);
+    const request = { visible: true, agents: [], reviewsNeedingYou: 2 };
+    await updateMenuBar(request);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith("update_menu_bar", { request });
+
+    const unlisten = vi.fn();
+    const handler = vi.fn();
+    listenMock.mockResolvedValue(unlisten);
+    const unsubscribe = await listenToMenuBar(handler);
+    expect(listenMock).toHaveBeenCalledWith("prompting-time://menu-bar", expect.any(Function));
+    const command = { kind: "agent" as const, plugin: "whooper", action: "poll" as const };
+    listenMock.mock.calls[0]?.[1]?.({ event: "prompting-time://menu-bar", id: 1, payload: command });
+    unsubscribe();
+    expect(handler).toHaveBeenCalledWith(command);
     expect(unlisten).toHaveBeenCalledOnce();
   });
 

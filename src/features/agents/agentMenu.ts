@@ -9,7 +9,7 @@ import { missingPrograms, readAgentStatus } from "./status";
 export type AgentAction = "poll" | "pause" | "resume" | "stop" | "start" | "settings" | "logs";
 export type AgentTab = "runs" | "logs" | "settings";
 
-type Control = { action: AgentAction; label: string; disabled: boolean };
+export type Control = { action: AgentAction; label: string; disabled: boolean };
 
 /**
  * The agent's controls as they stand: Poll now (its round action) while it runs and no round does;
@@ -33,6 +33,16 @@ export function agentControls(plugin: PluginSnapshot, read: PluginStatusRead | u
     ? { action: "stop", label: "Stop", disabled: plugin.process.kind !== "started" || pending !== null }
     : { action: "start", label: pending === "start" ? "Starting…" : "Start", disabled: pending !== null || plugin.settingsError !== null || missingPrograms(plugin).length > 0 };
   return { poll, pause, power };
+}
+
+/**
+ * The buttons on the agent's sidebar row, which the menu bar extra repeats: Pause or Resume, or
+ * Start, which takes Pause's place while the agent is stopped, then Poll now. Either is null when
+ * the plugin has no action for it.
+ */
+export function rowButtons(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null): [Control | null, Control | null] {
+  const { poll, pause, power } = agentControls(plugin, read, pending);
+  return [power.action === "start" ? power : pause, poll];
 }
 
 /** Menu items for the agent's controls that `include` names, in this order, followed by Settings and the log under `logsLabel`. */

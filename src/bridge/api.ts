@@ -40,15 +40,18 @@ import type {
   RunAuditPage,
   RunAuditDetailSnapshot,
   InstallPluginRequest,
+  MenuBarCommand,
   PluginActionRequest,
   PluginActionResult,
   PluginLog,
   PluginNameRequest,
   PluginSnapshot,
   SavePluginSettingsRequest,
+  UpdateMenuBarRequest,
 } from "./types";
 
 const APP_EVENT_NAME = "prompting-time://app-event";
+const MENU_BAR_EVENT_NAME = "prompting-time://menu-bar";
 
 export class BridgeError extends Error {
   readonly code: string;
@@ -260,4 +263,13 @@ export function readPluginLog(request: PluginNameRequest): Promise<PluginLog> {
 
 export async function listenToAppEvents(handler: (event: AppEvent) => void): Promise<() => void> {
   return listen<AppEvent>(APP_EVENT_NAME, ({ payload }) => handler(payload));
+}
+
+export function updateMenuBar(request: UpdateMenuBarRequest): Promise<void> {
+  return call("update_menu_bar", { request });
+}
+
+/** Calls the handler with each choice in the menu bar extra that the window carries out. */
+export async function listenToMenuBar(handler: (command: MenuBarCommand) => void): Promise<() => void> {
+  return listen<MenuBarCommand>(MENU_BAR_EVENT_NAME, ({ payload }) => handler(payload));
 }

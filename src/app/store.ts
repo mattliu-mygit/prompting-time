@@ -28,7 +28,9 @@ import type {
   PluginLog,
   PluginSnapshot,
   PluginSource,
+  MenuBarCommand,
   SavePluginSettingsRequest,
+  UpdateMenuBarRequest,
 } from "../bridge/types";
 
 const PAGE_SIZE = 200;
@@ -84,6 +86,8 @@ export type AppApi = {
   stopPlugin(request: { plugin: string }): Promise<PluginSnapshot>;
   startPlugin(request: { plugin: string }): Promise<PluginSnapshot>;
   readPluginLog(request: { plugin: string }): Promise<PluginLog>;
+  updateMenuBar(request: UpdateMenuBarRequest): Promise<void>;
+  listenToMenuBar(handler: (command: MenuBarCommand) => void): Promise<() => void>;
 };
 
 export type ConversationActions = Pick<
@@ -202,6 +206,10 @@ export type AppStore = {
   readPluginLog(name: string): Promise<PluginLog>;
   /** Reads the plugins and their statuses again, as after a change in their state folders. */
   refreshPlugins(): Promise<void>;
+  /** Shows the request in the menu bar extra. An unchanged request sends nothing, and a failure leaves the extra as it was. */
+  updateMenuBar(request: UpdateMenuBarRequest): void;
+  /** Calls the listener with each choice in the menu bar extra that the window carries out, until the returned function is called. */
+  onMenuBarCommand(listener: (command: MenuBarCommand) => void): () => void;
   readonly actions: AppActions;
   readonly pluginActions: PluginActions;
 };
@@ -257,6 +265,8 @@ export function createAppStore(api: AppApi): AppStore {
   let pluginRefreshPromise: Promise<void> | null = null;
   const pluginFilesListeners = new Set<(change: PluginFilesChange) => void>();
   let pluginRefreshRequested = false;
+  // The menu bar request last sent, as JSON: the window recomputes it on every change of the store.
+  let menuBarSent: string | null = null;
   let disposed = false;
   let unlisten: (() => void) | null = null;
 
@@ -450,6 +460,32 @@ export function createAppStore(api: AppApi): AppStore {
       .sort((left, right) => left.name.localeCompare(right.name));
     update({ plugins: { ...snapshot.plugins, items } });
     void requestPluginRefresh();
+  }
+
+  function updateMenuBar(request: UpdateMenuBarRequest) {
+    const sent = JSON.stringify(request);
+    if (disposed || sent === menuBarSent) return;
+    menuBarSent = sent;
+    api.updateMenuBar(request).catch((reason: unknown) => {
+      // The extra is optional: it keeps what it showed, and the next change sends again.
+      if (menuBarSent === sent) menuBarSent = null;
+      console.warn("Could not update the menu bar icon.", reason);
+    });
+  }
+
+  function onMenuBarCommand(listener: (command: MenuBarCommand) => void) {
+    let stopped = false;
+    let stopListening: (() => void) | null = null;
+    api.listenToMenuBar((command) => {
+      if (!stopped && !disposed) listener(command);
+    }).then((unlisten) => {
+      if (stopped) unlisten();
+      else stopListening = unlisten;
+    }, (reason: unknown) => console.warn("Could not listen to the menu bar icon.", reason));
+    return () => {
+      stopped = true;
+      stopListening?.();
+    };
   }
 
   async function installPlugin(source: PluginSource): Promise<PluginSnapshot> {
@@ -977,6 +1013,8 @@ export function createAppStore(api: AppApi): AppStore {
     startPlugin: async (plugin) => replacePlugin(await api.startPlugin({ plugin })),
     readPluginLog: (plugin) => api.readPluginLog({ plugin }),
     refreshPlugins: () => requestPluginRefresh(),
+    updateMenuBar,
+    onMenuBarCommand,
     retry: async () => {
       if (disposed) return;
       if (!unlisten) {

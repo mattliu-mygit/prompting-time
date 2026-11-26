@@ -157,6 +157,9 @@ const api: AppApi = {
   stopPlugin: unsupported,
   startPlugin: unsupported,
   readPluginLog: unsupported,
+  // The browser has no menu bar extra.
+  updateMenuBar: async () => {},
+  listenToMenuBar: async () => () => {},
 };
 
 const fixtureApi = treeScenario ? {
