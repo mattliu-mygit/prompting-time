@@ -2,7 +2,7 @@ import { createSignal, Show } from "solid-js";
 import type { AppApi, AppStore } from "../../src/app/store";
 import type { PluginActionRequest, PluginActionResult, PluginSnapshot } from "../../src/bridge/types";
 import { ConfirmActionDialog } from "../../src/features/agents/ConfirmActionDialog";
-import { answerReviewAction, fixtureReviewEntries, fixtureSubmitRequest, markFixtureSubmitted, reviewActions } from "./reviews-fixture";
+import { answerReviewAction, dockerCause, fixtureReviewEntries, fixtureRounds, fixtureSubmitRequest, markFixtureSubmitted, reviewActions } from "./reviews-fixture";
 
 /**
  * `?agents=1`: an invented Whooper under Background agents, running with its next poll at 3:45 PM.
@@ -87,6 +87,8 @@ const plugin: PluginSnapshot = {
   actions: [
     { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
     { name: "round", title: "Poll now", description: "Runs a round now. Posts nothing.", confirm: false },
+    { name: "pause", title: "Pause", description: "Skips scheduled rounds until resume; reviews in progress finish.", confirm: false },
+    { name: "resume", title: "Resume", description: "Runs scheduled rounds again.", confirm: false },
     { name: "get-settings", title: "Read settings", description: "Prints the settings as JSON.", confirm: false },
     { name: "save-settings", title: "Save settings", description: "Checks settings against the schema and saves them.", confirm: false },
     { name: "submit", title: "Submit review", description: "Posts the chosen comments and the approval or comment to GitHub as one review, with your gh login.", confirm: true },
@@ -116,6 +118,10 @@ const request = JSON.stringify({
 }, null, 2);
 const fingerprint = "9c".repeat(32);
 let mentionsRefused = agentsScenario !== "mentions";
+/** Whether the invented Whooper runs and is paused; Stop, Start, Pause, and Resume change them in browser memory. */
+let running = agentsScenario !== "missing";
+let paused = false;
+const logLines = Array.from({ length: 40 }, (_, index) => `15:${String(index).padStart(2, "0")}:0${index % 10} ${index % 9 === 4 ? "review acme/widgets#110: setup: Cannot connect to the Docker daemon. Is the docker daemon running?" : `poll: ${index % 3} review requests, ${index % 2} from Slack`}`);
 
 const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides });
 
@@ -131,8 +137,23 @@ async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionRes
     return result({ stdout: "posted the review: https://example.invalid/acme/widgets/pull/101#pullrequestreview-1\n" });
   }
   switch (sent.action) {
-    case "status":
-      return result({ stdout: JSON.stringify({ version: 1, loop: { running: true, pid: 4242 }, paused: false, next_round: nextPoll.toISOString(), round: { running: false, started_at: null, reviewing: null }, last_round: null, ...(agentsScenario === "reviews" ? { reviews: fixtureReviewEntries() } : {}) }) });
+    case "status": {
+      const reviews = agentsScenario === "reviews" ? fixtureReviewEntries() : [];
+      const blockedSince = new Date();
+      blockedSince.setHours(14, 30, 0, 0);
+      const waiting = reviews.filter((review) => review.outcome === "waiting").length;
+      return result({ stdout: JSON.stringify({
+        version: 1, loop: { running: running, pid: running ? 4242 : null }, paused, next_round: running && !paused ? nextPoll.toISOString() : null,
+        round: { running: false, started_at: null, reviewing: null }, last_round: null,
+        ...(agentsScenario === "reviews" ? { reviews, rounds: fixtureRounds(), blocked: waiting > 0 ? { ...dockerCause, since: blockedSince.toISOString(), waiting } : null } : {}),
+      }) });
+    }
+    case "round":
+      return result({ stdout: "polled: no new review requests\nround done\n" });
+    case "pause":
+    case "resume":
+      paused = sent.action === "pause";
+      return result({ stdout: `${paused ? "paused" : "resumed"}\n` });
     case "get-settings":
       return result({ stdout: JSON.stringify(settings) });
     case "submit":
@@ -152,7 +173,17 @@ async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionRes
 export function withAgentsFixture(base: AppApi): AppApi {
   return {
     ...base,
-    listPlugins: async () => [plugin],
+    listPlugins: async () => [{ ...plugin, process: running ? plugin.process : { kind: "notRunning" as const, exit: null } }],
+    stopPlugin: async () => {
+      running = false;
+      return { ...plugin, process: { kind: "notRunning" as const, exit: null } };
+    },
+    startPlugin: async () => {
+      running = true;
+      paused = false;
+      return plugin;
+    },
+    readPluginLog: async () => ({ path: "/synthetic/application-support/plugins/whooper.log", text: running ? logLines.join("\n") : "", truncated: false }),
     pluginRequest,
     savePluginSettings: async ({ values }) => {
       const changes = JSON.parse(values) as Record<string, Record<string, unknown>>;

@@ -175,13 +175,17 @@ Prompting Time can host background agents, such as Whooper, as plugins. The Rust
 checks, starts, and stops them, and the window shows them.
 
 - **Screens.** Installed plugins sit at the bottom of All work, under Background agents, one quiet
-  row each: the name, one gray line from the plugin's process and its `status` action, such as
-  "running · next poll 3:45 PM", and a status dot. A row opens the plugin's screen: its version
-  and where it came from, who runs its start command, the programs it needs and which are missing,
-  and its settings in a form drawn from its settings schema. The plugin checks and saves the
-  settings; a refusal shows in its own words. The add button beside Background agents installs a
-  release archive on this Mac, checked by its SHA-256, or runs a plugin folder in place, for
-  development.
+  row each: the name, one status sentence from the plugin's process and its `status` action, such
+  as "Running · next poll 3:45 PM", "Paused", "Stopped", or, in red, "Can't review · Docker isn't
+  running" while the status reports a cause that blocks every review, and a ⋯ menu with Poll now
+  (the `round` action), Pause or Resume (`pause`, `resume`), Stop or Start, Settings, and Open logs.
+  A row opens the plugin's screen: the same sentence and controls, its health (the last poll,
+  today's counts, and its `rounds` per day for 15 days), and the tabs Runs (rounds and every review
+  run, filtered to all, failed, or skipped), Logs (the end of its log, with search and copy), and
+  Settings (where it came from, who runs it, the programs it needs, and its settings in a form drawn
+  from its settings schema, which the plugin checks and saves). Stop asks first and names the
+  reviews in progress it ends. The add button beside Background agents installs a release archive
+  on this Mac, checked by its SHA-256, or runs a plugin folder in place, for development.
 
 - **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
   and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
@@ -195,8 +199,10 @@ checks, starts, and stops them, and the window shows them.
   start command in its own process group, unless a live copy of that command holds
   `<state folder>/run.lock/pid`, such as one started from a terminal. When Prompting Time quits,
   it sends SIGTERM to the process groups it started and kills them after 5 seconds; a copy it
-  did not start keeps running. The start command's output goes to
-  `<Application Support>/plugins/<name>.log`.
+  did not start keeps running. Stop and Start do the same on request: Stop ends only the copy
+  Prompting Time started, and Start honors the run lock; the plugin runs again the next time
+  Prompting Time opens. The start command's output goes to `<Application Support>/plugins/<name>.log`,
+  which each start empties; the Logs tab shows its last 256 KiB.
 - **Actions.** Prompting Time runs a plugin's actions and returns their output and exit code. An
   action marked `confirm` first runs with `--print`, which changes nothing outside this Mac, saves
   the request it would run in a file in the plugin's state folder, names that file in its output,
@@ -227,18 +233,25 @@ checks, starts, and stops them, and the window shows them.
   always does. Each result goes back to the page, which also hears of a new status and of changes
   to the shown run's files.
 - **Reviews.** A plugin's status may list `reviews`, as `whooper-status --json` does: the runs of the
-  last 30 days. Those that need you sit first under "Needs you" in All work, and Command-J steps
-  through them with the conversations. A plugin with past reviews gets a "Past reviews" row under
-  its own, which lists them, newest first, with how each ended or what you submitted. Opening a
-  review shows it in the plugin's page; a past one shows its diff, its findings, its drafts as
-  submitted, and what was submitted.
+  last 30 days, each with the commit it reviewed (`head_sha`), the pull request's head
+  (`pr_head_sha`), a `cause` when it failed or waits, and whether you skipped it. All work lists
+  the newest run of each pull request like a conversation: under "Needs you" while it waits on your
+  decision, in the project whose folder has the repository's name (else a group named after the
+  repository) while it runs, waits, failed, or finished today, and in a folded Done group once you
+  submitted or skipped it before today. "Needs you" also holds one row per cause that blocks every
+  review (`blocked`, or a cause with scope `all`), whose screen retries each waiting or failed review
+  with `retry <run>` and then offers Run now, asks about one with `ask`, and opens the logs.
+  Command-J steps through "Needs you", and Command-K finds every review. A review's header shows
+  "Review N · <short sha> · <time>" with the pull request's other versions (an earlier one is
+  read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run> [--undo]`), and a banner when
+  the pull request has commits after the reviewed one.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a
-  line saying it recorded none), and earlier questions with their answers (`asks`). Retry runs
-  `retry <run>`, which queues the pull request for the plugin's next round, shows what it printed,
-  and then offers Run now, which runs `round`. Ask why runs `ask <run> <question>` and adds the
-  answer. A failure shows the plugin's own words. The screen runs only actions that need no
+  line saying it recorded none), and earlier questions with their answers (`asks`); a review waiting
+  on a blocking cause links to that cause's screen. Retry review in the header runs `retry <run>`,
+  which queues the pull request for the plugin's next round, shows what it printed, and then offers
+  Run now, which runs `round`. Ask why runs `ask <run> <question>` and adds the answer. A failure shows the plugin's own words. The screen runs only actions that need no
   confirmation.
 
 ## Develop and verify

@@ -53,8 +53,9 @@ root waiting on you; Command-K (Control-K) opens the palette.
 
 Use `?agents=1` for an invented Whooper under Background agents, running with its next
 poll at 3:45 PM; combine it with `?work=1` for a full All work list. Select Whooper to
-open its settings: change a value and Save, or set "Stop a poll after" below 5 to see
-Whooper's refusal. The add button offers a synthetic archive, whose install is refused to
+open its screen, and its Settings tab to change a value and Save, or set "Stop a poll after"
+below 5 to see Whooper's refusal. Pause, Resume, Stop, and Start change the invented Whooper in
+browser memory; Stop asks first. The add button offers a synthetic archive, whose install is refused to
 show the message, and a synthetic folder. `?agents=missing` shows Whooper stopped for a
 missing program. `?agents=confirm` opens the submit confirmation over the app with an
 invented request, and `?agents=mentions` opens it on Whooper's refusal for an @-mention
@@ -62,20 +63,26 @@ first. The fixture answers in browser memory and runs no plugin.
 
 ## Plugin pages
 
-Use `?agents=reviews` for invented Whooper reviews: four under "Needs you", two of them failed,
-one running, and two submitted; "Past reviews" lists every review that ended. Start the server
-with `PROMPTING_TIME_FIXTURE_PAGE` set to a built plugin page folder, such as Whooper's `page/dist`
-after `npm ci && npm run build` in its `page/`, and the server serves it at `/plugin-page/` with
-the headers the app's `pt-plugin://` scheme sends. Open a review to see it in the page; Submit
-review opens the confirmation with the request built from the drafts, and confirming returns the
-result to the page. Draft changes and asks answer in browser memory. The fixture sends no
-pluginChanged events, so All work keeps a submitted review until a reload. None of this shows how
-WKWebView treats `pt-plugin://`.
+Use `?agents=reviews` for invented Whooper reviews. "Needs you" holds "Docker isn't running · 5
+reviews waiting" and two reviews to decide; the five waiting reviews, a running one, and two failed
+ones sit in their repository's groups (widgets joins the project folder of that name with `?work=1`,
+gadgets gets a group of its own), and the commented review from two days ago is in the folded Done
+group. Whooper's row reads "Can't review · Docker isn't running"; its menu and screen run Poll
+now, Pause or Resume, and Stop or Start in browser memory, and its Logs tab shows invented lines.
+The Docker row opens the cause screen: Retry all prints what each retry queued, then Run now
+prints an invented round. "add a retry policy for uploads" is review 2, with a new-commits banner
+and review 1 in its versions menu, read-only. Start the server with `PROMPTING_TIME_FIXTURE_PAGE`
+set to a built plugin page folder, such as Whooper's `page/dist` after `npm ci && npm run build`
+in its `page/`, and the server serves it at `/plugin-page/` with the headers the app's
+`pt-plugin://` scheme sends. Open a finished review to see it in the page; Submit review opens the
+confirmation with the request built from the drafts. The fixture sends no pluginChanged events,
+so a change shows after the next status read. None of this shows how WKWebView treats
+`pt-plugin://`.
 
 A failed review opens on Prompting Time's own screen and needs no built page. "keep only shared
 types in the core package" has Whooper's reason and an earlier answer; "drop the legacy upload
-path" recorded no reason. Retry prints that it queued the pull request and offers Run now, whose
-round prints invented output; Ask why answers in browser memory and adds the answer.
+path" recorded no reason. Retry review prints that it queued the pull request and offers Run now;
+Ask why answers in browser memory and adds the answer.
 
 ## Chat readability and streaming
 
