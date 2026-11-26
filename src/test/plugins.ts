@@ -110,3 +110,46 @@ export function fixtureStatus(nextRound: string, overrides: Record<string, unkno
 export function actionResult(overrides: Partial<PluginActionResult> = {}): PluginActionResult {
   return { exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides };
 }
+
+/** The actions Whooper's page runs, besides status: show-review, draft, ask, and submit, which asks first. */
+export const pageActions = [
+  { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
+  { name: "show-review", title: "Show a review", description: "Prints one review as JSON.", confirm: false },
+  { name: "draft", title: "Change a draft", description: "Changes a review's drafts.", confirm: false },
+  { name: "ask", title: "Ask about this", description: "Answers a question about a review.", confirm: false },
+  { name: "submit", title: "Submit review", description: "Posts the chosen comments to GitHub as one review.", confirm: true },
+];
+
+/** Invented reviews as `whooper-status --json` lists them, newest first. */
+export function fixtureReviews() {
+  return [
+    { run_id: "20261126T150000Z-101", repo: "acme/widgets", pr: 101, title: "separate cache configuration", url: "https://example.invalid/acme/widgets/pull/101",
+      started_at: "2026-11-26T15:00:00Z", ended_at: "2026-11-26T15:20:00Z", outcome: "reviewed", verdict: "approve_once_ci_passes",
+      skipped: false, findings: 2, submitted: null, needs_you: true },
+    { run_id: "20261126T140000Z-102", repo: "acme/widgets", pr: 102, title: null, url: null,
+      started_at: "2026-11-26T14:00:00Z", ended_at: null, outcome: "running", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: false },
+    { run_id: "20261125T100000Z-77", repo: "acme/gadgets", pr: 77, title: "add the tags package", url: null,
+      started_at: "2026-11-25T10:00:00Z", ended_at: "2026-11-25T10:30:00Z", outcome: "reviewed", verdict: "look_first",
+      skipped: false, findings: 1, submitted: { event: "COMMENT", at: "2026-11-25T11:00:00Z" }, needs_you: false },
+    { run_id: "20261124T090000Z-55", repo: "acme/gadgets", pr: 55, title: "move the projection", url: null,
+      started_at: "2026-11-24T09:00:00Z", ended_at: "2026-11-24T09:01:00Z", outcome: "failed", verdict: null,
+      skipped: false, findings: 0, submitted: null, needs_you: true },
+  ];
+}
+
+/** What the show-review action prints for one invented run. */
+export function fixtureShown(runId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    version: 1,
+    run_id: runId,
+    run: { repo: "acme/widgets", pr: 101 },
+    outcome: "reviewed",
+    findings: { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Invented reason." }, findings: [{ id: "1", path: "src/a.rs", line: 3, side: "RIGHT", title: "A nit", draft: "**nit:** invented", kind: "nit" }] },
+    drafts: { event: "APPROVE", message: "", findings: { "1": { included: true } } },
+    diff: "diff --git a/src/a.rs b/src/a.rs\n",
+    failure: null,
+    asks: [],
+    submitted: null,
+    ...overrides,
+  };
+}

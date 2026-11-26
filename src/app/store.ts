@@ -102,6 +102,9 @@ export type AppActions = ConversationActions & Pick<AppApi, "listRunAudits" | "l
 /** What a plugin's screens run: its actions, and saving its settings. */
 export type PluginActions = Pick<AppApi, "pluginRequest" | "savePluginSettings">;
 
+/** Files changed in a plugin's state folder: their paths relative to it, or null for any of them. */
+export type PluginFilesChange = Readonly<{ plugin: string; files: readonly string[] | null }>;
+
 /** What a plugin's status action printed, read as JSON, or why it could not be read. */
 export type PluginStatusRead = Readonly<{ value: unknown; error: null } | { value: null; error: string }>;
 
@@ -182,6 +185,8 @@ export type AppStore = {
   installPlugin(source: PluginSource): Promise<PluginSnapshot>;
   pickPluginFolder(): Promise<string | null>;
   pickPluginArchive(): Promise<string | null>;
+  /** Calls the listener with each change to a plugin's state folder, until the returned function is called. */
+  onPluginFilesChange(listener: (change: PluginFilesChange) => void): () => void;
   readonly actions: AppActions;
   readonly pluginActions: PluginActions;
 };
@@ -235,6 +240,7 @@ export function createAppStore(api: AppApi): AppStore {
     reject(reason: unknown): void;
   }> = [];
   let pluginRefreshPromise: Promise<void> | null = null;
+  const pluginFilesListeners = new Set<(change: PluginFilesChange) => void>();
   let pluginRefreshRequested = false;
   let disposed = false;
   let unlisten: (() => void) | null = null;
@@ -667,8 +673,11 @@ export function createAppStore(api: AppApi): AppStore {
     update({ lastSequence: nextSequence.toString() });
     if (fullRefresh) {
       void requestRefresh();
+      // Events may have been missed, so any plugin file may have changed.
+      snapshot.plugins.items.forEach(({ name }) => pluginFilesListeners.forEach((listener) => listener({ plugin: name, files: null })));
     } else if (event.kind === "pluginChanged") {
       void requestPluginRefresh();
+      pluginFilesListeners.forEach((listener) => listener({ plugin: event.plugin, files: event.files }));
     } else {
       requestConversationRefresh(event.conversationId);
       for (const conversation of Object.values(snapshot.conversationsById)) {
@@ -941,6 +950,10 @@ export function createAppStore(api: AppApi): AppStore {
     installPlugin,
     pickPluginFolder: () => api.pickPluginFolder(),
     pickPluginArchive: () => api.pickPluginArchive(),
+    onPluginFilesChange(listener) {
+      pluginFilesListeners.add(listener);
+      return () => pluginFilesListeners.delete(listener);
+    },
     retry: async () => {
       if (disposed) return;
       if (!unlisten) {
@@ -957,6 +970,7 @@ export function createAppStore(api: AppApi): AppStore {
       unlisten?.();
       unlisten = null;
       listeners.clear();
+      pluginFilesListeners.clear();
       update({ draftsById: {}, composerViewsById: {}, submissionsById: {}, thinkingSavesById: {}, contextBudgetSavesById: {} });
     },
     setStatusFilter(statusFilter) {
