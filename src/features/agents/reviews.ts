@@ -357,10 +357,12 @@ export function unsafeVerdict(review: ReviewEntry, kinds: readonly string[] | nu
 }
 
 /**
- * What the review's row says about where it stands, and its dot: "Reviewing…", the verdict while it
- * waits on a decision, with why the plugin judges it not safe to approve when the verdict says
- * approve ("approve once CI passes · has findings that aren't nits"), "Approved · 2:25 PM",
- * "Waiting · Docker isn't running", or "Review failed" in red.
+ * Where the review stands, in words and a dot, as its row and the window's header show it: the
+ * verdict while it waits on a decision, green when it is ready to approve ("approve once CI
+ * passes") and orange when it needs a look ("look first", or, when the verdict says approve but the
+ * plugin judges it not safe to approve, why: "approve once CI passes · has findings that aren't
+ * nits"); "Review failed" in red; "Reviewing…" with a dot that has no color; and no dot for
+ * "Approved · 2:25 PM", "Waiting · Docker isn't running", and the rest.
  */
 export function reviewState(review: ReviewEntry, now = new Date()): { words: string; status: Status } {
   if (review.removed_by_user) return { words: "Removed", status: "idle" };
@@ -370,7 +372,9 @@ export function reviewState(review: ReviewEntry, now = new Date()): { words: str
   if (review.outcome === "waiting") return { words: `Waiting · ${review.cause?.summary ?? "blocked"}`, status: "idle" };
   if (review.outcome === "failed") return { words: "Review failed", status: "error" };
   if (notSafeToApprove(review)) return { words: unsafeVerdict(review), status: "attention" };
-  if (review.needs_you) return { words: review.skipped ? "skipped, look first" : verdictWords(review.verdict), status: "attention" };
+  if (readyToDecide(review)) {
+    return { words: review.skipped ? "skipped, look first" : verdictWords(review.verdict), status: reviewCategory(review) === "ready" ? "success" : "attention" };
+  }
   return { words: "Not submitted", status: "idle" };
 }
 

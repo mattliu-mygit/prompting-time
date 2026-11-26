@@ -68,6 +68,8 @@ describe("a background agent's screen", () => {
     expect(screen.getByText(/· done$/)).toBeInTheDocument();
     expect(screen.getByText(/waiting on you$/)).toHaveTextContent("1 waiting on you");
     expect(screen.getByRole("img", { name: "Rounds per day for 15 days; today 1 done, 1 failed, 1 skipped" })).toBeInTheDocument();
+    // Red is the bars' only color, and the key names it.
+    expect(document.querySelector(".agent-bars-key")).toHaveTextContent("failed");
   });
 
   it("lists rounds and every review run on Runs, filtered to failed or skipped, and opens a run", () => {
@@ -75,6 +77,9 @@ describe("a background agent's screen", () => {
     const runs = within(screen.getByRole("tabpanel", { name: "Runs" }));
     const names = () => runs.getAllByRole("row").slice(1).map((row) => [...row.querySelectorAll("td")].slice(1, 3).map((cell) => cell.firstChild?.textContent));
     expect(names()).toHaveLength(8);
+    // Only failures have a colored dot, red, beside their words; done polls and reviewed runs have none.
+    const dots = Object.fromEntries(runs.getAllByRole("row").slice(1).map((row) => [row.querySelectorAll("td")[2]!.textContent, row.querySelector(".pt-status-dot")!.getAttribute("data-status")]));
+    expect(dots).toMatchObject({ "Poll failed": "error", Failed: "error", Done: "idle", Reviewed: "idle", Skipped: "idle" });
     fireEvent.click(runs.getByRole("button", { name: "Failed" }));
     flush();
     expect(runs.getByRole("button", { name: "Failed" })).toHaveAttribute("aria-pressed", "true");

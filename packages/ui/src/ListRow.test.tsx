@@ -10,17 +10,17 @@ describe("ListRow and StatusDot", () => {
     render(() => (
       <ul>
         <li>
-          <ListRow icon={<svg />} title="separate the cache configuration" count={2} status="attention" meta="widgets#101 · approve once CI passes" selected onClick={onClick} />
+          <ListRow icon={<svg />} title="separate the cache configuration" count={2} status="success" meta="widgets#101 · approve once CI passes" selected onClick={onClick} />
         </li>
         <li>
-          <ListRow icon={<svg />} title="Whooper" count="4 queued" status="success" meta="running · next poll 3:45 PM" />
+          <ListRow icon={<svg />} title="Whooper" count="4 queued" status="idle" meta="running · next poll 3:45 PM" />
         </li>
       </ul>
     ));
     const selected = screen.getByRole("button", { name: "separate the cache configuration 2 widgets#101 · approve once CI passes" });
     expect(selected).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("button", { name: /^Whooper 4 queued/ })).not.toHaveAttribute("aria-current");
-    expect(selected.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(selected.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
     expect(selected.querySelector(".pt-status-dot")).toHaveAttribute("aria-hidden", "true");
     fireEvent.click(selected);
     expect(onClick).toHaveBeenCalledOnce();

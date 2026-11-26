@@ -29,10 +29,11 @@ type Props = {
 export type ReviewTriage = { skip(runId: string): Promise<void>; remove(runId: string): Promise<void>; restore(runId: string): Promise<void> };
 
 /**
- * The open review's state words in the window's header, such as "approve once CI passes". For a
- * review that says approve once CI passes but that the plugin judges not safe to approve, they say
- * why, from the kinds of its findings, which show-review prints: "approve once CI passes · has a
- * question". Until show-review answers, or when it fails, they say what the status says.
+ * The open review's state words in the window's header, after the dot its row would have, such as
+ * "approve once CI passes" in green. For a review that says approve once CI passes but that the
+ * plugin judges not safe to approve, they say why, in orange, from the kinds of its findings, which
+ * show-review prints: "approve once CI passes · has a question". Until show-review answers, or when
+ * it fails, they say what the status says.
  */
 export function ReviewStateWords(props: { plugin: PluginSnapshot; review: ReviewEntry; actions: PluginActions }) {
   const [shown, setShown] = createSignal<{ runId: string; kinds: string[] | null } | null>(null);
@@ -53,7 +54,16 @@ export function ReviewStateWords(props: { plugin: PluginSnapshot; review: Review
     const known = shown();
     return known?.runId === props.review.run_id && notSafeToApprove(props.review) ? unsafeVerdict(props.review, known.kinds) : reviewState(props.review).words;
   };
-  return <>{words()}</>;
+  // The dot follows the status, which the kinds only explain.
+  const status = () => reviewState(props.review).status;
+  return (
+    <>
+      <Show when={status() !== "idle"}>
+        <StatusDot status={status()} />
+      </Show>
+      {words()}
+    </>
+  );
 }
 
 /** "Review 2 · dc0c0bf · 3:12 PM": the version, the commit it reviewed, and when it ended or started. */

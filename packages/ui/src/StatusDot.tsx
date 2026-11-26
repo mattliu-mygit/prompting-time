@@ -1,3 +1,9 @@
+/**
+ * What a status dot shows. Each color means one thing wherever it appears, and the words beside the
+ * dot always say it: "error" is red, for blocked or failed; "attention" is orange, for waiting on
+ * you; "success" is green, for ready to approve. "running" is a dot with no color, for work under
+ * way, and "idle" draws no dot but keeps its place, for every other status.
+ */
 export type Status = "idle" | "running" | "attention" | "success" | "error";
 
 export interface StatusDotProps {
@@ -9,7 +15,7 @@ export interface StatusDotProps {
   label?: string;
 }
 
-/** A small colored dot that shows status without a colored tag. */
+/** A small dot before a status's words, instead of a colored tag. */
 export function StatusDot(props: StatusDotProps) {
   return (
     <span

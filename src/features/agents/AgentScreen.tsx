@@ -87,7 +87,7 @@ export function AgentScreen(props: Props) {
   );
 }
 
-/** The last poll, today's counts, and the rounds of each of the last 15 days, as small bars. */
+/** The last poll, today's counts, and the rounds of each of the last 15 days, as small gray bars with failures in red. */
 function HealthStrip(props: { plugin: PluginSnapshot; status: PluginStatusRead | undefined }) {
   const today = new Date();
   const status = () => readAgentStatus(props.status);
@@ -151,6 +151,8 @@ function HealthStrip(props: { plugin: PluginSnapshot; status: PluginStatusRead |
             )}
           </For>
         </div>
+        {/* The bars' only color, named; the chart's label already says it for screen readers. */}
+        <span class="agent-bars-key" aria-hidden="true">failed</span>
       </div>
     </div>
   );

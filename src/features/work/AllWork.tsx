@@ -42,8 +42,11 @@ type CauseRow = { kind: "cause"; key: string; item: PluginCause; depth: 0 };
 type Row = ConversationRow | ReviewRow | CauseRow;
 /** One item of a part: a review, a cause, or a root with its loaded children. */
 type Entry = Row[];
-/** A labeled part of a section, or its only, unlabeled part. */
-type Part = { key: string; label: string | null; hint?: string; entries: Entry[] };
+/**
+ * A labeled part of a section, or its only, unlabeled part. `named` is the status its heading
+ * already says, such as "success" under Ready to approve: its rows show no dot for that status.
+ */
+type Part = { key: string; label: string | null; hint?: string; named?: Status; entries: Entry[] };
 type Section = { key: string; label: string; title?: string; count: number; parts: Part[] };
 
 /** The sections the user opened or folded, by key, which this device keeps across launches; the rest start folded except Needs you. */
@@ -59,10 +62,26 @@ const statusDots: Record<EffectiveStatus, Status> = {
   completed: "idle", interrupted: "idle", failed: "error",
 };
 
-/** The groups search results show reviews in, in this order, by where each review lists. */
-const RESULT_GROUPS: ReadonlyArray<[label: string, categories: readonly ReviewCategory[]]> = [
-  ["Needs you", ["ready", "look", "failed"]],
-  ["Reviewing", ["reviewing"]],
+/**
+ * A conversation's status in the words and dot its row and the window's header show: "waiting for
+ * you" in orange, "failed" in red, "working" and "queued" with a dot that has no color, and the
+ * rest with no dot.
+ */
+export function conversationState(conversation: Pick<ConversationSummary, "runStatus" | "rollupStatus">): { words: string; status: Status } {
+  const status = effectiveConversationStatus(conversation);
+  return { words: statusText[status], status: statusDots[status] };
+}
+
+/**
+ * The groups search results show reviews in, in this order, by where each review lists: the parts
+ * of Needs you, then the other sections. Like the sections' headings, each label says its reviews'
+ * status (`named`), so their rows need no dot for it.
+ */
+const RESULT_GROUPS: ReadonlyArray<[label: string, categories: readonly ReviewCategory[], named?: Status]> = [
+  ["Ready to approve", ["ready"], "success"],
+  ["Needs a look", ["look"], "attention"],
+  ["Review failed", ["failed"], "error"],
+  ["Reviewing", ["reviewing"], "running"],
   ["Waiting", ["waiting"]],
   ["Done", ["done"]],
   ["Removed", ["removed"]],
@@ -80,7 +99,7 @@ export function searchWork(reviews: readonly PluginReview[], conversations: read
   const found = reviews.filter(({ review }) => reviewMatches(review, tokens))
     .sort((left, right) => reviewTime(right.review).localeCompare(reviewTime(left.review)));
   return {
-    groups: RESULT_GROUPS.map(([label, categories]) => ({ label, reviews: found.filter(({ review }) => categories.includes(reviewCategory(review))) }))
+    groups: RESULT_GROUPS.map(([label, categories, named]) => ({ label, named, reviews: found.filter(({ review }) => categories.includes(reviewCategory(review))) }))
       .filter((group) => group.reviews.length > 0),
     chats: conversations.filter((conversation) => {
       const words = `${conversation.title} ${conversation.projectRoot ? folderName(conversation.projectRoot) : "no folder"}`.toLowerCase();
@@ -158,20 +177,20 @@ export function AllWork(props: Props) {
     const groups = groupWork(props.conversations);
     const waitingChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
     const { ready, look, failed } = needsYou(props.reviews);
-    const needsParts: Part[] = [
-      { key: "ready", label: "Ready to approve", hint: "The plugin judges each safe to approve, or, when it doesn't say, says approve once CI passes.", entries: ready.map(reviewRow) },
-      { key: "look", label: "Needs a look", hint: "The plugin judges each not safe to approve, or, when it doesn't say, says look first or skipped part of the change.", entries: look.map(reviewRow) },
-      { key: "failed", label: "Review failed", hint: "Each failed for a reason of its own; open one for the reason, Retry review, and Ask why.", entries: failed.map(reviewRow) },
-      { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", entries: chatEntries(waitingChats) },
-    ].filter((part) => part.entries.length > 0);
+    const needsParts: Part[] = ([
+      { key: "ready", label: "Ready to approve", hint: "The plugin judges each safe to approve, or, when it doesn't say, says approve once CI passes.", named: "success", entries: ready.map(reviewRow) },
+      { key: "look", label: "Needs a look", hint: "The plugin judges each not safe to approve, or, when it doesn't say, says look first or skipped part of the change.", named: "attention", entries: look.map(reviewRow) },
+      { key: "failed", label: "Review failed", hint: "Each failed for a reason of its own; open one for the reason, Retry review, and Ask why.", named: "error", entries: failed.map(reviewRow) },
+      { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", named: "attention", entries: chatEntries(waitingChats) },
+    ] satisfies Part[]).filter((part) => part.entries.length > 0);
     const reviewing = props.reviews.filter(({ review }) => reviewCategory(review) === "reviewing")
       .sort((left, right) => right.review.started_at.localeCompare(left.review.started_at));
     const done = props.reviews.filter(({ review }) => reviewCategory(review) === "done")
       .sort((left, right) => reviewTime(right.review).localeCompare(reviewTime(left.review)));
-    const single = (key: string, entries: Entry[]): Part[] => [{ key, label: null, entries }];
+    const single = (key: string, entries: Entry[], named?: Status): Part[] => [{ key, label: null, named, entries }];
     return [
       { key: "needs-you", label: "Needs you", count: needsParts.reduce((sum, part) => sum + part.entries.length, 0), parts: needsParts },
-      ...(reviewing.length > 0 ? [{ key: "reviewing", label: "Reviewing", count: reviewing.length, parts: single("reviewing", reviewing.map(reviewRow)) }] : []),
+      ...(reviewing.length > 0 ? [{ key: "reviewing", label: "Reviewing", count: reviewing.length, parts: single("reviewing", reviewing.map(reviewRow), "running") }] : []),
       ...props.causes.filter(({ cause }) => cause.reviews.length > 0).map(({ plugin, cause }): Section => {
         const key = causeKey(plugin, cause.id);
         return { key: `waiting:${key}`, label: `Waiting · ${cause.summary}`, count: cause.reviews.length, parts: single(key, [[{ kind: "cause", key, item: { plugin, cause }, depth: 0 }]]) };
@@ -191,7 +210,7 @@ export function AllWork(props: Props) {
     const { groups, chats } = searchWork(props.reviews, props.conversations, props.query);
     return [
       ...groups.map((group): Part => ({
-        key: `found:${group.label}`, label: group.label,
+        key: `found:${group.label}`, label: group.label, named: group.named,
         entries: group.reviews.map((item) => [{ kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 }]),
       })),
       ...(chats.length > 0 ? [{ key: "found:chats", label: "Chats", entries: chats.map((conversation): Entry => [{ kind: "conversation", key: conversation.id, conversation, depth: 0, found: true }]) }] : []),
@@ -266,16 +285,22 @@ export function AllWork(props: Props) {
     },
   });
 
-  function renderRow(row: () => Row): JSX.Element {
+  /**
+   * One row; `named` is the status its part's heading says, which replaces the row's dot. Rows keep
+   * the place of a dot they don't draw, so the gray lines of a list start in one column.
+   */
+  function renderRow(row: () => Row, named: () => Status | undefined): JSX.Element {
     const first = untrack(row);
+    const dot = (status: Status): Status => (status === named() ? "idle" : status);
     if (first.kind === "cause") {
-      // A cause's key holds its plugin and ID, so neither changes.
+      // A cause's key holds its plugin and ID, so neither changes. Its red dot comes with the
+      // words for it; the section's heading counts the reviews waiting.
       const item = () => (row() as CauseRow).item;
-      const meta = () => `${waitingText(item().cause.reviews.length)}${item().cause.since ? ` · since ${shortDate(item().cause.since!)}` : ""}`;
+      const meta = () => `Blocks every review${item().cause.since ? ` · since ${shortDate(item().cause.since!)}` : ""}`;
       return (
         <ListRow
           {...treeItem(first.key, row)}
-          aria-label={`${item().cause.summary}, ${meta()}`}
+          aria-label={`${item().cause.summary}, ${meta()}, ${waitingText(item().cause.reviews.length)}`}
           aria-level={1}
           aria-selected={props.selectedReview === first.key ? "true" : "false"}
           class="work-row"
@@ -306,7 +331,7 @@ export function AllWork(props: Props) {
           icon={<PullRequestIcon />}
           title={reviewTitle(item().review)}
           count={removed() ? "removed" : undefined}
-          status={removed() ? "idle" : reviewState(item().review).status}
+          status={removed() ? "idle" : dot(reviewState(item().review).status)}
           meta={meta()}
           trailing={
             <Show when={!removed() && props.canRemove(item().plugin)}>
@@ -332,13 +357,13 @@ export function AllWork(props: Props) {
     // The row's key is its conversation id, so the id never changes.
     const id = first.key;
     const conversation = () => (row() as ConversationRow).conversation;
-    const status = () => effectiveConversationStatus(conversation());
+    const state = () => conversationState(conversation());
     const provider = () => (conversation().provider ? providerNames[conversation().provider!] : "No provider");
     const found = first.kind === "conversation" && first.found === true;
     const expanded = () => !found && props.expandedById[id] === true;
     const page = () => props.childPagesById[id];
     const expandable = () => !found && (conversation().hasChildren || page() !== undefined);
-    const meta = () => `${found ? `${conversation().projectRoot ? folderName(conversation().projectRoot!) : "no folder"} · ` : ""}${provider()} · ${statusText[status()]}`;
+    const meta = () => `${found ? `${conversation().projectRoot ? folderName(conversation().projectRoot!) : "no folder"} · ` : ""}${provider()} · ${state().words}`;
     return (
       <ListRow
         {...treeItem(id, row)}
@@ -350,7 +375,7 @@ export function AllWork(props: Props) {
         style={{ "--work-depth": String(Math.min(row().depth, 8)) }}
         icon={<ChatIcon />}
         title={conversation().title}
-        status={statusDots[status()]}
+        status={dot(state().status)}
         meta={meta()}
         trailing={
           <Show when={expandable()}>
@@ -439,7 +464,7 @@ export function AllWork(props: Props) {
                 <div class="work-part">
                   <h3 class="work-part-heading"><span id={partId}>{part().label}</span> · {part().entries.length}</h3>
                   <ul role="tree" aria-labelledby={partId} class="work-rows">
-                    <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
+                    <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row, () => part().named)}</For>
                   </ul>
                 </div>
               );
@@ -466,7 +491,7 @@ export function AllWork(props: Props) {
                               {(label) => <h3 class="work-part-heading" title={part().hint}><span id={partId}>{label()}</span> · {part().entries.length}</h3>}
                             </Show>
                             <ul role="tree" aria-labelledby={part().label ? partId : labelId} class="work-rows">
-                              <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
+                              <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row, () => part().named)}</For>
                             </ul>
                           </div>
                         );

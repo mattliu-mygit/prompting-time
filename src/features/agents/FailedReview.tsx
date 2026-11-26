@@ -84,7 +84,7 @@ export function FailedReview(props: Props) {
           <p class="plugin-meta">{review.repo}#{review.pr}</p>
         </header>
         <section class="plugin-section failed-review" aria-labelledby="failed-review-heading">
-          <h3 id="failed-review-heading"><StatusDot status={waiting ? "idle" : "error"} />{waiting ? `Waiting · ${review.cause?.summary ?? "blocked"}` : "Review failed"}</h3>
+          <h3 id="failed-review-heading"><Show when={!waiting}><StatusDot status="error" /></Show>{waiting ? `Waiting · ${review.cause?.summary ?? "blocked"}` : "Review failed"}</h3>
           <Show when={!waiting && review.cause}>{(cause) => <p>{cause().summary}</p>}</Show>
           <Show when={waiting}>
             <p>{props.plugin.title} stopped its round when this cause blocked every review, so this review waits for the next round.</p>

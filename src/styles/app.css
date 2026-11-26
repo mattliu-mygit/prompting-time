@@ -49,6 +49,11 @@ body {
   white-space: nowrap;
 }
 
+.shell-meta .pt-status-dot {
+  margin-inline-end: var(--s-space-4);
+  vertical-align: 0.1em;
+}
+
 .toolbar-actions {
   display: flex;
   align-items: center;
@@ -730,13 +735,14 @@ body {
   color: var(--s-error);
 }
 
+/* Running work brightens without a color; red is for failures only. */
 .tool-operation.running .tool-operation-status {
-  color: var(--s-info);
+  color: var(--s-text-secondary);
 }
 
 .tool-operation-notice {
   margin: 0;
-  color: var(--s-warning);
+  color: var(--s-text-secondary);
   font-size: var(--s-size-xs);
 }
 
@@ -1144,9 +1150,10 @@ body {
   font-size: var(--s-size-sm);
 }
 
+/* Shown only when the command center can't start, which is red's meaning. */
 .diagnostic-card {
   padding: var(--s-space-8) var(--s-space-12);
-  border: var(--s-border-thin) var(--s-border-style) var(--s-warning);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-error);
 }
 
 .provider-diagnostic {
@@ -1155,16 +1162,6 @@ body {
   gap: var(--s-space-8);
 }
 
-.provider-indicator {
-  inline-size: calc(var(--s-space-12) / 2);
-  block-size: calc(var(--s-space-12) / 2);
-  border-radius: 50%;
-  background: var(--s-error);
-}
-
-.provider-indicator[data-available="true"] {
-  background: var(--s-success);
-}
 
 /* A background agent's settings: a scrolling column and a save bar under it. */
 .plugin-settings {
@@ -1521,8 +1518,9 @@ body {
   background: var(--s-surface);
 }
 
+/* One gray ramp for the rounds that went as planned, and red, named in the key, for failures. */
 .agent-bar-done {
-  background: var(--s-success);
+  background: var(--s-text-subtle);
 }
 
 .agent-bar-failed {
@@ -1531,6 +1529,19 @@ body {
 
 .agent-bar-skipped {
   background: var(--s-border-strong);
+}
+
+.agent-bars-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.agent-bars-key::before {
+  content: "";
+  inline-size: calc(var(--s-space-12) / 2);
+  block-size: calc(var(--s-space-12) / 2);
+  background: var(--s-error);
 }
 
 .agent-tabs {

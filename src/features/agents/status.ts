@@ -85,24 +85,26 @@ export function shortTime(iso: string, now: Date): string {
 }
 
 /**
- * The status words and the dot of a background agent's pinned row, which its screen repeats, such
- * as "Running · next poll 3:45 PM" with a green dot, or "Can't review · Docker isn't running" in red
- * with `cause`, the ID of that cause that blocks every review. What stops the plugin from running
- * comes first, then a cause that blocks every review, then what its status says.
+ * The status words and the dot of a background agent's pinned row, which its screen, the window's
+ * header, and the menu bar extra repeat: red ("error") when it is blocked, failed, or can't start,
+ * such as "Can't review · Docker isn't running" with `cause`, the ID of that cause that blocks every
+ * review; a dot with no color while a poll or review runs; and no dot otherwise, such as "Running ·
+ * next poll 3:45 PM" or "Paused". What stops the plugin from running comes first, then a cause that
+ * blocks every review, then what its status says.
  */
 export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | undefined, now = new Date()): { meta: string; status: Status; cause?: string } {
   const process = plugin.process;
   if (process.kind === "notRunning") {
     const missing = missingPrograms(plugin);
     if (plugin.settingsError) return { meta: "Can't read its settings", status: "error" };
-    if (missing.length > 0) return { meta: `Missing ${missing.join(", ")}`, status: "attention" };
+    if (missing.length > 0) return { meta: `Missing ${missing.join(", ")}`, status: "error" };
     if (process.exit && process.exit.code !== 0) {
       return { meta: process.exit.code === null ? "Stopped by a signal" : `Exited with code ${process.exit.code}`, status: "error" };
     }
     return { meta: "Stopped", status: "idle" };
   }
   const status = readAgentStatus(read);
-  if (!status) return { meta: "Running", status: "success" };
+  if (!status) return { meta: "Running", status: "idle" };
   const blocked = readBlocked(status);
   if (blocked) return { meta: `Can't review · ${blocked.summary}`, status: "error", cause: blocked.id };
   if (status.round.running) {
@@ -113,5 +115,5 @@ export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | u
   if (status.last_round?.result === "poll_failed") {
     return { meta: `Poll failed ${shortTime(status.last_round.ended_at, now)}${next ? ` · next try ${next}` : ""}`, status: "error" };
   }
-  return { meta: next ? `Running · next poll ${next}` : "Running", status: "success" };
+  return { meta: next ? `Running · next poll ${next}` : "Running", status: "idle" };
 }

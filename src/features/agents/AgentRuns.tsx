@@ -10,7 +10,11 @@ const FILTERS: Array<{ value: Filter; label: string }> = [
   { value: "skipped", label: "Skipped" },
 ];
 
-/** One line of the history: a round, or one run of a review, whose pull request search finds it by and its title line shows. */
+/**
+ * One line of the history: a round, or one run of a review, whose pull request search finds it by
+ * and its title line shows. Only a failure's result has a colored dot, red, and a run in progress a
+ * dot with no color.
+ */
 type Entry = { key: string; at: string; runId: string | null; name: string; result: string; dot: Status; detail: string; kind: Filter | null; review?: ReviewEntry };
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -19,7 +23,7 @@ function roundEntry(round: Round): Entry {
   const failed = round.result === "poll_failed" || round.result === "interrupted";
   const result = { done: "Done", poll_failed: "Poll failed", interrupted: "Interrupted", skipped: "Skipped" }[round.result];
   const detail = round.reason ?? (round.selected === null ? "" : `${plural(round.selected, "review")} selected`);
-  return { key: `round:${round.started_at}`, at: round.started_at, runId: null, name: "Poll", result, dot: failed ? "error" : round.result === "done" ? "success" : "idle", detail, kind: failed ? "failed" : round.result === "skipped" ? "skipped" : null };
+  return { key: `round:${round.started_at}`, at: round.started_at, runId: null, name: "Poll", result, dot: failed ? "error" : "idle", detail, kind: failed ? "failed" : round.result === "skipped" ? "skipped" : null };
 }
 
 function reviewEntry(review: ReviewEntry): Entry {
@@ -30,7 +34,7 @@ function reviewEntry(review: ReviewEntry): Entry {
     case "waiting": return { ...base, result: "Waiting", dot: "idle", detail: review.cause?.summary ?? "", kind: null };
     case "failed": return { ...base, result: "Failed", dot: "error", detail: review.cause?.summary ?? "no reason recorded", kind: "failed" };
     case "reviewed": return {
-      ...base, result: review.skipped ? "Skipped" : "Reviewed", dot: review.skipped ? "idle" : "success",
+      ...base, result: review.skipped ? "Skipped" : "Reviewed", dot: "idle",
       detail: `${verdictWords(review.verdict)} · ${plural(review.findings, "finding")}`, kind: review.skipped ? "skipped" : null,
     };
   }

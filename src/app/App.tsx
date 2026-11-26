@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
-import { Button, CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
+import { Button, CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon, StatusDot, type Status } from "@prompting-time/ui";
 import type { MenuBarCommand, PluginSource, ProviderId } from "../bridge/types";
 import { ACTIONS, hasAction, messageOf, runPluginAction } from "../features/agents/actions";
 import { AgentScreen } from "../features/agents/AgentScreen";
@@ -16,10 +16,10 @@ import { ConversationNavigation } from "../features/conversations/ConversationNa
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
-import { AllWork, searchWork, waitingRoots, type PluginCause } from "../features/work/AllWork";
+import { AllWork, conversationState, searchWork, waitingRoots, type PluginCause } from "../features/work/AllWork";
 import { NewConversationDialog } from "./NewConversationDialog";
 import { readSidebarWidth, SidebarResizer } from "./SidebarResizer";
-import { createSnapshot, effectiveConversationStatus, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
+import { createSnapshot, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
 
 const statusOptions: Array<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "All statuses" },
@@ -31,7 +31,6 @@ const statusOptions: Array<{ value: StatusFilter; label: string }> = [
   { value: "interrupted", label: "Interrupted" },
   { value: "failed", label: "Failed" },
 ];
-const statusWords = { idle: "ready", queued: "queued", running: "working", waiting: "waiting for you", completed: "completed", interrupted: "interrupted", failed: "failed" } as const;
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const NARROW_INSPECTOR = "(max-width: 72rem)";
 
@@ -90,6 +89,11 @@ export function App(props: { store: AppStore }) {
   });
   const selectedId = createMemo(() => selected()?.id ?? null);
   const selectedPlugin = createMemo(() => snapshot().plugins.items.find(({ name }) => name === pluginView()?.plugin) ?? null);
+  /** The words and dot of the selected agent's row, which the header repeats on its screen. */
+  const selectedAgentState = () => {
+    const plugin = selectedPlugin();
+    return plugin ? describeAgent(plugin, snapshot().plugins.statuses[plugin.name]) : null;
+  };
   const reviewsByPlugin = createMemo(() => pluginReviews(snapshot().plugins));
   /** The newest run of each pull request of every plugin: the reviews All work lists. */
   const newestReviews = createMemo(() => Object.entries(reviewsByPlugin()).flatMap(([plugin, reviews]): PluginReview[] => newestRuns(reviews).map((review) => ({ plugin, review }))));
@@ -487,7 +491,7 @@ export function App(props: { store: AppStore }) {
                 <Show when={selected()}>
                   {(conversation) => (
                     <span class="shell-meta">
-                      {conversation().provider ? providerNames[conversation().provider!] : "No provider"} · {statusWords[effectiveConversationStatus(conversation())]}
+                      {conversation().provider ? providerNames[conversation().provider!] : "No provider"} · <StatusWords words={conversationState(conversation()).words} status={conversationState(conversation()).status} />
                       {conversation().projectRoot ? ` · ${conversation().projectRoot!.split(/[\\/]/).filter(Boolean).at(-1)}` : ""}
                     </span>
                   )}
@@ -504,13 +508,13 @@ export function App(props: { store: AppStore }) {
                     fallback={
                       <div class="shell-title">
                         <h1>{plugin().title}</h1>
-                        <span class="shell-meta">Background agent · {describeAgent(plugin(), snapshot().plugins.statuses[plugin().name]).meta}</span>
+                        <span class="shell-meta">Background agent · <Show when={selectedAgentState()}>{(state) => <StatusWords words={state().meta} status={state().status} />}</Show></span>
                       </div>
                     }
                   >
                     <div class="shell-title">
                       <h1>{openCause()?.cause.summary ?? "Blocked reviews"}</h1>
-                      <span class="shell-meta">{plugin().title} · {waitingText(openCause()?.cause.reviews.length ?? 0)}</span>
+                      <span class="shell-meta">{plugin().title} · <StatusWords words="Blocks every review" status="error" /> · {waitingText(openCause()?.cause.reviews.length ?? 0)}</span>
                     </div>
                   </Show>
                 }
@@ -888,6 +892,18 @@ function SelectedTimeline(props: { store: AppStore; snapshot: () => AppSnapshot;
   );
 }
 
+/** A status in the window's header: its words, after its dot when the status has one, as its row shows it. */
+function StatusWords(props: { words: string; status: Status }) {
+  return (
+    <>
+      <Show when={props.status !== "idle"}>
+        <StatusDot status={props.status} />
+      </Show>
+      {props.words}
+    </>
+  );
+}
+
 function StartupState(props: { store: AppStore; snapshot: AppSnapshot }) {
   return (
     <Show
@@ -930,7 +946,7 @@ function ProviderList(props: { snapshot: AppSnapshot }) {
       <ul class="provider-list">
         {(props.snapshot.bootstrap?.providers ?? []).map((provider) => (
           <li class="provider-diagnostic">
-            <span class="provider-indicator" data-available={provider.available ? "true" : "false"} aria-hidden="true" />
+            <StatusDot status={provider.available ? "idle" : "error"} />
             <span>{provider.available && provider.version ? `${providerNames[provider.id]} ${provider.version}` : `${providerNames[provider.id]} unavailable: ${provider.diagnostic ?? "Not installed"}`}</span>
           </li>
         ))}

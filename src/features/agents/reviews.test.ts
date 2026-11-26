@@ -44,10 +44,12 @@ describe("reviews", () => {
     expect(unsafeReasons(review({ safe_to_approve: false, skipped: true, findings: 0 }), null)).toBe("didn't read the whole change");
     expect(unsafeReasons(review({ safe_to_approve: false, findings: 0 }), [])).toBe("not safe to approve");
     expect(reviewState(unsafe, now)).toEqual({ words: "approve once CI passes · has findings that aren't nits", status: "attention" });
-    // A review the plugin judges safe, or a status without the judgement, keeps the verdict alone.
-    expect(reviewState(review({ safe_to_approve: true }), now).words).toBe("approve once CI passes");
-    expect(reviewState(review({ safe_to_approve: null }), now).words).toBe("approve once CI passes");
-    expect(reviewState(review({ safe_to_approve: false, verdict: "look_first" }), now).words).toBe("look first");
+    // A review the plugin judges safe, or a status without the judgement, keeps the verdict alone,
+    // in green as ready to approve; one that needs a look is orange.
+    expect(reviewState(review({ safe_to_approve: true }), now)).toEqual({ words: "approve once CI passes", status: "success" });
+    expect(reviewState(review({ safe_to_approve: null }), now)).toEqual({ words: "approve once CI passes", status: "success" });
+    expect(reviewState(review({ safe_to_approve: false, verdict: "look_first" }), now)).toEqual({ words: "look first", status: "attention" });
+    expect(reviewState(review({ safe_to_approve: null, skipped: true }), now)).toEqual({ words: "skipped, look first", status: "attention" });
   });
 
   it("reads the kinds of a run's findings from what show-review printed", () => {

@@ -8,8 +8,8 @@ const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "nume
 const status = (value: unknown) => ({ value, error: null });
 
 describe("a background agent's row", () => {
-  it("says when a running agent polls next, with the day when it is not today", () => {
-    expect(describeAgent(fixturePlugin(), status(fixtureStatus(at(15, 45))), now)).toEqual({ meta: `Running · next poll ${time(at(15, 45))}`, status: "success" });
+  it("says when a running agent polls next, with the day when it is not today, and has no dot while all is well", () => {
+    expect(describeAgent(fixturePlugin(), status(fixtureStatus(at(15, 45))), now)).toEqual({ meta: `Running · next poll ${time(at(15, 45))}`, status: "idle" });
     const monday = at(10, 0, 30);
     expect(shortTime(monday, now)).toBe(`${new Date(monday).toLocaleDateString([], { weekday: "short" })} ${time(monday)}`);
   });
@@ -29,10 +29,10 @@ describe("a background agent's row", () => {
     expect(describeAgent(fixturePlugin(), status(failed), now)).toEqual({ meta: `Poll failed ${time(at(8, 19))} · next try ${time(at(9, 34))}`, status: "error" });
   });
 
-  it("says what keeps an agent from running before anything else", () => {
+  it("says what keeps an agent from running before anything else, in red", () => {
     const stopped = { kind: "notRunning" as const, exit: null };
     const missing = fixturePlugin({ process: stopped, prerequisites: [{ command: "slackdump", purpose: "Reads asks.", needed: true, path: null }] });
-    expect(describeAgent(missing, undefined, now)).toEqual({ meta: "Missing slackdump", status: "attention" });
+    expect(describeAgent(missing, undefined, now)).toEqual({ meta: "Missing slackdump", status: "error" });
     expect(describeAgent(fixturePlugin({ process: stopped, settingsError: "get-settings failed" }), undefined, now))
       .toEqual({ meta: "Can't read its settings", status: "error" });
     expect(describeAgent(fixturePlugin({ process: { kind: "notRunning", exit: { code: 3, output: "no config" } } }), undefined, now))
@@ -61,7 +61,7 @@ describe("a background agent's row", () => {
 
   it("falls back to the process when the status cannot be read", () => {
     expect(describeAgent(fixturePlugin({ process: { kind: "runningElsewhere", pid: 7 } }), { value: null, error: "boom" }, now))
-      .toEqual({ meta: "Running", status: "success" });
-    expect(describeAgent(fixturePlugin(), status({ version: 2 }), now)).toEqual({ meta: "Running", status: "success" });
+      .toEqual({ meta: "Running", status: "idle" });
+    expect(describeAgent(fixturePlugin(), status({ version: 2 }), now)).toEqual({ meta: "Running", status: "idle" });
   });
 });

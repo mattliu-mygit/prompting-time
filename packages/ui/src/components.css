@@ -231,7 +231,8 @@
   pointer-events: none;
 }
 
-/* StatusDot */
+/* StatusDot: red, orange, and green each mean one thing, and running work gets a dot with no
+   color. A quiet status draws no dot but keeps its place, so the words beside it line up. */
 .pt-status-dot {
   display: inline-block;
   flex: none;
@@ -240,11 +241,11 @@
   block-size: calc(var(--s-space-12) / 2);
   /* Round, as in the agreed mock, though the preset squares other corners. */
   border-radius: 50%;
-  background: var(--s-text-disabled);
+  background: transparent;
 }
 
 .pt-status-dot[data-status="running"] {
-  background: var(--s-info);
+  background: var(--s-text-secondary);
 }
 
 .pt-status-dot[data-status="attention"] {

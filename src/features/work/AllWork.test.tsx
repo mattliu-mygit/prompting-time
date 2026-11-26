@@ -122,8 +122,11 @@ describe("AllWork", () => {
     expect(names(screen.getByRole("tree", { name: "Chats waiting on you" }))).toEqual([expect.stringContaining("Waiting conversation")]);
     const ready = screen.getByRole("treeitem", { name: /^separate cache configuration/ });
     expect(ready).toHaveClass("work-review");
-    expect(ready.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
-    expect(screen.getByRole("treeitem", { name: /^move the projection/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    // Each part's heading says its rows' status, so the rows draw no dot for it.
+    expect(ready.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(screen.getByRole("treeitem", { name: /^cap the upload retry delay/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(screen.getByRole("treeitem", { name: /^move the projection/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(screen.getByRole("treeitem", { name: /^Waiting conversation/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
     expect(screen.queryByRole("treeitem", { name: /keep focus in the date picker/ })).not.toBeInTheDocument();
 
     fireEvent.click(ready);
@@ -144,7 +147,9 @@ describe("AllWork", () => {
     const view = renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: {} });
     fireEvent.click(screen.getByRole("button", { name: "Waiting · Docker isn't running 1" }));
     flush();
-    const cause = screen.getByRole("treeitem", { name: "Docker isn't running, 1 review waiting" });
+    // Its red dot comes with the words for it.
+    const cause = screen.getByRole("treeitem", { name: "Docker isn't running, Blocks every review, 1 review waiting" });
+    expect(cause).toHaveTextContent("Blocks every review");
     expect(cause.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
     fireEvent.click(cause);
     expect(view.onOpenCause).toHaveBeenCalledWith("whooper", "docker");
@@ -230,15 +235,17 @@ describe("AllWork", () => {
     const found = () => screen.getAllByRole("tree").map((tree) => `${document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent}: ${names(tree).join(" | ")}`);
 
     view.search("#101");
-    expect(found()).toEqual(["Needs you: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
+    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
+    // Each group's label says its reviews' status, as the sections' headings do, so no dot repeats it.
+    expect(within(results()).getByRole("treeitem").querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
     expect(within(results()).getByRole("status")).toHaveTextContent("1 result · Esc clears");
     view.search("101");
-    expect(found()).toEqual(["Needs you: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
+    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
     view.search("sprocket shim");
     expect(found()).toEqual(["Done: drop the sprocket shim, sprockets#9 · skipped"]);
     view.search("@sam-fixture");
     expect(found()).toEqual([
-      "Needs you: separate cache configuration, widgets#101 · @sam-fixture · 2 findings",
+      "Ready to approve: separate cache configuration, widgets#101 · @sam-fixture · 2 findings",
       "Removed: keep focus in the date picker, removed, widgets#8 · @sam-fixture · 2 findings",
     ]);
     const removed = screen.getByRole("treeitem", { name: /^keep focus in the date picker, removed/ });
@@ -246,7 +253,7 @@ describe("AllWork", () => {
     expect(removed).toHaveAttribute("data-removed");
     view.search("acme/gadgets");
     expect(found()).toEqual([
-      "Needs you: move the projection, gadgets#55 · review failed",
+      "Review failed: move the projection, gadgets#55 · review failed",
       "Waiting: speed up the gadget index, gadgets#60 · waiting · Docker isn't running",
       expect.stringMatching(/^Done: add the tags package, gadgets#77 · commented /),
     ]);
@@ -255,6 +262,8 @@ describe("AllWork", () => {
     view.search("alpha");
     expect(results().scrollTop).toBe(0);
     expect(found()).toEqual(["Chats: Auth refactor, alpha, Codex, working"]);
+    // Chats of every status mix here, so a chat keeps its dot.
+    expect(within(results()).getByRole("treeitem").querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
     expect(screen.queryByRole("button", { name: /^Collapse/ })).not.toBeInTheDocument();
     view.search("release no folder");
     expect(found()).toEqual(["Chats: Release notes, no folder, Claude, queued"]);
@@ -318,7 +327,8 @@ describe("AllWork", () => {
     expect([...needsYou.querySelectorAll("[role=treeitem]")].map((row) => row.getAttribute("aria-label"))).toEqual([
       "Evaluation rows, Codex, waiting for you", "Tag names, Codex, waiting for you",
     ]);
-    expect(needsYou.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    // "Chats waiting on you" says it, so these rows draw no orange dot; elsewhere a waiting chat has one.
+    expect([...needsYou.querySelectorAll(".pt-status-dot")].map((dot) => dot.getAttribute("data-status"))).toEqual(["idle", "idle"]);
     expect(screen.queryByRole("tree", { name: "Chats · beta" })).not.toBeInTheDocument();
     expect(groupWork([sibling, root]).map(({ label }) => label)).toEqual(["alpha", "no folder"]);
   });

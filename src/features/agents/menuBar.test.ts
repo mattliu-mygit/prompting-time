@@ -55,6 +55,9 @@ describe("the menu bar extra", () => {
     const missing = whooper({ process: { kind: "notRunning", exit: null }, prerequisites: [{ command: "gh", purpose: "Reads pull requests.", needed: true, path: null }] });
     expect(menuBarRequest(plugins([missing]), {}, 0, true, now).agents[0]).toMatchObject({ status: "Missing gh", alert: true });
     expect(menuBarRequest(plugins([whooper()], { whooper: fixtureStatus(nextPoll, { paused: true }) }), {}, 0, true, now).agents[0]!.alert).toBe(false);
+    // A poll under way has a dot with no color on the row, not a red one.
+    const polling = fixtureStatus(nextPoll, { round: { running: true, started_at: nextPoll, reviewing: null } });
+    expect(menuBarRequest(plugins([whooper()], { whooper: polling }), {}, 0, true, now).agents[0]).toMatchObject({ status: "Polling now", alert: false });
     expect(menuBarRequest(plugins([whooper({ process: { kind: "notRunning", exit: null } })]), {}, 0, true, now).agents[0]!.alert).toBe(false);
   });
 

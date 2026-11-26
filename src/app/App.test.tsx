@@ -386,7 +386,8 @@ describe("background agents", () => {
     const agents = await screen.findByRole("region", { name: "Background agents" });
     expect(await within(agents).findByText(`Running · next poll ${shortTime(nextPoll())}`)).toBeVisible();
     expect(within(agents).getByRole("button", { name: "Whooper" })).toHaveAccessibleDescription(`Running · next poll ${shortTime(nextPoll())}`);
-    expect(agents.querySelector(".agent-pin-status .pt-status-dot")).toHaveAttribute("data-status", "success");
+    // All is well, so no dot: red, orange, and green each mean something else.
+    expect(agents.querySelector(".agent-pin-status .pt-status-dot")).toHaveAttribute("data-status", "idle");
     const list = screen.getByRole("treeitem", { name: /Auth refactor/ });
     expect(agents.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // The rows scroll inside their section; the agents and the search stay above every section.
@@ -417,7 +418,7 @@ describe("background agents", () => {
     const { api } = agentsApi(stopped);
     renderApp(api);
     const words = await screen.findByText("Missing slackdump");
-    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
     expect(within(screen.getByRole("region", { name: "Background agents" })).getByRole("button", { name: "Start" })).toBeDisabled();
     expect(api.pluginRequest).not.toHaveBeenCalled();
   });
@@ -573,8 +574,11 @@ describe("agent controls and blocking causes", () => {
     const { api, pluginRequest } = controlsApi();
     renderApp(api);
     click(await screen.findByRole("button", { name: "Waiting · Docker isn't running 2" }));
-    click(await screen.findByRole("treeitem", { name: /^Docker isn't running, 2 reviews waiting · since / }));
+    click(await screen.findByRole("treeitem", { name: /^Docker isn't running, Blocks every review · since .*, 2 reviews waiting$/ }));
     await settle();
+    // The header says the red dot's words too.
+    expect(document.querySelector(".shell-meta")).toHaveTextContent("Whooper · Blocks every review · 2 reviews waiting");
+    expect(document.querySelector(".shell-meta .pt-status-dot")).toHaveAttribute("data-status", "error");
 
     const cause = screen.getByRole("main", { name: "Blocked reviews" });
     expect(screen.getByRole("heading", { level: 1, name: "Docker isn't running" })).toBeInTheDocument();
@@ -682,7 +686,18 @@ describe("review header", () => {
     click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
     const meta = () => document.querySelector(".shell-meta");
     await waitFor(() => expect(meta()).toHaveTextContent("Whooper review · acme/widgets#101 · approve once CI passes · has a question"));
+    // Orange, as the row would be outside Needs a look: the review needs a look.
+    expect(meta()!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
     expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [unsafe.run_id], confirmedFingerprint: null });
+  });
+
+  it("puts a green dot before the words of a review that is ready to approve", async () => {
+    const pluginRequest = vi.fn(async () => actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews: [fixtureReviews()[0]!] })) }));
+    renderApp(createApi({ listPlugins: vi.fn(async () => [fixturePlugin({ actions: pageActions })]), pluginRequest }));
+    click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
+    const meta = () => document.querySelector(".shell-meta");
+    await waitFor(() => expect(meta()).toHaveTextContent("Whooper review · acme/widgets#101 · approve once CI passes"));
+    expect(meta()!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
   });
 });
 
@@ -773,7 +788,7 @@ describe("triage", () => {
     const { api, pluginRequest } = triageApi();
     renderApp(api);
     click(await screen.findByRole("button", { name: "Waiting · Docker isn't running 2" }));
-    click(screen.getByRole("treeitem", { name: /^Docker isn't running, 2 reviews waiting/ }));
+    click(screen.getByRole("treeitem", { name: /^Docker isn't running, Blocks every review.*, 2 reviews waiting$/ }));
     await settle();
     click(screen.getByRole("button", { name: "Remove all" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Remove 2 reviews?" });

@@ -38,20 +38,21 @@ function Sidebar() {
           <FilterIcon />
         </IconButton>
       </div>
-      <h3 class="gallery-group">Needs you</h3>
+      {/* A heading that names the rows' status, such as Ready to approve, replaces their dots. */}
+      <h3 class="gallery-group">Ready to approve</h3>
       <ul class="gallery-rows">
         <li>
-          <ListRow icon={<PullRequestIcon />} title="separate the cache configuration" count={2} status="attention" meta="widgets#101 · approve once CI passes" {...row("w101")} />
-        </li>
-        <li>
-          <ListRow icon={<ChatIcon />} title="Score threshold cleanup" status="attention" meta="Codex · waiting for your approval" {...row("chat1")} />
-        </li>
-        <li>
-          <ListRow icon={<PullRequestIcon />} title="add the tags package with Tag and List types" count={1} status="error" meta="widgets#107 · review failed" {...row("w107")} />
+          <ListRow icon={<PullRequestIcon />} title="separate the cache configuration" count={2} status="idle" meta="widgets#101 · approve once CI passes" {...row("w101")} />
         </li>
       </ul>
       <h3 class="gallery-group">acme/widgets</h3>
       <ul class="gallery-rows">
+        <li>
+          <ListRow icon={<ChatIcon />} title="Score threshold cleanup" status="attention" meta="Codex · waiting for your approval" {...row("chat1")} />
+        </li>
+        <li>
+          <ListRow icon={<PullRequestIcon />} title="add the tags package with Tag and List types" status="error" meta="widgets#107 · review failed" {...row("w107")} />
+        </li>
         <li>
           <ListRow icon={<ChatIcon />} title="Saved results for queries" status="running" meta="Claude · working" {...row("chat2")} />
         </li>
@@ -62,7 +63,7 @@ function Sidebar() {
       <h3 class="gallery-group gallery-group-foot">Background agents</h3>
       <ul class="gallery-rows">
         <li>
-          <ListRow icon={<BotIcon />} title="Whooper" count="4 queued" status="success" meta="running · next poll 3:45 PM" {...row("whooper")} />
+          <ListRow icon={<BotIcon />} title="Whooper" count="4 queued" status="idle" meta="running · next poll 3:45 PM" {...row("whooper")} />
         </li>
       </ul>
     </aside>
@@ -92,12 +93,13 @@ function DraftThread(props: { annotation: () => DiffLineAnnotation<DraftComment>
   );
 }
 
+// Each color means one thing, always beside its words; running work gets a dot without color.
 const statuses: { status: Status; text: string }[] = [
-  { status: "attention", text: "Needs you" },
-  { status: "running", text: "Running" },
-  { status: "success", text: "Running fine" },
-  { status: "error", text: "Failed" },
-  { status: "idle", text: "Done" },
+  { status: "error", text: "Failed or blocked" },
+  { status: "attention", text: "Waiting on you" },
+  { status: "success", text: "Ready to approve" },
+  { status: "running", text: "Working now, no color" },
+  { status: "idle", text: "Anything else, no dot" },
 ];
 
 function Gallery() {
