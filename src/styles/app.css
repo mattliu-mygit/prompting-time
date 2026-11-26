@@ -696,8 +696,10 @@ body {
   cursor: pointer;
 }
 
+/* Without a size, small is the browser's "smaller", under 12px, Sigil's smallest size. */
 .activity-toggle small {
   color: var(--s-text-subtle);
+  font-size: var(--s-size-xs);
 }
 
 .activity-entries {

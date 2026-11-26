@@ -17,7 +17,7 @@ export function checkConversationTreeGeometry() {
   if (!levels.every((row, index) => index === 0 || row.x > levels[index - 1].x)) {
     failures.push("Each generation must have visibly greater indentation");
   }
-  if (levels.some(({ height }) => height < 31.5)) failures.push("Conversation rows must retain 32px targets");
+  if (levels.some(({ height }) => height < 35.5)) failures.push("Conversation rows must be at least 36px high");
   if (document.documentElement.scrollWidth > innerWidth + 1 || document.documentElement.scrollHeight > innerHeight + 1) {
     failures.push("Layout must remain inside the viewport");
   }

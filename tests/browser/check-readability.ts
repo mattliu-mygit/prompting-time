@@ -15,12 +15,27 @@ export function checkReadability({ inspectorOpen = false } = {}) {
   const inspector = document.querySelector<HTMLElement>(".inspector-pane");
   const labelWidths = [...document.querySelectorAll<HTMLElement>('[role="treeitem"] .pt-list-row-title')].slice(0, 3).map((label) => label.clientWidth);
   const controls = [...document.querySelectorAll<HTMLElement>("button, select, textarea, input:not([type=checkbox]):not([type=radio])")].filter(visible);
+  // Sizes from Sigil's default preset (@sigil-ui/presets): 12px (size-xs) is the smallest text,
+  // 14px (size-sm) is a button's or field's, 13px is code's, and 30px (controls.height-sm) is a
+  // control's height.
   const smallText = [...document.querySelectorAll<HTMLElement>("body *")]
-    .filter((element) => visible(element) && [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) && px(element) < 13)
+    .filter((element) => visible(element) && [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) && px(element) < 12)
     .map((element) => ({ tag: element.tagName, className: element.className, size: px(element) }));
-  const smallTargets = controls.filter((element) => element.getBoundingClientRect().height < 31.5)
+  // Three smaller controls sit inside a larger target: a section's heading toggle spans the
+  // sidebar, a row's expand and remove buttons sit in a tree row at least 36px high, and an inline
+  // text button such as Show details is text in its line.
+  const sidebarWidth = document.querySelector<HTMLElement>(".all-work")?.getBoundingClientRect().width ?? 0;
+  const insideLargerTarget = (element: HTMLElement) => {
+    const box = element.getBoundingClientRect();
+    if (element.matches(".work-group-toggle")) return box.height >= 27.5 && box.width >= sidebarWidth * 0.9;
+    if (element.matches(".work-disclosure, .work-remove")) return (element.closest<HTMLElement>('[role="treeitem"]')?.getBoundingClientRect().height ?? 0) >= 35.5;
+    return element.matches(".disclosure-link");
+  };
+  const smallTargets = controls.filter((element) => element.getBoundingClientRect().height < 29.5 && !insideLargerTarget(element))
     .map((element) => ({ tag: element.tagName, className: element.className, height: element.getBoundingClientRect().height }));
-  const smallControlText = controls.filter((element) => px(element) < 14)
+  const smallControlText = controls.filter((element) => px(element) < 12)
+    .map((element) => ({ tag: element.tagName, className: element.className, size: px(element) }));
+  const offSizeFields = [...document.querySelectorAll<HTMLElement>(".pt-button, .pt-input")].filter((element) => visible(element) && px(element) !== 14)
     .map((element) => ({ tag: element.tagName, className: element.className, size: px(element) }));
   const measurements = {
     inputSize: px(input), replySize: px(assistant), sidebarSize: px(required('[role="treeitem"] .pt-list-row-title')), codeSize: px(required(".pt-code-block pre")),
@@ -31,7 +46,7 @@ export function checkReadability({ inspectorOpen = false } = {}) {
     composerBottom: composer.bottom, viewportHeight: innerHeight,
     horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
     verticalOverflow: document.documentElement.scrollHeight > innerHeight,
-    smallText, smallTargets, smallControlText,
+    smallText, smallTargets, smallControlText, offSizeFields,
   };
   const failures = [];
   if (measurements.inputSize !== 16 || measurements.replySize !== 16) failures.push("chat and input must be 16px");
@@ -42,10 +57,11 @@ export function checkReadability({ inspectorOpen = false } = {}) {
   if (measurements.inputColor !== measurements.foregroundColor) failures.push("typed text must use normal foreground");
   if (measurements.rowHeight < 36) failures.push("tree rows must be at least 36px");
   if (measurements.inspectorOpen !== inspectorOpen) failures.push("unexpected inspector visibility");
-  if (smallText.length) failures.push("visible text below 13px");
-  if (smallTargets.length) failures.push("controls below 32px high");
-  if (smallControlText.length) failures.push("control text below 14px");
-  if (measurements.codeSize < 14) failures.push("code below 14px");
+  if (smallText.length) failures.push("visible text below 12px");
+  if (smallTargets.length) failures.push("controls below 30px high");
+  if (smallControlText.length) failures.push("control text below 12px");
+  if (offSizeFields.length) failures.push("buttons and fields must be 14px");
+  if (measurements.codeSize < 13) failures.push("code below 13px");
   if (composer.top < 0 || composer.bottom > innerHeight + 1 || measurements.horizontalOverflow || measurements.verticalOverflow) failures.push("content escapes viewport");
   if (failures.length) throw new Error(JSON.stringify({ failures, measurements }));
   return measurements;

@@ -285,7 +285,7 @@ check actual geometry:
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-conversation-tree.ts")).checkConversationTreeGeometry()'
 ```
 
-Each generation must indent visibly, controls remain at least 32px, and long deep
+Each generation must indent visibly, rows remain at least 36px high, and long deep
 paths must not escape the viewport. Repeat at 125% CSS scale. Exercise tree arrow
 keys, Home/End, Enter/Space, and collapse persistence across pane hide/show and
 selection changes. The helper also exports `checkSelectedConversation` for exact
@@ -344,7 +344,8 @@ playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/c
 ```
 
 The check requires compact rows, unchanged message typography, usable detail
-targets, and no page overflow. Repeat with `&tool-provider=claude`.
+targets (30px controls, or inline text buttons such as Show details in a 30px line),
+and no page overflow. Repeat with `&tool-provider=claude`.
 
 Use `?chat=tools` for invented read/search/command operations, a running operation,
 a failed command, empty output, unknown outcome, bounded output, and a legacy
@@ -398,7 +399,9 @@ being treated as ordinary one-line status updates.
 
 Use `?chat=reading` at 1440 × 900 and 960 × 600. With the inspector initially closed,
 open **Chats · no folder**, so the sidebar shows rows, and run the
-computed-font/target/layout check:
+computed-font/target/layout check, which holds the design spec's sizes from Sigil's
+default preset: no text under 12px, 14px buttons and fields, 13px code, and 30px
+controls except the three the spec names inside a larger target:
 
 ```sh
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-readability.ts")).checkReadability()'

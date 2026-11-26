@@ -30,7 +30,8 @@ export function checkMessageDensity() {
   if (result.assistantHeight > 76) failures.push("short assistant message too tall");
   if (result.lifecycleHeight > 28) failures.push("ordinary lifecycle needs one compact line");
   if (result.messageFont !== "16px" || result.messageLineHeight !== "26px") failures.push("message readability changed");
-  if (result.copyWidth < 31.5 || result.copyHeight < 31.5 || !result.copyInHeader) failures.push("copy must use an accessible header target");
+  // A 30px square, Sigil's small control size.
+  if (result.copyWidth < 29.5 || result.copyHeight < 29.5 || !result.copyInHeader) failures.push("copy must use an accessible header target");
   if (result.overflow) failures.push("layout escapes viewport");
   if (failures.length) throw new Error(JSON.stringify({ failures, result }));
   return result;

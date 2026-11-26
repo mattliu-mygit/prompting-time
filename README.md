@@ -69,9 +69,11 @@ Archiving removes a conversation from active navigation but keeps its durable hi
 ## Conversation continuity
 
 The default layout gives the conversation room to breathe: the inspector starts
-closed and opens on demand. Chat and draft text use Sigil's 16px large size at
-standard display scaling, controls and sidebar labels use 14px, and secondary text
-is at least 13px. The new-window default is 1440 × 900; smaller windows remain
+closed and opens on demand. Sizes follow Sigil's default preset at standard display
+scaling: chat and draft text use its 16px large size, controls and sidebar labels
+14px, code 13px, and secondary text 12px, its smallest; controls are at least 30px
+high. Text is Katagami Text and code Katagami Mono. The new-window default is
+1440 × 900; smaller windows remain
 supported, with the inspector opening as an overlay when it would crowd the chat.
 
 A single compact header holds the conversation title, provider, current status,

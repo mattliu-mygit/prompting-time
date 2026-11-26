@@ -59,13 +59,23 @@ is noninteractive, keyboard focus stays inside, and closing restores the trigger
 New windows default to 1440 × 900, with a minimum of 960 × 600. This does not reset
 the size of an already open window.
 
-Readable defaults use 16px chat, preview and composer text (Sigil's large size), 14px controls/sidebar
-labels and code, and at least 13px secondary text at standard root scaling. Existing
+Sizes come from Sigil's `default` preset (`src/default.ts` in `@sigil-ui/presets`
+3.0.0) at standard root scaling. Chat, preview, and composer text are 16px with a 26px
+line height (`typography.size-lg`, 1rem, and `leading-relaxed`, 1.625); controls,
+sidebar titles, and other interface text 14px (`size-sm` and `size-base`, 0.875rem);
+code 13px (`code.font-size`, 0.8125rem); and secondary text, such as a row's gray line,
+counts, section names, and the header's status line, 12px (`size-xs`, 0.75rem), the
+smallest size. All text is Katagami Text except code, which is Katagami Mono. Existing
 larger headings retain their hierarchy. Typed text uses the normal foreground color;
 placeholder and metadata remain secondary. Shared rem-based sizes preserve scaling
-without global zoom. Controls have at least 32px height, icon targets are 32px square,
-and conversation rows have at least 36px height. Long text wraps or scrolls within
-its own region rather than creating horizontal window overflow.
+without global zoom. Buttons, fields, selects, and menu items are at least 30px high
+and icon buttons 30px square (`controls.height-sm`, 30px), and conversation rows are
+at least 36px high. Three smaller controls sit inside a larger target: a section's
+heading is a 28px toggle across the sidebar's width; a row's expand and remove buttons
+are 20px, and the row's arrow keys and the review's header also reach what they do;
+and inline text buttons, such as Show details, are 12px text in a line at least 30px
+high. Long text wraps or scrolls within its own region rather than creating horizontal
+window overflow.
 Conversation names occupy their own row, with provider/status metadata
 below, so badges do not crowd out nested names.
 

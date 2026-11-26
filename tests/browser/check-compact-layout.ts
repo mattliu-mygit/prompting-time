@@ -31,7 +31,8 @@ export function checkCompactLayout() {
     failures.push("idle composer should have only field and footer");
   }
   if (measurements.inputFont !== "16px") failures.push("input typography changed");
-  if (measurements.headerTargets.some(height => height < 31.5)) failures.push("header targets shrank below 32px");
+  // Sigil's small control height, controls.height-sm in @sigil-ui/presets' default preset.
+  if (measurements.headerTargets.some(height => height < 29.5)) failures.push("header targets shrank below 30px");
   if (composer.bottom > innerHeight + 1 || measurements.horizontalOverflow || measurements.verticalOverflow) failures.push("layout escapes the window");
   if (failures.length) throw new Error(JSON.stringify({ failures, measurements }));
   return measurements;
