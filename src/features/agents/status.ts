@@ -1,6 +1,7 @@
 import type { Status } from "@prompting-time/ui";
 import type { PluginSnapshot } from "../../bridge/types";
 import type { PluginStatusRead } from "../../app/store";
+import { readStatusV2 } from "./statusV2";
 
 /**
  * What a plugin's status action prints, in the format of `whooper-status --json` version 1, which
@@ -90,7 +91,8 @@ export function shortTime(iso: string, now: Date): string {
  * such as "Can't review · Docker isn't running" with `cause`, the ID of that cause that blocks every
  * review; a dot with no color while a poll or review runs; and no dot otherwise, such as "Running ·
  * next poll 3:45 PM" or "Paused". What stops the plugin from running comes first, then a cause that
- * blocks every review, then what its status says.
+ * blocks every review, then what its status says. A plugin that prints status format 2 gives its
+ * own words and dot (`agent`).
  */
 export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | undefined, now = new Date()): { meta: string; status: Status; cause?: string } {
   const process = plugin.process;
@@ -103,6 +105,9 @@ export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | u
     }
     return { meta: "Stopped", status: "idle" };
   }
+  // A plugin that prints status format 2 says its own words and dot.
+  const v2 = readStatusV2(plugin, read);
+  if (v2) return v2.agent ? { meta: v2.agent.words, status: v2.agent.dot } : { meta: "Running", status: "idle" };
   const status = readAgentStatus(read);
   if (!status) return { meta: "Running", status: "idle" };
   const blocked = readBlocked(status);

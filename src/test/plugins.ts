@@ -94,6 +94,62 @@ export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSn
     ],
     settingsError: null,
     process: { kind: "started", pid: 4242 },
+    status: null,
+    ...overrides,
+  };
+}
+
+/**
+ * An invented plugin whose status action prints status format 2, laid out like Monopole's: four
+ * declared groups, two of them under Needs you, Done folded; Rerun and Delete on rows, Delete asking
+ * first; and Check providers, which a blocker names.
+ */
+export function fixtureV2Plugin(overrides: Partial<PluginSnapshot> = {}): PluginSnapshot {
+  return fixturePlugin({
+    name: "fixture-runs",
+    title: "Fixture runs",
+    description: "Runs invented evaluations and prints status format 2.",
+    folder: "/synthetic/plugins/fixture-runs",
+    stateFolder: "/synthetic/state/fixture-runs",
+    pageUrl: "pt-plugin://fixture-runs/index.html",
+    actions: [
+      { name: "status", title: "Status", description: "Prints status format 2.", confirm: false },
+      { name: "rerun", title: "Rerun", description: "Runs the evaluation again.", confirm: false },
+      { name: "delete", title: "Delete run", description: "Deletes the run's records.", confirm: true },
+      { name: "check-providers", title: "Check providers", description: "Checks each provider's sign-in again.", confirm: false },
+    ],
+    prerequisites: [],
+    status: {
+      format: 2,
+      groups: [
+        { id: "failed", title: "Run failed", needsYou: true, order: 1, folded: false },
+        { id: "review", title: "Review needed", needsYou: true, order: 2, folded: false },
+        { id: "running", title: "Running", needsYou: false, order: 3, folded: false },
+        { id: "done", title: "Done", needsYou: false, order: 4, folded: true },
+      ],
+      itemActions: ["rerun", "delete"],
+    },
+    ...overrides,
+  });
+}
+
+/** What fixtureV2Plugin's status action prints: one blocker and an item in each group. */
+export function fixtureV2Status(overrides: Record<string, unknown> = {}) {
+  return {
+    format: 2,
+    agent: { words: "Idle · last run 2 min ago", dot: "idle" },
+    blockers: [{ id: "codex-signed-out", title: "Codex is signed out", dot: "error", route: "/providers", action: "check-providers" }],
+    items: [
+      { id: "run-74c91b1d", group: "failed", title: "Review this stack of PRs · acme/widgets#60", detail: "Verification Discipline: the model could not run",
+        dot: "error", project: null, updated_at: "2026-11-26T18:43:07Z", route: "/runs/run-74c91b1d", actions: ["rerun", "delete"] },
+      { id: "run-review-2", group: "review", title: "Tighten upload retries", detail: "2 rubrics below threshold",
+        dot: "attention", project: "/work/alpha", updated_at: "2026-11-26T17:00:00Z", route: "/runs/run-review-2", actions: ["delete"] },
+      { id: "run-running-3", group: "running", title: "Score yesterday's sessions", detail: null,
+        dot: "running", project: null, updated_at: "2026-11-26T18:50:00Z", route: "/runs/run-running-3" },
+      { id: "run-done-4", group: "done", title: "Compare judge panels",
+        dot: "success", project: null, updated_at: "2026-11-25T10:00:00Z", route: "/runs/run-done-4", actions: ["rerun", "delete"] },
+    ],
+    truncated: false,
     ...overrides,
   };
 }
