@@ -11,6 +11,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
-    globals: true
+    globals: true,
+    // The app's tests, then the UI library's, which build with Solid instead of React.
+    projects: [{ extends: true, test: { name: "app", include: ["src/**/*.test.{ts,tsx}"] } }, "packages/ui"]
   }
 });

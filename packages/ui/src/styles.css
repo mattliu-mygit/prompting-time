@@ -1,0 +1,5 @@
+/* @prompting-time/ui's CSS: the Katagami fonts, Sigil's theme variables, and element defaults.
+   Import it once per page. */
+@import "./fonts.css";
+@import "./theme/sigil.css";
+@import "./base.css";

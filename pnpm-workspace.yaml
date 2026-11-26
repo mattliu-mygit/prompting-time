@@ -1,0 +1,8 @@
+packages:
+  - packages/*
+
+# Solid 2.0 publishes almost daily. solid-js and @solidjs/vite-plugin take their Solid
+# dependencies by range, so pin those to releases at least 7 days old as well.
+overrides:
+  "@solidjs/compiler": 2.0.1
+  "@solidjs/signals": 2.0.1
