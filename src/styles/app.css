@@ -111,7 +111,8 @@ body {
   padding-inline-start: calc(var(--s-space-16) + var(--s-space-16));
 }
 
-.queue-count {
+/* The queued count lines up with the search field above it. */
+.sidebar-pane > .queue-count {
   padding-inline: var(--s-space-12);
 }
 
