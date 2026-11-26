@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod menu_bar;
 pub mod plugin_pages;
 pub mod state;
 
@@ -14,6 +15,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(command_builder.invoke_handler())
+        .manage(menu_bar::MenuBar::default())
+        .on_menu_event(|app, event| menu_bar::handle_menu_event(app, event.id().as_ref()))
         .register_asynchronous_uri_scheme_protocol(
             plugin_pages::SCHEME,
             |context, request, responder| {

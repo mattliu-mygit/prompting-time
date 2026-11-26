@@ -47,6 +47,7 @@ use specta::Type;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::menu_bar::MenuBar;
 use crate::state::{AppState, ProviderDiagnostic as StateProviderDiagnostic, StateError};
 
 mod conversions;
@@ -498,6 +499,22 @@ pub async fn read_plugin_log(
     Ok(state.plugins()?.read_log(&request.plugin)?.into())
 }
 
+/// Shows the background agents' status in the menu bar extra as the window's sidebar shows it, or
+/// removes the extra when the request says not to show it.
+#[tauri::command]
+#[specta::specta]
+pub fn update_menu_bar(
+    app: tauri::AppHandle,
+    menu_bar: State<'_, MenuBar>,
+    request: UpdateMenuBarRequest,
+) -> Result<(), CommandError> {
+    menu_bar.update(&app, request).map_err(|_| CommandError {
+        code: "menu-bar-failed",
+        message: "Prompting Time could not update its menu bar icon.".to_owned(),
+        action: None,
+    })
+}
+
 pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(tauri_specta::collect_commands![
@@ -531,8 +548,10 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             stop_plugin,
             start_plugin,
             read_plugin_log,
+            update_menu_bar,
         ])
         .typ::<AppEvent>()
+        .typ::<MenuBarCommand>()
 }
 
 #[derive(Debug, thiserror::Error)]

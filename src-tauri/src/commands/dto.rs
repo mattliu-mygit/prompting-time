@@ -1024,3 +1024,76 @@ pub struct SavePluginSettingsRequest {
     /// The settings to change, as JSON object text.
     pub values: String,
 }
+
+/// What the menu bar extra shows, as the window's sidebar shows it: each background agent's status
+/// in the same words, with its row's buttons, and how many reviews need you.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMenuBarRequest {
+    /// False removes the icon from the menu bar: the user turned it off, or no background agent is
+    /// installed.
+    pub visible: bool,
+    pub agents: Vec<MenuBarAgent>,
+    /// The reviews under Needs you.
+    pub reviews_needing_you: u32,
+}
+
+/// One background agent in the menu bar extra.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuBarAgent {
+    /// The plugin's name, which the agent's commands carry back to the window.
+    pub plugin: String,
+    pub title: String,
+    /// The status words of the agent's sidebar row, such as "Running · next poll 3:45 PM" or
+    /// "Can't review · Docker isn't running".
+    pub status: String,
+    /// The ID of the cause that blocks every review, which the status words name; choosing them
+    /// opens its screen.
+    pub cause: Option<String>,
+    /// Whether the agent fails, is blocked, or can't start, which a dot on the icon shows.
+    pub alert: bool,
+    /// The row's buttons in order: Pause, Resume, or Start while it is stopped, then Poll now.
+    pub controls: Vec<MenuBarControl>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuBarControl {
+    pub action: MenuBarAction,
+    /// The button's label, such as "Pause" or "Polling…".
+    pub label: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum MenuBarAction {
+    Pause,
+    Resume,
+    Start,
+    Poll,
+}
+
+/// A choice in the menu bar extra that the window carries out as the sidebar would. Prompting Time
+/// sends it as the `prompting-time://menu-bar` event, and brings the window forward first for one
+/// that opens a screen.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum MenuBarCommand {
+    /// Pause, Resume, Start, or Poll now.
+    Agent {
+        plugin: String,
+        action: MenuBarAction,
+    },
+    /// The agent's screen.
+    OpenAgent { plugin: String },
+    /// The screen of the cause that blocks every review.
+    OpenCause { plugin: String, cause: String },
+    /// The first review under Needs you.
+    OpenNeedsYou,
+}

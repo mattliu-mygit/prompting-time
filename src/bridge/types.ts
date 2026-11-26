@@ -57,6 +57,11 @@ export const commands = {
 	startPlugin: (request: PluginNameRequest) => typedError<PluginSnapshot, CommandError>(__TAURI_INVOKE("start_plugin", { request })),
 	/**  The end of what a plugin's start command printed since Prompting Time last started it. */
 	readPluginLog: (request: PluginNameRequest) => typedError<PluginLog, CommandError>(__TAURI_INVOKE("read_plugin_log", { request })),
+	/**
+	 *  Shows the background agents' status in the menu bar extra as the window's sidebar shows it, or
+	 *  removes the extra when the request says not to show it.
+	 */
+	updateMenuBar: (request: UpdateMenuBarRequest) => typedError<null, CommandError>(__TAURI_INVOKE("update_menu_bar", { request })),
 };
 
 /* Types */
@@ -322,6 +327,51 @@ export type LoadTimelineRequest = {
 	conversationId: string,
 	cursor: string | null,
 	limit: number,
+};
+
+export type MenuBarAction = "pause" | "resume" | "start" | "poll";
+
+/**  One background agent in the menu bar extra. */
+export type MenuBarAgent = {
+	/**  The plugin's name, which the agent's commands carry back to the window. */
+	plugin: string,
+	title: string,
+	/**
+	 *  The status words of the agent's sidebar row, such as "Running · next poll 3:45 PM" or
+	 *  "Can't review · Docker isn't running".
+	 */
+	status: string,
+	/**
+	 *  The ID of the cause that blocks every review, which the status words name; choosing them
+	 *  opens its screen.
+	 */
+	cause: string | null,
+	/**  Whether the agent fails, is blocked, or can't start, which a dot on the icon shows. */
+	alert: boolean,
+	/**  The row's buttons in order: Pause, Resume, or Start while it is stopped, then Poll now. */
+	controls: MenuBarControl[],
+};
+
+/**
+ *  A choice in the menu bar extra that the window carries out as the sidebar would. Prompting Time
+ *  sends it as the `prompting-time://menu-bar` event, and brings the window forward first for one
+ *  that opens a screen.
+ */
+export type MenuBarCommand = 
+/**  Pause, Resume, Start, or Poll now. */
+{ kind: "agent"; plugin: string; action: MenuBarAction } | 
+/**  The agent's screen. */
+{ kind: "openAgent"; plugin: string } | 
+/**  The screen of the cause that blocks every review. */
+{ kind: "openCause"; plugin: string; cause: string } | 
+/**  The first review under Needs you. */
+{ kind: "openNeedsYou" };
+
+export type MenuBarControl = {
+	action: MenuBarAction,
+	/**  The button's label, such as "Pause" or "Polling…". */
+	label: string,
+	enabled: boolean,
 };
 
 export type MessageRole = "user" | "assistant";
@@ -635,6 +685,21 @@ export type ToolOperationSummary = {
 	exitCode: number | null,
 	truncated: boolean,
 	conflicted: boolean,
+};
+
+/**
+ *  What the menu bar extra shows, as the window's sidebar shows it: each background agent's status
+ *  in the same words, with its row's buttons, and how many reviews need you.
+ */
+export type UpdateMenuBarRequest = {
+	/**
+	 *  False removes the icon from the menu bar: the user turned it off, or no background agent is
+	 *  installed.
+	 */
+	visible: boolean,
+	agents: MenuBarAgent[],
+	/**  The reviews under Needs you. */
+	reviewsNeedingYou: number,
 };
 
 export type UserInputOption = {
