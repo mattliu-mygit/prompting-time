@@ -286,7 +286,8 @@ connect to native providers or establish native WebView acceptance.
 
 The shared UI library in [`packages/ui`](packages/ui/README.md) holds the theme and the Solid 2.0
 components that the Solid rewrite and plugin pages will use. `pnpm test` and `pnpm build` cover it;
-`pnpm --filter @prompting-time/ui gallery` serves its component gallery.
+`pnpm --filter @prompting-time/ui gallery` serves its component gallery, and `bash scripts/pack-ui.sh`
+packs the tarball plugin pages pin (see its README).
 
 Run the release checks with:
 
