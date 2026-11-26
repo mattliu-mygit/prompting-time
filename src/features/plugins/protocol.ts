@@ -104,3 +104,55 @@ export function readPageMessage(data: unknown): PageMessage | null {
   }
   return data as unknown as PageMessage;
 }
+
+/**
+ * Page protocol version 2, which a manifest names as `page.protocol: 2`: the page runs its plugin's
+ * declared actions itself, so Prompting Time knows no plugin's requests. Every message is a JSON
+ * object with `version: 2`, `type`, and only the fields its type lists; Prompting Time drops a
+ * message from the page that does not fit, and runs nothing for it.
+ *
+ * Page to host: `ready`, once the page listens; and `call`, which runs one of the manifest's
+ * actions with `args` after the action's own command. Prompting Time confirms first when the
+ * action is marked `confirm`, and answers with `result` (what the action printed, as JSON when it
+ * is JSON, else as text) or `error`, each with the call's `id` as `reply_to`.
+ *
+ * Host to page, unasked: `open`, the route of an item or blocker the user opened, sent once the
+ * page is ready; and `changed`, the files that changed in the plugin's state folder (null when
+ * more changed than one event lists), after which the page reads again with `call`.
+ */
+export const PROTOCOL_VERSION_2 = 2;
+
+/** The most arguments one call passes, and the most characters they hold together. */
+export const MAX_CALL_ARGS = 64;
+export const MAX_CALL_ARGS_LENGTH = 64 * 1024;
+
+export type PageMessageV2 =
+  | { version: typeof PROTOCOL_VERSION_2; type: "ready" }
+  | { version: typeof PROTOCOL_VERSION_2; type: "call"; id: number; action: string; args: string[] };
+
+export type HostUpdateV2 =
+  | { type: "result"; reply_to: number; json: unknown }
+  | { type: "error"; reply_to?: number; message: string }
+  | { type: "open"; route: string }
+  | { type: "changed"; files: string[] | null };
+
+export type HostMessageV2 = HostUpdateV2 & { version: typeof PROTOCOL_VERSION_2 };
+
+const MESSAGE_V2_FIELDS: Record<PageMessageV2["type"], readonly string[]> = {
+  ready: ["version", "type"],
+  call: ["version", "type", "id", "action", "args"],
+};
+
+function fitsArgs(args: unknown): args is string[] {
+  if (!Array.isArray(args) || args.length > MAX_CALL_ARGS || !args.every((arg) => typeof arg === "string")) return false;
+  return args.reduce((total: number, arg: string) => total + arg.length, 0) <= MAX_CALL_ARGS_LENGTH;
+}
+
+/** The message in `data` when it fits protocol version 2, or null: the check before anything runs. */
+export function readPageMessageV2(data: unknown): PageMessageV2 | null {
+  if (!isRecord(data) || data.version !== PROTOCOL_VERSION_2 || typeof data.type !== "string" || !Object.hasOwn(MESSAGE_V2_FIELDS, data.type)) return null;
+  const fields = MESSAGE_V2_FIELDS[data.type as PageMessageV2["type"]];
+  if (Object.keys(data).length !== fields.length || !fields.every((field) => Object.hasOwn(data, field))) return null;
+  if (data.type === "call" && !(Number.isSafeInteger(data.id) && typeof data.action === "string" && data.action !== "" && fitsArgs(data.args))) return null;
+  return data as unknown as PageMessageV2;
+}
