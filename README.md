@@ -196,6 +196,14 @@ checks, starts, and stops them, and the window shows them.
   names the reviews in progress it ends. With no plugin installed the pinned row offers to install
   one, and the palette always does: from a release archive on this Mac, checked by its SHA-256, or
   by running a plugin folder in place, for development.
+- **Menu bar.** While a background agent is installed, Prompting Time puts a clock in the macOS menu
+  bar, a template image that macOS draws in the menu bar's own color, with a dot at its top right
+  while an agent fails, is blocked, or can't start. Its menu repeats the pinned rows, from the same
+  status in the same words: each agent's name, which opens its screen; its status words, which
+  open a blocking cause's screen; its Pause or Resume (Start while it is stopped) and Poll now; then
+  how many reviews need you, which opens the first; then Open Prompting Time and Quit Prompting
+  Time. It is on by default; the palette's "Hide background agents from the menu bar" turns it off
+  and "Show background agents in the menu bar" back on, and this device remembers the choice.
 
 - **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
   and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
@@ -261,8 +269,13 @@ checks, starts, and stops them, and the window shows them.
   on each review's row and in its header, runs `remove <run>`: the review leaves the lists, its
   files stay on disk, and a notice offers Undo (`remove <run> --undo`); a removed review's page has
   Restore. After Submit, Skip, or Remove of the open review, the next item in "Needs you" opens and
-  the notice names it. Command-J steps through "Needs you", and Command-K finds every review. A
-  review's header shows "Review N · <short sha> · <time>" with the pull request's other versions
+  the notice names it. Command-J steps through "Needs you", and Command-K finds every review; when
+  either, the next item, or the menu bar selects a row below or above the visible part of its
+  section, the section scrolls just far enough to show it. The window's header names the review's
+  state, and for one that says approve once CI passes but that the plugin judges not safe to
+  approve it says why, from the kinds of its findings (`show-review`): "approve once CI passes · has
+  a question", or "didn't read the whole change" for a review that skipped it. A review's header
+  also shows "Review N · <short sha> · <time>" with the pull request's other versions
   (an earlier one is read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run>
   [--undo]`), Remove, and a banner when the pull request has commits after the reviewed one.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
