@@ -1782,3 +1782,82 @@ body {
 .sidebar-resizing iframe {
   pointer-events: none;
 }
+
+/* New chat: where the agent works, as a list of places. */
+.new-chat {
+  inline-size: min(32rem, 100%);
+}
+
+.new-chat-places {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.new-chat-place {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--s-space-8);
+  inline-size: 100%;
+  padding: var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  border-radius: var(--s-radius-button);
+  background: var(--s-surface);
+  color: var(--s-text);
+  font-size: var(--s-size-sm);
+  text-align: start;
+  cursor: pointer;
+}
+
+.new-chat-place:hover:not(:disabled),
+.new-chat-place:focus-visible {
+  border-color: var(--s-border-strong);
+  background: var(--s-surface-elevated);
+}
+
+.new-chat-place svg {
+  flex: none;
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+  color: var(--s-text-muted);
+}
+
+.new-chat-place-name {
+  font-weight: var(--s-weight-medium);
+}
+
+.new-chat-place-detail {
+  min-inline-size: 0;
+  color: var(--s-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.new-chat-place-path {
+  font-family: var(--s-font-mono);
+  font-size: var(--s-size-xs);
+}
+
+.new-chat-advanced {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: var(--s-space-4);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+  cursor: pointer;
+}
+
+.new-chat-advanced:hover {
+  color: var(--s-text);
+}
+
+.new-chat-advanced svg {
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+}

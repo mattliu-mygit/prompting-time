@@ -116,6 +116,8 @@ export function App(props: { store: AppStore }) {
     if (view?.kind === "cause") return causeKey(view.plugin, view.cause);
     return view ? null : selectedId();
   };
+  /** The folders of the root chats, in list order (most recent first), each once, at most five: New chat's first places. */
+  const recentFolders = () => [...new Set(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id]?.projectRoot ?? []))].slice(0, 5);
   const parent = () => {
     const parentId = selected()?.parentId;
     return parentId ? snapshot().conversationsById[parentId] : undefined;
@@ -429,7 +431,7 @@ export function App(props: { store: AppStore }) {
   );
 
   const newConversationButton = () => (
-    <IconButton ref={newConversationTrigger} label="New conversation" onClick={openNewConversation}>
+    <IconButton ref={newConversationTrigger} label="New chat" onClick={openNewConversation}>
       <PlusIcon />
     </IconButton>
   );
@@ -761,6 +763,7 @@ export function App(props: { store: AppStore }) {
         </Show>
         <Show when={creating()}>
           <NewConversationDialog
+            recentFolders={recentFolders()}
             pickProjectDirectory={() => store.pickProjectDirectory()}
             inspectProject={(path) => store.inspectProject(path)}
             onCancel={() => {
@@ -818,7 +821,7 @@ export function App(props: { store: AppStore }) {
             {
               heading: "Commands",
               items: [
-                { id: "command:new", label: "New conversation" },
+                { id: "command:new", label: "New chat" },
                 { id: "command:next-waiting", label: "Next item waiting on you (⌘J)", disabled: waiting().length === 0 },
                 { id: "command:parent", label: "Go to parent conversation", disabled: !parent() },
                 { id: "command:sidebar", label: sidebarOpen() ? "Hide All work" : "Show All work" },

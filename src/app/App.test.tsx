@@ -995,18 +995,18 @@ describe("creating and archiving", () => {
   async function openChooser(overrides: Partial<AppApi> = {}, inspectorOpen = false) {
     const api = createApi(overrides);
     const view = renderApp(api);
-    const trigger = await screen.findByRole("button", { name: "New conversation" });
+    const trigger = await screen.findByRole("button", { name: "New chat" });
     if (inspectorOpen) click(screen.getByRole("button", { name: "Show inspector" }));
     click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "New conversation" });
-    return { ...view, api, trigger, dialog, choose: within(dialog).getByRole("button", { name: "Choose folder" }) };
+    const dialog = screen.getByRole("dialog", { name: "New chat" });
+    return { ...view, api, trigger, dialog, choose: within(dialog).getByRole("button", { name: "Another folder…" }) };
   }
 
   it("chooses a Git folder and creates an empty Best fit conversation from an empty install", async () => {
     const { api, dialog, choose, store } = await openChooser({ listConversations: vi.fn().mockResolvedValue({ items: [], nextCursor: null }) });
     expect(choose).toHaveFocus();
     expect(within(dialog).queryByLabelText("Title")).not.toBeInTheDocument();
-    expect(dialog).toHaveTextContent(/uncommitted/i);
+    expect(dialog).toHaveAccessibleDescription("Where should the agent work?");
     click(choose);
     await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith({
       title: "synthetic-project", objective: "", constraints: [],
@@ -1018,7 +1018,27 @@ describe("creating and archiving", () => {
     expect(api.submitMessage).not.toHaveBeenCalled();
   });
 
-  it("gives focus back to Choose folder when the native picker is canceled", async () => {
+  it("lists the recent chats' folders first, and creates in one without the picker", async () => {
+    const items = [
+      createdConversation({ id: "a", title: "Alpha", projectRoot: "/projects/compiler" }),
+      createdConversation({ id: "b", title: "Beta", projectRoot: "/projects/renderer" }),
+      createdConversation({ id: "c", title: "Gamma", projectRoot: "/projects/compiler" }),
+      createdConversation({ id: "d", title: "Delta", projectRoot: null }),
+    ];
+    const { api, dialog } = await openChooser({ listConversations: vi.fn().mockResolvedValue({ items, nextCursor: null }), inspectProject: vi.fn().mockResolvedValue({ isGit: true }) });
+    expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "compiler/projects/compiler", "renderer/projects/renderer", "Another folder…", "No folder· for questions that don't need code", "Advanced", "Cancel",
+    ]);
+    expect(within(dialog).getByRole("button", { name: /^compiler/ })).toHaveFocus();
+    expect(within(dialog).queryByLabelText("In a Git folder, work in")).not.toBeInTheDocument();
+    click(within(dialog).getByRole("button", { name: /^renderer/ }));
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith({
+      title: "renderer", objective: "", constraints: [], workspace: { kind: "isolated", path: "/projects/renderer" }, routingProfile: "bestFit",
+    }));
+    expect(api.pickProjectDirectory).not.toHaveBeenCalled();
+  });
+
+  it("gives focus back to Another folder when the native picker is canceled", async () => {
     const { api, choose, dialog } = await openChooser({ pickProjectDirectory: vi.fn().mockResolvedValue(null) });
     click(choose);
     await waitFor(() => expect(choose).toBeEnabled());
@@ -1055,14 +1075,14 @@ describe("creating and archiving", () => {
   it.each(["balanced", "usageBalance"] as const)("honors Current checkout and the %s routing choice", async (routingProfile) => {
     const { api, choose, dialog } = await openChooser();
     click(within(dialog).getByRole("button", { name: "Advanced" }));
-    fireEvent.change(within(dialog).getByLabelText("Git execution"), { target: { value: "direct" } });
+    fireEvent.change(within(dialog).getByLabelText("In a Git folder, work in"), { target: { value: "direct" } });
     fireEvent.change(within(dialog).getByLabelText("Routing profile"), { target: { value: routingProfile } });
     flush();
     click(choose);
     await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith(expect.objectContaining({ routingProfile, workspace: { kind: "direct", path: "/tmp/synthetic-project" } })));
   });
 
-  it.each([["/tmp/synthetic-project///", "synthetic-project"], ["/", "New conversation"]])("titles %s as %s", async (path, title) => {
+  it.each([["/tmp/synthetic-project///", "synthetic-project"], ["/", "New chat"]])("titles %s as %s", async (path, title) => {
     const { api, choose } = await openChooser({ pickProjectDirectory: vi.fn().mockResolvedValue(path) });
     click(choose);
     await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith(expect.objectContaining({ title })));
@@ -1071,9 +1091,9 @@ describe("creating and archiving", () => {
   it("creates without a folder and sends only the ordinary first message", async () => {
     const submitMessage = vi.fn().mockResolvedValue({});
     const { api, dialog } = await openChooser({ submitMessage });
-    click(within(dialog).getByRole("button", { name: "Without a folder" }));
+    click(within(dialog).getByRole("button", { name: /^No folder/ }));
     await waitFor(() => expect(dialog).not.toBeInTheDocument());
-    expect(api.createConversation).toHaveBeenCalledWith({ title: "New conversation", objective: "", constraints: [], workspace: { kind: "projectless" }, routingProfile: "bestFit" });
+    expect(api.createConversation).toHaveBeenCalledWith({ title: "New chat", objective: "", constraints: [], workspace: { kind: "projectless" }, routingProfile: "bestFit" });
     expect(api.pickProjectDirectory).not.toHaveBeenCalled();
     expect(api.inspectProject).not.toHaveBeenCalled();
     fireEvent.input(await screen.findByRole("textbox", { name: "Message" }), { target: { value: "Explain the synthetic project" } });
@@ -1108,7 +1128,7 @@ describe("creating and archiving", () => {
       pickProjectDirectory: vi.fn().mockReturnValue(picker.promise),
       createConversation: vi.fn().mockReturnValue(creation.promise),
     });
-    const projectless = within(dialog).getByRole("button", { name: "Without a folder" });
+    const projectless = within(dialog).getByRole("button", { name: /^No folder/ });
     for (const button of intent === "folder" ? [choose, choose, projectless] : [projectless, projectless, choose]) {
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     }
@@ -1157,7 +1177,7 @@ describe("creating and archiving", () => {
     const advanced = within(dialog).getByRole("button", { name: "Advanced" });
     const cancel = within(dialog).getByRole("button", { name: "Cancel" });
     expect(advanced).toHaveAttribute("aria-expanded", "false");
-    expect(within(dialog).queryByLabelText("Git execution")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("In a Git folder, work in")).not.toBeInTheDocument();
     choose.focus();
     fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
     expect(cancel).toHaveFocus();
@@ -1165,7 +1185,7 @@ describe("creating and archiving", () => {
     expect(choose).toHaveFocus();
     click(advanced);
     expect(advanced).toHaveAttribute("aria-expanded", "true");
-    expect(within(dialog).getByLabelText("Git execution")).toBeVisible();
+    expect(within(dialog).getByLabelText("In a Git folder, work in")).toBeVisible();
     click(cancel);
     await waitFor(() => expect(trigger).toHaveFocus());
   });
@@ -1174,7 +1194,7 @@ describe("creating and archiving", () => {
     mediaQueries(narrowQuery);
     const { dialog } = await openChooser({}, true);
     expect(document.querySelector(".command-center")).toHaveAttribute("inert");
-    click(within(dialog).getByRole("button", { name: "Without a folder" }));
+    click(within(dialog).getByRole("button", { name: /^No folder/ }));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
     expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
     expect(document.querySelector(".command-center")).not.toHaveAttribute("inert");
@@ -1183,7 +1203,7 @@ describe("creating and archiving", () => {
   it("keeps an existing conversation's Balanced routing after creating a Best fit one", async () => {
     const saved = createdConversation({ id: "saved", title: "Saved Balanced", routingProfile: "balanced" });
     const { store, dialog } = await openChooser({ listConversations: vi.fn().mockResolvedValue({ items: [saved], nextCursor: null }) });
-    click(within(dialog).getByRole("button", { name: "Without a folder" }));
+    click(within(dialog).getByRole("button", { name: /^No folder/ }));
     await waitFor(() => expect(dialog).not.toBeInTheDocument());
     expect(store.getSnapshot().conversationsById.saved!.routingProfile).toBe("balanced");
     await store.selectConversation("saved");
@@ -1249,19 +1269,19 @@ describe("creating and archiving", () => {
     expect(await screen.findByRole("separator", { name: "Resize All work" })).toHaveAttribute("aria-valuenow", "366");
   });
 
-  it("keeps Search in the header and moves New conversation there when All work is hidden", async () => {
+  it("keeps Search in the header and moves New chat there when All work is hidden", async () => {
     renderApp(createApi());
     await screen.findByRole("heading", { level: 1, name: "Auth refactor" });
-    expect(screen.getAllByRole("button", { name: "New conversation" })).toHaveLength(1);
-    expect(screen.getByRole("complementary", { name: "All work" })).toContainElement(screen.getByRole("button", { name: "New conversation" }));
+    expect(screen.getAllByRole("button", { name: "New chat" })).toHaveLength(1);
+    expect(screen.getByRole("complementary", { name: "All work" })).toContainElement(screen.getByRole("button", { name: "New chat" }));
     expect(screen.getByRole("banner")).toContainElement(screen.getByRole("button", { name: "Search (⌘K)" }));
     click(screen.getByRole("button", { name: "Hide All work" }));
     expect(screen.getAllByRole("button", { name: "Search (⌘K)" })).toHaveLength(1);
-    const create = screen.getByRole("button", { name: "New conversation" });
+    const create = screen.getByRole("button", { name: "New chat" });
     expect(screen.getByRole("banner")).toContainElement(create);
     click(create);
-    click(within(screen.getByRole("dialog", { name: "New conversation" })).getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "New conversation" })).toHaveFocus());
+    click(within(screen.getByRole("dialog", { name: "New chat" })).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "New chat" })).toHaveFocus());
   });
 });
 
@@ -1271,7 +1291,7 @@ describe("palette and the composer", () => {
     createdConversation({ id: "b", title: "Beta", projectRoot: "/projects/renderer" }),
   ]) {
     const view = renderApp(createApi({ listConversations: vi.fn().mockResolvedValue({ items, nextCursor: null }) }));
-    await screen.findByRole("button", { name: "New conversation" });
+    await screen.findByRole("button", { name: "New chat" });
     return view;
   }
   async function openPalette() {
@@ -1323,16 +1343,16 @@ describe("palette and the composer", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("**preserved**");
   });
 
-  it("opens the chooser from New conversation and focuses the new message after creating", async () => {
+  it("opens the chooser from New chat and focuses the new message after creating", async () => {
     await openWorkspace();
-    choose(await openPalette(), "New conversation");
-    const dialog = await screen.findByRole("dialog", { name: "New conversation" });
-    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Choose folder" })).toHaveFocus());
+    choose(await openPalette(), "New chat");
+    const dialog = await screen.findByRole("dialog", { name: "New chat" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /^compiler/ })).toHaveFocus());
     expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
     press("k");
     await settle();
     expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
-    click(within(dialog).getByRole("button", { name: "Without a folder" }));
+    click(within(dialog).getByRole("button", { name: /^No folder/ }));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
   });
 
