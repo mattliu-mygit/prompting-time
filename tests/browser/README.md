@@ -70,6 +70,29 @@ focus staying on it.
 
 ## Background agents
 
+## Review walkthrough
+
+Use `?agents=reviews&work=1` at 1440 × 900 and 960 × 600. Review 2 of widgets#101, "add a
+retry policy for uploads", has an overview: three places to look, three layers, five calls
+before and after, two commits after the reviewed one, and a file that usually changes with
+mod.rs. widgets#103 has an overview too; every other review opens on Whooper's page. The check
+opens widgets#101 itself:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-review-walkthrough.ts")).checkReviewWalkthrough()'
+```
+
+It throws unless the header stays one 48–56px row holding the review's ⋯ menu, All work folds
+to a rail 48px wide or less labeled "All work · N need you" on its side, the walkthrough's
+navigator is open, its column is centered beside the navigator within 2px, the verdict banner
+comes first, and every control of the review is a 30px target. Then check by hand: ⌘\ or a
+click on the rail opens the list beside it and Escape closes it; j and k step through the
+places, dim the rest, and open each place's reason under its numbered lines; a click on a
+numbered line number opens or closes the reason; the since notice opens its commits, and ×
+hides it until the pull request moves; Views turns Calls before and after off and on; Diff
+shows Whooper's page under the same banner; and Decide… opens the decision bar, as reaching
+the end of the walkthrough does. Nothing opens on hover.
+
 Use `?agents=1` for an invented Whooper pinned at the top of the sidebar, running with its
 next poll at 3:45 PM; combine it with `?work=1` for a full All work list. Select Whooper to
 open its screen, and its Settings tab to change a value and Save, or set "Stop a poll after"
