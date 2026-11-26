@@ -70,6 +70,8 @@ describe("a failed review", () => {
     const open = vi.fn();
     renderFailed(FAILED, () => undefined, { outcome: "waiting", cause: { id: "docker", summary: "Docker isn't running", scope: "all" } }, { count: 3, open });
     expect(screen.getByRole("heading", { name: "Waiting · Docker isn't running" })).toBeInTheDocument();
+    // Blocked, like failed, opens on the red banner.
+    expect(screen.getByRole("heading", { name: "Waiting · Docker isn't running" }).closest("section")).toHaveAttribute("data-tone", "error");
     expect(screen.getByText(/so this review waits for the next round/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     click("See all 3 reviews waiting");
