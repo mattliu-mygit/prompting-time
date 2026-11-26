@@ -643,6 +643,24 @@ describe("menu bar", () => {
   });
 });
 
+describe("review header", () => {
+  it("says why a review that says approve once CI passes is not safe to approve", async () => {
+    const unsafe = { ...fixtureReviews()[0]!, safe_to_approve: false };
+    const findings = { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Invented reason." }, findings: [
+      { id: "1", path: "src/a.rs", line: 3, side: "RIGHT", title: "A nit", draft: "**nit:** invented", kind: "nit" },
+      { id: "2", path: "src/a.rs", line: 9, side: "RIGHT", title: "A question", draft: "**question:** invented", kind: "question" },
+    ] };
+    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => (sent.action === "status"
+      ? actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews: [unsafe] })) })
+      : actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!, { findings })) })));
+    renderApp(createApi({ listPlugins: vi.fn(async () => [fixturePlugin({ actions: pageActions })]), pluginRequest }));
+    click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
+    const meta = () => document.querySelector(".shell-meta");
+    await waitFor(() => expect(meta()).toHaveTextContent("Whooper review · acme/widgets#101 · approve once CI passes · has a question"));
+    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [unsafe.run_id], confirmedFingerprint: null });
+  });
+});
+
 describe("triage", () => {
   const docker = { id: "docker", summary: "Docker isn't running", scope: "all" };
   const notice = () => document.querySelector<HTMLElement>(".app-notice");

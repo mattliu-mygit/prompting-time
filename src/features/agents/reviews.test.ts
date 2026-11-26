@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fixtureReviews } from "../../test/plugins";
-import { blockingCauses, needsYou, readReviews, reviewCategory, reviewMatches, reviewRowMeta, searchTokens, type ReviewEntry } from "./reviews";
+import { blockingCauses, needsYou, readFindingKinds, readReviews, reviewCategory, reviewMatches, reviewRowMeta, reviewState, searchTokens, unsafeReasons, type ReviewEntry } from "./reviews";
 
 const docker = { id: "docker", summary: "Docker isn't running", scope: "all" as const };
 const agentExit = { id: "agent_no_findings", summary: "The agent exited without findings", scope: "pr" as const };
@@ -32,6 +32,30 @@ describe("reviews", () => {
     // The judgement sorts only what waits on a decision.
     expect(reviewCategory(review({ safe_to_approve: true, submitted: { event: "APPROVE", at: "2026-11-26T15:30:00Z" }, needs_you: false }))).toBe("done");
     expect(reviewCategory(review({ safe_to_approve: true, outcome: "running", needs_you: false }))).toBe("reviewing");
+  });
+
+  it("says why a review that says approve once CI passes is not safe to approve, from the kinds of its findings", () => {
+    const unsafe = review({ safe_to_approve: false, findings: 2 });
+    expect(unsafeReasons(unsafe, ["nit", "question"])).toBe("has a question");
+    expect(unsafeReasons(unsafe, ["question", "nit", "caller_visible_bug", "question"])).toBe("has a bug and 2 questions");
+    expect(unsafeReasons(unsafe, ["other", "ci_failure", "made_up", "question"])).toBe("has a CI failure, a question, a suggestion, and another finding");
+    // Before show-review answers, the status says only that the findings are more than nits.
+    expect(unsafeReasons(unsafe, null)).toBe("has findings that aren't nits");
+    expect(unsafeReasons(review({ safe_to_approve: false, skipped: true, findings: 0 }), null)).toBe("didn't read the whole change");
+    expect(unsafeReasons(review({ safe_to_approve: false, findings: 0 }), [])).toBe("not safe to approve");
+    expect(reviewState(unsafe, now)).toEqual({ words: "approve once CI passes · has findings that aren't nits", status: "attention" });
+    // A review the plugin judges safe, or a status without the judgement, keeps the verdict alone.
+    expect(reviewState(review({ safe_to_approve: true }), now).words).toBe("approve once CI passes");
+    expect(reviewState(review({ safe_to_approve: null }), now).words).toBe("approve once CI passes");
+    expect(reviewState(review({ safe_to_approve: false, verdict: "look_first" }), now).words).toBe("look first");
+  });
+
+  it("reads the kinds of a run's findings from what show-review printed", () => {
+    const shown = (findings: unknown, runId = "run-1") => JSON.stringify({ version: 1, run_id: runId, findings });
+    expect(readFindingKinds(shown({ status: "reviewed", findings: [{ id: "1", kind: "nit" }, { id: "2", kind: "question" }, { id: "3" }] }), "run-1")).toEqual(["nit", "question"]);
+    expect(readFindingKinds(shown(null), "run-1")).toBeNull();
+    expect(() => readFindingKinds(shown({ findings: [] }, "run-2"), "run-1")).toThrow("show-review did not print review run-1 in format version 1.");
+    expect(() => readFindingKinds("not json", "run-1")).toThrow();
   });
 
   it("places each review in the list where it waits", () => {

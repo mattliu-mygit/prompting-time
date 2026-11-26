@@ -10,7 +10,7 @@ import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { menuBarRequest, readMenuBarEnabled, saveMenuBarEnabled } from "../features/agents/menuBar";
 import { PluginInspector } from "../features/agents/PluginSettings";
 import { blockingCauses, causeKey, needsYou, newestRuns, pluginReviews, reviewKey, reviewState, reviewTitle, shortPullRequest, versionsOf, waitingText, type PluginReview, type ReviewEntry } from "../features/agents/reviews";
-import { ReviewScreen } from "../features/agents/ReviewScreen";
+import { ReviewScreen, ReviewStateWords } from "../features/agents/ReviewScreen";
 import { describeAgent, readAgentStatus, readBlocked } from "../features/agents/status";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { Inspector } from "../features/inspector/Inspector";
@@ -518,7 +518,7 @@ export function App(props: { store: AppStore }) {
                 {(review) => (
                   <div class="shell-title">
                     <h1 title={reviewTitle(review())}>{reviewTitle(review())}</h1>
-                    <span class="shell-meta">{plugin().title} review · {review().repo}#{review().pr} · {reviewState(review()).words}</span>
+                    <span class="shell-meta">{plugin().title} review · {review().repo}#{review().pr} · <ReviewStateWords plugin={plugin()} review={review()} actions={store.pluginActions} /></span>
                   </div>
                 )}
               </Show>

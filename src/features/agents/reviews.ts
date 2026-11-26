@@ -207,6 +207,26 @@ export type FailedReviewRecord = {
  * fit is left out.
  */
 export function readFailedReview(stdout: string, runId: string): FailedReviewRecord {
+  const shown = readShown(stdout, runId);
+  const asks: unknown[] = Array.isArray(shown.asks) ? shown.asks : [];
+  return {
+    failure: typeof shown.failure === "string" && shown.failure.trim() ? shown.failure.trim() : null,
+    answers: asks.flatMap((ask) => (isRecord(ask) && typeof ask.question === "string" && typeof ask.answer === "string" ? [{ question: ask.question, answer: ask.answer }] : [])),
+  };
+}
+
+/**
+ * The kinds of the run's findings in what the show-review action printed for run `runId`, such as
+ * ["nit", "question"], or null when it printed no findings.
+ */
+export function readFindingKinds(stdout: string, runId: string): string[] | null {
+  const findings = readShown(stdout, runId).findings;
+  if (!isRecord(findings) || !Array.isArray(findings.findings)) return null;
+  return findings.findings.flatMap((finding: unknown) => (isRecord(finding) && typeof finding.kind === "string" ? [finding.kind] : []));
+}
+
+/** What the show-review action printed for run `runId`, in format version 1, as Whooper's whooper-show prints it. */
+function readShown(stdout: string, runId: string): Record<string, unknown> {
   let shown: unknown = null;
   try {
     shown = JSON.parse(stdout);
@@ -214,11 +234,7 @@ export function readFailedReview(stdout: string, runId: string): FailedReviewRec
     // Answered below.
   }
   if (!isRecord(shown) || shown.version !== 1 || shown.run_id !== runId) throw new Error(`show-review did not print review ${runId} in format version 1.`);
-  const asks: unknown[] = Array.isArray(shown.asks) ? shown.asks : [];
-  return {
-    failure: typeof shown.failure === "string" && shown.failure.trim() ? shown.failure.trim() : null,
-    answers: asks.flatMap((ask) => (isRecord(ask) && typeof ask.question === "string" && typeof ask.answer === "string" ? [{ question: ask.question, answer: ask.answer }] : [])),
-  };
+  return shown;
 }
 
 /** The key of one plugin's review among every plugin's, such as "review:whooper:<run id>". */
@@ -291,10 +307,60 @@ export function verdictWords(verdict: string | null): string {
   return verdict ? verdict.replaceAll("_", " ") : "waiting for you";
 }
 
+/** Whether the review waits on the user's decision and says approve once CI passes, but the plugin judges it not safe to approve. */
+export function notSafeToApprove(review: ReviewEntry): boolean {
+  return readyToDecide(review) && review.verdict === "approve_once_ci_passes" && review.safe_to_approve === false;
+}
+
+/** Whooper's kinds of finding other than a nit, in the order the reasons name them, with the words for one and for several. */
+const CONCERNS: ReadonlyArray<readonly [kind: string, one: string, several: string]> = [
+  ["caller_visible_bug", "a bug", "bugs"],
+  ["ci_failure", "a CI failure", "CI failures"],
+  ["question", "a question", "questions"],
+  ["other", "a suggestion", "suggestions"],
+];
+
+/** "a", "a and b", or "a, b, and c". */
+function listWords(words: readonly string[]): string {
+  return words.length < 3 ? words.join(" and ") : `${words.slice(0, -1).join(", ")}, and ${words.at(-1)}`;
+}
+
+/**
+ * Why the plugin judges a review that says approve once CI passes not safe to approve, as Whooper
+ * judges it: the review skipped the change, so it didn't read the whole change, or it found more
+ * than nits. `kinds` are the kinds of the run's findings, which show-review prints; without them,
+ * the words say only that it found more than nits. For example, a run with a nit and a question
+ * "has a question", and one with two questions and a bug "has a bug and 2 questions".
+ */
+export function unsafeReasons(review: ReviewEntry, kinds: readonly string[] | null): string {
+  const reasons = review.skipped ? ["didn't read the whole change"] : [];
+  if (kinds === null) {
+    if (review.findings > 0) reasons.push("has findings that aren't nits");
+  } else {
+    const concerns = kinds.filter((kind) => kind !== "nit");
+    const others = concerns.filter((kind) => !CONCERNS.some(([known]) => known === kind)).length;
+    const words = [
+      ...CONCERNS.flatMap(([kind, one, several]) => {
+        const count = concerns.filter((item) => item === kind).length;
+        return count === 0 ? [] : [count === 1 ? one : `${count} ${several}`];
+      }),
+      ...(others === 0 ? [] : [others === 1 ? "another finding" : `${others} other findings`]),
+    ];
+    if (words.length > 0) reasons.push(`has ${listWords(words)}`);
+  }
+  return reasons.length > 0 ? reasons.join(", ") : "not safe to approve";
+}
+
+/** "approve once CI passes · has a question": the verdict, and why the plugin judges the review not safe to approve. */
+export function unsafeVerdict(review: ReviewEntry, kinds: readonly string[] | null = null): string {
+  return `${verdictWords(review.verdict)} · ${unsafeReasons(review, kinds)}`;
+}
+
 /**
  * What the review's row says about where it stands, and its dot: "Reviewing…", the verdict while it
- * waits on a decision, "Approved · 2:25 PM", "Waiting · Docker isn't running", or "Review failed"
- * in red.
+ * waits on a decision, with why the plugin judges it not safe to approve when the verdict says
+ * approve ("approve once CI passes · has findings that aren't nits"), "Approved · 2:25 PM",
+ * "Waiting · Docker isn't running", or "Review failed" in red.
  */
 export function reviewState(review: ReviewEntry, now = new Date()): { words: string; status: Status } {
   if (review.removed_by_user) return { words: "Removed", status: "idle" };
@@ -303,6 +369,7 @@ export function reviewState(review: ReviewEntry, now = new Date()): { words: str
   if (review.outcome === "running") return { words: "Reviewing…", status: "running" };
   if (review.outcome === "waiting") return { words: `Waiting · ${review.cause?.summary ?? "blocked"}`, status: "idle" };
   if (review.outcome === "failed") return { words: "Review failed", status: "error" };
+  if (notSafeToApprove(review)) return { words: unsafeVerdict(review), status: "attention" };
   if (review.needs_you) return { words: review.skipped ? "skipped, look first" : verdictWords(review.verdict), status: "attention" };
   return { words: "Not submitted", status: "idle" };
 }

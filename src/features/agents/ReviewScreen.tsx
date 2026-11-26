@@ -1,4 +1,4 @@
-import { createMemo, createSignal, Match, onSettled, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch } from "solid-js";
 import { Button, Menu, StatusDot } from "@prompting-time/ui";
 import type { AgentControls, PluginActions, PluginFilesChange, PluginStatusRead } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
@@ -6,7 +6,7 @@ import { PluginFrame } from "../plugins/PluginFrame";
 import { ACTIONS, hasAction, messageOf, runPluginAction } from "./actions";
 import { FailedReview } from "./FailedReview";
 import { RunNow } from "./RunNow";
-import { blockingCauses, readReviews, shortDate, shortPullRequest, shortSha, versionsOf, type ReviewEntry } from "./reviews";
+import { blockingCauses, notSafeToApprove, readFindingKinds, readReviews, reviewState, shortDate, shortPullRequest, shortSha, unsafeVerdict, versionsOf, type ReviewEntry } from "./reviews";
 import { readAgentStatus, readBlocked } from "./status";
 
 type Props = {
@@ -27,6 +27,33 @@ type Props = {
 
 /** What a review's header asks of the app for its run: skip it, take it out of the lists, or put it back. */
 export type ReviewTriage = { skip(runId: string): Promise<void>; remove(runId: string): Promise<void>; restore(runId: string): Promise<void> };
+
+/**
+ * The open review's state words in the window's header, such as "approve once CI passes". For a
+ * review that says approve once CI passes but that the plugin judges not safe to approve, they say
+ * why, from the kinds of its findings, which show-review prints: "approve once CI passes · has a
+ * question". Until show-review answers, or when it fails, they say what the status says.
+ */
+export function ReviewStateWords(props: { plugin: PluginSnapshot; review: ReviewEntry; actions: PluginActions }) {
+  const [shown, setShown] = createSignal<{ runId: string; kinds: string[] | null } | null>(null);
+  createEffect(() => (notSafeToApprove(props.review) ? props.review.run_id : null), (runId) => {
+    if (runId === null) return;
+    let current = true;
+    runPluginAction(props.actions, props.plugin, ACTIONS.showReview, [runId])
+      .then((stdout) => readFindingKinds(stdout, runId))
+      .then((kinds) => {
+        if (current) setShown({ runId, kinds });
+      }, () => {});
+    return () => {
+      current = false;
+    };
+  });
+  const words = () => {
+    const known = shown();
+    return known?.runId === props.review.run_id && notSafeToApprove(props.review) ? unsafeVerdict(props.review, known.kinds) : reviewState(props.review).words;
+  };
+  return <>{words()}</>;
+}
 
 /** "Review 2 · dc0c0bf · 3:12 PM": the version, the commit it reviewed, and when it ended or started. */
 export function versionLabel(review: ReviewEntry, number: number): string {
