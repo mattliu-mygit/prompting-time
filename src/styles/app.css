@@ -1088,6 +1088,57 @@ body {
   color: var(--s-warning);
 }
 
+/* A failed review, which Prompting Time shows itself: why it failed, Retry and Ask why, and the answers. */
+.failed-review {
+  gap: var(--s-space-12);
+  padding: var(--s-space-12) var(--s-space-16);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  background: var(--s-surface);
+}
+
+.failed-review h3 {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  margin: 0;
+  font-size: var(--s-size-base);
+  font-weight: var(--s-weight-semibold);
+}
+
+.failed-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.failed-review-ask {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.review-answers {
+  display: grid;
+  gap: var(--s-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-answers > li {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.review-answers > li + li {
+  padding-block-start: var(--s-space-16);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.review-answer-question {
+  color: var(--s-text-muted);
+}
+
 .install-path code {
   font-family: var(--s-font-mono);
   overflow-wrap: anywhere;

@@ -13,7 +13,8 @@ type Props = {
 /**
  * A plugin's past reviews, newest first, from the reviews its status lists: each with its pull
  * request, how it ended or what the user submitted, and when. A row opens the review in the
- * plugin's page, with its diff, findings, and what was submitted.
+ * plugin's page, with its diff, findings, and what was submitted; a failed review opens on
+ * Prompting Time's own screen for it.
  */
 export function ReviewHistory(props: Props) {
   const reviews = () => pastReviews(readReviews(props.status?.value));
@@ -23,7 +24,7 @@ export function ReviewHistory(props: Props) {
         <header class="plugin-heading">
           <p class="eyebrow">{props.plugin.title}</p>
           <h2 id="review-history-title">Past reviews</h2>
-          <p>The last 30 days, newest first. Open a review to see its diff, its findings, and what you submitted.</p>
+          <p>The last 30 days, newest first. Open a review to see its diff, its findings, and what you submitted, or why it failed.</p>
         </header>
         <Show when={props.status?.error}>{(error) => <p role="alert" class="inline-error">{error()}</p>}</Show>
         <Show when={!props.status}>

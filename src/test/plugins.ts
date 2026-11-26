@@ -111,12 +111,17 @@ export function actionResult(overrides: Partial<PluginActionResult> = {}): Plugi
   return { exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides };
 }
 
-/** The actions Whooper's page runs, besides status: show-review, draft, ask, and submit, which asks first. */
+/**
+ * The actions Whooper's page and Prompting Time's screen for a failed review run: status, show-review,
+ * draft, ask, retry, round, and submit, which asks first.
+ */
 export const pageActions = [
   { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
   { name: "show-review", title: "Show a review", description: "Prints one review as JSON.", confirm: false },
   { name: "draft", title: "Change a draft", description: "Changes a review's drafts.", confirm: false },
-  { name: "ask", title: "Ask about this", description: "Answers a question about a review.", confirm: false },
+  { name: "ask", title: "Ask about this", description: "Answers a question about a review from its record, and writes nothing else.", confirm: false },
+  { name: "retry", title: "Retry a review", description: "Queues the pull request of a failed review for the next round.", confirm: false },
+  { name: "round", title: "Poll now", description: "Runs a round now. Posts nothing.", confirm: false },
   { name: "submit", title: "Submit review", description: "Posts the chosen comments to GitHub as one review.", confirm: true },
 ];
 
@@ -131,25 +136,40 @@ export function fixtureReviews() {
     { run_id: "20261125T100000Z-77", repo: "acme/gadgets", pr: 77, title: "add the tags package", url: null,
       started_at: "2026-11-25T10:00:00Z", ended_at: "2026-11-25T10:30:00Z", outcome: "reviewed", verdict: "look_first",
       skipped: false, findings: 1, submitted: { event: "COMMENT", at: "2026-11-25T11:00:00Z" }, needs_you: false },
+    // An earlier run of #101 failed without recording why; the newer run means it no longer needs you.
+    { run_id: "20261125T080000Z-101", repo: "acme/widgets", pr: 101, title: "separate cache configuration", url: "https://example.invalid/acme/widgets/pull/101",
+      started_at: "2026-11-25T08:00:00Z", ended_at: "2026-11-25T08:02:00Z", outcome: "failed", verdict: null,
+      skipped: false, findings: 0, submitted: null, needs_you: false },
     { run_id: "20261124T090000Z-55", repo: "acme/gadgets", pr: 55, title: "move the projection", url: null,
       started_at: "2026-11-24T09:00:00Z", ended_at: "2026-11-24T09:01:00Z", outcome: "failed", verdict: null,
       skipped: false, findings: 0, submitted: null, needs_you: true },
   ];
 }
 
-/** What the show-review action prints for one invented run, with the title the status lists for it. */
+/** Why each invented failed run failed, as its failure.txt says, or null for a run that recorded no reason. */
+const fixtureFailures: Record<string, string | null> = {
+  "20261124T090000Z-55": "the review run exited 1 without findings; see runs/20261124T090000Z-55/stderr.log",
+  "20261125T080000Z-101": null,
+};
+
+/**
+ * What the show-review action prints for one invented run, with the title the status lists for it.
+ * A failed run has no findings, drafts, or diff, and says why it failed if it recorded a reason.
+ */
 export function fixtureShown(runId: string, overrides: Record<string, unknown> = {}) {
+  const review = fixtureReviews().find((entry) => entry.run_id === runId);
+  const failed = review?.outcome === "failed";
   return {
     version: 1,
     run_id: runId,
-    run: { repo: "acme/widgets", pr: 101 },
-    title: fixtureReviews().find((review) => review.run_id === runId)?.title ?? null,
+    run: review ? { repo: review.repo, pr: review.pr } : null,
+    title: review?.title ?? null,
     author: "fixture-author",
-    outcome: "reviewed",
-    findings: { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Invented reason." }, findings: [{ id: "1", path: "src/a.rs", line: 3, side: "RIGHT", title: "A nit", draft: "**nit:** invented", kind: "nit" }] },
-    drafts: { event: "APPROVE", message: "", findings: { "1": { included: true } } },
-    diff: "diff --git a/src/a.rs b/src/a.rs\n",
-    failure: null,
+    outcome: failed ? "failed" : "reviewed",
+    findings: failed ? null : { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Invented reason." }, findings: [{ id: "1", path: "src/a.rs", line: 3, side: "RIGHT", title: "A nit", draft: "**nit:** invented", kind: "nit" }] },
+    drafts: failed ? null : { event: "APPROVE", message: "", findings: { "1": { included: true } } },
+    diff: failed ? null : "diff --git a/src/a.rs b/src/a.rs\n",
+    failure: fixtureFailures[runId] ?? null,
     asks: [],
     submitted: null,
     ...overrides,

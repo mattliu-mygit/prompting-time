@@ -64,6 +64,36 @@ export function pastReviews(reviews: readonly ReviewEntry[]): ReviewEntry[] {
   return reviews.filter((review) => review.outcome !== "running");
 }
 
+/** An earlier question about a review and the plugin's answer, from the `asks` that show-review prints. */
+export type ReviewAnswer = { question: string; answer: string };
+
+/** What the screen for a failed review shows of it: why it failed, and the answers to questions so far. */
+export type FailedReviewRecord = {
+  /** failure.txt, the reason the plugin gave when it stopped the review; null when it recorded none. */
+  failure: string | null;
+  answers: ReviewAnswer[];
+};
+
+/**
+ * A failed review's record in what the show-review action printed for run `runId`, format version
+ * 1, as Whooper's whooper-show prints it: `failure` and `asks`, oldest first. An ask that does not
+ * fit is left out.
+ */
+export function readFailedReview(stdout: string, runId: string): FailedReviewRecord {
+  let shown: unknown = null;
+  try {
+    shown = JSON.parse(stdout);
+  } catch {
+    // Answered below.
+  }
+  if (!isRecord(shown) || shown.version !== 1 || shown.run_id !== runId) throw new Error(`show-review did not print review ${runId} in format version 1.`);
+  const asks: unknown[] = Array.isArray(shown.asks) ? shown.asks : [];
+  return {
+    failure: typeof shown.failure === "string" && shown.failure.trim() ? shown.failure.trim() : null,
+    answers: asks.flatMap((ask) => (isRecord(ask) && typeof ask.question === "string" && typeof ask.answer === "string" ? [{ question: ask.question, answer: ask.answer }] : [])),
+  };
+}
+
 /** The key of one plugin's review among every plugin's, such as "review:whooper:<run id>". */
 export function reviewKey(plugin: string, runId: string): string {
   return `review:${plugin}:${runId}`;

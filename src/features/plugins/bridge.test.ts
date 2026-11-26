@@ -8,6 +8,8 @@ import { readReviews } from "../agents/reviews";
 const OPEN = "20261126T150000Z-101";
 const SUBMITTED = "20261125T100000Z-77";
 const FAILED = "20261124T090000Z-55";
+/** An earlier run of #101 that failed without recording why. */
+const UNRECORDED = "20261125T080000Z-101";
 
 function setup(options: { actions?: typeof pageActions; status?: PluginStatusRead; confirm?: (action: string, args: readonly string[]) => Promise<PluginActionResult | null> } = {}) {
   const posted: Record<string, unknown>[] = [];
@@ -17,9 +19,7 @@ function setup(options: { actions?: typeof pageActions; status?: PluginStatusRea
     const [runId] = request.args;
     switch (request.action) {
       case "show-review":
-        return runId === FAILED
-          ? actionResult({ stdout: JSON.stringify(fixtureShown(runId, { outcome: "failed", findings: null, drafts: null, failure: "the agent stopped" })) })
-          : actionResult({ stdout: JSON.stringify(fixtureShown(runId!)) });
+        return actionResult({ stdout: JSON.stringify(fixtureShown(runId!)) });
       case "draft":
         if (request.args[1] === "text" && request.args[3] === "") return actionResult({ exitCode: 1, stderr: "whooper-draft: the text is empty" });
         return actionResult({ stdout: JSON.stringify({ event: request.args[1] === "comment" ? "COMMENT" : "APPROVE", message: "", findings: {} }) });
@@ -93,6 +93,7 @@ describe("the page bridge", () => {
       { run_id: OPEN, pr: "acme/widgets#101", title: "separate cache configuration", state: "decide", verdict: "approve_once_ci_passes", findings: 2 },
       { run_id: "20261126T140000Z-102", pr: "acme/widgets#102", title: null, state: "reviewing", verdict: null, findings: 0 },
       { run_id: SUBMITTED, pr: "acme/gadgets#77", title: "add the tags package", state: "submitted", verdict: "look_first", findings: 1 },
+      { run_id: UNRECORDED, pr: "acme/widgets#101", title: "separate cache configuration", state: "failed", verdict: null, findings: 0 },
       { run_id: FAILED, pr: "acme/gadgets#55", title: "move the projection", state: "failed", verdict: null, findings: 0 },
     ]);
     expect(page.pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [SUBMITTED], confirmedFingerprint: null });
@@ -143,9 +144,12 @@ describe("the page bridge", () => {
     const page = setup();
     page.bridge.open(FAILED);
     await page.send({ type: "ready", id: 1 });
-    expect(page.notices.at(-1)).toBe("Whooper's review failed: the agent stopped");
+    const reason = "Whooper's review failed: the review run exited 1 without findings; see runs/20261124T090000Z-55/stderr.log";
+    expect(page.notices.at(-1)).toBe(reason);
     await page.send({ type: "open-review", id: 2, run_id: FAILED });
-    expect(page.posted.at(-1)).toEqual({ version: 1, type: "error", reply_to: 2, message: "Whooper's review failed: the agent stopped" });
+    expect(page.posted.at(-1)).toEqual({ version: 1, type: "error", reply_to: 2, message: reason });
+    await page.send({ type: "open-review", id: 3, run_id: UNRECORDED });
+    expect(page.posted.at(-1)).toEqual({ version: 1, type: "error", reply_to: 3, message: "Whooper's review has no findings to show." });
   });
 
   it("maps each draft change to the draft action's arguments and answers with the drafts it prints", async () => {
@@ -260,6 +264,6 @@ describe("the page bridge", () => {
   it("puts only waiting, running, failed, and submitted reviews in the page's queue", () => {
     const reviews = readReviews({ reviews: [...fixtureReviews(), { ...fixtureReviews()[0], run_id: "old", needs_you: false }, { run_id: "broken" }] });
     expect(reviews.map(({ run_id }) => run_id)).not.toContain("broken");
-    expect(queueOf(reviews).map(({ run_id }) => run_id)).toEqual([OPEN, "20261126T140000Z-102", SUBMITTED, FAILED]);
+    expect(queueOf(reviews).map(({ run_id }) => run_id)).toEqual([OPEN, "20261126T140000Z-102", SUBMITTED, UNRECORDED, FAILED]);
   });
 });

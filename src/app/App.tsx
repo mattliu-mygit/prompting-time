@@ -2,10 +2,11 @@ import { createMemo, createSignal, Match, onSettled, Show, Switch, untrack } fro
 import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
 import type { PluginSource, ProviderId } from "../bridge/types";
 import { BackgroundAgents, type InstallKind } from "../features/agents/BackgroundAgents";
+import { FailedReview } from "../features/agents/FailedReview";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { PluginInspector, PluginSettings } from "../features/agents/PluginSettings";
 import { ReviewHistory } from "../features/agents/ReviewHistory";
-import { pastReviews, pluginReviews, reviewKey, reviewsNeedingYou, reviewState, reviewTitle } from "../features/agents/reviews";
+import { pastReviews, pluginReviews, reviewKey, reviewsNeedingYou, reviewState, reviewTitle, type ReviewEntry } from "../features/agents/reviews";
 import { describeAgent } from "../features/agents/status";
 import { PluginFrame } from "../features/plugins/PluginFrame";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
@@ -78,6 +79,15 @@ export function App(props: { store: AppStore }) {
     const view = pluginView();
     return view?.kind === "review" ? reviewsByPlugin()[view.plugin]?.find((review) => review.run_id === view.runId) ?? null : null;
   };
+  /**
+   * The open review when it failed, which Prompting Time shows itself, since page protocol 1 shows
+   * only reviews with findings. It stays the same object while the same run stays open, so a new
+   * status does not make a new screen.
+   */
+  const failedReview = createMemo(() => {
+    const review = openReviewEntry();
+    return review?.outcome === "failed" ? review : null;
+  }, { equals: (previous, next) => previous?.run_id === next?.run_id });
   /** The key of what the list shows as selected: the open review, or the conversation when no plugin shows. */
   const currentKey = () => {
     const view = pluginView();
@@ -397,16 +407,24 @@ export function App(props: { store: AppStore }) {
                   {(plugin) => (
                     <Switch>
                       <Match when={pluginView()?.kind === "review"}>
-                        <PluginFrame
-                          plugin={plugin()}
-                          status={snapshot().plugins.statuses[name]}
-                          runId={openRun()}
-                          actions={store.pluginActions}
-                          onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
-                          onShowReview={(runId) => {
-                            if (openRun() !== runId) setPluginView({ kind: "review", plugin: name, runId });
-                          }}
-                        />
+                        <Show
+                          when={failedReview()}
+                          keyed
+                          fallback={
+                            <PluginFrame
+                              plugin={plugin()}
+                              status={snapshot().plugins.statuses[name]}
+                              runId={openRun()}
+                              actions={store.pluginActions}
+                              onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
+                              onShowReview={(runId) => {
+                                if (openRun() !== runId) setPluginView({ kind: "review", plugin: name, runId });
+                              }}
+                            />
+                          }
+                        >
+                          {(review: ReviewEntry) => <FailedReview plugin={plugin()} review={review} actions={store.pluginActions} />}
+                        </Show>
                       </Match>
                       <Match when={pluginView()?.kind === "history"}>
                         <ReviewHistory plugin={plugin()} status={snapshot().plugins.statuses[name]} onOpen={(runId) => openReview(name, runId)} />

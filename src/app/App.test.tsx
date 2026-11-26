@@ -175,6 +175,7 @@ describe("All work and ⌘J", () => {
 describe("plugin pages", () => {
   const OPEN = "20261126T150000Z-101";
   const SUBMITTED = "20261125T100000Z-77";
+  const FAILED = "20261124T090000Z-55";
   const request = JSON.stringify({ event: "APPROVE", body: "", comments: [] }, null, 2);
   const fingerprint = "9c".repeat(32);
 
@@ -236,16 +237,40 @@ describe("plugin pages", () => {
     expect(screen.queryByRole("alertdialog", { name: "Submit review" })).not.toBeInTheDocument();
   });
 
+  it("opens a failed review on Prompting Time's own screen instead of the page, and a finished one in the page", async () => {
+    const { api, pluginRequest } = pagesApi();
+    renderApp(api);
+    await settle();
+    await settle();
+
+    fireEvent.click(await screen.findByRole("treeitem", { name: /^move the projection, gadgets#55 · review failed/ }));
+    await settle();
+    await settle();
+    expect(document.querySelector("iframe.plugin-frame")).toBeNull();
+    const failed = screen.getByRole("main", { name: "Review" });
+    expect(within(failed).getByRole("heading", { name: "Review failed" })).toBeInTheDocument();
+    expect(within(failed).getByLabelText("Why it failed")).toHaveTextContent("the review run exited 1 without findings; see runs/20261124T090000Z-55/stderr.log");
+    expect(within(failed).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(within(failed).getByRole("button", { name: "Ask why" })).toBeInTheDocument();
+    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [FAILED], confirmedFingerprint: null });
+    expect(screen.queryByText(/has no findings to show/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("treeitem", { name: /^separate cache configuration, 2 findings/ }));
+    await settle();
+    expect(frame().element).toHaveAttribute("src", "pt-plugin://whooper/index.html");
+    expect(screen.queryByRole("heading", { name: "Review failed" })).not.toBeInTheDocument();
+  });
+
   it("lists past reviews under the agent and opens one with what was submitted", async () => {
     const { api } = pagesApi();
     renderApp(api);
     await settle();
     await settle();
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Past reviews 3/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Past reviews 4/ }));
     await settle();
     const rows = within(screen.getByRole("main", { name: "Past reviews" })).getAllByRole("button");
-    expect(rows.map((row) => row.querySelector(".pt-list-row-title")?.textContent)).toEqual(["separate cache configuration", "add the tags package", "move the projection"]);
+    expect(rows.map((row) => row.querySelector(".pt-list-row-title")?.textContent)).toEqual(["separate cache configuration", "add the tags package", "separate cache configuration", "move the projection"]);
     expect(rows[1]).toHaveTextContent("gadgets#77 · commented");
 
     fireEvent.click(rows[1]!);
