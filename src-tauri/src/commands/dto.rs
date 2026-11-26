@@ -925,6 +925,32 @@ pub struct PluginSnapshot {
     /// does not start until they can be.
     pub settings_error: Option<String>,
     pub process: PluginProcess,
+    /// The manifest's `status` key: null unless the status action prints status format 2.
+    pub status: Option<PluginStatusConfig>,
+}
+
+/// The vocabulary of a plugin's status format 2, which its status action fills in.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStatusConfig {
+    pub format: u32,
+    /// The groups items go in; the window orders, folds, and puts them under Needs you by these.
+    pub groups: Vec<PluginStatusGroup>,
+    /// The actions an item's row may offer, run with `--item <id>` after their own arguments.
+    pub item_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStatusGroup {
+    pub id: String,
+    pub title: String,
+    /// Whether the group's items wait on the user, which lists them under Needs you.
+    pub needs_you: bool,
+    /// Where the group lists among the plugin's groups, lowest first.
+    pub order: u32,
+    /// Whether the group's section starts folded.
+    pub folded: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]

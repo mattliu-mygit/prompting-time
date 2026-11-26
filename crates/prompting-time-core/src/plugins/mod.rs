@@ -16,6 +16,9 @@
 //!   the request it would run in a file in the state folder, names that file by its absolute path
 //!   in its output, and prints `fingerprint: <hex>`, the file's SHA-256, on its last line; and
 //!   `--expect <hex>`, which refuses a request whose fingerprint changed since.
+//! - An action the manifest's `status.item_actions` names takes `--item <id>` after its fixed
+//!   arguments, naming one item of the `status` action's format-2 output; the window passes it as an
+//!   ordinary argument, so a confirm action still gets `--print` or `--expect` after it.
 
 mod install;
 pub mod manifest;

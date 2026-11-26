@@ -478,6 +478,8 @@ export type PluginSnapshot = {
 	 */
 	settingsError: string | null,
 	process: PluginProcess,
+	/**  The manifest's `status` key: null unless the status action prints status format 2. */
+	status: PluginStatusConfig | null,
 };
 
 /**
@@ -485,6 +487,26 @@ export type PluginSnapshot = {
  *  digits); a folder runs in place, for developing a plugin. Paths are absolute.
  */
 export type PluginSource = { kind: "release"; url: string; sha256: string } | { kind: "archive"; path: string; sha256: string } | { kind: "folder"; path: string };
+
+/**  The vocabulary of a plugin's status format 2, which its status action fills in. */
+export type PluginStatusConfig = {
+	format: number,
+	/**  The groups items go in; the window orders, folds, and puts them under Needs you by these. */
+	groups: PluginStatusGroup[],
+	/**  The actions an item's row may offer, run with `--item <id>` after their own arguments. */
+	itemActions: string[],
+};
+
+export type PluginStatusGroup = {
+	id: string,
+	title: string,
+	/**  Whether the group's items wait on the user, which lists them under Needs you. */
+	needsYou: boolean,
+	/**  Where the group lists among the plugin's groups, lowest first. */
+	order: number,
+	/**  Whether the group's section starts folded. */
+	folded: boolean,
+};
 
 export type ProjectPathSnapshot = {
 	isGit: boolean,

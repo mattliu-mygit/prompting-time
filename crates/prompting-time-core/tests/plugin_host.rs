@@ -99,6 +99,12 @@ done
 echo "posted the review"
 "#;
 
+const RERUN: &str = r#"#!/bin/sh
+# A row action of status format 2: logs the arguments it was given, after its fixed one.
+printf '%s\n' "$*" >> "$XDG_STATE_HOME/fake-agent-rerun.log"
+echo "queued again"
+"#;
+
 struct Fixture {
     root: TempDir,
 }
@@ -158,8 +164,18 @@ impl Fixture {
                 { "name": "save-settings", "title": "Save settings", "description": "Saves them.",
                   "command": ["bin/fake-settings", "set"], "confirm": false },
                 { "name": "submit", "title": "Submit", "description": "Posts a review.",
-                  "command": ["bin/fake-submit"], "confirm": true }
-            ]
+                  "command": ["bin/fake-submit"], "confirm": true },
+                { "name": "rerun", "title": "Rerun", "description": "Runs a job again.",
+                  "command": ["bin/fake-rerun", "--now"], "confirm": false }
+            ],
+            "status": {
+                "format": 2,
+                "groups": [
+                    { "id": "failed", "title": "Run failed", "needs_you": true, "order": 1 },
+                    { "id": "done", "title": "Done", "needs_you": false, "order": 2, "folded": true }
+                ],
+                "item_actions": ["rerun", "submit"]
+            }
         });
         fs::create_dir_all(folder.join("schemas")).unwrap();
         fs::write(
@@ -177,6 +193,7 @@ impl Fixture {
             ("fake-status", STATUS),
             ("fake-settings", SETTINGS),
             ("fake-submit", SUBMIT),
+            ("fake-rerun", RERUN),
         ] {
             executable(&folder.join("bin").join(name), body);
         }
@@ -643,6 +660,56 @@ async fn actions_return_their_output_and_exit_code_and_confirm_actions_need_a_fi
         .await,
         Err(PluginError::UnknownPlugin(_))
     ));
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_row_action_gets_the_item_after_its_fixed_arguments_and_confirms_like_any_action() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let snapshot = host
+        .install(PluginSource::Folder {
+            path: fixture.plugin(json!([])),
+        })
+        .await
+        .unwrap();
+    let status = snapshot
+        .manifest
+        .status
+        .expect("the manifest declares status format 2");
+    assert_eq!(status.item_actions, vec!["rerun", "submit"]);
+
+    let rerun = host
+        .run_action(action("rerun", &["--item", "run-74c91b1d"], None))
+        .await
+        .unwrap();
+    assert_eq!(rerun.exit_code, Some(0));
+    assert_eq!(rerun.stdout.trim(), "queued again");
+    assert_eq!(
+        fs::read_to_string(fixture.path("state").join("fake-agent-rerun.log")).unwrap(),
+        "--now --item run-74c91b1d\n",
+        "the item follows the action's fixed arguments"
+    );
+
+    // A row action marked confirm previews first, with the item, then runs with the fingerprint.
+    let preview = host
+        .run_action(action("submit", &["run-2", "--item", "run-2"], None))
+        .await
+        .unwrap();
+    let fingerprint = preview
+        .fingerprint
+        .expect("a preview prints its fingerprint");
+    host.run_action(action(
+        "submit",
+        &["run-2", "--item", "run-2"],
+        Some(fingerprint.clone()),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.submit_log(),
+        format!("run-2 --item run-2 --print\nrun-2 --item run-2 --expect {fingerprint}\n")
+    );
     host.shutdown().await;
 }
 

@@ -33,6 +33,39 @@ pub struct Manifest {
     /// The JSON Schema of the settings, as a path in the plugin's folder.
     pub settings: String,
     pub actions: Vec<Action>,
+    /// What the `status` action prints, when it prints status format 2: the groups its items go
+    /// in and the actions their rows offer. None for a plugin whose status PT reads another way.
+    #[serde(default)]
+    pub status: Option<StatusConfig>,
+}
+
+/// The vocabulary of a plugin's status format 2, which its `status` action fills in. PT keeps no
+/// group names of its own: it places, orders, and folds items by the groups declared here.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StatusConfig {
+    /// The status format the `status` action prints; PT reads format 2.
+    pub format: u32,
+    pub groups: Vec<StatusGroup>,
+    /// The actions an item's row may offer. PT runs one as `<command> --item <id>`, with the same
+    /// confirmation as any other action.
+    #[serde(default)]
+    pub item_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StatusGroup {
+    /// What each item names as its `group`.
+    pub id: String,
+    pub title: String,
+    /// Whether the group's items wait on the user, which lists them under Needs you.
+    pub needs_you: bool,
+    /// Where the group lists among the plugin's groups, lowest first.
+    pub order: u32,
+    /// Whether the group's section starts folded.
+    #[serde(default)]
+    pub folded: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -172,6 +205,9 @@ impl Manifest {
                 "a prerequisite depends on a setting, so the manifest needs a {GET_SETTINGS_ACTION} action"
             ));
         }
+        if let Some(status) = &self.status {
+            check_status(status, &names)?;
+        }
         Ok(())
     }
 
@@ -224,6 +260,47 @@ pub fn load(folder: &Path) -> Result<(Manifest, String), ManifestError> {
 
 fn invalid<T>(message: String) -> Result<T, ManifestError> {
     Err(ManifestError(message))
+}
+
+/// The rules of the manifest's `status` key: format 2, at least one group, group IDs unique and
+/// lowercase-kebab, titles not empty, and item actions that name declared actions, each once.
+fn check_status(status: &StatusConfig, actions: &HashSet<&str>) -> Result<(), ManifestError> {
+    if status.format != 2 {
+        return invalid(format!(
+            "status.format is {}, and Prompting Time reads status format 2",
+            status.format
+        ));
+    }
+    if status.groups.is_empty() {
+        return invalid("status.groups declares no group for items to go in".to_owned());
+    }
+    let mut ids = HashSet::new();
+    for group in &status.groups {
+        if !is_id(&group.id) {
+            return invalid(format!(
+                "the status group {:?} must start with a lowercase letter and hold only lowercase letters, digits, and hyphens",
+                group.id
+            ));
+        }
+        if !ids.insert(group.id.as_str()) {
+            return invalid(format!("two status groups are named {}", group.id));
+        }
+        if group.title.trim().is_empty() {
+            return invalid(format!("the status group {} has no title", group.id));
+        }
+    }
+    let mut item_actions = HashSet::new();
+    for name in &status.item_actions {
+        if !actions.contains(name.as_str()) {
+            return invalid(format!(
+                "status.item_actions names {name}, which is not one of the manifest's actions"
+            ));
+        }
+        if !item_actions.insert(name.as_str()) {
+            return invalid(format!("status.item_actions names {name} twice"));
+        }
+    }
+    Ok(())
 }
 
 fn is_id(text: &str) -> bool {
@@ -365,6 +442,112 @@ mod tests {
         ];
         for (expected, change) in cases {
             let mut manifest = whooper_like();
+            change(&mut manifest);
+            let error = parse(&manifest).unwrap_err();
+            assert!(error.0.contains(expected), "{expected}: {error}");
+        }
+    }
+
+    /// The fixture with a `status` key in format 2: two groups and one row action.
+    fn with_status() -> serde_json::Value {
+        let mut manifest = whooper_like();
+        manifest["actions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": "rerun", "title": "Rerun", "description": "Runs it again.",
+                "command": ["bin/rerun"], "confirm": false
+            }));
+        manifest["status"] = serde_json::json!({
+            "format": 2,
+            "groups": [
+                { "id": "failed", "title": "Run failed", "needs_you": true, "order": 1 },
+                { "id": "done", "title": "Done", "needs_you": false, "order": 2, "folded": true }
+            ],
+            "item_actions": ["rerun", "submit"]
+        });
+        manifest
+    }
+
+    #[test]
+    fn a_status_key_declares_the_groups_and_row_actions() {
+        assert_eq!(parse(&whooper_like()).unwrap().status, None);
+        let status = parse(&with_status()).unwrap().status.unwrap();
+        assert_eq!(status.format, 2);
+        assert_eq!(
+            status.groups,
+            vec![
+                StatusGroup {
+                    id: "failed".into(),
+                    title: "Run failed".into(),
+                    needs_you: true,
+                    order: 1,
+                    folded: false
+                },
+                StatusGroup {
+                    id: "done".into(),
+                    title: "Done".into(),
+                    needs_you: false,
+                    order: 2,
+                    folded: true
+                },
+            ]
+        );
+        assert_eq!(status.item_actions, vec!["rerun", "submit"]);
+        let mut no_actions = with_status();
+        no_actions["status"]
+            .as_object_mut()
+            .unwrap()
+            .remove("item_actions");
+        assert!(
+            parse(&no_actions)
+                .unwrap()
+                .status
+                .unwrap()
+                .item_actions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn status_keys_that_break_a_rule_are_refused_with_the_rule() {
+        type Change = fn(&mut serde_json::Value);
+        let cases: Vec<(&str, Change)> = vec![
+            ("does not fit", |m| m["status"]["extra"] = true.into()),
+            ("does not fit", |m| {
+                m["status"]["groups"][0]["color"] = "red".into()
+            }),
+            ("does not fit", |m| {
+                m["status"]["groups"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("needs_you");
+            }),
+            ("status format 2", |m| m["status"]["format"] = 1.into()),
+            ("declares no group", |m| {
+                m["status"]["groups"] = serde_json::json!([])
+            }),
+            ("lowercase letter", |m| {
+                m["status"]["groups"][0]["id"] = "Failed".into()
+            }),
+            ("lowercase letter", |m| {
+                m["status"]["groups"][0]["id"] = "run_failed".into()
+            }),
+            ("two status groups", |m| {
+                m["status"]["groups"][1]["id"] = "failed".into()
+            }),
+            ("has no title", |m| {
+                m["status"]["groups"][0]["title"] = " ".into()
+            }),
+            ("not one of the manifest's actions", |m| {
+                m["status"]["item_actions"] = serde_json::json!(["delete"])
+            }),
+            ("twice", |m| {
+                m["status"]["item_actions"] = serde_json::json!(["rerun", "rerun"])
+            }),
+        ];
+        for (expected, change) in cases {
+            let mut manifest = with_status();
             change(&mut manifest);
             let error = parse(&manifest).unwrap_err();
             assert!(error.0.contains(expected), "{expected}: {error}");
