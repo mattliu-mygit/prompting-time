@@ -982,6 +982,16 @@ impl From<CoreActionOutput> for PluginActionResult {
     }
 }
 
+impl From<CorePluginLog> for PluginLog {
+    fn from(log: CorePluginLog) -> Self {
+        Self {
+            path: log.path.display().to_string(),
+            text: log.text,
+            truncated: log.truncated,
+        }
+    }
+}
+
 impl From<PluginError> for CommandError {
     fn from(error: PluginError) -> Self {
         let (code, message, action) = match error {
@@ -1029,6 +1039,13 @@ impl From<PluginError> for CommandError {
                     "{action} saved no request Prompting Time can show, so there is nothing to confirm."
                 ),
                 None,
+            ),
+            PluginError::StartedElsewhere { plugin, pid } => (
+                "plugin-started-elsewhere",
+                format!(
+                    "{plugin} runs as process {pid}, which Prompting Time did not start, so Prompting Time leaves it running."
+                ),
+                Some("Stop it where it was started, such as in its terminal."),
             ),
             PluginError::Quitting => (
                 "shutting-down",

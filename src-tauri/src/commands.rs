@@ -19,8 +19,8 @@ use prompting_time_core::domain::{
 use prompting_time_core::handoff::HandoffError;
 use prompting_time_core::plugins::{
     ActionOutput as CoreActionOutput, ActionRequest as CoreActionRequest, PluginError,
-    PluginProcess as CorePluginProcess, PluginSnapshot as CorePluginSnapshot,
-    PluginSource as CorePluginSource,
+    PluginLog as CorePluginLog, PluginProcess as CorePluginProcess,
+    PluginSnapshot as CorePluginSnapshot, PluginSource as CorePluginSource,
 };
 use prompting_time_core::providers::{
     ApprovalResponse as CoreApprovalResponse, ProviderId as CoreProviderId,
@@ -465,6 +465,39 @@ pub async fn save_plugin_settings(
         .into())
 }
 
+/// Stops the start command Prompting Time started for a plugin, which ends a review in progress;
+/// it stays stopped until start_plugin or the next time Prompting Time opens. A copy started
+/// elsewhere is refused.
+#[tauri::command]
+#[specta::specta]
+pub async fn stop_plugin(
+    state: State<'_, Arc<AppState>>,
+    request: PluginNameRequest,
+) -> Result<PluginSnapshot, CommandError> {
+    Ok(state.plugins()?.stop(&request.plugin).await?.into())
+}
+
+/// Starts a stopped or exited plugin as Prompting Time does when it opens: not while a needed
+/// program is missing or a copy holds its run lock, which the snapshot shows.
+#[tauri::command]
+#[specta::specta]
+pub async fn start_plugin(
+    state: State<'_, Arc<AppState>>,
+    request: PluginNameRequest,
+) -> Result<PluginSnapshot, CommandError> {
+    Ok(state.plugins()?.start(&request.plugin).await?.into())
+}
+
+/// The end of what a plugin's start command printed since Prompting Time last started it.
+#[tauri::command]
+#[specta::specta]
+pub async fn read_plugin_log(
+    state: State<'_, Arc<AppState>>,
+    request: PluginNameRequest,
+) -> Result<PluginLog, CommandError> {
+    Ok(state.plugins()?.read_log(&request.plugin)?.into())
+}
+
 pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(tauri_specta::collect_commands![
@@ -495,6 +528,9 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
             list_plugins,
             plugin_request,
             save_plugin_settings,
+            stop_plugin,
+            start_plugin,
+            read_plugin_log,
         ])
         .typ::<AppEvent>()
 }

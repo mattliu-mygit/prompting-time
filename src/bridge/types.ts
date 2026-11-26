@@ -44,6 +44,19 @@ export const commands = {
 	 *  and stderr.
 	 */
 	savePluginSettings: (request: SavePluginSettingsRequest) => typedError<PluginActionResult, CommandError>(__TAURI_INVOKE("save_plugin_settings", { request })),
+	/**
+	 *  Stops the start command Prompting Time started for a plugin, which ends a review in progress;
+	 *  it stays stopped until start_plugin or the next time Prompting Time opens. A copy started
+	 *  elsewhere is refused.
+	 */
+	stopPlugin: (request: PluginNameRequest) => typedError<PluginSnapshot, CommandError>(__TAURI_INVOKE("stop_plugin", { request })),
+	/**
+	 *  Starts a stopped or exited plugin as Prompting Time does when it opens: not while a needed
+	 *  program is missing or a copy holds its run lock, which the snapshot shows.
+	 */
+	startPlugin: (request: PluginNameRequest) => typedError<PluginSnapshot, CommandError>(__TAURI_INVOKE("start_plugin", { request })),
+	/**  The end of what a plugin's start command printed since Prompting Time last started it. */
+	readPluginLog: (request: PluginNameRequest) => typedError<PluginLog, CommandError>(__TAURI_INVOKE("read_plugin_log", { request })),
 };
 
 /* Types */
@@ -361,6 +374,21 @@ export type PluginActionResult = {
 export type PluginExit = {
 	code: number | null,
 	output: string,
+};
+
+/**  The end of what a plugin's start command printed since Prompting Time last started it. */
+export type PluginLog = {
+	/**  The log file, which each start empties. */
+	path: string,
+	/**  The end of the file, from its first whole line; empty before the first start. */
+	text: string,
+	/**  Whether the file holds more than `text`. */
+	truncated: boolean,
+};
+
+/**  Names the plugin to stop, start, or read the log of. */
+export type PluginNameRequest = {
+	plugin: string,
 };
 
 export type PluginPrerequisite = {

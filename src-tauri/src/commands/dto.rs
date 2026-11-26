@@ -998,6 +998,25 @@ pub struct PluginActionResult {
     pub preview: Option<String>,
 }
 
+/// Names the plugin to stop, start, or read the log of.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginNameRequest {
+    pub plugin: String,
+}
+
+/// The end of what a plugin's start command printed since Prompting Time last started it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginLog {
+    /// The log file, which each start empties.
+    pub path: String,
+    /// The end of the file, from its first whole line; empty before the first start.
+    pub text: String,
+    /// Whether the file holds more than `text`.
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SavePluginSettingsRequest {

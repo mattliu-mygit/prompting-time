@@ -42,6 +42,8 @@ import type {
   InstallPluginRequest,
   PluginActionRequest,
   PluginActionResult,
+  PluginLog,
+  PluginNameRequest,
   PluginSnapshot,
   SavePluginSettingsRequest,
 } from "./types";
@@ -242,6 +244,18 @@ export function pluginRequest(request: PluginActionRequest): Promise<PluginActio
 
 export function savePluginSettings(request: SavePluginSettingsRequest): Promise<PluginActionResult> {
   return call("save_plugin_settings", { request });
+}
+
+export function stopPlugin(request: PluginNameRequest): Promise<PluginSnapshot> {
+  return call("stop_plugin", { request });
+}
+
+export function startPlugin(request: PluginNameRequest): Promise<PluginSnapshot> {
+  return call("start_plugin", { request });
+}
+
+export function readPluginLog(request: PluginNameRequest): Promise<PluginLog> {
+  return call("read_plugin_log", { request });
 }
 
 export async function listenToAppEvents(handler: (event: AppEvent) => void): Promise<() => void> {

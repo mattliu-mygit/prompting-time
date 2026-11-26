@@ -30,6 +30,9 @@ import {
   listPlugins,
   pluginRequest,
   savePluginSettings,
+  stopPlugin,
+  startPlugin,
+  readPluginLog,
   respondToApproval,
   steerRun,
   submitMessage,
@@ -175,6 +178,9 @@ describe("desktop bridge", () => {
     await installPlugin({ source: { kind: "folder", path: "/tmp/plugin" } });
     await pluginRequest({ plugin: "fixture", action: "submit", args: ["run-1"], confirmedFingerprint: null });
     await savePluginSettings({ plugin: "fixture", values: "{}" });
+    await stopPlugin({ plugin: "fixture" });
+    await startPlugin({ plugin: "fixture" });
+    await readPluginLog({ plugin: "fixture" });
 
     expect(invokeMock.mock.calls).toEqual([
       ["bootstrap"],
@@ -239,6 +245,9 @@ describe("desktop bridge", () => {
       ["install_plugin", { request: { source: { kind: "folder", path: "/tmp/plugin" } } }],
       ["plugin_request", { request: { plugin: "fixture", action: "submit", args: ["run-1"], confirmedFingerprint: null } }],
       ["save_plugin_settings", { request: { plugin: "fixture", values: "{}" } }],
+      ["stop_plugin", { request: { plugin: "fixture" } }],
+      ["start_plugin", { request: { plugin: "fixture" } }],
+      ["read_plugin_log", { request: { plugin: "fixture" } }],
     ]);
   });
 
