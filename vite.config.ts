@@ -1,8 +1,9 @@
 import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vitest/config";
+import { developmentServer } from "./scripts/development-server.js";
 
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [solid(), developmentServer()],
   server: {
     host: "localhost",
     port: 1420,
