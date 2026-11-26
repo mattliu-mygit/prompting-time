@@ -320,9 +320,9 @@ describe("AllWork", () => {
       expect(screen.queryByRole("button", { name: "Actions for Score yesterday's sessions" })).not.toBeInTheDocument();
 
       fireEvent.click(failed);
-      expect(view.onOpenEntry).toHaveBeenCalledExactlyOnceWith("fixture-runs", "item:fixture-runs:run-74c91b1d");
+      expect(view.onOpenEntry).toHaveBeenCalledExactlyOnceWith("fixture-runs", "item:fixture-runs:run-74c91b1d", "/runs/run-74c91b1d");
       press(blocker, "Enter");
-      expect(view.onOpenEntry).toHaveBeenLastCalledWith("fixture-runs", "blocker:fixture-runs:codex-signed-out");
+      expect(view.onOpenEntry).toHaveBeenLastCalledWith("fixture-runs", "blocker:fixture-runs:codex-signed-out", "/providers");
       expect(await axeViolations()).toEqual([]);
     });
 

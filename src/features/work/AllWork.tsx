@@ -37,8 +37,8 @@ type Props = {
   pluginWork: StatusV2Work;
   /** The title the plugin's manifest gives an action, for a row's ⋯ menu. */
   actionTitle(plugin: string, action: string): string;
-  /** A click on a format-2 item or blocker, by its key (itemKey or blockerKey). */
-  onOpenEntry(plugin: string, key: string): void;
+  /** A click on a format-2 item or blocker, by its key (itemKey or blockerKey), with the route its plugin's page shows it at. */
+  onOpenEntry(plugin: string, key: string, route: string): void;
   /** A choice in a format-2 row's ⋯ menu: an item's action with `--item <id>`, a blocker's with no arguments. */
   onEntryAction(plugin: string, action: string, args: string[], label: string): void;
   onToggle(id: string): void;
@@ -262,7 +262,7 @@ export function AllWork(props: Props) {
   function open(row: ReviewRow | CauseRow | EntryRow) {
     if (row.kind === "review") props.onOpenReview(row.item.plugin, row.item.review.run_id);
     else if (row.kind === "cause") props.onOpenCause(row.item.plugin, row.item.cause.id);
-    else props.onOpenEntry(row.plugin, row.key);
+    else props.onOpenEntry(row.plugin, row.key, "item" in row.entry ? row.entry.item.route : row.entry.blocker.route);
   }
 
   function navigate(event: KeyboardEvent, row: Row) {

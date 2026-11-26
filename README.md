@@ -253,7 +253,15 @@ checks, starts, and stops them, and the window shows them.
   for a review, `draft <run> <change>` for a draft, `ask <run> <question> [--finding <id>]` for Ask
   about this, and `submit <run>`, which goes through the confirmation; an action marked `confirm`
   always does. Each result goes back to the page, which also hears of a new status and of changes
-  to the shown run's files.
+  to the shown run's files. A page whose manifest says `page.protocol: 2` speaks the generic page
+  protocol 2 instead: it sends `ready`, then `call {id, action, args}` to run one of its manifest's
+  actions with `args` after the action's command, and gets back `result {reply_to, json}`, what the
+  action printed (parsed when it is JSON, else the text), or `error {reply_to, message}`. Prompting
+  Time refuses an action the manifest does not declare, runs an action marked `confirm` only
+  through the confirmation, and refuses `--print` and `--expect` from the page for one. Unasked, the
+  page gets `open {route}` for the item or blocker the user opened and `changed {files}` when files
+  in the plugin's state folder change, null when more changed than one event lists. A call holds at
+  most 64 arguments of at most 64 KiB together.
 - **Reviews.** A plugin's status may list `reviews`, as `whooper-status --json` does: the runs of the
   last 30 days, each with the commit it reviewed (`head_sha`), the pull request's head
   (`pr_head_sha`), its `author`, a `cause` when it failed or waits, whether you skipped or removed
@@ -294,8 +302,10 @@ checks, starts, and stops them, and the window shows them.
   first; Command-J and the menu bar's count include them. A row's ⋯ menu, opened by a click, lists
   the item's `actions` and runs the chosen one as `<command> --item <id>`, through the confirmation
   for an action marked `confirm`; a blocker's `action` runs with no extra arguments. An item or
-  blocker that does not fit is left out, as are row actions the manifest does not allow. Opening an
-  item shows the plugin's screen until page protocol 2 can open its `route`.
+  blocker that does not fit is left out, as are row actions the manifest does not allow. A click on
+  an item or blocker, or Command-J landing on one, opens the plugin's page at its `route` when the
+  page speaks page protocol 2, keeping the page loaded from one row to the next; with a page of
+  protocol 1 it shows the plugin's screen instead.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a

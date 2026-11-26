@@ -687,6 +687,7 @@ describe("status format 2", () => {
       return actionResult({ stdout: "queued again\n" });
     });
     let handler: (command: MenuBarCommand) => void = () => {};
+    let appEvents: ((event: AppEvent) => void) | null = null;
     const api = createApi({
       listPlugins: vi.fn(async () => [fixtureV2Plugin()]),
       pluginRequest,
@@ -694,14 +695,29 @@ describe("status format 2", () => {
         handler = next;
         return () => {};
       }),
+      listenToAppEvents: vi.fn(async (listener: (event: AppEvent) => void) => {
+        appEvents = listener;
+        return () => {};
+      }),
     });
     const choose = (command: MenuBarCommand) => {
       handler(command);
       flush();
     };
-    return { api, pluginRequest, choose, lastRequest: () => vi.mocked(api.updateMenuBar).mock.lastCall?.[0] };
+    return { api, pluginRequest, choose, emit: (event: AppEvent) => appEvents?.(event), lastRequest: () => vi.mocked(api.updateMenuBar).mock.lastCall?.[0] };
   }
   const selected = () => document.querySelector('.all-work [role=treeitem][aria-selected="true"]')?.getAttribute("aria-label");
+  /** The plugin's page frame, with a spy on what Prompting Time posts to it. */
+  function pageFrame() {
+    const element = document.querySelector<HTMLIFrameElement>("iframe.plugin-frame");
+    if (!element?.contentWindow) throw new Error("no plugin frame");
+    return { element, window: element.contentWindow, posted: vi.spyOn(element.contentWindow, "postMessage") };
+  }
+  async function fromPage(source: Window, data: unknown) {
+    window.dispatchEvent(new MessageEvent("message", { data, source }));
+    await settle();
+    await settle();
+  }
 
   it("steps through its blockers and Needs you items with Command-J, and counts the items in the menu bar", async () => {
     const { api, choose, lastRequest } = v2Api();
@@ -715,6 +731,7 @@ describe("status format 2", () => {
     press("j");
     expect(selected()).toMatch(/^Codex is signed out/);
     expect(screen.getByRole("main", { name: "Background agent" })).toBeInTheDocument();
+    expect(screen.getByTitle("Fixture runs's page")).toHaveAttribute("src", "pt-plugin://fixture-runs/index.html");
     press("j");
     expect(selected()).toMatch(new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`));
     press("j");
@@ -747,6 +764,78 @@ describe("status format 2", () => {
     fireEvent.click(confirm);
     await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "fixture-runs", action: "delete", args: ["--item", "run-74c91b1d"], confirmedFingerprint: fingerprint }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("opens a clicked row in the plugin's sandboxed page at its route, and sends Command-J's next row to the same page", async () => {
+    const { api } = v2Api();
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("treeitem", { name: new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`) }));
+    await settle();
+    const page = pageFrame();
+    expect(page.element).toHaveAttribute("sandbox", "allow-scripts");
+    expect(page.element).toHaveAttribute("src", "pt-plugin://fixture-runs/index.html");
+    expect(selected()).toMatch(new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`));
+    // Nothing goes to the page before it says it is ready, nor for a message from another window.
+    expect(page.posted).not.toHaveBeenCalled();
+    await fromPage(window, { version: 2, type: "ready" });
+    expect(page.posted).not.toHaveBeenCalled();
+    await fromPage(page.window, { version: 2, type: "ready" });
+    expect(page.posted).toHaveBeenCalledExactlyOnceWith({ version: 2, type: "open", route: "/runs/run-74c91b1d" }, "*");
+
+    press("j");
+    await settle();
+    expect(selected()).toMatch(/^Tighten upload retries/);
+    expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/runs/run-review-2" }, "*");
+
+    // Opening the same row again shows it again, after the page may have moved on.
+    fireEvent.click(screen.getByRole("treeitem", { name: /^Tighten upload retries/ }));
+    await settle();
+    expect(page.posted).toHaveBeenCalledTimes(3);
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/runs/run-review-2" }, "*");
+  });
+
+  it("runs the page's calls to declared actions only, a confirm action only after the confirmation, and tells the page what changed", async () => {
+    const { api, pluginRequest, emit } = v2Api();
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("treeitem", { name: /^Codex is signed out/ }));
+    await settle();
+    const page = pageFrame();
+    await fromPage(page.window, { version: 2, type: "ready" });
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/providers" }, "*");
+
+    await fromPage(page.window, { version: 2, type: "call", id: 1, action: "status", args: [] });
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "result", reply_to: 1, json: fixtureV2Status() }, "*");
+
+    await fromPage(page.window, { version: 2, type: "call", id: 2, action: "rm-everything", args: [] });
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "error", reply_to: 2, message: "Fixture runs declares no rm-everything action." }, "*");
+    expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "rm-everything" }));
+
+    await fromPage(page.window, { version: 2, type: "call", id: 3, action: "delete", args: ["--item", "run-74c91b1d"] });
+    const dialog = await screen.findByRole("alertdialog", { name: "Delete run" });
+    expect(await within(dialog).findByLabelText("What it will send")).toHaveTextContent("delete run-74c91b1d");
+    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "fixture-runs", action: "delete", args: ["--item", "run-74c91b1d"], confirmedFingerprint: null });
+    expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "delete", confirmedFingerprint: fingerprint }));
+    expect(page.posted).not.toHaveBeenCalledWith(expect.objectContaining({ reply_to: 3 }), "*");
+    const confirm = within(dialog).getByRole("button", { name: "Delete run" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await settle();
+    await settle();
+    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "fixture-runs", action: "delete", args: ["--item", "run-74c91b1d"], confirmedFingerprint: fingerprint });
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "result", reply_to: 3, json: "deleted\n" }, "*");
+
+    // Cancelling runs nothing for real and tells the page.
+    await fromPage(page.window, { version: 2, type: "call", id: 4, action: "delete", args: ["--item", "run-review-2"] });
+    fireEvent.click(within(await screen.findByRole("alertdialog", { name: "Delete run" })).getByRole("button", { name: "Cancel" }));
+    await settle();
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "error", reply_to: 4, message: "Nothing ran: the confirmation was cancelled." }, "*");
+    expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ args: ["--item", "run-review-2"], confirmedFingerprint: fingerprint }));
+
+    emit({ kind: "pluginChanged", sequence: "1", plugin: "fixture-runs", files: ["runs/run-74c91b1d/run.json"] });
+    emit({ kind: "pluginChanged", sequence: "2", plugin: "whooper", files: ["round.lock/round.json"] });
+    await settle();
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "changed", files: ["runs/run-74c91b1d/run.json"] }, "*");
   });
 });
 

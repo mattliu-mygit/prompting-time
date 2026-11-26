@@ -15,6 +15,7 @@ import { describeAgent, readAgentStatus, readBlocked } from "../features/agents/
 import { blockerKey, itemKey, NO_STATUS_V2_WORK, statusV2Work, type StatusV2Work } from "../features/agents/statusV2";
 import { ConfirmActionDialog } from "../features/agents/ConfirmActionDialog";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
+import { PluginPage } from "../features/plugins/PluginPage";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
@@ -42,12 +43,16 @@ type Notice = { text: string; alert?: boolean; action?: { label: string; run(): 
 const NOTICE_MS = 8000;
 
 /**
- * What the workspace shows of a plugin instead of a conversation: its screen on a tab, one review, or
- * one cause that blocks every review. `entry` is the key of the status format 2 item or blocker the
- * user opened, which the list shows as selected; its screen shows until the plugin's page can open
- * the item's route.
+ * What the workspace shows of a plugin instead of a conversation: its screen on a tab, one review,
+ * one cause that blocks every review, or its page of protocol 2 at the route of the status format 2
+ * item or blocker the user opened. `entry` is that item's or blocker's key, which the list shows as
+ * selected; a plugin whose page speaks protocol 1 shows its screen with the row selected instead.
  */
-type PluginView = { kind: "agent"; plugin: string; tab: AgentTab; entry?: string } | { kind: "review"; plugin: string; runId: string } | { kind: "cause"; plugin: string; cause: string };
+type PluginView =
+  | { kind: "agent"; plugin: string; tab: AgentTab; entry?: string }
+  | { kind: "review"; plugin: string; runId: string }
+  | { kind: "cause"; plugin: string; cause: string }
+  | { kind: "page"; plugin: string; entry: string; target: { route: string } };
 /** A row action of a format-2 plugin that waits for the user's confirmation. */
 type EntryConfirmation = { plugin: string; action: string; args: string[] };
 
@@ -117,7 +122,7 @@ export function App(props: { store: AppStore }) {
   /** What plugins that print status format 2 add to All work: blockers, and items in their declared groups. */
   const pluginWork = createMemo(() => statusV2Work(snapshot().plugins));
   /** The items of format-2 Needs you groups, in list order, each with what a notice names it. */
-  const needsYouItems = () => pluginWork().needsYou.flatMap(({ plugin, items }) => items.map((item) => ({ key: itemKey(plugin, item.id), label: item.title, open: () => openEntry(plugin, itemKey(plugin, item.id)) })));
+  const needsYouItems = () => pluginWork().needsYou.flatMap(({ plugin, items }) => items.map((item) => ({ key: itemKey(plugin, item.id), label: item.title, open: () => openEntry(plugin, itemKey(plugin, item.id), item.route) })));
   // The menu bar extra shows what the pinned agents and Needs you show, and changes with them.
   createEffect(() => menuBarRequest(snapshot().plugins, agentPending(), needsYouReviews().length + needsYouItems().length, menuBarEnabled()), (request) => store.updateMenuBar(request));
   const openReviewEntry = () => {
@@ -137,6 +142,7 @@ export function App(props: { store: AppStore }) {
       return reviewKey(view.plugin, newest?.run_id ?? view.runId);
     }
     if (view?.kind === "cause") return causeKey(view.plugin, view.cause);
+    if (view?.kind === "page") return view.entry;
     if (view?.kind === "agent" && view.entry) return view.entry;
     return view ? null : selectedId();
   };
@@ -152,7 +158,7 @@ export function App(props: { store: AppStore }) {
   const workspaceLabel = () => {
     const view = pluginView();
     if (!view || !selectedPlugin()) return "Conversation workspace";
-    return { agent: "Background agent", review: "Review", cause: "Blocked reviews" }[view.kind];
+    return { agent: "Background agent", page: "Background agent", review: "Review", cause: "Blocked reviews" }[view.kind];
   };
   /** The reviews under "Needs you", then the items of format-2 Needs you groups, each with what a notice names it: what the menu bar's count opens the first of. */
   const needsYouWork = () => [
@@ -161,7 +167,7 @@ export function App(props: { store: AppStore }) {
   ];
   /** Everything under "Needs you", in list order: format-2 blockers, its reviews and items, then the conversations waiting on you, each with what a notice names it. */
   const waiting = () => [
-    ...pluginWork().blockers.map(({ plugin, blocker }) => ({ key: blockerKey(plugin, blocker.id), label: blocker.title, open: () => openEntry(plugin, blockerKey(plugin, blocker.id)) })),
+    ...pluginWork().blockers.map(({ plugin, blocker }) => ({ key: blockerKey(plugin, blocker.id), label: blocker.title, open: () => openEntry(plugin, blockerKey(plugin, blocker.id), blocker.route) })),
     ...needsYouWork(),
     ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []))
       .map(({ id, title }) => ({ key: id, label: title, open: () => selectConversation(id) })),
@@ -185,8 +191,13 @@ export function App(props: { store: AppStore }) {
 
   const openPlugin = (name: string, tab: AgentTab = "runs") => showPlugin({ kind: "agent", plugin: name, tab });
   const openReview = (plugin: string, runId: string) => showPlugin({ kind: "review", plugin, runId });
-  /** A format-2 item or blocker: its plugin's screen, with the row selected. */
-  const openEntry = (plugin: string, key: string) => showPlugin({ kind: "agent", plugin, tab: "runs", entry: key });
+  /**
+   * A format-2 item or blocker: its plugin's page, which shows its route. A page of protocol 1
+   * cannot, so the plugin's screen shows, with the row selected.
+   */
+  const openEntry = (plugin: string, key: string, route: string) => showPlugin(pluginNamed(plugin)?.pageProtocol === 2
+    ? { kind: "page", plugin, entry: key, target: { route } }
+    : { kind: "agent", plugin, tab: "runs", entry: key });
 
   /**
    * Runs one of an agent's controls from its row menu or its screen: Poll now, Pause, and Resume
@@ -702,6 +713,16 @@ export function App(props: { store: AppStore }) {
                               />
                             )}
                           </Show>
+                        )}
+                      </Match>
+                      <Match when={pluginView()?.kind === "page" && (pluginView() as { target: { route: string } }).target}>
+                        {(target) => (
+                          <PluginPage
+                            plugin={plugin()}
+                            target={target()}
+                            actions={store.pluginActions}
+                            onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
+                          />
                         )}
                       </Match>
                       <Match when={pluginView()?.kind === "agent" && (pluginView() as { tab: AgentTab }).tab}>
