@@ -919,6 +919,9 @@ pub struct PluginSnapshot {
     /// Where the window loads the plugin's page, in a frame sandboxed to scripts only, such as
     /// "pt-plugin://whooper/index.html".
     pub page_url: String,
+    /// The page protocol the page speaks: 1, Whooper's review messages, or 2, in which the page
+    /// runs the manifest's actions itself and opens the route of an item the user clicks.
+    pub page_protocol: u32,
     pub actions: Vec<PluginAction>,
     pub prerequisites: Vec<PluginPrerequisite>,
     /// Why the settings that decide which programs are needed could not be read; the plugin

@@ -470,6 +470,11 @@ export type PluginSnapshot = {
 	 *  "pt-plugin://whooper/index.html".
 	 */
 	pageUrl: string,
+	/**
+	 *  The page protocol the page speaks: 1, Whooper's review messages, or 2, in which the page
+	 *  runs the manifest's actions itself and opens the route of an item the user clicks.
+	 */
+	pageProtocol: number,
 	actions: PluginAction[],
 	prerequisites: PluginPrerequisite[],
 	/**

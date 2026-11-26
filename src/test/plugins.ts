@@ -82,6 +82,7 @@ export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSn
     stateFolder: "/synthetic/state/whooper",
     settingsSchema: fixtureSchema,
     pageUrl: "pt-plugin://whooper/index.html",
+    pageProtocol: 1,
     actions: [
       { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
       { name: "get-settings", title: "Read settings", description: "Prints the settings as JSON.", confirm: false },
@@ -102,7 +103,7 @@ export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSn
 /**
  * An invented plugin whose status action prints status format 2, laid out like Monopole's: four
  * declared groups, two of them under Needs you, Done folded; Rerun and Delete on rows, Delete asking
- * first; and Check providers, which a blocker names.
+ * first; Check providers, which a blocker names; and a page that speaks page protocol 2.
  */
 export function fixtureV2Plugin(overrides: Partial<PluginSnapshot> = {}): PluginSnapshot {
   return fixturePlugin({
@@ -112,6 +113,7 @@ export function fixtureV2Plugin(overrides: Partial<PluginSnapshot> = {}): Plugin
     folder: "/synthetic/plugins/fixture-runs",
     stateFolder: "/synthetic/state/fixture-runs",
     pageUrl: "pt-plugin://fixture-runs/index.html",
+    pageProtocol: 2,
     actions: [
       { name: "status", title: "Status", description: "Prints status format 2.", confirm: false },
       { name: "rerun", title: "Rerun", description: "Runs the evaluation again.", confirm: false },

@@ -92,6 +92,8 @@ pub struct SettingCondition {
 #[serde(deny_unknown_fields)]
 pub struct Page {
     pub entry: String,
+    /// The page protocol the page speaks: 1, Whooper's review messages, or 2, in which the page runs
+    /// the manifest's actions itself. Protocol 1 goes once Whooper's page speaks 2.
     pub protocol: u32,
 }
 
@@ -174,9 +176,9 @@ impl Manifest {
                 ));
             }
         }
-        if self.page.protocol != 1 {
+        if !matches!(self.page.protocol, 1 | 2) {
             return invalid(format!(
-                "page.protocol is {}, and Prompting Time speaks protocol 1",
+                "page.protocol is {}, and Prompting Time speaks protocols 1 and 2",
                 self.page.protocol
             ));
         }
@@ -402,6 +404,14 @@ mod tests {
     }
 
     #[test]
+    fn a_page_speaks_protocol_1_or_2() {
+        assert_eq!(parse(&whooper_like()).unwrap().page.protocol, 1);
+        let mut manifest = whooper_like();
+        manifest["page"]["protocol"] = 2.into();
+        assert_eq!(parse(&manifest).unwrap().page.protocol, 2);
+    }
+
+    #[test]
     fn manifests_that_break_a_rule_are_refused_with_the_rule() {
         type Change = fn(&mut serde_json::Value);
         let cases: Vec<(&str, Change)> = vec![
@@ -430,7 +440,8 @@ mod tests {
             ("program name", |m| {
                 m["prerequisites"][0]["command"] = "bin/gh".into()
             }),
-            ("protocol 1", |m| m["page"]["protocol"] = 2.into()),
+            ("protocols 1 and 2", |m| m["page"]["protocol"] = 0.into()),
+            ("protocols 1 and 2", |m| m["page"]["protocol"] = 3.into()),
             ("two actions", |m| {
                 let copy = m["actions"][0].clone();
                 m["actions"].as_array_mut().unwrap().push(copy);

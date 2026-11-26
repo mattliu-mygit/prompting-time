@@ -86,6 +86,7 @@ const plugin: PluginSnapshot = {
   stateFolder: "/synthetic/state/whooper",
   settingsSchema: JSON.stringify(schema),
   pageUrl: "/plugin-page/index.html",
+  pageProtocol: 1,
   actions: [
     { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
     { name: "round", title: "Poll now", description: "Runs a round now. Posts nothing.", confirm: false },

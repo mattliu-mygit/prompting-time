@@ -154,7 +154,7 @@ impl Fixture {
             "description": "An invented background agent.",
             "start": ["bin/fake-run"],
             "prerequisites": prerequisites,
-            "page": { "entry": "page/index.html", "protocol": 1 },
+            "page": { "entry": "page/index.html", "protocol": 2 },
             "settings": "schemas/settings.json",
             "actions": [
                 { "name": "status", "title": "Status", "description": "Prints status.",

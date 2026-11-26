@@ -18,6 +18,7 @@ export const v2Plugin: PluginSnapshot = {
   stateFolder: "/synthetic/state/fixture-runs",
   settingsSchema: JSON.stringify({ title: "Fixture runs settings", type: "object", properties: {} }),
   pageUrl: "/plugin-page/index.html",
+  pageProtocol: 2,
   actions: [
     { name: "status", title: "Status", description: "Prints status format 2.", confirm: false },
     { name: "get-settings", title: "Read settings", description: "Prints the settings as JSON.", confirm: false },
