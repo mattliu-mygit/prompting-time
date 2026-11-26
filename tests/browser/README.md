@@ -29,10 +29,10 @@ scroll internally. Close only this session with
 `playwright-cli -s=layout-check close`, then stop the dev server you started.
 
 The fixture also supports folder-first creation entirely in browser memory. Open
-New conversation and verify Choose folder creates an empty `project` conversation
-with Best fit selected and focus in Message. Without a folder creates `New
-conversation`. Expand Advanced to inspect Git execution and routing overrides;
-Cancel/Escape return focus to the New conversation trigger. Collapsed options are excluded
+New chat, which asks where the agent should work, and verify Another folder… creates an
+empty `project` chat with Best fit selected and focus in Message. No folder creates `New
+chat`; with `?work=1` the recent chats' folders come first. Expand Advanced to inspect
+the worktree and routing overrides; Cancel/Escape return focus to the New chat trigger. Collapsed options are excluded
 from keyboard navigation.
 
 Reload the fixture with `?folder=cancel`, `?folder=error`, or `?folder=non-git` to
@@ -45,33 +45,36 @@ layout check on the original synthetic conversations.
 
 Use `?work=1` for invented root conversations across three projects and in every
 status. All work shows the roots waiting on you first, under "Needs you", then one
-group per project and "No project". Combine it with a chat scenario, such as
+folded "Chats · <project>" section per project and "Chats · no folder"; open a section
+by its heading, and it stays open after a reload. Combine it with a chat scenario, such as
 `?work=1&chat=reading`, for timeline content. Command-J (Control-J) moves to the next
 root waiting on you; Command-K (Control-K) opens the palette.
 
 ## Background agents
 
-Use `?agents=1` for an invented Whooper under Background agents, running with its next
-poll at 3:45 PM; combine it with `?work=1` for a full All work list. Select Whooper to
+Use `?agents=1` for an invented Whooper pinned at the top of the sidebar, running with its
+next poll at 3:45 PM; combine it with `?work=1` for a full All work list. Select Whooper to
 open its screen, and its Settings tab to change a value and Save, or set "Stop a poll after"
 below 5 to see Whooper's refusal. Pause, Resume, Stop, and Start change the invented Whooper in
-browser memory; Stop asks first. The add button offers a synthetic archive, whose install is refused to
-show the message, and a synthetic folder. `?agents=missing` shows Whooper stopped for a
+browser memory; Stop asks first. The palette's "Add background agent" commands offer a synthetic
+archive, whose install is refused to show the message, and a synthetic folder. `?agents=missing` shows Whooper stopped for a
 missing program. `?agents=confirm` opens the submit confirmation over the app with an
 invented request, and `?agents=mentions` opens it on Whooper's refusal for an @-mention
 first. The fixture answers in browser memory and runs no plugin.
 
 ## Plugin pages
 
-Use `?agents=reviews` for invented Whooper reviews. "Needs you" holds "Docker isn't running · 5
-reviews waiting" and two reviews to decide; the five waiting reviews, a running one, and two failed
-ones sit in their repository's groups (widgets joins the project folder of that name with `?work=1`,
-gadgets gets a group of its own), and the commented review from two days ago is in the folded Done
-group. Whooper's row reads "Can't review · Docker isn't running"; its menu and screen run Poll
-now, Pause or Resume, and Stop or Start in browser memory, and its Logs tab shows invented lines.
-The Docker row opens the cause screen: Retry all prints what each retry queued, then Run now
-prints an invented round. "add a retry policy for uploads" is review 2, with a new-commits banner
-and review 1 in its versions menu, read-only. Start the server with `PROMPTING_TIME_FIXTURE_PAGE`
+Use `?agents=reviews` for invented Whooper reviews. Whooper's pinned row reads "Can't review ·
+Docker isn't running" in red and opens the cause screen: Retry all prints what each retry queued,
+then Run now prints an invented round, and Remove all asks first, then removes the five waiting
+reviews with Undo. "Needs you" shows five of seven reviews ready to approve with "Show 2 more",
+two that need a look, and two failed ones; Reviewing, "Waiting · Docker isn't running", and Done
+start folded. "Search PRs and chats" finds a review by number, title words, author, or repo, and
+"keep focus" finds a removed review, whose page offers Restore. Remove on a row or in a review's
+header, Skip, and Submit open the next item in Needs you and say so in a notice with Undo.
+Whooper's Runs tab has its own search. "add a retry policy for uploads" is review 2, with a
+new-commits banner and review 1 in its versions menu, read-only. Drag the sidebar's right edge to
+resize it; the width stays after a reload. Start the server with `PROMPTING_TIME_FIXTURE_PAGE`
 set to a built plugin page folder, such as Whooper's `page/dist` after `npm ci && npm run build`
 in its `page/`, and the server serves it at `/plugin-page/` with the headers the app's
 `pt-plugin://` scheme sends. Open a finished review to see it in the page; Submit review opens the
@@ -216,8 +219,8 @@ editor receives focus; returning through the palette restores the original draft
 
 Check ArrowUp/ArrowDown selection, no results, and Control-K toggling as well.
 From Markdown preview, the Focus message command must restore editing without
-changing raw text. New conversation must close the palette before focusing Choose
-folder; simulated creation focuses the new editor. Opening the narrow inspector
+changing raw text. New chat must close the palette before focusing its first
+place; simulated creation focuses the new editor. Opening the narrow inspector
 must focus its close button. Command-K must not open another dialog behind the
 inspector or a creation/interruption dialog. Confirm no horizontal overflow and
 that long palette lists scroll internally. Library behavior still needs these
@@ -299,8 +302,8 @@ Navigate to the child and back through its ancestor path using Enter; the parent
 draft, preview, and reading position must survive the child visit.
 
 Exercise Filter by keyboard, select Completed, hide/show the sidebar, and verify
-the radio selection persists. Search and New must appear only once, moving to the
-header while the sidebar is hidden. Open More → Archive and cancel: focus returns
+the radio selection persists. Search (the palette) stays in the header, and New chat
+must appear only once, moving to the header while the sidebar is hidden. Open More → Archive and cancel: focus returns
 to More. Open Command-K from More and cancel: no stale menu item receives focus.
 From Search, use the palette to hide the sidebar, then reopen it from header
 Search; focus should return to the moved trigger. Repeat creation cancellation

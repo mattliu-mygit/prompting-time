@@ -39,15 +39,15 @@ Additional providers, remote execution, learned routing, scheduled tasks, mobile
 
 The main window uses a three-pane command-center layout:
 
-- The left pane, All work, lists the root conversations waiting on you first, under "Needs you", then groups the rest by project; a status filter narrows the list. Expanding any conversation reveals its child conversations, recursively. Each row shows its own provider and current status in one muted line with a status dot. Background agents, such as Whooper, follow at the bottom, one row each with a status sentence and a menu of its controls; selecting one shows its screen: Poll now, Pause or Resume, Stop or Start, its health, and Runs, Logs, and Settings tabs. Plugin reviews sit in their repository's project group like conversations, those waiting on your decision under "Needs you" with one row per cause that blocks every review, and those finished before today in a folded Done group. A review opens in the plugin's own page, framed in the center pane with a sandbox that leaves it only postMessage to Prompting Time, under a header with its version, earlier versions (read-only), Rerun review, Skip, and a new-commits banner. A failed or waiting review, which that page cannot show, opens on Prompting Time's own screen instead: why it failed, earlier answers, and Ask why.
+- The left pane, All work, starts with the background agents, such as Whooper, pinned above its scrolling list, one compact row each with its status in words (in red while a cause blocks every review, opening that cause), Pause or Resume (Start while stopped), Poll now, and a menu with Stop, Settings, and Open logs; selecting an agent shows its screen: those controls, its health, and Runs (searchable by pull request), Logs, and Settings tabs. Below them, "Search PRs and chats" finds a pull request by number, title, author, or repo in every state, and chats by title or folder. The list folds into sections with counts, remembered across launches, and only "Needs you" starts open: reviews ready to approve, reviews that need a look, reviews that failed for a reason of their own, and the root conversations waiting on you, five of each before "Show N more". Then come Reviewing, one section per cause that blocks every review, each project's chats, and Done; a status filter narrows the list, and the sidebar resizes from its right edge. Expanding any conversation reveals its child conversations, recursively. Each row shows its own status in one muted line with a status dot; a review's row adds its author and findings. A review opens in the plugin's own page, framed in the center pane with a sandbox that leaves it only postMessage to Prompting Time, under a header with its version, earlier versions (read-only), Rerun review, Skip, Remove (Restore once removed), and a new-commits banner; after Submit, Skip, or Remove the next item in "Needs you" opens. A failed or waiting review, which that page cannot show, opens on Prompting Time's own screen instead: why it failed, earlier answers, and Ask why.
 - The center pane prioritizes the selected conversation: readable assistant responses, compact user messages, expandable tool activity, approvals, and the composer. Provider identity stays visible without dominating the text.
 - The right inspector shows routing rationale, workspace and worktree state, changed files, active agents, and explicitly disclosed diagnostics. It is collapsible for focus and smaller windows.
 
 One 48–56px application header holds the selected conversation title, actual
 provider and run status, pane toggles, and a More menu for archival. There is no
-second workspace title row or visible Timeline heading. The sidebar heading shares
-a row with Search, New conversation, and a status filter; Search and New move to
-the header when the sidebar is hidden. The filter retains its current selection
+second workspace title row or visible Timeline heading. The header holds the
+palette's Search; the sidebar's search field shares a row with New chat and a status
+filter, and New chat moves to the header when the sidebar is hidden. The filter retains its current selection
 while toggling the sidebar. Menu cancellation restores the trigger, and menu-to-
 dialog or palette transitions restore focus only to controls that remain mounted.
 Shared dropdown primitives and icons avoid separate custom menu machinery.
@@ -237,15 +237,16 @@ message-column width; it does not change routing or submission semantics.
 
 ### Conversation creation
 
-A fresh installation offers a compact new-conversation chooser with **Choose folder**,
-**Without a folder**, and collapsed **Advanced** options. Choose folder opens the native
-macOS single-directory picker. Selection automatically validates and classifies the
+**New chat** asks where the agent should work: the folders of recent chats (up to five,
+most recent first), **Another folder…**, **No folder** for questions that need no code,
+and collapsed **Advanced** options. Another folder… opens the native macOS
+single-directory picker; a recent folder skips it. Selection automatically validates and classifies the
 directory, prepares the workspace, creates and selects an empty conversation, and
 focuses the composer without another form or manual inspection action. Picker cancellation
 creates nothing and returns to the chooser. Creation does not start a provider or submit
 a prompt.
 
-The folder name supplies the initial title, with **New conversation** as the fallback
+The folder name supplies the initial title, with **New chat** as the fallback
 and projectless title. No title or objective is required. The initial objective is empty;
 ordinary message history carries the first user request without inferred instructions,
 an extra naming model call, or duplicated metadata. Advanced allows routing and Git

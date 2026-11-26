@@ -10,6 +10,7 @@ export const reviewActions: PluginAction[] = [
   { name: "ask", title: "Ask about this", description: "Answers a question about a review with a run of the review's agent that reads the review's record and writes nothing else.", confirm: false },
   { name: "retry", title: "Retry a review", description: "Queues the pull request of a review for the next round, which reviews its head again.", confirm: false },
   { name: "skip", title: "Skip a review", description: "Marks a review done without submitting it; --undo takes that back.", confirm: false },
+  { name: "remove", title: "Remove a review", description: "Takes a review out of the lists; its files stay, and --undo puts it back.", confirm: false },
 ];
 
 const at = (daysAgo: number, hours: number, minutes = 0) => {
@@ -25,6 +26,7 @@ type Entry = {
   outcome: "running" | "reviewed" | "failed" | "waiting"; verdict: string | null; skipped: boolean; findings: number;
   submitted: { event: "APPROVE" | "COMMENT"; at: string } | null; needs_you: boolean;
   head_sha: string | null; pr_head_sha: string | null; cause: Cause | null; skipped_by_user: boolean;
+  author: string | null; removed_by_user: boolean;
 };
 
 /** The cause that blocks every review in this fixture: Docker stopped, so each review's setup failed. */
@@ -35,8 +37,15 @@ type Drafts = { event: "APPROVE" | "COMMENT"; message: string; findings: Record<
 type Finding = { id: string; path: string; line: number; side: "RIGHT"; title: string; draft: string; kind: string };
 type Ask = { question: string; finding: string | null; answer: string; agent: string; started_at: string; ended_at: string; transcript: string | null };
 
-const run = (entry: Omit<Entry, "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user" | "url" | "skipped"> & Partial<Entry>): Entry => ({
-  url: null, skipped: false, head_sha: sha(entry.pr), pr_head_sha: sha(entry.pr), cause: null, skipped_by_user: false, ...entry,
+/** Invented GitHub logins, one per pull request number's last digit. */
+const authors = ["ade-o", "lin-w", "rhea-k", "jon-b", "mika-s", "priya-r", "tomasz-p", "sam-t", "noor-a", "eli-v"];
+const run = (entry: Omit<Entry, "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user" | "url" | "skipped" | "author" | "removed_by_user"> & Partial<Entry>): Entry => ({
+  url: null, skipped: false, head_sha: sha(entry.pr), pr_head_sha: sha(entry.pr), cause: null, skipped_by_user: false,
+  author: authors[entry.pr % 10]!, removed_by_user: false, ...entry,
+});
+/** A finished review that waits on the user, `minutes` after 9:00 today. */
+const reviewed = (pr: number, repo: string, title: string, verdict: string, findings: number, minutes: number) => run({
+  run_id: `fixture-run-${pr}`, repo, pr, title, started_at: at(0, 9, minutes), ended_at: at(0, 9, minutes + 20), outcome: "reviewed", verdict, findings, submitted: null, needs_you: true,
 });
 const waiting = (pr: number, repo: string, title: string, minutes: number) => run({ run_id: `fixture-run-${pr}`, repo, pr, title, started_at: at(0, 14, minutes), ended_at: null, outcome: "waiting", verdict: null, findings: 0, submitted: null, needs_you: false, cause: dockerCause });
 
@@ -45,6 +54,16 @@ const entries: Entry[] = [
   // Review 2 of #101: the pull request moved on after it, so its header offers Rerun review.
   run({ run_id: "fixture-run-101", repo: "acme/widgets", pr: 101, title: "add a retry policy for uploads", started_at: at(0, 14, 0), ended_at: at(0, 14, 25), outcome: "reviewed", verdict: "approve_once_ci_passes", findings: 2, submitted: null, needs_you: true, pr_head_sha: sha(9101) }),
   run({ run_id: "fixture-run-103", repo: "acme/widgets", pr: 103, title: "cap the upload retry delay", started_at: at(0, 11, 0), ended_at: at(0, 11, 20), outcome: "reviewed", verdict: "look_first", findings: 1, submitted: null, needs_you: true }),
+  // Enough reviews ready to approve that Needs you shows five and "Show 2 more".
+  reviewed(105, "acme/widgets", "drop the unused metrics exporter from the upload client", "approve_once_ci_passes", 0, 30),
+  reviewed(106, "acme/widgets", "fix the timezone in exported traces", "approve_once_ci_passes", 1, 20),
+  reviewed(66, "acme/gadgets", "lazy-load the chart bundle", "approve_once_ci_passes", 0, 10),
+  reviewed(67, "acme/gadgets", "rename the queue worker settings", "approve_once_ci_passes", 1, 5),
+  reviewed(68, "acme/gadgets", "validate project names before creating buckets", "approve_once_ci_passes", 2, 0),
+  reviewed(107, "acme/widgets", "move the span tree into its own package", "approve_once_ci_passes", 2, 0),
+  reviewed(69, "acme/gadgets", "show token counts in the trace sidebar", "look_first", 2, 15),
+  // Removed by the user: it leaves the lists, and search finds it, tagged removed.
+  run({ ...reviewed(108, "acme/widgets", "keep focus in the date picker after Escape", "approve_once_ci_passes", 2, 40), needs_you: false, removed_by_user: true }),
   waiting(110, "acme/widgets", "split the upload client", 30),
   waiting(111, "acme/widgets", "log slow uploads", 31),
   waiting(62, "acme/gadgets", "index gadgets by owner", 30),
@@ -184,9 +203,16 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
   switch (sent.action) {
     case "show-review": {
       if (!entry) return refused(`whooper-show: no run ${runId}`);
+      if (entry.outcome === "reviewed" && !findings[runId]) {
+        // A review without findings of its own gets the nits, or the question when Whooper says look first.
+        findings[runId] = entry.verdict === "look_first"
+          ? { verdict: "look_first", reason: "One question about the delay.", findings: [question] }
+          : { verdict: "approve_once_ci_passes", reason: "Small and tested.", findings: nits.slice(0, Math.min(entry.findings, 2)) };
+        drafts[runId] = { event: entry.verdict === "look_first" ? "COMMENT" : "APPROVE", message: "", findings: Object.fromEntries(findings[runId]!.findings.map((finding) => [finding.id, { included: entry.verdict !== "look_first" }])) };
+      }
       const found = findings[runId];
       return result({ stdout: JSON.stringify({
-        version: 1, run_id: runId, run: { repo: entry.repo, pr: entry.pr }, title: entry.title, author: "fixture-author", outcome: entry.outcome,
+        version: 1, run_id: runId, run: { repo: entry.repo, pr: entry.pr }, title: entry.title, author: entry.author, outcome: entry.outcome,
         findings: found ? { status: "reviewed", skip_reason: "", approval: { verdict: found.verdict, reason: found.reason }, findings: found.findings } : null,
         drafts: drafts[runId] ?? null, diff: found ? patch : null,
         failure: failures[runId] ?? null, asks: asks[runId] ?? [], submitted: entry.submitted,
@@ -217,6 +243,11 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
       if (!entry) return refused(`whooper-retry: no run ${runId} in /synthetic/state/whooper/runs`);
       if (entry.outcome === "running") return refused(`whooper-retry: ${entry.repo}#${entry.pr} is being reviewed now`);
       return result({ stdout: `queued ${entry.repo}#${entry.pr} for the next round\n` });
+    case "remove":
+      if (!entry) return refused(`whooper-remove: no run ${runId} in /synthetic/state/whooper/runs`);
+      entry.removed_by_user = !rest.includes("--undo");
+      entry.needs_you = !entry.removed_by_user && !entry.skipped_by_user && entry.outcome !== "running" && entry.outcome !== "waiting" && entry.submitted === null;
+      return result({ stdout: `${entry.removed_by_user ? "removed" : "restored"} ${entry.repo}#${entry.pr}\n` });
     case "skip":
       if (!entry) return refused(`whooper-skip: no run ${runId} in /synthetic/state/whooper/runs`);
       entry.skipped_by_user = !rest.includes("--undo");

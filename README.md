@@ -52,14 +52,15 @@ Claude runs with default permissions through stdio, empty filesystem settings so
 
 A conversation can run without a project. For a Git project, Prompting Time defaults to a dedicated worktree so concurrent conversations do not share a checkout. You can explicitly choose the current checkout instead. A non-Git directory runs directly because Git worktree isolation is unavailable.
 
-Choose **New conversation → Choose folder** to use the native macOS folder picker.
-Prompting Time checks the folder automatically, creates the conversation, and puts
-the cursor in the composer. No title, objective, typed path, or manual directory
-check is required. The folder name supplies the initial title; your first message
-supplies the task. **Without a folder** starts a projectless conversation.
+**New chat** asks where the agent should work: the folders of your recent chats (up to
+five, most recent first), **Another folder…**, which opens the native macOS folder
+picker, or **No folder**, for questions that don't need code. Prompting Time checks the
+folder automatically, creates the chat, and puts the cursor in the composer. No title,
+objective, typed path, or manual directory check is required. The folder name supplies
+the initial title; your first message supplies the task.
 
-New conversations use **Auto · Best fit**. The collapsed **Advanced** options let you
-change routing or choose the current Git checkout before selecting a folder. Isolated
+New chats use **Auto · Best fit**. The collapsed **Advanced** options let you
+change routing or choose the current Git checkout before choosing a folder. Isolated
 worktrees do not copy uncommitted checkout edits, and failed isolation never silently
 falls back to the current checkout. Existing conversations keep their saved settings.
 
@@ -75,8 +76,11 @@ supported, with the inspector opening as an overlay when it would crowd the chat
 
 A single compact header holds the conversation title, provider, current status,
 and pane controls. **More → Archive conversation** keeps archival out of the main
-reading area. The sidebar puts **Search**, **New conversation**, and the status
-filter beside its heading; Search and New move into the header when it is hidden.
+reading area. The sidebar starts with the pinned background agents, then **Search PRs
+and chats**, **New chat**, and the status filter above its list; New chat moves into the
+header when the sidebar is hidden, and the palette's **Search** stays in the header. Drag
+the sidebar's right edge, or focus it and use the arrow keys, to make it 220 to 520 pixels
+wide; the width, like which of its sections are open, is remembered on this device.
 
 On macOS, **⌘+** (or **⌘=**) zooms the whole app in, **⌘−** zooms out, and
 **⌘0** resets to 100%. Zoom ranges from 75% to 200% in 25-point steps and is
@@ -174,18 +178,21 @@ leaves the outcome unconfirmed, with no replay.
 Prompting Time can host background agents, such as Whooper, as plugins. The Rust core installs,
 checks, starts, and stops them, and the window shows them.
 
-- **Screens.** Installed plugins sit at the bottom of All work, under Background agents, one quiet
-  row each: the name, one status sentence from the plugin's process and its `status` action, such
-  as "Running · next poll 3:45 PM", "Paused", "Stopped", or, in red, "Can't review · Docker isn't
-  running" while the status reports a cause that blocks every review, and a ⋯ menu with Poll now
-  (the `round` action), Pause or Resume (`pause`, `resume`), Stop or Start, Settings, and Open logs.
-  A row opens the plugin's screen: the same sentence and controls, its health (the last poll,
-  today's counts, and its `rounds` per day for 15 days), and the tabs Runs (rounds and every review
-  run, filtered to all, failed, or skipped), Logs (the end of its log, with search and copy), and
-  Settings (where it came from, who runs it, the programs it needs, and its settings in a form drawn
-  from its settings schema, which the plugin checks and saves). Stop asks first and names the
-  reviews in progress it ends. The add button beside Background agents installs a release archive
-  on this Mac, checked by its SHA-256, or runs a plugin folder in place, for development.
+- **Screens.** Installed plugins sit pinned at the top of the sidebar, outside its scrolling list,
+  one compact row each: the name, which opens the plugin's screen; Pause or Resume (`pause`,
+  `resume`), Start while it is stopped, and Poll now (`round`) as buttons; a ⋯ menu with Stop,
+  Settings, and Open logs; and its status in words from its process and its `status` action, such
+  as "Running · next poll 3:45 PM", "Paused", or "Stopped". While the status reports a cause that
+  blocks every review (`blocked`), the words read in red, "Can't review · Docker isn't running",
+  until the plugin clears it, and open the cause's screen. The plugin's screen has the same words
+  and controls, its health (the last poll, today's counts, and its `rounds` per day for 15 days),
+  and the tabs Runs (rounds and every review run, filtered to all, failed, or skipped, and searched
+  by pull request: number, title, author, or repo), Logs (the end of its log, with search and
+  copy), and Settings (where it came from, who runs it, the programs it needs, and its settings in
+  a form drawn from its settings schema, which the plugin checks and saves). Stop asks first and
+  names the reviews in progress it ends. With no plugin installed the pinned row offers to install
+  one, and the palette always does: from a release archive on this Mac, checked by its SHA-256, or
+  by running a plugin folder in place, for development.
 
 - **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
   and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
@@ -234,17 +241,25 @@ checks, starts, and stops them, and the window shows them.
   to the shown run's files.
 - **Reviews.** A plugin's status may list `reviews`, as `whooper-status --json` does: the runs of the
   last 30 days, each with the commit it reviewed (`head_sha`), the pull request's head
-  (`pr_head_sha`), a `cause` when it failed or waits, and whether you skipped it. All work lists
-  the newest run of each pull request like a conversation: under "Needs you" while it waits on your
-  decision, in the project whose folder has the repository's name (else a group named after the
-  repository) while it runs, waits, failed, or finished today, and in a folded Done group once you
-  submitted or skipped it before today. "Needs you" also holds one row per cause that blocks every
-  review (`blocked`, or a cause with scope `all`), whose screen retries each waiting or failed review
-  with `retry <run>` and then offers Run now, asks about one with `ask`, and opens the logs.
-  Command-J steps through "Needs you", and Command-K finds every review. A review's header shows
-  "Review N · <short sha> · <time>" with the pull request's other versions (an earlier one is
-  read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run> [--undo]`), and a banner when
-  the pull request has commits after the reviewed one.
+  (`pr_head_sha`), its `author`, a `cause` when it failed or waits, and whether you skipped or
+  removed it (`skipped_by_user`, `removed_by_user`). The sidebar lists the newest run of each pull
+  request in sections that fold to a heading with a count; only "Needs you" starts open. It holds
+  Ready to approve (the plugin says approve once CI passes and read the whole change), Needs a look,
+  Review failed (a cause of the pull request's own), and Chats waiting on you, five items each
+  before "Show N more". Then come Reviewing, one "Waiting · <cause>" section per cause that blocks
+  every review (`blocked`, or a cause with scope `all`), the chats of each project, and Done. A
+  review's row has a two-line title and "widgets#101 · @author · 2 findings". "Search PRs and
+  chats" finds a pull request by number, title words, author, or repo in every state, removed ones
+  tagged "removed", and chats by title or folder; Escape clears it and Enter opens the first
+  result. A cause's screen retries each waiting or failed review with `retry <run>` and then offers
+  Run now, asks about one with `ask`, opens the logs, and has Remove all, which asks first. Remove,
+  on each review's row and in its header, runs `remove <run>`: the review leaves the lists, its
+  files stay on disk, and a notice offers Undo (`remove <run> --undo`); a removed review's page has
+  Restore. After Submit, Skip, or Remove of the open review, the next item in "Needs you" opens and
+  the notice names it. Command-J steps through "Needs you", and Command-K finds every review. A
+  review's header shows "Review N · <short sha> · <time>" with the pull request's other versions
+  (an earlier one is read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run>
+  [--undo]`), Remove, and a banner when the pull request has commits after the reviewed one.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a
