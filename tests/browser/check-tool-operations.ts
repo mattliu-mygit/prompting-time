@@ -10,15 +10,8 @@ export function checkToolOperations() {
   const failed = row(6);
   const message = getComputedStyle(required(".timeline-message .pt-markdown"));
   const visibleButtons = [running, failed].flatMap(element => [...element.querySelectorAll<HTMLButtonElement>("button")]);
-  // A control is a 30px target, Sigil's small control height, or an inline text button such as
-  // Show details: 12px text or larger in a summary line at least 30px high.
-  const usable = (element: HTMLButtonElement) => {
-    const box = element.getBoundingClientRect();
-    if (box.width >= 29.5 && box.height >= 29.5) return true;
-    const line = element.closest<HTMLElement>(".tool-operation-summary");
-    return element.matches(".disclosure-link") && Number.parseFloat(getComputedStyle(element).fontSize) >= 12
-      && line !== null && line.getBoundingClientRect().height >= 29.5;
-  };
+  // Every control, Show details too, is a 30px target: Sigil's small control height.
+  const usable = (element: HTMLButtonElement) => element.getBoundingClientRect().height >= 29.5;
   const result = {
     runningHeight: running.getBoundingClientRect().height,
     failedHeight: failed.getBoundingClientRect().height,
@@ -34,7 +27,7 @@ export function checkToolOperations() {
   if (!result.runningTitle || !result.failedTitle) failures.push("running and failed operations must remain directly visible");
   if (result.runningHeight > 56 || result.failedHeight > 56) failures.push("closed operation rows are too tall");
   if (result.messageFont !== "16px" || result.messageLineHeight !== "26px") failures.push("message readability changed");
-  if (!visibleButtons.length || result.targets.some(({ usable }) => !usable)) failures.push("detail controls need 30px targets or a 30px line");
+  if (!visibleButtons.length || result.targets.some(({ usable }) => !usable)) failures.push("detail controls need 30px targets");
   if (result.horizontalOverflow || result.verticalOverflow) failures.push("layout escapes viewport");
   if (failures.length) throw new Error(JSON.stringify({ failures, result }));
   return result;

@@ -21,16 +21,10 @@ export function checkReadability({ inspectorOpen = false } = {}) {
   const smallText = [...document.querySelectorAll<HTMLElement>("body *")]
     .filter((element) => visible(element) && [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) && px(element) < 12)
     .map((element) => ({ tag: element.tagName, className: element.className, size: px(element) }));
-  // Three smaller controls sit inside a larger target: a section's heading toggle spans the
-  // sidebar, a row's expand and remove buttons sit in a tree row at least 36px high, and an inline
-  // text button such as Show details is text in its line.
-  const sidebarWidth = document.querySelector<HTMLElement>(".all-work")?.getBoundingClientRect().width ?? 0;
-  const insideLargerTarget = (element: HTMLElement) => {
-    const box = element.getBoundingClientRect();
-    if (element.matches(".work-group-toggle")) return box.height >= 27.5 && box.width >= sidebarWidth * 0.9;
-    if (element.matches(".work-disclosure, .work-remove")) return (element.closest<HTMLElement>('[role="treeitem"]')?.getBoundingClientRect().height ?? 0) >= 35.5;
-    return element.matches(".disclosure-link");
-  };
+  // One kind of control is smaller and sits inside a larger target: a row's expand and remove
+  // buttons, in a tree row at least 36px high.
+  const insideLargerTarget = (element: HTMLElement) =>
+    element.matches(".work-disclosure, .work-remove") && (element.closest<HTMLElement>('[role="treeitem"]')?.getBoundingClientRect().height ?? 0) >= 35.5;
   const smallTargets = controls.filter((element) => element.getBoundingClientRect().height < 29.5 && !insideLargerTarget(element))
     .map((element) => ({ tag: element.tagName, className: element.className, height: element.getBoundingClientRect().height }));
   const smallControlText = controls.filter((element) => px(element) < 12)

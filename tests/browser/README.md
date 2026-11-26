@@ -344,7 +344,7 @@ playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/c
 ```
 
 The check requires compact rows, unchanged message typography, usable detail
-targets (30px controls, or inline text buttons such as Show details in a 30px line),
+targets (30px controls, Show details included),
 and no page overflow. Repeat with `&tool-provider=claude`.
 
 Use `?chat=tools` for invented read/search/command operations, a running operation,
@@ -401,7 +401,7 @@ Use `?chat=reading` at 1440 × 900 and 960 × 600. With the inspector initially 
 open **Chats · no folder**, so the sidebar shows rows, and run the
 computed-font/target/layout check, which holds the design spec's sizes from Sigil's
 default preset: no text under 12px, 14px buttons and fields, 13px code, and 30px
-controls except the three the spec names inside a larger target:
+controls except a row's expand and remove buttons, which the spec names inside the row:
 
 ```sh
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-readability.ts")).checkReadability()'

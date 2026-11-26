@@ -70,11 +70,10 @@ larger headings retain their hierarchy. Typed text uses the normal foreground co
 placeholder and metadata remain secondary. Shared rem-based sizes preserve scaling
 without global zoom. Buttons, fields, selects, and menu items are at least 30px high
 and icon buttons 30px square (`controls.height-sm`, 30px), and conversation rows are
-at least 36px high. Three smaller controls sit inside a larger target: a section's
-heading is a 28px toggle across the sidebar's width; a row's expand and remove buttons
-are 20px, and the row's arrow keys and the review's header also reach what they do;
-and inline text buttons, such as Show details, are 12px text in a line at least 30px
-high. Long text wraps or scrolls within its own region rather than creating horizontal
+at least 36px high. A section's heading is a 30px toggle across the sidebar's width,
+and inline text buttons, such as Show details, are 30px targets too. Only a row's
+expand and remove buttons are smaller, 20px inside the row, and the row's arrow keys
+and the review's header also reach what they do. Long text wraps or scrolls within its own region rather than creating horizontal
 window overflow.
 Conversation names occupy their own row, with provider/status metadata
 below, so badges do not crowd out nested names.

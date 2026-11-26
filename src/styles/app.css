@@ -79,7 +79,7 @@ body {
 /* The sections work like VS Code's sidebar panes: the open ones share the space above the stack
    of folded ones, which sits at the bottom, and each open one scrolls on its own. */
 .all-work {
-  --work-heading-size: calc(var(--s-space-24) + var(--s-space-4));
+  --work-heading-size: var(--s-control-height-sm);
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -661,7 +661,9 @@ body {
   margin-block-start: var(--s-space-4);
 }
 
+/* A 30px target, like every control, though it reads as a link. */
 .disclosure-link {
+  min-block-size: var(--s-control-height-sm);
   padding: 0;
   border: 0;
   background: none;
