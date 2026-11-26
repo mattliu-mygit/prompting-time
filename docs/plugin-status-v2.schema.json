@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mattliu-mygit/prompting-time/docs/plugin-status-v2.schema.json",
+  "title": "Prompting Time plugin status, format 2",
+  "description": "What a plugin's `status` action prints when its manifest declares `\"status\": {\"format\": 2, ...}`. Prompting Time draws the plugin's agent row, its blockers, and its items in All work, Needs you, Command-J, and the menu bar from this output. An item's `group` must be one of the manifest's `status.groups` ids, and its `actions` must be among the manifest's `status.item_actions`. Prompting Time drops an item or blocker that does not fit this schema, an item whose group the manifest does not declare, and an item past the 50th or with an id already listed; it ignores row actions the manifest does not allow and a blocker action the manifest does not declare, and keeps the rest.",
+  "type": "object",
+  "required": ["format", "agent", "blockers", "items", "truncated"],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "const": 2 },
+    "agent": {
+      "description": "The plugin's row: a few status words and a dot.",
+      "type": "object",
+      "required": ["words", "dot"],
+      "additionalProperties": false,
+      "properties": {
+        "words": { "type": "string", "description": "Such as \"Polling every 10 min\" or \"Idle · last run 2 min ago\"." },
+        "dot": { "$ref": "#/$defs/dot" }
+      }
+    },
+    "blockers": {
+      "description": "Problems that stop every job, such as a signed-out CLI. Prompting Time draws them above Needs you and in the menu bar badge.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "dot", "route"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "title": { "type": "string", "minLength": 1, "description": "Such as \"Codex is signed out\"." },
+          "dot": { "$ref": "#/$defs/dot" },
+          "route": { "$ref": "#/$defs/route" },
+          "action": { "type": "string", "minLength": 1, "description": "One of the manifest's actions that fixes or rechecks the blocker; it runs with no extra arguments." }
+        }
+      }
+    },
+    "items": {
+      "description": "Current items plus a bounded tail of finished ones, at most 50; set `truncated` when more exist. Full history belongs in the plugin's page.",
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": ["id", "group", "title", "dot", "updated_at", "route"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/id", "description": "Unique among the items; row actions receive it as `--item <id>`." },
+          "group": { "type": "string", "minLength": 1, "description": "One of the manifest's `status.groups` ids." },
+          "title": { "type": "string", "minLength": 1 },
+          "detail": { "type": ["string", "null"], "description": "One line of muted text under the title." },
+          "dot": { "$ref": "#/$defs/dot" },
+          "project": { "type": ["string", "null"], "description": "An absolute path of the project the item belongs to, if any." },
+          "updated_at": { "type": "string", "format": "date-time", "description": "ISO 8601 with an offset; items in a group list newest first." },
+          "route": { "$ref": "#/$defs/route" },
+          "actions": {
+            "description": "The row actions that apply to this item, each among the manifest's `status.item_actions`.",
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "truncated": { "type": "boolean", "description": "Whether the plugin left items out to stay within 50." }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1 },
+    "dot": {
+      "description": "The design spec's one color mapping: error red, attention orange, success green, running an uncolored dot, idle no dot.",
+      "enum": ["error", "attention", "success", "running", "idle"]
+    },
+    "route": {
+      "description": "Where the plugin's page shows this, such as \"/runs/run-74c91b1d\".",
+      "type": "string",
+      "pattern": "^/"
+    }
+  }
+}
