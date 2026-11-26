@@ -181,6 +181,10 @@ development URL. The optional [browser layout regression](tests/browser/README.m
 real frontend with synthetic data to check pane scrolling and composer visibility. It does not
 connect to native providers or establish native WebView acceptance.
 
+The shared UI library in [`packages/ui`](packages/ui/README.md) holds the theme and the Solid 2.0
+components that the Solid rewrite and plugin pages will use. `pnpm test` and `pnpm build` cover it;
+`pnpm --filter @prompting-time/ui gallery` serves its component gallery.
+
 Run the release checks with:
 
 ```sh
