@@ -40,12 +40,12 @@ describe("a background agent's row", () => {
     expect(describeAgent(fixturePlugin({ process: stopped }), undefined, now)).toEqual({ meta: "Stopped", status: "idle" });
   });
 
-  it("says in red that a cause blocks every review, before what a round does", () => {
+  it("says in red that a cause blocks every review, before what a round does, and names the cause", () => {
     const blocked = fixtureStatus(at(15, 45), {
       round: { running: true, started_at: at(8, 50), reviewing: null },
       blocked: { id: "docker", summary: "Docker isn't running", scope: "all", since: at(8, 10), waiting: 36 },
     });
-    expect(describeAgent(fixturePlugin(), status(blocked), now)).toEqual({ meta: "Can't review · Docker isn't running", status: "error" });
+    expect(describeAgent(fixturePlugin(), status(blocked), now)).toEqual({ meta: "Can't review · Docker isn't running", status: "error", cause: "docker" });
   });
 
   it("reads the rounds newest first, leaving out any that does not fit", () => {

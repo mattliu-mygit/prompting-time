@@ -35,10 +35,10 @@ export function agentControls(plugin: PluginSnapshot, read: PluginStatusRead | u
   return { poll, pause, power };
 }
 
-/** Menu items for the agent's controls, in this order, followed by Settings and the log under `logsLabel`. */
-export function agentMenuItems(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null, include: { poll: boolean; pause: boolean; logsLabel: string }): MenuItem[] {
+/** Menu items for the agent's controls that `include` names, in this order, followed by Settings and the log under `logsLabel`. */
+export function agentMenuItems(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null, include: { poll: boolean; pause: boolean; power: boolean; logsLabel: string }): MenuItem[] {
   const { poll, pause, power } = agentControls(plugin, read, pending);
-  const controls = [include.poll ? poll : null, include.pause ? pause : null, power].filter((control): control is Control => control !== null);
+  const controls = [include.poll ? poll : null, include.pause ? pause : null, include.power ? power : null].filter((control): control is Control => control !== null);
   return [
     ...controls.map((control) => ({ value: control.action, label: control.label, disabled: control.disabled })),
     { value: "settings", label: "Settings" },

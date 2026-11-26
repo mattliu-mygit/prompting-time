@@ -268,7 +268,7 @@ describe("plugin pages", () => {
     await settle();
 
     expect(screen.queryByRole("button", { name: /^Past reviews/ })).not.toBeInTheDocument();
-    click(await screen.findByRole("button", { name: /^Whooper Running/ }));
+    click(within(await screen.findByRole("region", { name: "Background agents" })).getByRole("button", { name: "Whooper" }));
     const runs = within(screen.getByRole("tabpanel", { name: "Runs" }));
     expect(runs.getAllByRole("row").slice(1).map((row) => row.querySelector("td:nth-child(2)")?.textContent))
       .toEqual(["Review widgets#101", "Review widgets#102", "Review gadgets#77", "Review widgets#101", "Review gadgets#55"]);
@@ -306,13 +306,17 @@ describe("background agents", () => {
     return { api, emit: (event: AppEvent) => handler?.(event) };
   }
 
-  it("shows each agent as a quiet row after the work groups, from its process and status", async () => {
+  it("pins each agent above the list, outside it, with its status in words", async () => {
     renderApp(agentsApi().api);
-    const row = await screen.findByRole("button", { name: `Whooper Running · next poll ${shortTime(nextPoll())}` });
-    expect(row.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
-    const heading = screen.getByRole("heading", { name: "Background agents" });
-    const workHeading = screen.getByRole("heading", { name: "No project" });
-    expect(workHeading.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const agents = await screen.findByRole("region", { name: "Background agents" });
+    expect(await within(agents).findByText(`Running · next poll ${shortTime(nextPoll())}`)).toBeVisible();
+    expect(within(agents).getByRole("button", { name: "Whooper" })).toHaveAccessibleDescription(`Running · next poll ${shortTime(nextPoll())}`);
+    expect(agents.querySelector(".agent-pin-status .pt-status-dot")).toHaveAttribute("data-status", "success");
+    const list = screen.getByRole("treeitem", { name: /Auth refactor/ });
+    expect(agents.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(agents.closest(".sidebar-scroll")).toBeNull();
+    expect(list.closest(".sidebar-scroll")).not.toBeNull();
+    expect(await axeViolations()).toEqual([]);
   });
 
   it("reads the agent again when a pluginChanged event arrives", async () => {
@@ -320,12 +324,12 @@ describe("background agents", () => {
     const fake = agentsApi(fixturePlugin(), () => fixtureStatus(nextPoll().toISOString(),
       reviewing ? { round: { running: true, started_at: null, reviewing } } : {}));
     renderApp(fake.api);
-    await screen.findByRole("button", { name: /^Whooper Running/ });
+    await screen.findByText(/^Running · next poll/);
     reviewing = "acme/widgets#101";
     fake.emit({ kind: "pluginChanged", sequence: "1", plugin: "whooper", files: ["round.lock/round.json"] });
 
-    const row = await screen.findByRole("button", { name: "Whooper Reviewing acme/widgets#101" });
-    expect(row.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
+    const words = await screen.findByText("Reviewing acme/widgets#101");
+    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
   });
 
   it("shows what is missing on an agent that cannot start", async () => {
@@ -335,20 +339,22 @@ describe("background agents", () => {
     });
     const { api } = agentsApi(stopped);
     renderApp(api);
-    const row = await screen.findByRole("button", { name: "Whooper Missing slackdump" });
-    expect(row.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    const words = await screen.findByText("Missing slackdump");
+    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(within(screen.getByRole("region", { name: "Background agents" })).getByRole("button", { name: "Start" })).toBeDisabled();
     expect(api.pluginRequest).not.toHaveBeenCalled();
   });
 
   it("opens an agent's screen from its row, its settings on a tab, and goes back to a conversation from All work", async () => {
     renderApp(agentsApi().api);
-    click(await screen.findByRole("button", { name: /^Whooper Running/ }));
+    const name = within(await screen.findByRole("region", { name: "Background agents" })).getByRole("button", { name: "Whooper" });
+    click(name);
 
     expect(await screen.findByRole("heading", { name: "Whooper", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Runs" })).toHaveAttribute("aria-selected", "true");
     click(screen.getByRole("tab", { name: "Settings" }));
     expect(await screen.findByRole("spinbutton", { name: "Poll every" })).toHaveValue(15);
-    expect(screen.getByRole("button", { name: /^Whooper Running/ })).toHaveAttribute("aria-current", "true");
+    expect(name).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("treeitem", { name: /Auth refactor/ })).toHaveAttribute("aria-selected", "false");
     click(screen.getByRole("button", { name: "Show inspector" }));
     expect(within(screen.getByRole("complementary", { name: "Inspector" })).getByText("Asks you first")).toBeInTheDocument();
@@ -368,7 +374,7 @@ describe("background agents", () => {
       return installed;
     });
     renderApp(api);
-    expect(await screen.findByText("None installed.")).toBeInTheDocument();
+    expect(await screen.findByText("No background agents")).toBeInTheDocument();
     click(screen.getByRole("button", { name: "Add background agent" }));
     click(await screen.findByRole("menuitem", { name: "Install from a release archive…" }));
 
@@ -385,13 +391,19 @@ describe("background agents", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
-  it("runs a plugin folder in place, and keeps a refused install in its dialog", async () => {
+  it("runs a plugin folder in place from the palette once an agent is installed, and keeps a refused install in its dialog", async () => {
     const { api } = agentsApi();
     api.pickPluginFolder = vi.fn().mockResolvedValue("/synthetic/whooper");
     api.installPlugin = vi.fn().mockRejectedValue(new BridgeError("plugin-manifest-invalid", "The plugin's manifest is invalid: fixture reason", null));
     renderApp(api);
-    click(await screen.findByRole("button", { name: "Add background agent" }));
-    click(await screen.findByRole("menuitem", { name: "Run a plugin folder in place…" }));
+    await screen.findByRole("region", { name: "Background agents" });
+    expect(screen.queryByRole("button", { name: "Add background agent" })).not.toBeInTheDocument();
+    press("k");
+    const search = await screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
+    fireEvent.input(search, { target: { value: "Run a plugin folder in place" } });
+    flush();
+    fireEvent.keyDown(search, { key: "Enter" });
+    flush();
     const dialog = await screen.findByRole("alertdialog", { name: "Run a plugin folder in place" });
     click(within(dialog).getByRole("button", { name: "Install" }));
 
@@ -430,25 +442,54 @@ describe("agent controls and blocking causes", () => {
     return { api, pluginRequest };
   }
 
-  it("runs Pause from the agent's row menu, and asks before Stop with the reviews it ends", async () => {
+  it("runs Pause and Poll now from the agent's pinned row, and asks before Stop with the reviews it ends", async () => {
     const { api, pluginRequest } = controlsApi();
     renderApp(api);
-    const row = await screen.findByRole("button", { name: "Whooper Can't review · Docker isn't running" });
-    expect(row.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    const agents = await screen.findByRole("region", { name: "Background agents" });
+    const words = await within(agents).findByRole("button", { name: "Can't review · Docker isn't running" });
+    expect(words.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    expect(agents.querySelector(".agent-pin")).toHaveAttribute("data-blocked");
 
-    click(screen.getByRole("button", { name: "Whooper actions" }));
-    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Poll now", "Pause", "Stop", "Settings", "Open logs"]);
-    click(screen.getByRole("menuitem", { name: "Pause" }));
+    click(within(agents).getByRole("button", { name: "Pause" }));
     await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "pause", args: [], confirmedFingerprint: null }));
+    await waitFor(() => expect(within(agents).getByRole("button", { name: "Poll now" })).toBeEnabled());
+    click(within(agents).getByRole("button", { name: "Poll now" }));
+    await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "round", args: [], confirmedFingerprint: null }));
 
+    await waitFor(() => expect(within(agents).getByRole("button", { name: "Poll now" })).toBeEnabled());
     click(screen.getByRole("button", { name: "Whooper actions" }));
-    click(await screen.findByRole("menuitem", { name: "Stop" }));
+    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Stop", "Settings", "Open logs"]);
+    click(screen.getByRole("menuitem", { name: "Stop" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Stop Whooper?" });
     expect(dialog).toHaveTextContent("widgets#102 · acme/widgets#102");
     expect(api.stopPlugin).not.toHaveBeenCalled();
     click(within(dialog).getByRole("button", { name: "Stop Whooper" }));
     await waitFor(() => expect(api.stopPlugin).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("opens the cause from the pinned row's red words, and offers Start in place of Pause once stopped", async () => {
+    const { api } = controlsApi();
+    const stopped = fixturePlugin({ actions: [...pageActions, { name: "pause", title: "Pause", description: "Pauses the schedule.", confirm: false }, { name: "resume", title: "Resume", description: "Resumes the schedule.", confirm: false }], process: { kind: "notRunning", exit: null } });
+    api.startPlugin = vi.fn(async () => stopped);
+    renderApp(api);
+    const agents = await screen.findByRole("region", { name: "Background agents" });
+    const words = await within(agents).findByRole("button", { name: "Can't review · Docker isn't running" });
+    click(words);
+    await settle();
+    expect(screen.getByRole("main", { name: "Blocked reviews" })).toBeInTheDocument();
+    expect(words).toHaveAttribute("aria-current", "true");
+
+    api.listPlugins = vi.fn(async () => [stopped]);
+    await stores[0]!.refreshPlugins();
+    await settle();
+    expect(within(agents).getByText("Stopped")).toBeVisible();
+    expect(within(agents).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    expect(within(agents).getByRole("button", { name: "Poll now" })).toBeDisabled();
+    click(within(agents).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(api.startPlugin).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper" }));
+    click(screen.getByRole("button", { name: "Whooper actions" }));
+    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Settings", "Open logs"]);
   });
 
   it("opens a blocking cause from Needs you and retries each review it stopped, then offers Run now", async () => {

@@ -85,12 +85,12 @@ export function shortTime(iso: string, now: Date): string {
 }
 
 /**
- * The one gray line and the dot of a background agent's row, which its screen repeats, such as
- * "Running · next poll 3:45 PM" with a green dot, or "Can't review · Docker isn't running" in red.
- * What stops the plugin from running comes first, then a cause that blocks every review, then what
- * its status says.
+ * The status words and the dot of a background agent's pinned row, which its screen repeats, such
+ * as "Running · next poll 3:45 PM" with a green dot, or "Can't review · Docker isn't running" in red
+ * with `cause`, the ID of that cause that blocks every review. What stops the plugin from running
+ * comes first, then a cause that blocks every review, then what its status says.
  */
-export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | undefined, now = new Date()): { meta: string; status: Status } {
+export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | undefined, now = new Date()): { meta: string; status: Status; cause?: string } {
   const process = plugin.process;
   if (process.kind === "notRunning") {
     const missing = missingPrograms(plugin);
@@ -104,7 +104,7 @@ export function describeAgent(plugin: PluginSnapshot, read: PluginStatusRead | u
   const status = readAgentStatus(read);
   if (!status) return { meta: "Running", status: "success" };
   const blocked = readBlocked(status);
-  if (blocked) return { meta: `Can't review · ${blocked.summary}`, status: "error" };
+  if (blocked) return { meta: `Can't review · ${blocked.summary}`, status: "error", cause: blocked.id };
   if (status.round.running) {
     return { meta: status.round.reviewing ? `Reviewing ${status.round.reviewing}` : "Polling now", status: "running" };
   }

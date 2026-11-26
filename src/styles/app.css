@@ -61,16 +61,23 @@ body {
   min-block-size: 0;
 }
 
-/* All work */
+/* All work: background agents pinned on top, then the list, which scrolls on its own. */
 .sidebar-pane {
   display: flex;
   flex: 0 0 var(--s-sidebar-width);
+  flex-direction: column;
+  min-block-size: 0;
+  border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.sidebar-scroll {
+  display: flex;
+  flex: 1;
   flex-direction: column;
   gap: var(--s-space-4);
   min-block-size: 0;
   padding: var(--s-space-12) var(--s-space-8);
   overflow-y: auto;
-  border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
 }
 
 .sidebar-toolbar {
@@ -164,42 +171,126 @@ body {
   margin: 0;
 }
 
-/* Background agents, below the work groups, as in the agreed mock */
-.agents-group {
-  margin-block-start: var(--s-space-12);
-  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+/* Background agents, pinned on top: one compact box per agent, with a red edge while a cause blocks every review. */
+.agents-pinned {
+  display: grid;
+  gap: var(--s-space-4);
+  padding: var(--s-space-8) var(--s-space-8) 0;
 }
 
-.agents-heading {
+.agents-empty {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--s-space-4);
 }
 
-.agents-heading .work-group-heading {
-  margin-block: var(--s-space-8) var(--s-space-4);
+.agents-list {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-/* An agent's row, with its menu at the end of the title line. */
-.agent-row {
-  position: relative;
+.agent-pin {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-space-4);
+  padding: var(--s-space-8) var(--s-space-8) var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  border-inline-start: var(--s-border-thick) var(--s-border-style) var(--s-border-strong);
+  background: var(--s-surface);
 }
 
-.agent-row .pt-list-row {
-  inline-size: 100%;
-  padding-inline-end: var(--s-space-32);
+.agent-pin[data-blocked] {
+  border-inline-start-color: var(--s-error);
 }
 
-.agent-row-menu {
-  position: absolute;
-  inset-block-start: var(--s-space-4);
-  inset-inline-end: var(--s-space-4);
+/* In a narrow sidebar the buttons move under the agent's name instead of hiding it. */
+.agent-pin-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-4);
 }
 
-/* Quiet like a work row's disclosure: the menu shows on the row you point at, focus, or open. */
-.agent-row:not(:hover, :focus-within, :has([aria-current="true"], [aria-expanded="true"])) .agent-row-menu {
-  opacity: 0;
+.agent-pin-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.agent-pin-name {
+  display: inline-flex;
+  flex: 1 0 auto;
+  align-items: center;
+  gap: var(--s-space-8);
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--s-text);
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-semibold);
+  text-align: start;
+  cursor: pointer;
+}
+
+.agent-pin-name svg {
+  flex: none;
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+  color: var(--s-text-muted);
+}
+
+.agent-pin-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-pin-name:hover span,
+.agent-pin-name[aria-current="true"] span,
+.agent-pin-blocked:hover span,
+.agent-pin-blocked[aria-current="true"] span {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.agent-pin .pt-button {
+  min-block-size: 1.625rem;
+  padding: 0 var(--s-space-8);
+  font-size: var(--s-size-xs);
+}
+
+.agent-pin .pt-icon-button {
+  inline-size: 1.625rem;
+  block-size: 1.625rem;
+}
+
+.agent-pin-status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-space-8);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  line-height: 1.4;
+  text-align: start;
+}
+
+.agent-pin-status .pt-status-dot {
+  flex: none;
+  margin-block-start: 0.35em;
+}
+
+.agent-pin-blocked {
+  color: var(--s-error);
+  cursor: pointer;
 }
 
 /* Done folds to its heading, which holds the toggle and the count. */

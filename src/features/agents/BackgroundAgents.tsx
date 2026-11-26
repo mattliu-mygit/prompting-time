@@ -1,75 +1,146 @@
-import { For, Show } from "solid-js";
-import { BotIcon, EllipsisIcon, ListRow, Menu, PlusIcon } from "@prompting-time/ui";
-import type { PluginsSnapshot } from "../../app/store";
-import { agentMenuItems, type AgentAction } from "./agentMenu";
+import { createUniqueId, For, Show } from "solid-js";
+import { BotIcon, Button, EllipsisIcon, Menu, PlusIcon, StatusDot, type MenuItem } from "@prompting-time/ui";
+import type { PluginsSnapshot, PluginStatusRead } from "../../app/store";
+import type { PluginSnapshot } from "../../bridge/types";
+import { agentControls, agentMenuItems, type AgentAction } from "./agentMenu";
+import { causeKey } from "./reviews";
 import { describeAgent } from "./status";
 
 export type InstallKind = "archive" | "folder";
+
+/** The two ways to add a plugin, for development: the sidebar's install menu and the palette's commands. */
+export const INSTALL_ITEMS: readonly (MenuItem & { value: InstallKind })[] = [
+  { value: "archive", label: "Install from a release archive…" },
+  { value: "folder", label: "Run a plugin folder in place…" },
+];
 
 type Props = {
   plugins: PluginsSnapshot;
   /** The plugin whose screen the workspace shows. */
   selected: string | null;
+  /** The key (causeKey) of the cause whose screen the workspace shows, if any. */
+  selectedCause: string | null;
   /** The control that runs now for each plugin, by plugin name. */
   pending: Readonly<Record<string, AgentAction>>;
   onSelect(name: string): void;
+  onOpenCause(name: string, cause: string): void;
   onAction(name: string, action: AgentAction): void;
   onInstall(kind: InstallKind): void;
 };
 
 /**
- * "Background agents" at the bottom of All work: one quiet row per installed plugin, with its
- * icon, name, one status sentence, and a status dot, and a menu beside it with Poll now, Pause or
- * Resume, Stop or Start, Settings, and Open logs. A row opens the plugin's screen. The add button
- * installs a plugin for development.
+ * Background agents, pinned at the top of the sidebar outside its scrolling list, so each agent and
+ * its controls stay one click away: one compact row per installed plugin. Without any, or when the
+ * list fails, it offers the install menu, which otherwise lives in the palette.
  */
 export function BackgroundAgents(props: Props) {
   return (
-    <section class="agents-group" aria-labelledby="agents-heading">
-      <div class="agents-heading">
-        <h2 id="agents-heading" class="work-group-heading">Background agents</h2>
-        <Menu
-          label="Add background agent"
-          icon={<PlusIcon />}
-          items={[
-            { value: "archive", label: "Install from a release archive…" },
-            { value: "folder", label: "Run a plugin folder in place…" },
-          ]}
-          onSelect={(value) => props.onInstall(value as InstallKind)}
-        />
-      </div>
-      <Show when={props.plugins.error}>{(error) => <p class="work-empty" role="alert">{error()}</p>}</Show>
-      <Show when={props.plugins.loaded && !props.plugins.error && props.plugins.items.length === 0}>
-        <p class="work-empty">None installed.</p>
-      </Show>
-      <ul class="work-rows">
-        <For each={props.plugins.items} keyed={(plugin) => plugin.name}>
-          {(plugin) => {
-            const status = () => props.plugins.statuses[plugin().name];
-            const row = () => describeAgent(plugin(), status());
-            return (
-              <li class="agent-row">
-                <ListRow
-                  icon={<BotIcon />}
-                  title={plugin().title}
-                  meta={row().meta}
-                  status={row().status}
+    <Show when={props.plugins.loaded}>
+      <section class="agents-pinned" aria-label="Background agents">
+        <Show when={props.plugins.error}>{(error) => <p class="work-empty" role="alert">{error()}</p>}</Show>
+        <Show when={props.plugins.items.length === 0}>
+          <div class="agents-empty">
+            <Show when={!props.plugins.error}><p class="work-empty">No background agents</p></Show>
+            <Menu label="Add background agent" icon={<PlusIcon />} items={INSTALL_ITEMS} onSelect={(value) => props.onInstall(value as InstallKind)} />
+          </div>
+        </Show>
+        <Show when={props.plugins.items.length > 0}>
+          <ul class="agents-list">
+            <For each={props.plugins.items} keyed={(plugin) => plugin.name}>
+              {(plugin) => (
+                <AgentRow
+                  plugin={plugin()}
+                  status={props.plugins.statuses[plugin().name]}
                   selected={props.selected === plugin().name}
-                  onClick={() => props.onSelect(plugin().name)}
+                  selectedCause={props.selectedCause}
+                  pending={props.pending[plugin().name] ?? null}
+                  onSelect={() => props.onSelect(plugin().name)}
+                  onOpenCause={(cause) => props.onOpenCause(plugin().name, cause)}
+                  onAction={(action) => props.onAction(plugin().name, action)}
                 />
-                <span class="agent-row-menu">
-                  <Menu
-                    label={`${plugin().title} actions`}
-                    icon={<EllipsisIcon />}
-                    items={agentMenuItems(plugin(), status(), props.pending[plugin().name] ?? null, { poll: true, pause: true, logsLabel: "Open logs" })}
-                    onSelect={(value) => props.onAction(plugin().name, value as AgentAction)}
-                  />
-                </span>
-              </li>
-            );
-          }}
-        </For>
-      </ul>
-    </section>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
+type RowProps = {
+  plugin: PluginSnapshot;
+  status: PluginStatusRead | undefined;
+  selected: boolean;
+  selectedCause: string | null;
+  pending: AgentAction | null;
+  onSelect(): void;
+  onOpenCause(cause: string): void;
+  onAction(action: AgentAction): void;
+};
+
+/**
+ * One agent: its name, which opens its screen; Pause or Resume, or Start while it is stopped, and
+ * Poll now as buttons; a ⋯ menu with Stop, Settings, and Open logs; and its status in words under
+ * them. While the status reports a cause that blocks every review, the words read in red, such as
+ * "Can't review · Docker isn't running", until the plugin clears it, and open the cause's screen.
+ */
+function AgentRow(props: RowProps) {
+  const statusId = createUniqueId();
+  const words = () => describeAgent(props.plugin, props.status);
+  const controls = () => agentControls(props.plugin, props.status, props.pending);
+  // Start takes Pause's place while the agent is stopped, so the menu keeps only Stop.
+  const first = () => (controls().power.action === "start" ? controls().power : controls().pause);
+  return (
+    <li class="agent-pin" data-blocked={words().cause ? "" : undefined}>
+      <div class="agent-pin-top">
+        <button
+          type="button"
+          class="agent-pin-name"
+          aria-current={props.selected ? "true" : undefined}
+          aria-describedby={statusId}
+          title={`Open ${props.plugin.title}'s screen: runs, logs, and settings`}
+          onClick={() => props.onSelect()}
+        >
+          <BotIcon />
+          <span>{props.plugin.title}</span>
+        </button>
+        <span class="agent-pin-actions">
+          <Show when={first()}>
+            {(control) => <Button disabled={control().disabled} onClick={() => props.onAction(control().action)}>{control().label}</Button>}
+          </Show>
+          <Show when={controls().poll}>
+            {(control) => <Button disabled={control().disabled} onClick={() => props.onAction(control().action)}>{control().label}</Button>}
+          </Show>
+          <Menu
+            label={`${props.plugin.title} actions`}
+            icon={<EllipsisIcon />}
+            items={agentMenuItems(props.plugin, props.status, props.pending, { poll: false, pause: false, power: controls().power.action === "stop", logsLabel: "Open logs" })}
+            onSelect={(value) => props.onAction(value as AgentAction)}
+          />
+        </span>
+      </div>
+      <Show
+        when={words().cause}
+        fallback={
+          <p id={statusId} class="agent-pin-status">
+            <StatusDot status={words().status} />
+            <span>{words().meta}</span>
+          </p>
+        }
+      >
+        {(cause) => (
+          <button
+            id={statusId}
+            type="button"
+            class="agent-pin-status agent-pin-blocked"
+            aria-current={props.selectedCause === causeKey(props.plugin.name, cause()) ? "true" : undefined}
+            onClick={() => props.onOpenCause(cause())}
+          >
+            <StatusDot status="error" />
+            <span>{words().meta}</span>
+          </button>
+        )}
+      </Show>
+    </li>
   );
 }

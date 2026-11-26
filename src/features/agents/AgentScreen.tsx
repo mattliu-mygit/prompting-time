@@ -63,7 +63,7 @@ export function AgentScreen(props: Props) {
           <Menu
             label={`More ${props.plugin.title} actions`}
             icon={<EllipsisIcon />}
-            items={agentMenuItems(props.plugin, props.status, props.pending, { poll: false, pause: false, logsLabel: "Logs" })}
+            items={agentMenuItems(props.plugin, props.status, props.pending, { poll: false, pause: false, power: true, logsLabel: "Logs" })}
             onSelect={(value) => props.onAction(value as AgentAction)}
           />
         </div>

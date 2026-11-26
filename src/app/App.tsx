@@ -4,7 +4,7 @@ import type { PluginSource, ProviderId } from "../bridge/types";
 import { ACTIONS, messageOf, runPluginAction } from "../features/agents/actions";
 import { AgentScreen } from "../features/agents/AgentScreen";
 import { reviewsInProgress, type AgentAction, type AgentTab } from "../features/agents/agentMenu";
-import { BackgroundAgents, type InstallKind } from "../features/agents/BackgroundAgents";
+import { BackgroundAgents, INSTALL_ITEMS, type InstallKind } from "../features/agents/BackgroundAgents";
 import { CauseScreen } from "../features/agents/CauseScreen";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { PluginInspector } from "../features/agents/PluginSettings";
@@ -404,6 +404,17 @@ export function App(props: { store: AppStore }) {
         <div class="command-center" inert={lifecycleModalOpen()}>
           <Show when={sidebarOpen()}>
             <aside id="work-pane" class="sidebar-pane" aria-label="All work" inert={overlay()}>
+              <BackgroundAgents
+                plugins={snapshot().plugins}
+                selected={pluginView()?.kind === "agent" ? selectedPlugin()?.name ?? null : null}
+                selectedCause={pluginView()?.kind === "cause" ? currentKey() : null}
+                pending={agentPending()}
+                onSelect={(name) => openPlugin(name)}
+                onOpenCause={(plugin, cause) => showPlugin({ kind: "cause", plugin, cause })}
+                onAction={(name, action) => void runAgentAction(name, action)}
+                onInstall={(kind) => void startInstall(kind)}
+              />
+              <div class="sidebar-scroll">
               <div class="sidebar-toolbar">
                 <h2>All work</h2>
                 <div class="toolbar-actions">
@@ -433,14 +444,7 @@ export function App(props: { store: AppStore }) {
                 onToggle={(id) => store.toggleConversation(id)}
                 onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
               />
-              <BackgroundAgents
-                plugins={snapshot().plugins}
-                selected={pluginView()?.kind === "agent" ? selectedPlugin()?.name ?? null : null}
-                pending={agentPending()}
-                onSelect={(name) => openPlugin(name)}
-                onAction={(name, action) => void runAgentAction(name, action)}
-                onInstall={(kind) => void startInstall(kind)}
-              />
+              </div>
             </aside>
           </Show>
 
@@ -636,6 +640,7 @@ export function App(props: { store: AppStore }) {
                 { id: "command:next-waiting", label: "Next item waiting on you (⌘J)", disabled: waiting().length === 0 },
                 { id: "command:parent", label: "Go to parent conversation", disabled: !parent() },
                 { id: "command:sidebar", label: sidebarOpen() ? "Hide All work" : "Show All work" },
+                ...INSTALL_ITEMS.map((item) => ({ id: `command:install-${item.value}`, label: `Add background agent: ${item.label}` })),
                 { id: "command:inspector", label: inspectorOpen() ? "Hide inspector" : "Show inspector" },
                 {
                   id: "command:message",
@@ -662,6 +667,7 @@ export function App(props: { store: AppStore }) {
               if (target) selectConversation(target.id);
             } else if (id === "command:sidebar") setSidebarOpen((open) => !open);
             else if (id === "command:inspector") setInspectorOpen((open) => !open);
+            else if (id.startsWith("command:install-")) void startInstall(id.slice("command:install-".length) as InstallKind);
           }}
         />
       </div>
