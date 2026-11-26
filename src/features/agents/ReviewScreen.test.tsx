@@ -25,6 +25,12 @@ function renderReview(runId: string, reviews: object[] = runs) {
   });
   const onOpenReview = vi.fn();
   const refreshPlugins = vi.fn(async () => {});
+  // The app's triage runs the plugin's action, then opens the next item, which this screen leaves to it.
+  const triage = {
+    skip: vi.fn(async (run: string) => void await pluginRequest({ plugin: "whooper", action: "skip", args: [run], confirmedFingerprint: null })),
+    remove: vi.fn(async () => {}),
+    restore: vi.fn(async () => {}),
+  };
   render(() => (
     <ReviewScreen
       plugin={plugin}
@@ -35,9 +41,11 @@ function renderReview(runId: string, reviews: object[] = runs) {
       onPluginFilesChange={() => () => {}}
       onOpenReview={onOpenReview}
       onOpenCause={vi.fn()}
+      triage={triage}
+      onSubmitted={vi.fn()}
     />
   ));
-  return { pluginRequest, onOpenReview, refreshPlugins };
+  return { pluginRequest, onOpenReview, refreshPlugins, triage };
 }
 
 const click = (name: string) => {

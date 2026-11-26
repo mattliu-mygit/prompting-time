@@ -13,6 +13,8 @@ type Props = {
   onPluginFilesChange(listener: (change: PluginFilesChange) => void): () => void;
   /** The page now shows this review, whether the user opened it here or in the page. */
   onShowReview(runId: string): void;
+  /** The plugin posted the user's review of this run, after the confirmation. */
+  onSubmitted?(runId: string): void;
 };
 
 type Confirmation = { action: string; args: readonly string[]; resolve(result: PluginActionResult | null): void };
@@ -44,6 +46,7 @@ export function PluginFrame(props: Props) {
     }),
     onShowReview: (runId) => props.onShowReview(runId),
     onNotice: setNotice,
+    onSubmitted: (runId) => props.onSubmitted?.(runId),
   });
 
   onSettled(() => {

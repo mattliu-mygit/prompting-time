@@ -239,6 +239,9 @@ describe("plugin pages", () => {
     expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "submit", args: [OPEN], confirmedFingerprint: fingerprint });
     expect(page.posted).toHaveBeenLastCalledWith({ version: 1, type: "submit-result", reply_to: 2, run_id: OPEN, posted: true, message: "posted the review: https://example.invalid/review/1" }, "*");
     expect(screen.queryByRole("alertdialog", { name: "Submit review" })).not.toBeInTheDocument();
+    // The next item in Needs you opens, and the notice names both.
+    expect(document.querySelector(".app-notice")).toHaveTextContent("Submitted widgets#101 · now showing gadgets#55");
+    expect(screen.getByRole("heading", { level: 1, name: "move the projection" })).toBeInTheDocument();
   });
 
   it("searches PRs and chats from the sidebar: Enter opens the first result, and Escape clears", async () => {
@@ -546,6 +549,104 @@ describe("agent controls and blocking causes", () => {
     await settle();
     expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
     expect(api.readPluginLog).toHaveBeenCalledWith({ plugin: "whooper" });
+  });
+});
+
+describe("triage", () => {
+  const docker = { id: "docker", summary: "Docker isn't running", scope: "all" };
+  const notice = () => document.querySelector<HTMLElement>(".app-notice");
+  /** Whooper with reviews to approve, to look at, failed, removed, and waiting on Docker; skip and remove succeed. */
+  function triageApi() {
+    const reviews = [
+      ...fixtureReviews(),
+      { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", findings: 1, started_at: "2026-11-26T12:00:00Z", ended_at: "2026-11-26T12:20:00Z" },
+      { ...fixtureReviews()[0]!, run_id: "removed-8", pr: 8, title: "keep focus in the date picker", removed_by_user: true, needs_you: false, started_at: "2026-11-26T10:00:00Z", ended_at: "2026-11-26T10:20:00Z" },
+      { ...fixtureReviews()[1]!, run_id: "waiting-60", repo: "acme/gadgets", pr: 60, title: "speed up the gadget index", outcome: "waiting", cause: docker },
+      { ...fixtureReviews()[1]!, run_id: "waiting-61", repo: "acme/gadgets", pr: 61, title: "drop the legacy upload path", outcome: "waiting", cause: docker },
+    ];
+    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
+      switch (sent.action) {
+        case "status": return actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews })) });
+        case "show-review": return actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!)) });
+        case "skip": case "remove": return actionResult({ stdout: `${sent.action} ${sent.args.join(" ")}\n` });
+        default: return actionResult({ stdout: JSON.stringify(fixtureSettings) });
+      }
+    });
+    const plugin = fixturePlugin({ actions: [...pageActions,
+      { name: "skip", title: "Skip a review", description: "Marks a review done without submitting it.", confirm: false },
+      { name: "remove", title: "Remove a review", description: "Takes a review out of the lists; its files stay.", confirm: false }] });
+    return { pluginRequest, api: createApi({ listPlugins: vi.fn(async () => [plugin]), pluginRequest }) };
+  }
+  const calls = (pluginRequest: ReturnType<typeof triageApi>["pluginRequest"], action: string) => pluginRequest.mock.calls.filter(([sent]) => sent.action === action).map(([sent]) => sent.args);
+
+  it("opens the next item in Needs you after Skip and names it, and Undo brings the review back", async () => {
+    const { api, pluginRequest } = triageApi();
+    renderApp(api);
+    click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
+    await settle();
+    click(screen.getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(notice()).toHaveTextContent("Skipped widgets#101 · now showing widgets#103"));
+    expect(calls(pluginRequest, "skip")).toEqual([["20261126T150000Z-101"]]);
+    expect(screen.getByRole("heading", { level: 1, name: "cap the upload retry delay" })).toBeInTheDocument();
+
+    click(within(notice()!).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "separate cache configuration" })).toBeInTheDocument());
+    expect(calls(pluginRequest, "skip")).toEqual([["20261126T150000Z-101"], ["20261126T150000Z-101", "--undo"]]);
+    expect(notice()).toBeNull();
+  });
+
+  it("removes a review from its row with Undo, and from the open review's header, which opens the next item", async () => {
+    const { api, pluginRequest } = triageApi();
+    renderApp(api);
+    click(await screen.findByRole("button", { name: "Remove widgets#103" }));
+    await waitFor(() => expect(notice()).toHaveTextContent("Removed widgets#103"));
+    expect(screen.getByRole("heading", { level: 1, name: "Auth refactor" })).toBeInTheDocument();
+    click(within(notice()!).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(calls(pluginRequest, "remove")).toEqual([["look-103"], ["look-103", "--undo"]]));
+
+    click(screen.getByRole("treeitem", { name: /^separate cache configuration/ }));
+    await settle();
+    click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(notice()).toHaveTextContent("Removed widgets#101 · now showing widgets#103"));
+    expect(calls(pluginRequest, "remove").at(-1)).toEqual(["20261126T150000Z-101"]);
+    expect(screen.getByRole("heading", { level: 1, name: "cap the upload retry delay" })).toBeInTheDocument();
+  });
+
+  it("restores a removed review, which search finds, from its page", async () => {
+    const { api, pluginRequest } = triageApi();
+    renderApp(api);
+    await screen.findByRole("treeitem", { name: /^separate cache configuration/ });
+    expect(screen.queryByRole("treeitem", { name: /keep focus in the date picker/ })).not.toBeInTheDocument();
+    const search = screen.getByRole("searchbox", { name: "Search PRs and chats" });
+    fireEvent.input(search, { target: { value: "keep focus" } });
+    flush();
+    fireEvent.keyDown(search, { key: "Enter" });
+    flush();
+    await settle();
+    const banner = screen.getByText(/its files stay on disk, and search still finds it/).closest<HTMLElement>("[role=note]")!;
+    expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+    click(within(banner).getByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(notice()).toHaveTextContent("Restored widgets#8 to your lists."));
+    expect(calls(pluginRequest, "remove")).toEqual([["removed-8", "--undo"]]);
+  });
+
+  it("asks before Remove all on a cause's screen, says the files stay and Whooper won't retry them, and removes each with Undo", async () => {
+    const { api, pluginRequest } = triageApi();
+    renderApp(api);
+    click(await screen.findByRole("button", { name: "Waiting · Docker isn't running 2" }));
+    click(screen.getByRole("treeitem", { name: /^Docker isn't running, 2 reviews waiting/ }));
+    await settle();
+    click(screen.getByRole("button", { name: "Remove all" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove 2 reviews?" });
+    expect(dialog).toHaveTextContent("Whooper won't retry them");
+    expect(dialog).toHaveTextContent("files stay on disk");
+    expect(calls(pluginRequest, "remove")).toEqual([]);
+    click(within(dialog).getByRole("button", { name: "Remove 2 reviews" }));
+    await waitFor(() => expect(notice()).toHaveTextContent("Removed 2 reviews. Their files stay on disk."));
+    expect(calls(pluginRequest, "remove")).toEqual([["waiting-60"], ["waiting-61"]]);
+    click(within(notice()!).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(calls(pluginRequest, "remove")).toHaveLength(4));
+    expect(calls(pluginRequest, "remove").slice(2)).toEqual([["waiting-60", "--undo"], ["waiting-61", "--undo"]]);
   });
 });
 

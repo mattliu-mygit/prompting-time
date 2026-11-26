@@ -8,6 +8,7 @@ export const ACTIONS = {
   retry: "retry",
   round: "round",
   skip: "skip",
+  remove: "remove",
   pause: "pause",
   resume: "resume",
 } as const;

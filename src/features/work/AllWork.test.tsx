@@ -34,6 +34,8 @@ type Options = {
   selectedReview?: string | null;
   /** The sections a past launch left open, saved before rendering; null leaves what is saved. By default the chat sections this file uses are open. */
   open?: Record<string, boolean> | null;
+  /** Whether the plugin has a remove action, which puts Remove on review rows. */
+  canRemove?: boolean;
 };
 const SECTIONS = "prompting-time.sidebar-sections";
 
@@ -52,6 +54,7 @@ function renderWork(options: Options = {}) {
   const onLoadChildPage = vi.fn();
   const onOpenReview = vi.fn();
   const onOpenCause = vi.fn();
+  const onRemoveReview = vi.fn();
   const view = render(() => (
     <AllWork
       reviews={options.reviews ?? []}
@@ -60,6 +63,8 @@ function renderWork(options: Options = {}) {
       query={query()}
       onOpenReview={onOpenReview}
       onOpenCause={onOpenCause}
+      canRemove={() => options.canRemove ?? false}
+      onRemoveReview={onRemoveReview}
       conversations={conversations()}
       conversationsById={options.conversationsById ?? { root, child, grandchild, sibling }}
       childPagesById={childPagesById()}
@@ -76,7 +81,7 @@ function renderWork(options: Options = {}) {
     setQuery(text);
     flush();
   };
-  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, onRemoveReview, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -202,6 +207,16 @@ describe("AllWork", () => {
     view.search("");
     expect(screen.queryByRole("region", { name: "Search results" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Needs you 3" })).toBeVisible();
+  });
+
+  it("puts Remove on each review's row when the plugin can remove, without opening the review", () => {
+    const view = renderWork({ conversations: [], reviews: pluginEntries(), canRemove: true });
+    fireEvent.click(screen.getByRole("button", { name: "Remove widgets#101" }));
+    expect(view.onRemoveReview).toHaveBeenCalledExactlyOnceWith("whooper", "20261126T150000Z-101");
+    expect(view.onOpenReview).not.toHaveBeenCalled();
+    view.search("keep focus");
+    expect(screen.getByRole("treeitem", { name: /^keep focus in the date picker, removed/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Remove widgets#8" })).not.toBeInTheDocument();
   });
 
   it("moves between review and conversation rows with the arrow keys, past folded sections, and opens a review with Enter", () => {

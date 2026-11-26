@@ -1690,3 +1690,66 @@ body {
     background: var(--s-background);
   }
 }
+
+/* Remove on a review's row shows while the pointer is on the row or the row has focus. */
+.work-remove,
+.row-remove {
+  display: inline-grid;
+  place-items: center;
+  inline-size: var(--s-space-20);
+  block-size: var(--s-space-20);
+  padding: 0;
+  border: 0;
+  border-radius: var(--s-radius-sm);
+  background: transparent;
+  color: var(--s-text-muted);
+  cursor: pointer;
+}
+
+.work-remove:hover,
+.row-remove:hover {
+  background: var(--s-secondary-hover);
+  color: var(--s-text);
+}
+
+.work-remove svg,
+.row-remove svg {
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+}
+
+.work-review:not(:hover, :focus-within) .work-remove,
+.cause-row:not(:hover, :focus-within) .row-remove {
+  opacity: 0;
+}
+
+.cause-row {
+  position: relative;
+}
+
+.cause-row .row-remove {
+  position: absolute;
+  inset-block-start: var(--s-space-4);
+  inset-inline-end: var(--s-space-4);
+}
+
+/* What a Submit, Skip, or Remove did, with Undo, at the bottom of the window. */
+.app-notice {
+  position: fixed;
+  inset-block-end: var(--s-space-16);
+  inset-inline-end: var(--s-space-16);
+  z-index: var(--s-overlay-z-index);
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-12);
+  max-inline-size: 32rem;
+  padding: var(--s-space-8) var(--s-space-8) var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
+  background: var(--s-surface-elevated);
+  box-shadow: var(--s-shadow-modal);
+  font-size: var(--s-size-sm);
+}
+
+.app-notice-alert {
+  border-inline-start: var(--s-border-thick) var(--s-border-style) var(--s-error);
+}

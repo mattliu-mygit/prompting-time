@@ -26,6 +26,8 @@ export type PageBridgeOptions = {
   onShowReview(runId: string): void;
   /** Why the page cannot show what the user opened, or null once it can. */
   onNotice(text: string | null): void;
+  /** The plugin posted the user's review of this run. */
+  onSubmitted?(runId: string): void;
 };
 
 export type PageBridge = {
@@ -214,7 +216,10 @@ export function createPageBridge(options: PageBridgeOptions): PageBridge {
         const { run_id } = newest(message.run_id);
         const result = await run(SUBMIT, [run_id]);
         if (result === null) post({ type: "submit-result", run_id, posted: false, message: "cancelled" }, message.id);
-        else if (result.exitCode === 0) post({ type: "submit-result", run_id, posted: true, message: result.stdout.trim() || "submitted" }, message.id);
+        else if (result.exitCode === 0) {
+          post({ type: "submit-result", run_id, posted: true, message: result.stdout.trim() || "submitted" }, message.id);
+          options.onSubmitted?.(run_id);
+        }
         else throw failure(result, SUBMIT);
         break;
       }

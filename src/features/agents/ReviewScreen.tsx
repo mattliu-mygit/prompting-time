@@ -19,7 +19,14 @@ type Props = {
   onPluginFilesChange(listener: (change: PluginFilesChange) => void): () => void;
   onOpenReview(runId: string): void;
   onOpenCause(cause: string): void;
+  /** Skip, Remove, and Restore run here, so that after Skip or Remove the next item opens; each throws the plugin's refusal. */
+  triage: ReviewTriage;
+  /** The plugin posted the user's review of this run from its page. */
+  onSubmitted(runId: string): void;
 };
+
+/** What a review's header asks of the app for its run: skip it, take it out of the lists, or put it back. */
+export type ReviewTriage = { skip(runId: string): Promise<void>; remove(runId: string): Promise<void>; restore(runId: string): Promise<void> };
 
 /** "Review 2 · dc0c0bf · 3:12 PM": the version, the commit it reviewed, and when it ended or started. */
 export function versionLabel(review: ReviewEntry, number: number): string {
@@ -59,6 +66,7 @@ export function ReviewScreen(props: Props) {
             actions={props.actions}
             refresh={() => props.controls.refreshPlugins()}
             onOpenReview={props.onOpenReview}
+            triage={props.triage}
           />
         )}
       </Show>
@@ -74,6 +82,7 @@ export function ReviewScreen(props: Props) {
               onShowReview={(runId) => {
                 if (runId !== props.runId) props.onOpenReview(runId);
               }}
+              onSubmitted={props.onSubmitted}
             />
           </Match>
           <Match when={body() === "problem"}>
@@ -107,9 +116,10 @@ type HeaderProps = {
   actions: PluginActions;
   refresh(): Promise<void>;
   onOpenReview(runId: string): void;
+  triage: ReviewTriage;
 };
 
-/** The review's header: its version and the others, Rerun review, Skip with Undo, and its banners. */
+/** The review's header: its version and the others, Rerun review, Skip with Undo, Remove or Restore, and its banners. */
 function ReviewHeader(props: HeaderProps) {
   const [busy, setBusy] = createSignal(false);
   const [queued, setQueued] = createSignal<string | null>(null);
@@ -125,18 +135,19 @@ function ReviewHeader(props: HeaderProps) {
   const problem = () => props.review.outcome === "failed" || props.review.outcome === "waiting";
   const skipped = () => skippedHere() ?? props.review.skipped_by_user;
   const canRerun = () => !earlier() && !running() && hasAction(props.plugin, ACTIONS.retry);
-  const canSkip = () => !earlier() && !running() && props.review.submitted === null && hasAction(props.plugin, ACTIONS.skip);
+  const removed = () => !earlier() && props.review.removed_by_user;
+  const canSkip = () => !earlier() && !running() && !removed() && props.review.submitted === null && hasAction(props.plugin, ACTIONS.skip);
+  const canRemove = () => !earlier() && !removed() && hasAction(props.plugin, ACTIONS.remove);
   const newCommits = () => !earlier() && !running() && props.review.head_sha !== null && props.review.pr_head_sha !== null && props.review.head_sha !== props.review.pr_head_sha;
   const label = () => `${versionLabel(props.review, number())}${earlier() ? " · read-only" : ""}`;
 
-  async function act(name: string, args: string[], done: (printed: string) => void) {
+  /** Runs one task at a time and shows its refusal; `done` runs after it unless the header is gone. */
+  async function run<T>(task: () => Promise<T>, done: (result: T) => void) {
     setBusy(true);
     setError(null);
     try {
-      const printed = await runPluginAction(props.actions, props.plugin, name, args);
-      if (disposed) return;
-      done(printed);
-      void props.refresh();
+      const result = await task();
+      if (!disposed) done(result);
     } catch (reason) {
       if (!disposed) setError(messageOf(reason));
     } finally {
@@ -144,8 +155,15 @@ function ReviewHeader(props: HeaderProps) {
     }
   }
 
+  const act = (name: string, args: string[], done: (printed: string) => void) => run(async () => {
+    const printed = await runPluginAction(props.actions, props.plugin, name, args);
+    void props.refresh();
+    return printed;
+  }, done);
+
   const rerun = () => act(ACTIONS.retry, [props.review.run_id], (printed) => setQueued(printed || `${props.plugin.title} reviews ${shortPullRequest(props.review)} again in its next round.`));
-  const skip = (undo: boolean) => act(ACTIONS.skip, undo ? [props.review.run_id, "--undo"] : [props.review.run_id], () => setSkippedHere(!undo));
+  const skip = () => run(() => props.triage.skip(props.review.run_id), () => setSkippedHere(true));
+  const unskip = () => act(ACTIONS.skip, [props.review.run_id, "--undo"], () => setSkippedHere(false));
 
   onSettled(() => () => {
     disposed = true;
@@ -172,15 +190,26 @@ function ReviewHeader(props: HeaderProps) {
           <span class="plugin-note">Reviewing… started {shortDate(props.review.started_at)}</span>
         </Show>
         <Show when={canSkip()}>
-          <Show when={skipped()} fallback={<Button disabled={busy()} onClick={() => void skip(false)}>Skip</Button>}>
+          <Show when={skipped()} fallback={<Button disabled={busy()} onClick={() => void skip()}>Skip</Button>}>
             <span class="plugin-note">Skipped</span>
-            <Button disabled={busy()} onClick={() => void skip(true)}>Undo</Button>
+            <Button disabled={busy()} onClick={() => void unskip()}>Undo</Button>
           </Show>
+        </Show>
+        <Show when={canRemove()}>
+          <Button disabled={busy()} onClick={() => void run(() => props.triage.remove(props.review.run_id), () => {})}>Remove</Button>
         </Show>
         <Show when={canRerun()}>
           <Button variant={problem() || newCommits() ? "primary" : "plain"} disabled={busy()} onClick={() => void rerun()}>{problem() ? "Retry review" : "Rerun review"}</Button>
         </Show>
       </div>
+      <Show when={removed()}>
+        <div class="review-banner" role="note">
+          <span><strong>Removed from your lists</strong> · its files stay on disk, and search still finds it.</span>
+          <Show when={hasAction(props.plugin, ACTIONS.remove)}>
+            <Button disabled={busy()} onClick={() => void run(() => props.triage.restore(props.review.run_id), () => {})}>Restore</Button>
+          </Show>
+        </div>
+      </Show>
       <Show when={earlier()}>
         <div class="review-banner" role="note">
           <span>Review {number()} of {props.versions.length}, read-only: only the newest review can be submitted.</span>

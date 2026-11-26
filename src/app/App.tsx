@@ -1,14 +1,14 @@
 import { createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
-import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
+import { Button, CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
 import type { PluginSource, ProviderId } from "../bridge/types";
-import { ACTIONS, messageOf, runPluginAction } from "../features/agents/actions";
+import { ACTIONS, hasAction, messageOf, runPluginAction } from "../features/agents/actions";
 import { AgentScreen } from "../features/agents/AgentScreen";
 import { reviewsInProgress, type AgentAction, type AgentTab } from "../features/agents/agentMenu";
 import { BackgroundAgents, INSTALL_ITEMS, type InstallKind } from "../features/agents/BackgroundAgents";
 import { CauseScreen } from "../features/agents/CauseScreen";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { PluginInspector } from "../features/agents/PluginSettings";
-import { blockingCauses, causeKey, needsYou, newestRuns, pluginReviews, reviewKey, reviewState, reviewTitle, shortPullRequest, versionsOf, waitingText, type PluginReview } from "../features/agents/reviews";
+import { blockingCauses, causeKey, needsYou, newestRuns, pluginReviews, reviewKey, reviewState, reviewTitle, shortPullRequest, versionsOf, waitingText, type PluginReview, type ReviewEntry } from "../features/agents/reviews";
 import { ReviewScreen } from "../features/agents/ReviewScreen";
 import { describeAgent, readAgentStatus, readBlocked } from "../features/agents/status";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
@@ -32,6 +32,11 @@ const statusOptions: Array<{ value: StatusFilter; label: string }> = [
 const statusWords = { idle: "ready", queued: "queued", running: "working", waiting: "waiting for you", completed: "completed", interrupted: "interrupted", failed: "failed" } as const;
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const NARROW_INSPECTOR = "(max-width: 72rem)";
+
+/** A short note at the bottom of the window about what an action did, with one follow-up, such as Undo; an alert when it failed. */
+type Notice = { text: string; alert?: boolean; action?: { label: string; run(): void } };
+/** How long a notice stays: Undo is meant for right after, and Restore on a removed review's page covers later. */
+const NOTICE_MS = 8000;
 
 /** What the workspace shows of a plugin instead of a conversation: its screen on a tab, one review, or one cause that blocks every review. */
 type PluginView = { kind: "agent"; plugin: string; tab: AgentTab } | { kind: "review"; plugin: string; runId: string } | { kind: "cause"; plugin: string; cause: string };
@@ -65,6 +70,9 @@ export function App(props: { store: AppStore }) {
   const [agentPending, setAgentPending] = createSignal<Readonly<Record<string, AgentAction>>>({});
   const [agentError, setAgentError] = createSignal<{ plugin: string; text: string } | null>(null);
   const [stopTarget, setStopTarget] = createSignal<string | null>(null);
+  // What a Submit, Skip, or Remove did and what opened after it, with Undo, until it times out or is dismissed.
+  const [notice, setNotice] = createSignal<Notice | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   // What the sidebar's search holds; its results replace the sections while it has words.
   const [query, setQuery] = createSignal("");
   let workScroll: HTMLDivElement | undefined;
@@ -118,11 +126,11 @@ export function App(props: { store: AppStore }) {
     if (!view || !selectedPlugin()) return "Conversation workspace";
     return { agent: "Background agent", review: "Review", cause: "Blocked reviews" }[view.kind];
   };
-  /** Everything under "Needs you", in list order: its reviews, then the conversations waiting on you. */
+  /** Everything under "Needs you", in list order: its reviews, then the conversations waiting on you, each with what a notice names it. */
   const waiting = () => [
-    ...needsYouReviews().map(({ plugin, review }) => ({ key: reviewKey(plugin, review.run_id), open: () => openReview(plugin, review.run_id) })),
+    ...needsYouReviews().map(({ plugin, review }) => ({ key: reviewKey(plugin, review.run_id), label: shortPullRequest(review), open: () => openReview(plugin, review.run_id) })),
     ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []))
-      .map(({ id }) => ({ key: id, open: () => selectConversation(id) })),
+      .map(({ id, title }) => ({ key: id, label: title, open: () => selectConversation(id) })),
   ];
   /** The reviews the sidebar lists under the status filter: every one for all statuses, those under Needs you for waiting, none for the rest. */
   const sidebarReviews = () => (snapshot().statusFilter === "all" ? newestReviews() : snapshot().statusFilter === "waiting" ? needsYouReviews() : []);
@@ -167,6 +175,107 @@ export function App(props: { store: AppStore }) {
       setAgentPending(Object.fromEntries(Object.entries(agentPending()).filter(([key]) => key !== name)));
       if (action === "stop") setStopTarget(null);
     }
+  }
+
+  function notify(next: Notice | null) {
+    clearTimeout(noticeTimer);
+    setNotice(next);
+    if (next) noticeTimer = setTimeout(() => setNotice(null), NOTICE_MS);
+  }
+
+  const pluginNamed = (name: string) => snapshot().plugins.items.find((plugin) => plugin.name === name) ?? null;
+  const reviewOf = (plugin: string, runId: string) => reviewsByPlugin()[plugin]?.find((review) => review.run_id === runId) ?? null;
+  /** Runs one of a plugin's actions on its reviews; a refusal throws the plugin's words. */
+  async function reviewAction(plugin: string, name: string, args: string[]) {
+    const found = pluginNamed(plugin);
+    if (!found) throw new Error("The plugin is no longer installed.");
+    await runPluginAction(store.pluginActions, found, name, args);
+  }
+
+  /**
+   * After the user submitted, skipped, or removed a review: when it was open, the item after it in
+   * Needs you opens, as the list stood before (the first item when the review was not in it), and
+   * the notice names both; otherwise the notice says what happened. Undo runs `undo` and opens the
+   * review again when it was open. A refusal of `run` throws to the caller, which shows it.
+   */
+  async function decide(plugin: string, review: ReviewEntry, verb: "Submitted" | "Skipped" | "Removed", run: () => Promise<void>, undo?: () => Promise<void>) {
+    const key = reviewKey(plugin, review.run_id);
+    const items = waiting();
+    const wasOpen = currentKey() === key;
+    await run();
+    void store.refreshPlugins();
+    const name = shortPullRequest(review);
+    const action = undo && {
+      label: "Undo",
+      run: () => void undo().then(() => {
+        void store.refreshPlugins();
+        if (wasOpen) openReview(plugin, review.run_id);
+      }, (reason: unknown) => notify({ text: messageOf(reason), alert: true })),
+    };
+    if (!wasOpen) return notify({ text: `${verb} ${name}`, action });
+    const index = items.findIndex((item) => item.key === key);
+    const next = index < 0 ? items[0] : items[index + 1] ?? items.find((item) => item.key !== key);
+    next?.open();
+    notify({ text: next ? `${verb} ${name} · now showing ${next.label}` : `${verb} ${name} · nothing else needs you`, action });
+  }
+
+  /** The review actions a plugin's screens and rows ask for, for plugin `plugin`. */
+  const triage = (plugin: string) => ({
+    async skip(runId: string) {
+      const review = reviewOf(plugin, runId);
+      if (review) await decide(plugin, review, "Skipped", () => reviewAction(plugin, ACTIONS.skip, [runId]), () => reviewAction(plugin, ACTIONS.skip, [runId, "--undo"]));
+    },
+    async remove(runId: string) {
+      const review = reviewOf(plugin, runId);
+      if (review) await decide(plugin, review, "Removed", () => reviewAction(plugin, ACTIONS.remove, [runId]), () => reviewAction(plugin, ACTIONS.remove, [runId, "--undo"]));
+    },
+    async restore(runId: string) {
+      const review = reviewOf(plugin, runId);
+      await reviewAction(plugin, ACTIONS.remove, [runId, "--undo"]);
+      void store.refreshPlugins();
+      notify({ text: `Restored ${review ? shortPullRequest(review) : "the review"} to your lists.` });
+    },
+  });
+
+  /**
+   * Remove all on a cause's screen: removes each review one after another, then names how many with
+   * Undo, and what the plugin refused. It throws only when the plugin refused every one.
+   */
+  async function removeAll(plugin: string, runIds: readonly string[]) {
+    if (runIds.length === 1) return triage(plugin).remove(runIds[0]!);
+    const removed: string[] = [];
+    const refused: string[] = [];
+    for (const runId of runIds) {
+      try {
+        await reviewAction(plugin, ACTIONS.remove, [runId]);
+        removed.push(runId);
+      } catch (reason) {
+        const review = reviewOf(plugin, runId);
+        refused.push(`${review ? shortPullRequest(review) : runId}: ${messageOf(reason)}`);
+      }
+    }
+    void store.refreshPlugins();
+    if (removed.length === 0) throw new Error(refused.join("\n"));
+    const title = pluginNamed(plugin)?.title ?? plugin;
+    notify({
+      text: `Removed ${removed.length} reviews. Their files stay on disk.${refused.length > 0 ? ` ${title} refused ${refused.length}: ${refused.join("; ")}` : ""}`,
+      action: {
+        label: "Undo",
+        run: () => void Promise.all(removed.map((runId) => reviewAction(plugin, ACTIONS.remove, [runId, "--undo"])))
+          .then(() => void store.refreshPlugins(), (reason: unknown) => notify({ text: messageOf(reason), alert: true })),
+      },
+    });
+  }
+
+  /** Remove on a review's row in the sidebar; a refusal shows in the notice. */
+  function removeFromRow(plugin: string, runId: string) {
+    triage(plugin).remove(runId).catch((reason: unknown) => notify({ text: messageOf(reason), alert: true }));
+  }
+
+  /** The plugin's page posted the user's review: the next item in Needs you opens. */
+  function submitted(plugin: string, runId: string) {
+    const review = reviewOf(plugin, runId);
+    if (review) void decide(plugin, review, "Submitted", async () => {});
   }
 
   /** Picks the archive or folder, then asks in the install dialog; a cancelled pick does nothing. */
@@ -246,6 +355,7 @@ export function App(props: { store: AppStore }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      clearTimeout(noticeTimer);
       query?.removeEventListener("change", updateNarrow);
       window.removeEventListener("keydown", onKeyDown);
     };
@@ -475,6 +585,11 @@ export function App(props: { store: AppStore }) {
                 selectedReview={pluginView()?.kind === "review" || pluginView()?.kind === "cause" ? currentKey() : null}
                 onOpenReview={openReview}
                 onOpenCause={(plugin, cause) => showPlugin({ kind: "cause", plugin, cause })}
+                canRemove={(plugin) => {
+                  const found = pluginNamed(plugin);
+                  return found !== null && hasAction(found, ACTIONS.remove);
+                }}
+                onRemoveReview={removeFromRow}
                 conversations={selectVisibleConversations(snapshot())}
                 conversationsById={snapshot().conversationsById}
                 childPagesById={snapshot().childPagesById}
@@ -506,6 +621,8 @@ export function App(props: { store: AppStore }) {
                             onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
                             onOpenReview={(next) => setPluginView({ kind: "review", plugin: name, runId: next })}
                             onOpenCause={(cause) => showPlugin({ kind: "cause", plugin: name, cause })}
+                            triage={triage(name)}
+                            onSubmitted={(runId) => submitted(name, runId)}
                           />
                         )}
                       </Match>
@@ -520,6 +637,7 @@ export function App(props: { store: AppStore }) {
                                 actions={store.pluginActions}
                                 onOpenReview={(runId) => openReview(name, runId)}
                                 onOpenLogs={() => openPlugin(name, "logs")}
+                                onRemove={(runIds) => removeAll(name, runIds)}
                               />
                             )}
                           </Show>
@@ -585,6 +703,26 @@ export function App(props: { store: AppStore }) {
             </aside>
           </Show>
         </div>
+        <Show when={notice()} keyed>
+          {(current: Notice) => (
+            <div class={["app-notice", { "app-notice-alert": current.alert }]} role={current.alert ? "alert" : "status"}>
+              <span>{current.text}</span>
+              <Show when={current.action}>
+                {(action) => (
+                  <Button
+                    onClick={() => {
+                      notify(null);
+                      action().run();
+                    }}
+                  >
+                    {action().label}
+                  </Button>
+                )}
+              </Show>
+              <IconButton label="Dismiss" onClick={() => notify(null)}><CloseIcon /></IconButton>
+            </div>
+          )}
+        </Show>
         <Show when={snapshot().error}><p role="alert" class="inline-error lifecycle-error">{snapshot().error}</p></Show>
         <Show when={lifecycleError() && !creating() && !archiveTarget()}><p role="alert" class="inline-error lifecycle-error">{lifecycleError()}</p></Show>
         {/* A control run from an agent's row menu fails here; its screen shows the failure itself. */}

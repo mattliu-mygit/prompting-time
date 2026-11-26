@@ -1,10 +1,10 @@
 import { createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { AlertIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, ListRow, PullRequestIcon, type Status } from "@prompting-time/ui";
+import { AlertIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, CloseIcon, ListRow, PullRequestIcon, type Status } from "@prompting-time/ui";
 import type { ConversationSummary, ProviderId } from "../../bridge/types";
 import { effectiveConversationStatus, type ChildPageSnapshot, type EffectiveStatus, type SelectedPath } from "../../app/store";
 import { readPreference, savePreference } from "../../app/preferences";
-import { causeKey, needsYou, reviewCategory, reviewKey, reviewMatches, reviewRowMeta, reviewState, reviewTime, reviewTitle, searchTokens, shortDate, waitingText, type BlockingCause, type PluginReview, type ReviewCategory } from "../agents/reviews";
+import { causeKey, needsYou, reviewCategory, reviewKey, reviewMatches, reviewRowMeta, reviewState, reviewTime, reviewTitle, searchTokens, shortDate, shortPullRequest, waitingText, type BlockingCause, type PluginReview, type ReviewCategory } from "../agents/reviews";
 
 type Props = {
   /** Active roots in list order, already filtered by status. */
@@ -25,6 +25,10 @@ type Props = {
   onSelect(id: string): void;
   onOpenReview(plugin: string, runId: string): void;
   onOpenCause(plugin: string, cause: string): void;
+  /** Whether a plugin can take its reviews out of the lists, which puts Remove on their rows. */
+  canRemove(plugin: string): boolean;
+  /** Remove on a review's row, which shows while the pointer is on the row. */
+  onRemoveReview(plugin: string, runId: string): void;
   onToggle(id: string): void;
   onLoadChildPage(id: string, restart: boolean): void;
 };
@@ -292,6 +296,23 @@ export function AllWork(props: Props) {
           count={removed() ? "removed" : undefined}
           status={removed() ? "idle" : reviewState(item().review).status}
           meta={meta()}
+          trailing={
+            <Show when={!removed() && props.canRemove(item().plugin)}>
+              <button
+                type="button"
+                class="work-remove"
+                tabindex={-1}
+                aria-label={`Remove ${shortPullRequest(item().review)}`}
+                title={`Remove ${shortPullRequest(item().review)} from your lists`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  props.onRemoveReview(item().plugin, item().review.run_id);
+                }}
+              >
+                <CloseIcon />
+              </button>
+            </Show>
+          }
           onClick={() => props.onOpenReview(item().plugin, item().review.run_id)}
         />
       );

@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onSettled, Show } from "solid-js";
-import { AlertIcon, Button, ListRow, Markdown, PullRequestIcon, Textarea } from "@prompting-time/ui";
+import { AlertIcon, Button, CloseIcon, ConfirmDialog, IconButton, ListRow, Markdown, PullRequestIcon, Textarea } from "@prompting-time/ui";
 import type { PluginActions, PluginStatusRead } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
 import { ACTIONS, hasAction, messageOf, runPluginAction } from "./actions";
@@ -15,6 +15,8 @@ type Props = {
   actions: PluginActions;
   onOpenReview(runId: string): void;
   onOpenLogs(): void;
+  /** Takes these reviews out of the lists, the app offering Undo; throws when the plugin refused every one. */
+  onRemove(runIds: readonly string[]): Promise<void>;
 };
 
 type Retried = { queued: number; refused: Array<{ review: ReviewEntry; reason: string }> };
@@ -42,7 +44,28 @@ export function CauseScreen(props: Props) {
   const [askBusy, setAskBusy] = createSignal(false);
   const [askError, setAskError] = createSignal<string | null>(null);
   const [answers, setAnswers] = createSignal<Array<ReviewAnswer & { about: string }>>([]);
+  // Remove all asks first; while it runs, and why the plugin refused.
+  const [removeAsked, setRemoveAsked] = createSignal(false);
+  const [removing, setRemoving] = createSignal(false);
+  const [removeError, setRemoveError] = createSignal<string | null>(null);
   let disposed = false;
+  const canRemove = () => hasAction(props.plugin, ACTIONS.remove);
+  const plural = (count: number) => (count === 1 ? "1 review" : `${count} reviews`);
+
+  async function remove(runIds: readonly string[]) {
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      await props.onRemove(runIds);
+    } catch (reason) {
+      if (!disposed) setRemoveError(messageOf(reason));
+    } finally {
+      if (!disposed) {
+        setRemoving(false);
+        setRemoveAsked(false);
+      }
+    }
+  }
 
   const run = (name: string, args: string[]) => runPluginAction(props.actions, props.plugin, name, args);
 
@@ -110,7 +133,11 @@ export function CauseScreen(props: Props) {
               <Button disabled={asking() || affected().length === 0} onClick={() => setAsking(true)}>Ask why</Button>
             </Show>
             <Button onClick={() => props.onOpenLogs()}>Open logs</Button>
+            <Show when={canRemove()}>
+              <Button disabled={removing() || affected().length === 0} onClick={() => setRemoveAsked(true)}>Remove all</Button>
+            </Show>
           </div>
+          <Show when={removeError()}>{(error) => <p role="alert" class="inline-error plugin-refusal">{error()}</p>}</Show>
           <Show when={retried()}>
             {(result) => (
               <>
@@ -171,7 +198,7 @@ export function CauseScreen(props: Props) {
               <ul class="work-rows">
                 <For each={items} keyed={(review) => review.run_id}>
                   {(review) => (
-                    <li>
+                    <li class="cause-row">
                       <ListRow
                         icon={<PullRequestIcon />}
                         title={reviewTitle(review())}
@@ -179,6 +206,11 @@ export function CauseScreen(props: Props) {
                         meta={`${shortPullRequest(review())} · ${reviewState(review()).words} · ${shortDate(review().ended_at ?? review().started_at)}`}
                         onClick={() => props.onOpenReview(review().run_id)}
                       />
+                      <Show when={canRemove()}>
+                        <IconButton class="row-remove" label={`Remove ${shortPullRequest(review())}`} disabled={removing()} onClick={() => void remove([review().run_id])}>
+                          <CloseIcon />
+                        </IconButton>
+                      </Show>
                     </li>
                   )}
                 </For>
@@ -187,6 +219,19 @@ export function CauseScreen(props: Props) {
           )}
         </For>
       </div>
+      <ConfirmDialog
+        open={removeAsked()}
+        busy={removing()}
+        title={`Remove ${plural(affected().length)}?`}
+        cancelLabel="Keep them"
+        confirmLabel={`Remove ${plural(affected().length)}`}
+        confirmDisabled={affected().length === 0}
+        onConfirm={() => void remove(affected().map((review) => review.run_id))}
+        onCancel={() => setRemoveAsked(false)}
+      >
+        <p>They wait on “{group()?.summary ?? props.cause}”. Removing takes them out of your lists, and {props.plugin.title} won't retry them. You can undo right after.</p>
+        <p>Each review's files stay on disk in {props.plugin.title}'s state folder, and search still finds them, tagged removed.</p>
+      </ConfirmDialog>
     </section>
   );
 }

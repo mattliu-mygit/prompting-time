@@ -291,6 +291,7 @@ export function verdictWords(verdict: string | null): string {
  * in red.
  */
 export function reviewState(review: ReviewEntry, now = new Date()): { words: string; status: Status } {
+  if (review.removed_by_user) return { words: "Removed", status: "idle" };
   if (review.submitted) return { words: `${review.submitted.event === "APPROVE" ? "Approved" : "Commented"} · ${shortDate(review.submitted.at, now)}`, status: "idle" };
   if (review.skipped_by_user) return { words: "Skipped", status: "idle" };
   if (review.outcome === "running") return { words: "Reviewing…", status: "running" };
