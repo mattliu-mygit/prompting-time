@@ -161,6 +161,56 @@ const drafts: Record<string, Drafts> = {
   "fixture-run-77": { event: "COMMENT", message: "", findings: { "1": { included: true, text: "**question:** Should the delay stop doubling at a cap, such as 30 seconds?" } } },
 };
 
+/**
+ * The overview Whooper writes of a run, its walkthrough's content, for the runs that have one:
+ * review 2 of #101, which says approve once CI passes, and #103, which says look first.
+ */
+const retryOverview = {
+  summary: "Uploads get a `RetryPolicy`: five attempts, a delay that doubles from 250 ms, and a yes for cancelled uploads. The upload module exports it.",
+  verdict_reason: "The policy is small and its tests pass; two nits about naming and cancelled uploads.",
+  before_after: [
+    { label: "A failed upload", before: "fails at once", after: "tries 5 times, waiting 250 ms, then 500 ms, 1 s, 2 s" },
+    { label: "A cancelled upload", before: "stops", after: "tries again, since `retries_cancelled` says yes" },
+  ],
+  places: [
+    { id: "p1", title: "The delay doubles without a cap", reason: "`delay_before` doubles each attempt, so a policy with more attempts waits hours, and `2u32.pow` overflows after 32.", evidence: { kind: "read", detail: "read `delay_before`; no test sets more than 5 attempts" }, path: "src/upload/retry.rs", start_line: 15, end_line: 18 },
+    { id: "p2", title: "Cancelled uploads retry", reason: "`retries_cancelled` always says yes, so an upload the user stopped starts again.", evidence: { kind: "searched", detail: "searched for callers; the client doesn't check it yet" }, path: "src/upload/retry.rs", start_line: 20, end_line: 23 },
+    { id: "p3", title: "The policy is public", reason: "`pub use retry::RetryPolicy` makes the type part of the crate's interface.", evidence: { kind: "ran", detail: "ran `cargo doc`; RetryPolicy is listed" }, path: "src/upload/mod.rs", start_line: 2, end_line: 5 },
+  ],
+  layers: [
+    { id: "policy", title: "The retry policy", intent: "A new type that says how many times to try and how long to wait.", read_hint: "read", ranges: [{ path: "src/upload/retry.rs", start_line: 1, end_line: 13 }] },
+    { id: "delays", title: "Delays and cancelled uploads", intent: "How the wait grows, and which uploads may try again.", read_hint: "read", ranges: [{ path: "src/upload/retry.rs", start_line: 14, end_line: 24 }] },
+    { id: "exports", title: "The module exports it", intent: "Two lines that make the policy public.", read_hint: "skim", ranges: [{ path: "src/upload/mod.rs", start_line: 1, end_line: 8 }] },
+  ],
+  flow: {
+    title: "A failed upload",
+    input: "upload(\"report.csv\") while the server answers 503",
+    calls: [
+      { from: "UploadClient", to: "server", label: "send once", status: "removed", old_label: null, path: null, line: null },
+      { from: "UploadClient", to: "RetryPolicy", label: "standard()", status: "added", old_label: null, path: "src/upload/retry.rs", line: 11 },
+      { from: "UploadClient", to: "server", label: "send", status: "same", old_label: null, path: null, line: null },
+      { from: "UploadClient", to: "RetryPolicy", label: "delay_before(n)", status: "changed", old_label: "fail", path: "src/upload/retry.rs", line: 16 },
+      { from: "RetryPolicy", to: "RetryPolicy", label: "retries_cancelled()", status: "added", old_label: null, path: "src/upload/retry.rs", line: 21 },
+    ],
+  },
+  checked: ["Ran the upload tests at head and base", "Searched for other retry loops in the client", "Built the docs"],
+  not_checked: ["Didn't run the integration suite, which needs a server", "Didn't time a long retry"],
+};
+const overviews: Record<string, typeof retryOverview> = {
+  "fixture-run-101": retryOverview,
+  "fixture-run-103": { ...retryOverview, verdict_reason: "The delay can overflow for long retries; look at it before approving.", places: retryOverview.places.slice(0, 2) },
+};
+/** The commits after each run's head, as show-review lists them: #101 moved on after its review 2. */
+const sinceReview: Record<string, Array<{ sha: string; title: string; author: string; at: string; files: string[] }>> = {
+  "fixture-run-101": [
+    { sha: sha(9100), title: "upload: cap the retry delay at 30 s", author: "lin-w", at: at(0, 15, 0), files: ["src/upload/retry.rs"] },
+    { sha: sha(9101), title: "docs: describe upload retries", author: "lin-w", at: at(0, 15, 10), files: ["docs/uploads.md"] },
+  ],
+};
+const coChange: Record<string, Array<{ path: string; partner: string; ratio: number; commits: number }>> = {
+  "fixture-run-101": [{ path: "src/upload/client.rs", partner: "src/upload/mod.rs", ratio: 0.75, commits: 12 }],
+};
+
 /** Why each failed run failed, as its failure.txt says; fixture-run-61 recorded no reason. */
 const failures: Record<string, string> = {
   "fixture-run-55": "the review run exited 1 without findings; see /synthetic/state/whooper/runs/fixture-run-55/stderr.log and the transcript in /synthetic/state/whooper/runs/fixture-run-55",
@@ -225,6 +275,7 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
         drafts: drafts[runId] ?? null, diff: found ? patch : null,
         failure: failures[runId] ?? null, asks: asks[runId] ?? [], submitted: entry.submitted,
         head_sha: entry.head_sha, cause: entry.cause, skipped_by_user: entry.skipped_by_user,
+        overview: found ? overviews[runId] ?? null : null, commits_since_review: sinceReview[runId] ?? (found ? [] : null), co_change: coChange[runId] ?? [],
       }) });
     }
     case "draft": {
