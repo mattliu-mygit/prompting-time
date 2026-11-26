@@ -169,6 +169,34 @@ future prompt after arbitrarily much newer content. These fixes apply to new inp
 backfill previously lost steering or historical answers. A crash without durable confirmation
 leaves the outcome unconfirmed, with no replay.
 
+## Background agent plugins
+
+Prompting Time can host background agents, such as Whooper, as plugins. The Rust core installs,
+checks, starts, and stops them; their screens are not built yet.
+
+- **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
+  and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
+  refuses it unless its SHA-256 matches the one given. For development, a local archive (with
+  the same check) or a local folder, which runs in place, works too. Installed copies live in
+  `<Application Support>/plugins/<name>/`, beside a record of where each came from.
+- **Prerequisites.** Before starting a plugin, Prompting Time looks for each program its manifest
+  lists on the PATH plugin commands get, the same one provider CLIs get. A program needed only
+  for some settings is checked against what the plugin's `get-settings` action prints.
+- **Start and stop.** When Prompting Time opens or installs a plugin, it starts the manifest's
+  start command in its own process group, unless a live copy of that command holds
+  `<state folder>/run.lock/pid`, such as one started from a terminal. When Prompting Time quits,
+  it sends SIGTERM to the process groups it started and kills them after 5 seconds; a copy it
+  did not start keeps running. The start command's output goes to
+  `<Application Support>/plugins/<name>.log`.
+- **Actions.** Prompting Time runs a plugin's actions and returns their output and exit code. An
+  action marked `confirm` first runs with `--print`, which changes nothing outside this Mac and
+  prints `fingerprint: <hex>` last; it runs for real only with the fingerprint the user
+  confirmed, as `--expect <hex>`. Settings are saved through the `save-settings` action, which
+  checks them.
+- **State.** A plugin keeps its state in `$XDG_STATE_HOME/<name>` (default
+  `~/.local/state/<name>`). Prompting Time passes its `XDG_STATE_HOME` to plugin commands, watches
+  that folder, and sends the window a `pluginChanged` event naming the files that changed.
+
 ## Develop and verify
 
 ```sh

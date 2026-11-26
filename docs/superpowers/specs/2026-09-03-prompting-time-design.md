@@ -347,6 +347,7 @@ The Rust core is organized around these responsibilities:
 - Approval broker: normalizes provider approval and question requests without weakening provider policy.
 - Workspace manager: creates, validates, inventories, and safely cleans up worktrees.
 - Notification service: emits macOS notifications for actionable background transitions.
+- Plugin host: installs background-agent plugins from release archives pinned by SHA-256, checks their prerequisites, starts their start command unless a copy already holds its run lock, stops the process groups it started when the app quits, runs their actions, and watches their state folders.
 - Resource boundary: provides the extension point for Milestone 2 without importing resources in Milestone 1.
 
 Tauri commands expose typed application operations. Tauri events publish typed state changes. The Solid interface owns transient presentation state only; orchestration policy and durable truth remain in Rust.
