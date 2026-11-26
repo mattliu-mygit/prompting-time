@@ -15,6 +15,13 @@ export default [
     }
   },
   {
+    files: ["tests/browser/plugin-page-v2/*.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: globals.browser
+    }
+  },
+  {
     files: ["scripts/**/*.js"],
     languageOptions: {
       globals: globals.node

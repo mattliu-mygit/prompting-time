@@ -1,6 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import type { AppApi, AppStore } from "../../src/app/store";
-import type { PluginActionRequest, PluginActionResult, PluginSnapshot } from "../../src/bridge/types";
+import type { AppEvent, PluginActionRequest, PluginActionResult, PluginSnapshot } from "../../src/bridge/types";
 import { ConfirmActionDialog } from "../../src/features/agents/ConfirmActionDialog";
 import { answerReviewAction, dockerCause, fixtureReviewEntries, fixtureRounds, fixtureSubmitRequest, markFixtureSubmitted, reviewActions } from "./reviews-fixture";
 import { answerV2Action, V2_PLUGIN, v2Plugin } from "./status-v2-fixture";
@@ -10,7 +10,8 @@ import { answerV2Action, V2_PLUGIN, v2Plugin } from "./status-v2-fixture";
  * `?agents=missing` shows it stopped for a missing program; `?agents=confirm` opens the submit
  * confirmation over the app, and `?agents=mentions` opens it on a refusal for an @-mention first.
  * `?agents=reviews` lists invented reviews, which open in the plugin page the dev server serves.
- * `?agents=v2` adds an invented plugin that prints status format 2 (status-v2-fixture.ts).
+ * `?agents=v2` adds an invented plugin that prints status format 2 (status-v2-fixture.ts), whose
+ * actions send pluginChanged events.
  */
 export const agentsScenario = new URLSearchParams(location.search).get("agents");
 
@@ -129,8 +130,14 @@ const logLines = Array.from({ length: 40 }, (_, index) => `15:${String(index).pa
 
 const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides });
 
+// The app's event listeners, each numbering its events in order, so the fixture can add pluginChanged.
+const appListeners = new Set<(event: AppEvent) => void>();
+let appSequence = 0;
+
 async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionResult> {
-  if (sent.plugin === V2_PLUGIN) return answerV2Action(sent);
+  if (sent.plugin === V2_PLUGIN) {
+    return answerV2Action(sent, (files) => appListeners.forEach((listener) => listener({ kind: "pluginChanged", sequence: "", plugin: V2_PLUGIN, files })));
+  }
   const answered = agentsScenario === "reviews" ? answerReviewAction(sent) : null;
   if (answered) return answered;
   if (agentsScenario === "reviews" && sent.action === "submit") {
@@ -191,6 +198,17 @@ export function withAgentsFixture(base: AppApi): AppApi {
       paused = false;
       return plugin;
     },
+    ...(agentsScenario === "v2" ? {
+      listenToAppEvents: async (listener: (event: AppEvent) => void) => {
+        const forward = (event: AppEvent) => listener({ ...event, sequence: String(++appSequence) });
+        appListeners.add(forward);
+        const unsubscribe = await base.listenToAppEvents(forward);
+        return () => {
+          appListeners.delete(forward);
+          unsubscribe();
+        };
+      },
+    } : {}),
     readPluginLog: async () => ({ path: "/synthetic/application-support/plugins/whooper.log", text: running ? logLines.join("\n") : "", truncated: false }),
     pluginRequest,
     savePluginSettings: async ({ values }) => {

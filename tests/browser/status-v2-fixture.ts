@@ -4,7 +4,8 @@ import type { PluginActionRequest, PluginActionResult, PluginSnapshot } from "..
  * `?agents=v2`: an invented plugin, beside the invented Whooper, whose status action prints status
  * format 2, laid out like Monopole's. Its manifest declares four groups (Run failed and Review
  * needed under Needs you, Running, and Done folded), Rerun and Delete run on rows (Delete asks
- * first), and Check providers, which its one blocker names. Everything answers in browser memory.
+ * first), and Check providers, which its one blocker names. Its page, `plugin-page-v2/`, speaks page
+ * protocol 2. Everything answers in browser memory.
  */
 export const V2_PLUGIN = "fixture-runs";
 
@@ -17,7 +18,7 @@ export const v2Plugin: PluginSnapshot = {
   folder: "/synthetic/fixture-runs",
   stateFolder: "/synthetic/state/fixture-runs",
   settingsSchema: JSON.stringify({ title: "Fixture runs settings", type: "object", properties: {} }),
-  pageUrl: "/plugin-page/index.html",
+  pageUrl: "/plugin-page-v2/index.html",
   pageProtocol: 2,
   actions: [
     { name: "status", title: "Status", description: "Prints status format 2.", confirm: false },
@@ -71,8 +72,11 @@ function itemOf(sent: PluginActionRequest): string | null {
   return index >= 0 ? sent.args[index + 1] ?? null : null;
 }
 
-/** Answers the invented format-2 plugin's actions in browser memory. */
-export function answerV2Action(sent: PluginActionRequest): PluginActionResult {
+/**
+ * Answers the invented format-2 plugin's actions in browser memory, and reports the files in its
+ * state folder that an action changed, as the plugin watcher would.
+ */
+export function answerV2Action(sent: PluginActionRequest, changed: (files: string[]) => void): PluginActionResult {
   const id = itemOf(sent);
   switch (sent.action) {
     case "status":
@@ -87,9 +91,11 @@ export function answerV2Action(sent: PluginActionRequest): PluginActionResult {
       return result({ stdout: "{}" });
     case "check-providers":
       codexSignedOut = false;
+      changed(["providers.json"]);
       return result({ stdout: "codex: signed in\n" });
     case "rerun":
       items = items.map((item) => (item.id === id ? { ...item, group: "running", dot: "running", detail: "Queued again", updated_at: new Date().toISOString(), actions: [] } : item));
+      changed([`runs/${id}/run.json`]);
       return result({ stdout: `queued ${id} again\n` });
     case "delete":
       if (sent.confirmedFingerprint === null) {
@@ -97,6 +103,7 @@ export function answerV2Action(sent: PluginActionRequest): PluginActionResult {
           preview: JSON.stringify({ delete: id, records: ["run.json", "scores.jsonl", "reviews/"] }, null, 2) });
       }
       items = items.filter((item) => item.id !== id);
+      changed([`runs/${id}/run.json`]);
       return result({ stdout: `deleted ${id}\n` });
     default:
       return result({ exitCode: 2, stderr: `fixture-runs: this synthetic fixture does not run ${sent.action}` });

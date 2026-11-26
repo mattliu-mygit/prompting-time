@@ -90,6 +90,15 @@ the blocker and those three items. Each row's ⋯ menu opens on a click: Rerun m
 Delete run opens the confirmation with the invented request and deletes the run after Confirm, and
 the blocker's Check providers clears it. Everything answers in browser memory.
 
+Clicking a row, or Command-J landing on one, opens the plugin's page, which speaks page protocol 2
+and needs no build: the server serves `tests/browser/plugin-page-v2/` at `/plugin-page-v2/` with the
+headers of `pt-plugin://`. The page says `ready`, shows the route it was opened at (`/runs/<id>` for
+a run, `/providers` for the blocker), and reads the status with `call`. Opening another row sends
+its route to the same page without reloading it. Delete this run opens the confirmation and, after
+Confirm, the page shows "deleted <id>" and "Changed: runs/<id>/run.json", since the fixture sends a
+pluginChanged event for each action that changes something. Call an undeclared action shows
+Prompting Time's refusal, "Fixture runs declares no rm-everything action."
+
 ## Plugin pages
 
 Use `?agents=reviews` for invented Whooper reviews. Whooper's pinned row reads "Can't review ·
