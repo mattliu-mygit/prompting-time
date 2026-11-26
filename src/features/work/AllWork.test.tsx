@@ -3,7 +3,7 @@ import { createSignal, flush } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type { ChildPageSnapshot, SelectedPath } from "../../app/store";
 import type { ConversationSummary } from "../../bridge/types";
-import { axeViolations, render } from "../../test/render";
+import { axeViolations, render, settle } from "../../test/render";
 import { fixtureReviews } from "../../test/plugins";
 import { blockingCauses, newestRuns, readReviews, type PluginReview, type ReviewEntry } from "../agents/reviews";
 import { AllWork, groupWork, type PluginCause } from "./AllWork";
@@ -104,6 +104,8 @@ describe("AllWork", () => {
   const causes = (): PluginCause[] => blockingCauses(entries(), null).map((cause) => ({ plugin: "whooper", cause }));
   const names = (tree: HTMLElement) => [...tree.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")].map((item) => item.getAttribute("aria-label"));
   const toggles = () => [...document.querySelectorAll<HTMLButtonElement>(".work-group-toggle")].map((button) => `${button.textContent} ${button.getAttribute("aria-expanded")}`);
+  /** The headings of the open sections (".work-open") or of the folded ones stacked at the bottom (".work-folded"), in order. */
+  const headings = (place: ".work-open" | ".work-folded") => [...document.querySelectorAll<HTMLButtonElement>(`${place} .work-group-toggle`)].map((button) => button.textContent);
   const waitingRoot = { ...root, id: "waiting", title: "Waiting conversation", projectRoot: null, rollupStatus: "needsAttention" as const };
 
   it("folds every section but Needs you to its heading with a count, and splits Needs you by what each review needs", async () => {
@@ -149,24 +151,69 @@ describe("AllWork", () => {
 
     view.unmount();
     renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: null });
-    expect(toggles()).toEqual(["Needs you 3 false", "Reviewing 1 false", "Waiting · Docker isn't running 1 true", "Chats · no folder 1 false", "Done 2 true"]);
+    // The open sections come back above the stack, and the folded ones in it, each in list order.
+    expect(toggles()).toEqual(["Waiting · Docker isn't running 1 true", "Done 2 true", "Needs you 3 false", "Reviewing 1 false", "Chats · no folder 1 false"]);
+    expect(headings(".work-open")).toEqual(["Waiting · Docker isn't running 1", "Done 2"]);
+    expect(headings(".work-folded")).toEqual(["Needs you 3", "Reviewing 1", "Chats · no folder 1"]);
     expect(screen.getByRole("tree", { name: "Waiting · Docker isn't running" })).toBeVisible();
   });
 
-  it("shows five items per part of Needs you until Show N more, and the selected review even past them", () => {
-    const many: PluginReview[] = Array.from({ length: 7 }, (_, index) => ({ plugin: "whooper", review: { ...entries()[0]!, run_id: `run-${index}`, pr: 200 + index, title: `ready ${index}`, ended_at: todayAt(20 - index) } }));
-    const view = renderWork({ conversations: [], reviews: many });
-    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toHaveLength(5);
-    expect(screen.getByRole("heading", { name: "Ready to approve · 7" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Show 2 more" }));
-    flush();
-    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toHaveLength(7);
-    expect(screen.queryByRole("button", { name: /more$/ })).not.toBeInTheDocument();
+  it("stacks the folded sections' headings below the open ones, outside their scrolling rows, and lists every item of a long Needs you", async () => {
+    const many: PluginReview[] = Array.from({ length: 12 }, (_, index) => ({ plugin: "whooper", review: { ...entries()[0]!, run_id: `run-${index}`, pr: 200 + index, title: `ready ${index}`, ended_at: todayAt(20 - index) } }));
+    renderWork({ conversations: [sibling], reviews: [...many, ...pluginEntries()], causes: causes(), open: null });
 
-    view.unmount();
-    renderWork({ conversations: [], reviews: many, selectedReview: "review:whooper:run-6" });
-    expect(screen.getByRole("treeitem", { name: /^ready 6,/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: "Ready to approve · 13" })).toBeVisible();
+    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toHaveLength(13);
     expect(screen.queryByRole("button", { name: /more$/ })).not.toBeInTheDocument();
+    expect(headings(".work-open")).toEqual(["Needs you 15"]);
+    expect(headings(".work-folded")).toEqual(["Reviewing 1", "Waiting · Docker isn't running 1", "Chats · no folder 1", "Done 2"]);
+    // The rows scroll inside Needs you's body; the stack follows the open sections, outside it.
+    const stack = document.querySelector(".work-folded")!;
+    expect(screen.getByRole("tree", { name: "Ready to approve" }).closest(".work-section-body")).not.toBeNull();
+    expect(stack.closest(".work-section-body")).toBeNull();
+    expect(document.querySelector(".work-open")!.compareDocumentPosition(stack) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await axeViolations()).toEqual([]);
+  });
+
+  it("splits the space above the stack between the open sections, each with its own rows, and moves across them with the arrow keys", () => {
+    renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: { reviewing: true, done: true }, selectedId: null });
+    expect(headings(".work-open")).toEqual(["Needs you 3", "Reviewing 1", "Done 2"]);
+    expect(headings(".work-folded")).toEqual(["Waiting · Docker isn't running 1", "Chats · no folder 1"]);
+    const bodies = [...document.querySelectorAll(".work-open > .work-section > .work-section-body")];
+    expect(bodies.map((body) => body.querySelectorAll("[role=treeitem]").length)).toEqual([3, 1, 2]);
+
+    const last = screen.getByRole("treeitem", { name: /^move the projection/ });
+    last.focus();
+    press(last, "ArrowDown");
+    expect(document.activeElement).toHaveAttribute("aria-label", expect.stringContaining("widgets#102 · reviewing since"));
+    expect(bodies[1]!.contains(document.activeElement)).toBe(true);
+  });
+
+  it("opens a section from the stack and folds it back with its heading, which keeps the focus as it moves", async () => {
+    renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: null });
+    const folded = screen.getByRole("button", { name: "Done 2" });
+    expect(folded).toHaveAttribute("aria-expanded", "false");
+    // Enter or Space on the focused heading, which is a button, clicks it.
+    folded.focus();
+    fireEvent.click(folded);
+    flush();
+    await settle();
+    const opened = screen.getByRole("button", { name: "Done 2" });
+    expect(opened).toHaveAttribute("aria-expanded", "true");
+    expect(opened.closest(".work-open")).not.toBeNull();
+    expect(opened).toHaveFocus();
+    expect(names(screen.getByRole("tree", { name: "Done" }))).toHaveLength(2);
+    expect(headings(".work-open")).toEqual(["Needs you 3", "Done 2"]);
+
+    fireEvent.click(opened);
+    flush();
+    await settle();
+    const again = screen.getByRole("button", { name: "Done 2" });
+    expect(again).toHaveAttribute("aria-expanded", "false");
+    expect(again.closest(".work-folded")).not.toBeNull();
+    expect(again).toHaveFocus();
+    expect(screen.queryByRole("tree", { name: "Done" })).not.toBeInTheDocument();
+    expect(headings(".work-folded")).toEqual(["Reviewing 1", "Waiting · Docker isn't running 1", "Chats · no folder 1", "Done 2"]);
   });
 
   it("finds a pull request by number, title words, author, or repo in every state, tags removed ones, and finds chats by title or folder", async () => {
@@ -195,7 +242,10 @@ describe("AllWork", () => {
       "Waiting: speed up the gadget index, gadgets#60 · waiting · Docker isn't running",
       expect.stringMatching(/^Done: add the tags package, gadgets#77 · commented /),
     ]);
+    // The results scroll on their own, and a new search shows them from the top.
+    results().scrollTop = 40;
     view.search("alpha");
+    expect(results().scrollTop).toBe(0);
     expect(found()).toEqual(["Chats: Auth refactor, alpha, Codex, working"]);
     expect(screen.queryByRole("button", { name: /^Collapse/ })).not.toBeInTheDocument();
     view.search("release no folder");

@@ -61,7 +61,7 @@ body {
   min-block-size: 0;
 }
 
-/* All work: background agents pinned on top, then the list, which scrolls on its own. */
+/* All work: background agents and the search pinned on top, then the list's sections. */
 .sidebar-pane {
   position: relative;
   display: flex;
@@ -71,11 +71,58 @@ body {
   border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
 }
 
-.sidebar-scroll {
+/* The sections work like VS Code's sidebar panes: the open ones share the space above the stack
+   of folded ones, which sits at the bottom, and each open one scrolls on its own. */
+.all-work {
+  --work-heading-size: calc(var(--s-space-24) + var(--s-space-4));
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: var(--s-space-4);
+  min-block-size: 0;
+}
+
+/* Each open section gets an equal share of the space, and one whose rows need less gives the rest
+   to the others (grid tracks grow evenly up to their content). Only when their headings alone do
+   not fit does this space scroll as a whole. */
+.work-open {
+  display: grid;
+  flex: 1 1 0;
+  grid-auto-rows: minmax(calc(var(--work-heading-size) + var(--s-border-thin)), max-content);
+  align-content: start;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.work-section {
+  display: flex;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.work-open > .work-section + .work-section {
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.work-section-body {
+  flex: 1;
+  min-block-size: 0;
+  padding: 0 var(--s-space-8) var(--s-space-8);
+  overflow-y: auto;
+}
+
+/* The folded sections' headings. A stack taller than half the list, from many projects' chats in
+   a short window, scrolls instead of squeezing the open sections out; raise the limit if people
+   keep more sections than that folded. */
+.work-folded {
+  flex: none;
+  max-block-size: 50%;
+  padding-block-end: var(--s-space-4);
+  overflow-y: auto;
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.work-results {
+  flex: 1;
   min-block-size: 0;
   padding: 0 var(--s-space-8) var(--s-space-16);
   overflow-y: auto;
@@ -125,8 +172,8 @@ body {
 }
 
 .work-group-heading {
-  margin: var(--s-space-12) 0 var(--s-space-4);
-  padding-inline-start: var(--s-space-4);
+  margin: 0;
+  padding: 0 var(--s-space-8);
   color: var(--s-text-muted);
   font-size: var(--s-size-xs);
   font-weight: var(--s-weight-medium);
@@ -321,7 +368,8 @@ body {
   align-items: center;
   gap: var(--s-space-4);
   inline-size: 100%;
-  padding: var(--s-space-4);
+  min-block-size: var(--work-heading-size);
+  padding: 0 var(--s-space-4);
   border: 0;
   background: transparent;
   color: inherit;
@@ -335,6 +383,11 @@ body {
 .work-group-toggle:hover {
   background: var(--s-surface-elevated);
   color: var(--s-text);
+}
+
+/* Inside the ring's own width, since the stack and the open sections clip what overflows them. */
+.work-group-toggle:focus-visible {
+  outline-offset: calc(var(--s-focus-ring-width) * -1);
 }
 
 .work-group-toggle svg {
@@ -356,32 +409,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.work-section .work-group-heading {
-  margin-block: var(--s-space-8) var(--s-space-4);
-  padding-inline-start: 0;
-}
-
 .work-part-heading {
   margin: var(--s-space-8) 0 var(--s-space-4);
   padding-inline-start: var(--s-space-8);
   color: var(--s-text);
   font-size: var(--s-size-xs);
   font-weight: var(--s-weight-medium);
-}
-
-.work-more {
-  margin: var(--s-space-4) 0 0;
-  padding: var(--s-space-4) var(--s-space-8);
-  border: 0;
-  background: none;
-  color: var(--s-text-muted);
-  font-size: var(--s-size-xs);
-  cursor: pointer;
-}
-
-.work-more:hover {
-  color: var(--s-text);
-  text-decoration: underline;
 }
 
 /* A review's title gets two lines before it is cut, and its gray line wraps once. */

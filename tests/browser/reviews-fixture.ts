@@ -54,7 +54,7 @@ const entries: Entry[] = [
   // Review 2 of #101: the pull request moved on after it, so its header offers Rerun review.
   run({ run_id: "fixture-run-101", repo: "acme/widgets", pr: 101, title: "add a retry policy for uploads", started_at: at(0, 14, 0), ended_at: at(0, 14, 25), outcome: "reviewed", verdict: "approve_once_ci_passes", findings: 2, submitted: null, needs_you: true, pr_head_sha: sha(9101) }),
   run({ run_id: "fixture-run-103", repo: "acme/widgets", pr: 103, title: "cap the upload retry delay", started_at: at(0, 11, 0), ended_at: at(0, 11, 20), outcome: "reviewed", verdict: "look_first", findings: 1, submitted: null, needs_you: true }),
-  // Enough reviews ready to approve that Needs you shows five and "Show 2 more".
+  // Enough reviews that Needs you scrolls on its own above the stack of folded sections.
   reviewed(105, "acme/widgets", "drop the unused metrics exporter from the upload client", "approve_once_ci_passes", 0, 30),
   reviewed(106, "acme/widgets", "fix the timezone in exported traces", "approve_once_ci_passes", 1, 20),
   reviewed(66, "acme/gadgets", "lazy-load the chart bundle", "approve_once_ci_passes", 0, 10),

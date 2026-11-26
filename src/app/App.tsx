@@ -77,7 +77,6 @@ export function App(props: { store: AppStore }) {
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   // What the sidebar's search holds; its results replace the sections while it has words.
   const [query, setQuery] = createSignal("");
-  let workScroll: HTMLDivElement | undefined;
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
@@ -436,17 +435,11 @@ export function App(props: { store: AppStore }) {
     </IconButton>
   );
 
-  /** A new search, or clearing it, shows the list from its top. */
-  function search(text: string) {
-    setQuery(text);
-    if (workScroll) workScroll.scrollTop = 0;
-  }
-
   /** Escape clears the search; Enter opens its first result, a review before a chat. */
   function onSearchKeyDown(event: KeyboardEvent) {
     if (event.key === "Escape" && query() !== "") {
       event.preventDefault();
-      search("");
+      setQuery("");
     } else if (event.key === "Enter" && query().trim() !== "") {
       event.preventDefault();
       const { groups, chats } = searchWork(sidebarReviews(), selectVisibleConversations(snapshot()), query());
@@ -563,7 +556,7 @@ export function App(props: { store: AppStore }) {
                     placeholder="Search PRs and chats"
                     aria-label="Search PRs and chats"
                     value={query()}
-                    onInput={(event) => search(event.currentTarget.value)}
+                    onInput={(event) => setQuery(event.currentTarget.value)}
                     onKeyDown={onSearchKeyDown}
                   />
                 </label>
@@ -576,12 +569,6 @@ export function App(props: { store: AppStore }) {
                 />
               </div>
               <Show when={snapshot().queuedCount > 0}><p class="queue-count">{snapshot().queuedCount} queued</p></Show>
-              <div
-                class="sidebar-scroll"
-                ref={(element: HTMLDivElement) => {
-                  workScroll = element;
-                }}
-              >
               <AllWork
                 query={query()}
                 reviews={sidebarReviews()}
@@ -604,7 +591,6 @@ export function App(props: { store: AppStore }) {
                 onToggle={(id) => store.toggleConversation(id)}
                 onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
               />
-              </div>
               <SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} />
             </aside>
           </Show>

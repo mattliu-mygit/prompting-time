@@ -351,8 +351,10 @@ describe("background agents", () => {
     expect(agents.querySelector(".agent-pin-status .pt-status-dot")).toHaveAttribute("data-status", "success");
     const list = screen.getByRole("treeitem", { name: /Auth refactor/ });
     expect(agents.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(agents.closest(".sidebar-scroll")).toBeNull();
-    expect(list.closest(".sidebar-scroll")).not.toBeNull();
+    // The rows scroll inside their section; the agents and the search stay above every section.
+    expect(list.closest(".work-section-body")).not.toBeNull();
+    expect(agents.closest(".all-work")).toBeNull();
+    expect(screen.getByRole("searchbox", { name: "Search PRs and chats" }).closest(".all-work")).toBeNull();
     expect(await axeViolations()).toEqual([]);
   });
 

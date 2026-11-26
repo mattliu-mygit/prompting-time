@@ -7,7 +7,8 @@ export function checkLayout() {
   };
   const shell = element(".app-shell").getBoundingClientRect();
   const composer = element(".composer").getBoundingClientRect();
-  const panes = [".timeline-scroll", ".sidebar-pane", ".inspector-pane"].map((selector) => {
+  // All work's open sections scroll on their own, each in its own body; check-sidebar-panes.ts checks them.
+  const panes = [".timeline-scroll", ".inspector-pane"].map((selector) => {
     const pane = element(selector);
     const previous = pane.scrollTop;
     pane.scrollTop = 0;

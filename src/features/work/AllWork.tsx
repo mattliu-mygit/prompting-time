@@ -1,4 +1,4 @@
-import { createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { AlertIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, CloseIcon, ListRow, PullRequestIcon, type Status } from "@prompting-time/ui";
 import type { ConversationSummary, ProviderId } from "../../bridge/types";
@@ -42,14 +42,12 @@ type CauseRow = { kind: "cause"; key: string; item: PluginCause; depth: 0 };
 type Row = ConversationRow | ReviewRow | CauseRow;
 /** One item of a part: a review, a cause, or a root with its loaded children. */
 type Entry = Row[];
-/** A labeled part of a section, or its only, unlabeled part; Needs you's parts show at most PART_LIMIT items until asked for more. */
-type Part = { key: string; label: string | null; hint?: string; entries: Entry[]; limited: boolean };
+/** A labeled part of a section, or its only, unlabeled part. */
+type Part = { key: string; label: string | null; hint?: string; entries: Entry[] };
 type Section = { key: string; label: string; title?: string; count: number; parts: Part[] };
 
 /** The sections the user opened or folded, by key, which this device keeps across launches; the rest start folded except Needs you. */
 const SECTIONS_PREFERENCE = "prompting-time.sidebar-sections";
-/** How many items each part of Needs you shows before "Show N more", so the folded sections below stay on screen. */
-const PART_LIMIT = 5;
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const statusText: Record<EffectiveStatus, string> = {
@@ -103,13 +101,16 @@ function readOpenSections(): Record<string, boolean> {
 }
 
 /**
- * The All work list, in sections that fold to a heading with a count. Only "Needs you" starts open:
- * reviews ready to approve, reviews that need a look, reviews that failed for a reason of their
- * own, and roots waiting on you, each part showing five items until "Show N more". Then Reviewing,
- * one section per cause that blocks every review with its one row, the chats of each project and
- * those without a folder, each root followed by its loaded children, and Done. The sections the
- * user opens or folds stay so across launches. It is a tree for keyboard users: arrow keys move
- * and open rows, Home and End jump, and Enter or Space opens a conversation, a review, or a cause.
+ * The All work list, in sections that work like VS Code's sidebar panes: every section's heading,
+ * with its name and count, stays on screen. The open sections share the space above the folded
+ * ones, each scrolling on its own, and the folded ones stack at the bottom; a heading opens its
+ * section into that space or folds it back into the stack. Only "Needs you" starts open: every
+ * review ready to approve, review that needs a look, review that failed for a reason of its own,
+ * and root waiting on you. Then Reviewing, one section per cause that blocks every review with its
+ * one row, the chats of each project and those without a folder, each root followed by its loaded
+ * children, and Done. The sections the user opens or folds stay so across launches. The rows are a
+ * tree for keyboard users: arrow keys move and open rows across the open sections, Home and End
+ * jump, and Enter or Space opens a conversation, a review, or a cause.
  */
 export function AllWork(props: Props) {
   const [focusedId, setFocusedId] = createSignal<string | null>(null);
@@ -117,17 +118,25 @@ export function AllWork(props: Props) {
   // Solid applies its writes only on the next flush.
   let opened = readOpenSections();
   const [openSections, setOpenSections] = createSignal(opened);
-  // The parts whose every item shows, after "Show N more".
-  const [shownParts, setShownParts] = createSignal<ReadonlySet<string>>(new Set());
   const items = new Map<string, HTMLElement>();
   const openIn = (sections: Record<string, boolean>, key: string) => sections[key] ?? key === "needs-you";
   const isOpen = (key: string) => openIn(openSections(), key);
+  // The section whose heading had the focus when it opened or folded. Its heading moves between the
+  // open sections and the stack, which draws a new one, so the new heading takes the focus back.
+  let refocus: string | null = null;
+  let resultsBox: HTMLElement | undefined;
 
-  function toggleSection(key: string) {
+  function toggleSection(key: string, heading: HTMLElement) {
+    if (document.activeElement === heading) refocus = key;
     opened = { ...opened, [key]: !openIn(opened, key) };
     setOpenSections(opened);
     savePreference(SECTIONS_PREFERENCE, JSON.stringify(opened));
   }
+
+  // A new search shows its results from the top, as the sections do after one.
+  createEffect(() => props.query, () => {
+    if (resultsBox) resultsBox.scrollTop = 0;
+  });
 
   const sections = createMemo((): Section[] => {
     const reviewRow = (item: PluginReview): Entry => [{ kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 }];
@@ -143,16 +152,16 @@ export function AllWork(props: Props) {
     const waitingChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
     const { ready, look, failed } = needsYou(props.reviews);
     const needsParts: Part[] = [
-      { key: "ready", label: "Ready to approve", hint: "The plugin says approve once CI passes.", entries: ready.map(reviewRow), limited: true },
-      { key: "look", label: "Needs a look", hint: "The plugin says look first, or skipped part of the change.", entries: look.map(reviewRow), limited: true },
-      { key: "failed", label: "Review failed", hint: "Each failed for a reason of its own; open one for the reason, Retry review, and Ask why.", entries: failed.map(reviewRow), limited: true },
-      { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", entries: chatEntries(waitingChats), limited: true },
+      { key: "ready", label: "Ready to approve", hint: "The plugin says approve once CI passes.", entries: ready.map(reviewRow) },
+      { key: "look", label: "Needs a look", hint: "The plugin says look first, or skipped part of the change.", entries: look.map(reviewRow) },
+      { key: "failed", label: "Review failed", hint: "Each failed for a reason of its own; open one for the reason, Retry review, and Ask why.", entries: failed.map(reviewRow) },
+      { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", entries: chatEntries(waitingChats) },
     ].filter((part) => part.entries.length > 0);
     const reviewing = props.reviews.filter(({ review }) => reviewCategory(review) === "reviewing")
       .sort((left, right) => right.review.started_at.localeCompare(left.review.started_at));
     const done = props.reviews.filter(({ review }) => reviewCategory(review) === "done")
       .sort((left, right) => reviewTime(right.review).localeCompare(reviewTime(left.review)));
-    const single = (key: string, entries: Entry[]): Part[] => [{ key, label: null, entries, limited: false }];
+    const single = (key: string, entries: Entry[]): Part[] => [{ key, label: null, entries }];
     return [
       { key: "needs-you", label: "Needs you", count: needsParts.reduce((sum, part) => sum + part.entries.length, 0), parts: needsParts },
       ...(reviewing.length > 0 ? [{ key: "reviewing", label: "Reviewing", count: reviewing.length, parts: single("reviewing", reviewing.map(reviewRow)) }] : []),
@@ -175,23 +184,19 @@ export function AllWork(props: Props) {
     const { groups, chats } = searchWork(props.reviews, props.conversations, props.query);
     return [
       ...groups.map((group): Part => ({
-        key: `found:${group.label}`, label: group.label, limited: false,
+        key: `found:${group.label}`, label: group.label,
         entries: group.reviews.map((item) => [{ kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 }]),
       })),
-      ...(chats.length > 0 ? [{ key: "found:chats", label: "Chats", limited: false, entries: chats.map((conversation): Entry => [{ kind: "conversation", key: conversation.id, conversation, depth: 0, found: true }]) }] : []),
+      ...(chats.length > 0 ? [{ key: "found:chats", label: "Chats", entries: chats.map((conversation): Entry => [{ kind: "conversation", key: conversation.id, conversation, depth: 0, found: true }]) }] : []),
     ];
   });
 
-  /** The entries a part shows: all of them once asked, or while the selected row is past the limit; else the first five. */
-  const shownEntries = (part: Part): Entry[] => {
-    if (!part.limited || part.entries.length <= PART_LIMIT || shownParts().has(part.key)) return part.entries;
-    const selected = [props.selectedReview, props.selectedId];
-    const past = part.entries.slice(PART_LIMIT).some((entry) => entry.some((row) => selected.includes(row.key)));
-    return past ? part.entries : part.entries.slice(0, PART_LIMIT);
-  };
+  /** The open sections, which share the space above the stack, and the folded ones in the stack; each in list order. */
+  const openList = createMemo(() => sections().filter((section) => isOpen(section.key)));
+  const foldedList = createMemo(() => sections().filter((section) => !isOpen(section.key)));
   const rows = createMemo(() => (searching()
     ? results().flatMap((part) => part.entries.flat())
-    : sections().flatMap((section) => (isOpen(section.key) ? section.parts.flatMap((part) => shownEntries(part).flat()) : []))));
+    : openList().flatMap((section) => section.parts.flatMap((part) => part.entries.flat()))));
   const tabStop = () => (rows().some((row) => row.key === focusedId()) ? focusedId() : rows()[0]?.key);
 
   function focus(id: string | null | undefined) {
@@ -382,12 +387,43 @@ export function AllWork(props: Props) {
     );
   }
 
+  /** A section's heading: a toggle with its name and count, which opens the section or folds it into the stack. */
+  function heading(section: () => Section, labelId: string, open: boolean) {
+    const key = untrack(section).key;
+    return (
+      <h2 class="work-group-heading">
+        <button
+          type="button"
+          class="work-group-toggle"
+          aria-expanded={open ? "true" : "false"}
+          title={section().title}
+          ref={(element: HTMLButtonElement) => {
+            if (refocus !== key) return;
+            refocus = null;
+            queueMicrotask(() => element.focus());
+          }}
+          onClick={(event) => toggleSection(key, event.currentTarget)}
+        >
+          {open ? <ChevronDownIcon /> : <ChevronRightIcon />}
+          <span id={labelId} class="work-group-label">{section().label}</span>{" "}
+          <span class="work-group-count">{section().count}</span>
+        </button>
+      </h2>
+    );
+  }
+
   const resultCount = () => results().reduce((sum, part) => sum + part.entries.length, 0);
 
   return (
     <div class="all-work">
       <Show when={searching()}>
-        <section class="work-results" aria-label="Search results">
+        <section
+          class="work-results"
+          aria-label="Search results"
+          ref={(element: HTMLElement) => {
+            resultsBox = element;
+          }}
+        >
           <p class="work-empty" role="status">{resultCount() === 0 ? "No PRs or chats match" : `${resultCount()} ${resultCount() === 1 ? "result" : "results"}`} · Esc clears</p>
           <For each={results()} keyed={(part) => part.key}>
             {(part) => {
@@ -404,52 +440,45 @@ export function AllWork(props: Props) {
           </For>
         </section>
       </Show>
-      <For each={searching() ? [] : sections()} keyed={(section) => section.key}>
-        {(section) => {
-          const labelId = createUniqueId();
-          return (
-            <section class={["work-section", { "work-section-needs-you": section().key === "needs-you" }]}>
-              <h2 class="work-group-heading">
-                <button
-                  type="button"
-                  class="work-group-toggle"
-                  aria-expanded={isOpen(section().key) ? "true" : "false"}
-                  title={section().title}
-                  onClick={() => toggleSection(section().key)}
-                >
-                  {isOpen(section().key) ? <ChevronDownIcon /> : <ChevronRightIcon />}
-                  <span id={labelId} class="work-group-label">{section().label}</span>{" "}
-                  <span class="work-group-count">{section().count}</span>
-                </button>
-              </h2>
-              <Show when={isOpen(section().key)}>
-                <Show when={section().count === 0}><p class="work-empty">Nothing needs you right now.</p></Show>
-                <For each={section().parts} keyed={(part) => part.key}>
-                  {(part) => {
-                    const partId = createUniqueId();
-                    const hidden = () => part().entries.length - shownEntries(part()).length;
-                    return (
-                      <div class="work-part">
-                        <Show when={part().label}>
-                          {(label) => <h3 class="work-part-heading" title={part().hint}><span id={partId}>{label()}</span> · {part().entries.length}</h3>}
-                        </Show>
-                        <ul role="tree" aria-labelledby={part().label ? partId : labelId} class="work-rows">
-                          <For each={shownEntries(part()).flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
-                        </ul>
-                        <Show when={hidden() > 0}>
-                          <button type="button" class="work-more" onClick={() => setShownParts((shown) => new Set([...shown, part().key]))}>
-                            Show {hidden()} more
-                          </button>
-                        </Show>
-                      </div>
-                    );
-                  }}
-                </For>
-              </Show>
-            </section>
-          );
-        }}
-      </For>
+      <Show when={!searching()}>
+        <div class="work-open">
+          <For each={openList()} keyed={(section) => section.key}>
+            {(section) => {
+              const labelId = createUniqueId();
+              return (
+                <section class="work-section">
+                  {heading(section, labelId, true)}
+                  <div class="work-section-body">
+                    <Show when={section().count === 0}><p class="work-empty">Nothing needs you right now.</p></Show>
+                    <For each={section().parts} keyed={(part) => part.key}>
+                      {(part) => {
+                        const partId = createUniqueId();
+                        return (
+                          <div class="work-part">
+                            <Show when={part().label}>
+                              {(label) => <h3 class="work-part-heading" title={part().hint}><span id={partId}>{label()}</span> · {part().entries.length}</h3>}
+                            </Show>
+                            <ul role="tree" aria-labelledby={part().label ? partId : labelId} class="work-rows">
+                              <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
+                            </ul>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </section>
+              );
+            }}
+          </For>
+        </div>
+        <Show when={foldedList().length > 0}>
+          <div class="work-folded">
+            <For each={foldedList()} keyed={(section) => section.key}>
+              {(section) => <section class="work-section">{heading(section, createUniqueId(), false)}</section>}
+            </For>
+          </div>
+        </Show>
+      </Show>
     </div>
   );
 }
