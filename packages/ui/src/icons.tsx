@@ -81,6 +81,19 @@ export const CheckIcon = () => (
     <path d="M20 6 9 17l-5-5" />
   </Icon>
 );
+export const HelpIcon = () => (
+  <Icon>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+    <path d="M12 17h.01" />
+  </Icon>
+);
+export const PlusIcon = () => (
+  <Icon>
+    <path d="M5 12h14" />
+    <path d="M12 5v14" />
+  </Icon>
+);
 export const CloseIcon = () => (
   <Icon>
     <path d="M18 6 6 18" />
