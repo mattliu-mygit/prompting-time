@@ -8,7 +8,7 @@ import { BackgroundAgents, INSTALL_ITEMS, type InstallKind } from "../features/a
 import { CauseScreen } from "../features/agents/CauseScreen";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { PluginInspector } from "../features/agents/PluginSettings";
-import { blockingCauses, causeKey, newestRuns, pluginReviews, readyToDecide, reviewKey, reviewState, reviewTitle, shortPullRequest, versionsOf, waitingText, type PluginReview } from "../features/agents/reviews";
+import { blockingCauses, causeKey, needsYou, newestRuns, pluginReviews, reviewKey, reviewState, reviewTitle, shortPullRequest, versionsOf, waitingText, type PluginReview } from "../features/agents/reviews";
 import { ReviewScreen } from "../features/agents/ReviewScreen";
 import { describeAgent, readAgentStatus, readBlocked } from "../features/agents/status";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
@@ -79,7 +79,11 @@ export function App(props: { store: AppStore }) {
   /** The newest run of each pull request of every plugin: the reviews All work lists. */
   const newestReviews = createMemo(() => Object.entries(reviewsByPlugin()).flatMap(([plugin, reviews]): PluginReview[] => newestRuns(reviews).map((review) => ({ plugin, review }))));
   const causes = createMemo(() => snapshot().plugins.items.flatMap((plugin): PluginCause[] => blockingCauses(reviewsByPlugin()[plugin.name] ?? [], readBlocked(readAgentStatus(snapshot().plugins.statuses[plugin.name]))).map((cause) => ({ plugin: plugin.name, cause }))));
-  const needsYouReviews = createMemo(() => newestReviews().filter(({ review }) => readyToDecide(review)));
+  /** The reviews under "Needs you", in list order: ready to approve, needing a look, then failed for a reason of their own. */
+  const needsYouReviews = createMemo(() => {
+    const { ready, look, failed } = needsYou(newestReviews());
+    return [...ready, ...look, ...failed];
+  });
   const openReviewEntry = () => {
     const view = pluginView();
     return view?.kind === "review" ? reviewsByPlugin()[view.plugin]?.find((review) => review.run_id === view.runId) ?? null : null;
@@ -111,9 +115,8 @@ export function App(props: { store: AppStore }) {
     if (!view || !selectedPlugin()) return "Conversation workspace";
     return { agent: "Background agent", review: "Review", cause: "Blocked reviews" }[view.kind];
   };
-  /** Everything under "Needs you", in list order: causes that block every review, reviews to decide, then conversations. */
+  /** Everything under "Needs you", in list order: its reviews, then the conversations waiting on you. */
   const waiting = () => [
-    ...causes().map(({ plugin, cause }) => ({ key: causeKey(plugin, cause.id), open: () => showPlugin({ kind: "cause", plugin, cause: cause.id }) })),
     ...needsYouReviews().map(({ plugin, review }) => ({ key: reviewKey(plugin, review.run_id), open: () => openReview(plugin, review.run_id) })),
     ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []))
       .map(({ id }) => ({ key: id, open: () => selectConversation(id) })),
@@ -430,7 +433,7 @@ export function App(props: { store: AppStore }) {
               <Show when={snapshot().queuedCount > 0}><p class="queue-count">{snapshot().queuedCount} queued</p></Show>
               <AllWork
                 reviews={snapshot().statusFilter === "all" ? newestReviews() : snapshot().statusFilter === "waiting" ? needsYouReviews() : []}
-                causes={snapshot().statusFilter === "all" || snapshot().statusFilter === "waiting" ? causes() : []}
+                causes={snapshot().statusFilter === "all" ? causes() : []}
                 selectedReview={pluginView()?.kind === "review" || pluginView()?.kind === "cause" ? currentKey() : null}
                 onOpenReview={openReview}
                 onOpenCause={(plugin, cause) => showPlugin({ kind: "cause", plugin, cause })}
@@ -629,7 +632,7 @@ export function App(props: { store: AppStore }) {
                 id: `review:${plugin}:${review.run_id}`,
                 label: reviewTitle(review),
                 detail: `${shortPullRequest(review)} · ${reviewState(review).words}`,
-                keywords: [review.repo, `#${review.pr}`, shortPullRequest(review)],
+                keywords: [review.repo, `#${review.pr}`, shortPullRequest(review), ...(review.author ? [`@${review.author}`] : [])],
                 current: currentKey() === reviewKey(plugin, review.run_id),
               })),
             },

@@ -133,7 +133,7 @@ export function fixtureReviews() {
   return [
     { run_id: "20261126T150000Z-101", repo: "acme/widgets", pr: 101, title: "separate cache configuration", url: "https://example.invalid/acme/widgets/pull/101",
       started_at: "2026-11-26T15:00:00Z", ended_at: "2026-11-26T15:20:00Z", outcome: "reviewed", verdict: "approve_once_ci_passes",
-      skipped: false, findings: 2, submitted: null, needs_you: true },
+      skipped: false, findings: 2, submitted: null, needs_you: true, author: "sam-fixture" },
     { run_id: "20261126T140000Z-102", repo: "acme/widgets", pr: 102, title: null, url: null,
       started_at: "2026-11-26T14:00:00Z", ended_at: null, outcome: "running", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: false },
     { run_id: "20261125T100000Z-77", repo: "acme/gadgets", pr: 77, title: "add the tags package", url: null,

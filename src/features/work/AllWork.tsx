@@ -1,8 +1,10 @@
-import { createMemo, createSignal, For, Show, untrack } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { AlertIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, ListRow, PullRequestIcon, type Status } from "@prompting-time/ui";
 import type { ConversationSummary, ProviderId } from "../../bridge/types";
 import { effectiveConversationStatus, type ChildPageSnapshot, type EffectiveStatus, type SelectedPath } from "../../app/store";
-import { causeKey, isFinished, reviewKey, reviewPlace, reviewState, reviewTitle, shortPullRequest, waitingText, type BlockingCause, type PluginReview } from "../agents/reviews";
+import { readPreference, savePreference } from "../../app/preferences";
+import { causeKey, needsYou, reviewCategory, reviewKey, reviewRowMeta, reviewState, reviewTime, reviewTitle, shortDate, waitingText, type BlockingCause, type PluginReview } from "../agents/reviews";
 
 type Props = {
   /** Active roots in list order, already filtered by status. */
@@ -12,13 +14,9 @@ type Props = {
   expandedById: Readonly<Record<string, boolean>>;
   selectedId: string | null;
   selectedPath: SelectedPath | null;
-  /**
-   * The plugins' reviews, the newest run of each pull request. A review waiting on a decision sits
-   * under "Needs you", one the user finished with before today in Done, and the rest in their
-   * repository's group.
-   */
+  /** The plugins' reviews, the newest run of each pull request, in every state; reviewCategory places each. */
   reviews: readonly PluginReview[];
-  /** The causes that block every review, one row each, first under "Needs you". */
+  /** The causes that block every review; each with a waiting review gets a section of its own. */
   causes: readonly PluginCause[];
   /** The key (reviewKey or causeKey) of the review or cause the workspace shows, if any. */
   selectedReview: string | null;
@@ -35,8 +33,16 @@ type ConversationRow = { kind: "conversation"; key: string; conversation: Conver
 type ReviewRow = { kind: "review"; key: string; item: PluginReview; depth: 0 };
 type CauseRow = { kind: "cause"; key: string; item: PluginCause; depth: 0 };
 type Row = ConversationRow | ReviewRow | CauseRow;
-/** A group as the list draws it; Done folds to its heading. */
-type DisplayGroup = WorkGroup & { rows: Row[]; done?: boolean };
+/** One item of a part: a review, a cause, or a root with its loaded children. */
+type Entry = Row[];
+/** A labeled part of a section, or its only, unlabeled part; Needs you's parts show at most PART_LIMIT items until asked for more. */
+type Part = { key: string; label: string | null; hint?: string; entries: Entry[]; limited: boolean };
+type Section = { key: string; label: string; title?: string; count: number; parts: Part[] };
+
+/** The sections the user opened or folded, by key, which this device keeps across launches; the rest start folded except Needs you. */
+const SECTIONS_PREFERENCE = "prompting-time.sidebar-sections";
+/** How many items each part of Needs you shows before "Show N more", so the folded sections below stay on screen. */
+const PART_LIMIT = 5;
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const statusText: Record<EffectiveStatus, string> = {
@@ -48,34 +54,91 @@ const statusDots: Record<EffectiveStatus, Status> = {
   completed: "idle", interrupted: "idle", failed: "error",
 };
 
+function readOpenSections(): Record<string, boolean> {
+  try {
+    const value: unknown = JSON.parse(readPreference(SECTIONS_PREFERENCE) ?? "{}");
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"))
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 /**
- * The All work list: the causes that block every review, the reviews that wait on a decision, and
- * the roots waiting on you under "Needs you"; then the rest grouped by project, each root followed
- * by its loaded children and its repository's other reviews; then Done, folded, with the reviews
- * finished before today. It is a tree for keyboard users: arrow keys move and open rows, Home and
- * End jump, and Enter or Space opens a conversation, a review, or a cause.
+ * The All work list, in sections that fold to a heading with a count. Only "Needs you" starts open:
+ * reviews ready to approve, reviews that need a look, reviews that failed for a reason of their
+ * own, and roots waiting on you, each part showing five items until "Show N more". Then Reviewing,
+ * one section per cause that blocks every review with its one row, the chats of each project and
+ * those without a folder, each root followed by its loaded children, and Done. The sections the
+ * user opens or folds stay so across launches. It is a tree for keyboard users: arrow keys move
+ * and open rows, Home and End jump, and Enter or Space opens a conversation, a review, or a cause.
  */
 export function AllWork(props: Props) {
   const [focusedId, setFocusedId] = createSignal<string | null>(null);
-  const [doneOpen, setDoneOpen] = createSignal(false);
+  // Toggles read and write `opened`, which holds every toggle at once; the signal shows it, and
+  // Solid applies its writes only on the next flush.
+  let opened = readOpenSections();
+  const [openSections, setOpenSections] = createSignal(opened);
+  // The parts whose every item shows, after "Show N more".
+  const [shownParts, setShownParts] = createSignal<ReadonlySet<string>>(new Set());
   const items = new Map<string, HTMLElement>();
-  const groups = createMemo(() => {
-    const now = new Date();
-    const conversationGroups: DisplayGroup[] = groupWork(props.conversations).map((group) => ({
-      ...group,
-      rows: visibleRows(group.conversations, props.conversationsById, props.childPagesById, props.expandedById, props.selectedPath) as Row[],
-    }));
-    const needsYou: Row[] = props.causes.map((item) => ({ kind: "cause", key: causeKey(item.plugin, item.cause.id), item, depth: 0 }));
-    const inProjects: ReviewRow[] = [];
-    const done: ReviewRow[] = [];
-    for (const item of props.reviews) {
-      const row: ReviewRow = { kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 };
-      const place = reviewPlace(item.review, now);
-      (place === "needs-you" ? needsYou : place === "done" ? done : inProjects).push(row);
-    }
-    return placeReviews(conversationGroups, needsYou, inProjects, done);
+  const openIn = (sections: Record<string, boolean>, key: string) => sections[key] ?? key === "needs-you";
+  const isOpen = (key: string) => openIn(openSections(), key);
+
+  function toggleSection(key: string) {
+    opened = { ...opened, [key]: !openIn(opened, key) };
+    setOpenSections(opened);
+    savePreference(SECTIONS_PREFERENCE, JSON.stringify(opened));
+  }
+
+  const sections = createMemo((): Section[] => {
+    const reviewRow = (item: PluginReview): Entry => [{ kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 }];
+    const chatEntries = (roots: readonly ConversationSummary[]): Entry[] => {
+      const rows = visibleRows(roots, props.conversationsById, props.childPagesById, props.expandedById, props.selectedPath) as Row[];
+      return rows.reduce<Entry[]>((entries, row) => {
+        if (row.depth === 0) entries.push([row]);
+        else entries.at(-1)?.push(row);
+        return entries;
+      }, []);
+    };
+    const groups = groupWork(props.conversations);
+    const waitingChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
+    const { ready, look, failed } = needsYou(props.reviews);
+    const needsParts: Part[] = [
+      { key: "ready", label: "Ready to approve", hint: "The plugin says approve once CI passes.", entries: ready.map(reviewRow), limited: true },
+      { key: "look", label: "Needs a look", hint: "The plugin says look first, or skipped part of the change.", entries: look.map(reviewRow), limited: true },
+      { key: "failed", label: "Review failed", hint: "Each failed for a reason of its own; open one for the reason, Retry review, and Ask why.", entries: failed.map(reviewRow), limited: true },
+      { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", entries: chatEntries(waitingChats), limited: true },
+    ].filter((part) => part.entries.length > 0);
+    const reviewing = props.reviews.filter(({ review }) => reviewCategory(review) === "reviewing")
+      .sort((left, right) => right.review.started_at.localeCompare(left.review.started_at));
+    const done = props.reviews.filter(({ review }) => reviewCategory(review) === "done")
+      .sort((left, right) => reviewTime(right.review).localeCompare(reviewTime(left.review)));
+    const single = (key: string, entries: Entry[]): Part[] => [{ key, label: null, entries, limited: false }];
+    return [
+      { key: "needs-you", label: "Needs you", count: needsParts.reduce((sum, part) => sum + part.entries.length, 0), parts: needsParts },
+      ...(reviewing.length > 0 ? [{ key: "reviewing", label: "Reviewing", count: reviewing.length, parts: single("reviewing", reviewing.map(reviewRow)) }] : []),
+      ...props.causes.filter(({ cause }) => cause.reviews.length > 0).map(({ plugin, cause }): Section => {
+        const key = causeKey(plugin, cause.id);
+        return { key: `waiting:${key}`, label: `Waiting · ${cause.summary}`, count: cause.reviews.length, parts: single(key, [[{ kind: "cause", key, item: { plugin, cause }, depth: 0 }]]) };
+      }),
+      ...groups.filter((group) => group.key !== "needs-you").map((group): Section => {
+        const key = `chats:${group.path ?? "no-folder"}`;
+        return { key, label: `Chats · ${group.label}`, title: group.path ?? undefined, count: group.conversations.length, parts: single(key, chatEntries(group.conversations)) };
+      }),
+      ...(done.length > 0 ? [{ key: "done", label: "Done", count: done.length, parts: single("done", done.map(reviewRow)) }] : []),
+    ];
   });
-  const rows = createMemo(() => groups().flatMap((group) => (group.done && !doneOpen() ? [] : group.rows)));
+
+  /** The entries a part shows: all of them once asked, or while the selected row is past the limit; else the first five. */
+  const shownEntries = (part: Part): Entry[] => {
+    if (!part.limited || part.entries.length <= PART_LIMIT || shownParts().has(part.key)) return part.entries;
+    const selected = [props.selectedReview, props.selectedId];
+    const past = part.entries.slice(PART_LIMIT).some((entry) => entry.some((row) => selected.includes(row.key)));
+    return past ? part.entries : part.entries.slice(0, PART_LIMIT);
+  };
+  const rows = createMemo(() => sections().flatMap((section) => (isOpen(section.key) ? section.parts.flatMap((part) => shownEntries(part).flat()) : [])));
   const tabStop = () => (rows().some((row) => row.key === focusedId()) ? focusedId() : rows()[0]?.key);
 
   function focus(id: string | null | undefined) {
@@ -122,198 +185,177 @@ export function AllWork(props: Props) {
     }
   }
 
+  /** The tree attributes and handlers every row shares, the tab stop as a getter so it stays live; `key` never changes for a row. */
+  const treeItem = (key: string, row: () => Row) => ({
+    element: "li" as const,
+    role: "treeitem" as const,
+    ref: (element: HTMLElement) => items.set(key, element),
+    get tabindex() {
+      return tabStop() === key ? 0 : -1;
+    },
+    onFocus: (event: FocusEvent) => {
+      if (event.target === event.currentTarget) setFocusedId(key);
+    },
+    onKeyDown: (event: KeyboardEvent) => {
+      if (event.target === event.currentTarget) navigate(event, row());
+    },
+  });
+
+  function renderRow(row: () => Row): JSX.Element {
+    const first = untrack(row);
+    if (first.kind === "cause") {
+      // A cause's key holds its plugin and ID, so neither changes.
+      const item = () => (row() as CauseRow).item;
+      const meta = () => `${waitingText(item().cause.reviews.length)}${item().cause.since ? ` · since ${shortDate(item().cause.since!)}` : ""}`;
+      return (
+        <ListRow
+          {...treeItem(first.key, row)}
+          aria-label={`${item().cause.summary}, ${meta()}`}
+          aria-level={1}
+          aria-selected={props.selectedReview === first.key ? "true" : "false"}
+          class="work-row"
+          style={{ "--work-depth": "0" }}
+          icon={<AlertIcon />}
+          title={item().cause.summary}
+          status="error"
+          meta={meta()}
+          onClick={() => open(row() as CauseRow)}
+        />
+      );
+    }
+    if (first.kind === "review") {
+      // A review's key holds its plugin and run, so neither changes.
+      const item = () => (row() as ReviewRow).item;
+      const meta = () => reviewRowMeta(item().review);
+      return (
+        <ListRow
+          {...treeItem(first.key, row)}
+          aria-label={`${reviewTitle(item().review)}, ${meta()}`}
+          aria-level={1}
+          aria-selected={props.selectedReview === first.key ? "true" : "false"}
+          class="work-row work-review"
+          style={{ "--work-depth": "0" }}
+          icon={<PullRequestIcon />}
+          title={reviewTitle(item().review)}
+          status={reviewState(item().review).status}
+          meta={meta()}
+          onClick={() => props.onOpenReview(item().plugin, item().review.run_id)}
+        />
+      );
+    }
+    // The row's key is its conversation id, so the id never changes.
+    const id = first.key;
+    const conversation = () => (row() as ConversationRow).conversation;
+    const status = () => effectiveConversationStatus(conversation());
+    const provider = () => (conversation().provider ? providerNames[conversation().provider!] : "No provider");
+    const expanded = () => props.expandedById[id] === true;
+    const page = () => props.childPagesById[id];
+    const expandable = () => conversation().hasChildren || page() !== undefined;
+    return (
+      <ListRow
+        {...treeItem(id, row)}
+        aria-label={`${conversation().title}, ${provider()}, ${statusText[status()]}`}
+        aria-level={row().depth + 1}
+        aria-selected={props.selectedId === id ? "true" : "false"}
+        aria-expanded={expandable() ? (expanded() ? "true" : "false") : undefined}
+        class="work-row"
+        style={{ "--work-depth": String(Math.min(row().depth, 8)) }}
+        icon={<ChatIcon />}
+        title={conversation().title}
+        status={statusDots[status()]}
+        meta={`${provider()} · ${statusText[status()]}`}
+        trailing={
+          <Show when={expandable()}>
+            <button
+              type="button"
+              class="work-disclosure"
+              tabindex={-1}
+              aria-label={`${expanded() ? "Collapse" : "Expand"} ${conversation().title}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onToggle(id);
+              }}
+            >
+              {expanded() ? <ChevronDownIcon /> : <ChevronRightIcon />}
+            </button>
+          </Show>
+        }
+        onClick={() => props.onSelect(id)}
+      >
+        <Show when={expanded() && page()}>
+          {(current) => (
+            <div class="child-page-controls" onClick={(event) => event.stopPropagation()}>
+              <Show when={current().loading}><span role="status">Loading conversations…</span></Show>
+              <Show when={current().error}>
+                <p role="alert">{current().error}</p>
+                <button type="button" class="pt-button" onClick={() => props.onLoadChildPage(id, true)}>Retry conversations</button>
+              </Show>
+              <Show when={current().nextCursor}>
+                <button type="button" class="pt-button" disabled={current().loading} onClick={() => props.onLoadChildPage(id, false)}>Load more conversations</button>
+              </Show>
+              <Show when={current().evicted}>
+                <div role="note">
+                  <span>Some conversations are outside this bounded view.</span>
+                  <button type="button" class="pt-button" disabled={current().loading} onClick={() => props.onLoadChildPage(id, true)}>Reload conversations</button>
+                </div>
+              </Show>
+            </div>
+          )}
+        </Show>
+      </ListRow>
+    );
+  }
+
   return (
-    <Show when={groups().length > 0} fallback={<p class="work-empty">No conversations match this status.</p>}>
-      <div class="all-work">
-        <For each={groups()} keyed={(group) => group.key}>
-          {(group, index) => (
-            <section class={["work-group", { "work-group-needs-you": group().key === "needs-you" }]}>
-              <h2 id={`work-group-${index()}`} class="work-group-heading" title={group().path ?? undefined}>
-                <Show when={group().done} fallback={group().label}>
-                  <button type="button" class="work-group-toggle" aria-expanded={doneOpen() ? "true" : "false"} onClick={() => setDoneOpen(!doneOpen())}>
-                    {doneOpen() ? <ChevronDownIcon /> : <ChevronRightIcon />}
-                    <span>{group().label}</span>{" "}
-                    <span class="work-group-count">{group().rows.length}</span>
-                  </button>
-                </Show>
+    <div class="all-work">
+      <For each={sections()} keyed={(section) => section.key}>
+        {(section) => {
+          const labelId = createUniqueId();
+          return (
+            <section class={["work-section", { "work-section-needs-you": section().key === "needs-you" }]}>
+              <h2 class="work-group-heading">
+                <button
+                  type="button"
+                  class="work-group-toggle"
+                  aria-expanded={isOpen(section().key) ? "true" : "false"}
+                  title={section().title}
+                  onClick={() => toggleSection(section().key)}
+                >
+                  {isOpen(section().key) ? <ChevronDownIcon /> : <ChevronRightIcon />}
+                  <span id={labelId} class="work-group-label">{section().label}</span>{" "}
+                  <span class="work-group-count">{section().count}</span>
+                </button>
               </h2>
-              <Show when={!group().done || doneOpen()}>
-              <ul role="tree" aria-labelledby={`work-group-${index()}`} class="work-rows">
-                <For each={group().rows} keyed={(row) => row.key}>
-                  {(row) => {
-                    const first = untrack(row);
-                    if (first.kind === "cause") {
-                      // A cause's key holds its plugin and ID, so neither changes.
-                      const item = () => (row() as CauseRow).item;
-                      const meta = () => waitingText(item().cause.reviews.length);
-                      return (
-                        <ListRow
-                          element="li"
-                          role="treeitem"
-                          ref={(element: HTMLElement) => items.set(first.key, element)}
-                          aria-label={`${item().cause.summary}, ${meta()}`}
-                          aria-level={1}
-                          aria-selected={props.selectedReview === first.key ? "true" : "false"}
-                          tabindex={tabStop() === first.key ? 0 : -1}
-                          class="work-row"
-                          style={{ "--work-depth": "0" }}
-                          icon={<AlertIcon />}
-                          title={item().cause.summary}
-                          status="error"
-                          meta={meta()}
-                          onFocus={(event: FocusEvent) => {
-                            if (event.target === event.currentTarget) setFocusedId(first.key);
-                          }}
-                          onClick={() => open(row() as CauseRow)}
-                          onKeyDown={(event: KeyboardEvent) => {
-                            if (event.target === event.currentTarget) navigate(event, row());
-                          }}
-                        />
-                      );
-                    }
-                    if (first.kind === "review") {
-                      // A review's key holds its plugin and run, so neither changes.
-                      const item = () => (row() as ReviewRow).item;
-                      const state = () => reviewState(item().review);
-                      const meta = () => `${shortPullRequest(item().review)} · ${state().words}`;
-                      // Findings count while the review waits on a decision; after it, they are history.
-                      const count = () => (item().review.outcome === "reviewed" && !isFinished(item().review) && item().review.findings > 0 ? item().review.findings : undefined);
-                      return (
-                        <ListRow
-                          element="li"
-                          role="treeitem"
-                          ref={(element: HTMLElement) => items.set(first.key, element)}
-                          aria-label={`${reviewTitle(item().review)}, ${count() === undefined ? "" : `${count()} ${count() === 1 ? "finding" : "findings"}, `}${meta()}`}
-                          aria-level={1}
-                          aria-selected={props.selectedReview === first.key ? "true" : "false"}
-                          tabindex={tabStop() === first.key ? 0 : -1}
-                          class="work-row"
-                          style={{ "--work-depth": "0" }}
-                          icon={<PullRequestIcon />}
-                          title={reviewTitle(item().review)}
-                          count={count()}
-                          status={state().status}
-                          meta={meta()}
-                          onFocus={(event: FocusEvent) => {
-                            if (event.target === event.currentTarget) setFocusedId(first.key);
-                          }}
-                          onClick={() => props.onOpenReview(item().plugin, item().review.run_id)}
-                          onKeyDown={(event: KeyboardEvent) => {
-                            if (event.target === event.currentTarget) navigate(event, row());
-                          }}
-                        />
-                      );
-                    }
-                    // The row's key is its conversation id, so the id never changes.
-                    const id = first.key;
-                    const conversation = () => (row() as ConversationRow).conversation;
-                    const status = () => effectiveConversationStatus(conversation());
-                    const provider = () => (conversation().provider ? providerNames[conversation().provider!] : "No provider");
-                    const expanded = () => props.expandedById[id] === true;
-                    const page = () => props.childPagesById[id];
-                    const expandable = () => conversation().hasChildren || page() !== undefined;
+              <Show when={isOpen(section().key)}>
+                <Show when={section().count === 0}><p class="work-empty">Nothing needs you right now.</p></Show>
+                <For each={section().parts} keyed={(part) => part.key}>
+                  {(part) => {
+                    const partId = createUniqueId();
+                    const hidden = () => part().entries.length - shownEntries(part()).length;
                     return (
-                      <ListRow
-                        element="li"
-                        role="treeitem"
-                        ref={(element: HTMLElement) => items.set(id, element)}
-                        aria-label={`${conversation().title}, ${provider()}, ${statusText[status()]}`}
-                        aria-level={row().depth + 1}
-                        aria-selected={props.selectedId === id ? "true" : "false"}
-                        aria-expanded={expandable() ? (expanded() ? "true" : "false") : undefined}
-                        tabindex={tabStop() === id ? 0 : -1}
-                        class="work-row"
-                        style={{ "--work-depth": String(Math.min(row().depth, 8)) }}
-                        icon={<ChatIcon />}
-                        title={conversation().title}
-                        status={statusDots[status()]}
-                        meta={`${provider()} · ${statusText[status()]}`}
-                        trailing={
-                          <Show when={expandable()}>
-                            <button
-                              type="button"
-                              class="work-disclosure"
-                              tabindex={-1}
-                              aria-label={`${expanded() ? "Collapse" : "Expand"} ${conversation().title}`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                props.onToggle(id);
-                              }}
-                            >
-                              {expanded() ? <ChevronDownIcon /> : <ChevronRightIcon />}
-                            </button>
-                          </Show>
-                        }
-                        onFocus={(event: FocusEvent) => {
-                          if (event.target === event.currentTarget) setFocusedId(id);
-                        }}
-                        onClick={() => props.onSelect(id)}
-                        onKeyDown={(event: KeyboardEvent) => {
-                          if (event.target === event.currentTarget) navigate(event, row());
-                        }}
-                      >
-                        <Show when={expanded() && page()}>
-                          {(current) => (
-                            <div class="child-page-controls" onClick={(event) => event.stopPropagation()}>
-                              <Show when={current().loading}><span role="status">Loading conversations…</span></Show>
-                              <Show when={current().error}>
-                                <p role="alert">{current().error}</p>
-                                <button type="button" class="pt-button" onClick={() => props.onLoadChildPage(id, true)}>Retry conversations</button>
-                              </Show>
-                              <Show when={current().nextCursor}>
-                                <button type="button" class="pt-button" disabled={current().loading} onClick={() => props.onLoadChildPage(id, false)}>Load more conversations</button>
-                              </Show>
-                              <Show when={current().evicted}>
-                                <div role="note">
-                                  <span>Some conversations are outside this bounded view.</span>
-                                  <button type="button" class="pt-button" disabled={current().loading} onClick={() => props.onLoadChildPage(id, true)}>Reload conversations</button>
-                                </div>
-                              </Show>
-                            </div>
-                          )}
+                      <div class="work-part">
+                        <Show when={part().label}>
+                          {(label) => <h3 class="work-part-heading" title={part().hint}><span id={partId}>{label()}</span> · {part().entries.length}</h3>}
                         </Show>
-                      </ListRow>
+                        <ul role="tree" aria-labelledby={part().label ? partId : labelId} class="work-rows">
+                          <For each={shownEntries(part()).flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
+                        </ul>
+                        <Show when={hidden() > 0}>
+                          <button type="button" class="work-more" onClick={() => setShownParts((shown) => new Set([...shown, part().key]))}>
+                            Show {hidden()} more
+                          </button>
+                        </Show>
+                      </div>
                     );
                   }}
                 </For>
-              </ul>
               </Show>
             </section>
-          )}
-        </For>
-      </div>
-    </Show>
+          );
+        }}
+      </For>
+    </div>
   );
-}
-
-/**
- * Adds the reviews to the conversation groups: `needsYou` first under "Needs you", each review of
- * `inProjects` at the end of the project whose folder has its repository's name, such as widgets
- * for acme/widgets, else in a group named after the repository among the projects, and `done` in a
- * Done group at the end. Matching by folder name can put two repositories with the same name in
- * one project; reading each project's remote would tell them apart.
- */
-function placeReviews(groups: DisplayGroup[], needsYou: Row[], inProjects: ReviewRow[], done: ReviewRow[]): DisplayGroup[] {
-  const result = [...groups];
-  if (needsYou.length > 0) {
-    if (result[0]?.key === "needs-you") result[0] = { ...result[0], rows: [...needsYou, ...result[0].rows] };
-    else result.unshift({ key: "needs-you", label: "Needs you", path: null, conversations: [], rows: needsYou });
-  }
-  for (const row of inProjects) {
-    const repo = row.item.review.repo;
-    const name = projectName(repo);
-    let index = result.findIndex((group) => group.key.startsWith("project:") && group.path !== null && projectName(group.path) === name);
-    if (index < 0) index = result.findIndex((group) => group.key === `repo:${repo}`);
-    if (index >= 0) {
-      result[index] = { ...result[index]!, rows: [...result[index]!.rows, row] };
-      continue;
-    }
-    const label = result.some((group) => group.label === name) ? repo : name;
-    const before = result.findIndex((group) => group.key === "projectless" || ((group.key.startsWith("project:") || group.key.startsWith("repo:")) && group.label.localeCompare(label) > 0));
-    result.splice(before < 0 ? result.length : before, 0, { key: `repo:${repo}`, label, path: null, conversations: [], rows: [row] });
-  }
-  if (done.length > 0) result.push({ key: "done", label: "Done", path: null, conversations: [], rows: done, done: true });
-  return result;
 }
 
 /** The roots waiting on you, in list order: what ⌘J steps through. */
@@ -323,15 +365,15 @@ export function waitingRoots(conversations: readonly ConversationSummary[]): Con
 
 /**
  * "Needs you" first, holding every root waiting on you (a root also waits when a descendant does),
- * then one group per project, sorted by name, then conversations without a project. A root shows
- * in one group only.
+ * then one group per project, sorted by name, then conversations without a folder. A root shows in
+ * one group only.
  */
 export function groupWork(conversations: readonly ConversationSummary[]): WorkGroup[] {
   const active = conversations.filter((conversation) => !conversation.archived);
   const needsYou: WorkGroup = { key: "needs-you", label: "Needs you", path: null, conversations: waitingRoots(active) };
   const waiting = new Set(needsYou.conversations);
   const projects = new Map<string, WorkGroup>();
-  const projectless: WorkGroup = { key: "projectless", label: "No project", path: null, conversations: [] };
+  const projectless: WorkGroup = { key: "projectless", label: "no folder", path: null, conversations: [] };
   for (const conversation of active) {
     if (waiting.has(conversation)) continue;
     if (!conversation.projectRoot) {

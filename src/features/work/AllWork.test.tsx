@@ -32,10 +32,15 @@ type Options = {
   reviews?: PluginReview[];
   causes?: PluginCause[];
   selectedReview?: string | null;
+  /** The sections a past launch left open, saved before rendering; null leaves what is saved. By default the chat sections this file uses are open. */
+  open?: Record<string, boolean> | null;
 };
+const SECTIONS = "prompting-time.sidebar-sections";
 
 /** Renders All work with its disclosure and selection owned by signals, as App owns them through the store. */
 function renderWork(options: Options = {}) {
+  const open = options.open === undefined ? { "chats:/work/alpha": true, "chats:/work/beta": true, "chats:no-folder": true } : options.open;
+  if (open !== null) window.localStorage.setItem(SECTIONS, JSON.stringify(open));
   const [conversations, setConversations] = createSignal(options.conversations ?? [root, sibling]);
   const [expandedById, setExpanded] = createSignal(options.expandedById ?? { root: true, child: true });
   const [selectedId, setSelected] = createSignal(options.selectedId === undefined ? "root" : options.selectedId);
@@ -72,73 +77,88 @@ const press = (element: HTMLElement, key: string) => {
 };
 
 describe("AllWork", () => {
-  /** The fixture's reviews, today's being those of Nov 26, 2026, plus a review of acme/gadgets waiting on Docker. */
+  /** The fixture's reviews, today's being those of Nov 26, 2026, plus one to look at, one waiting on Docker, one skipped, and one removed. */
   const docker = { id: "docker", summary: "Docker isn't running", scope: "all" as const };
   const today = new Date();
   const todayAt = (hours: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours).toISOString();
   const entries = (): ReviewEntry[] => readReviews({ reviews: [
     ...fixtureReviews().map((review) => ({ ...review, ...(review.started_at.startsWith("2026-11-26") ? { started_at: todayAt(9), ended_at: review.ended_at && todayAt(10) } : {}) })),
+    { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", findings: 1, author: null, started_at: todayAt(6), ended_at: todayAt(7) },
     { ...fixtureReviews()[1]!, run_id: "waiting-60", pr: 60, repo: "acme/gadgets", title: "speed up the gadget index", outcome: "waiting", cause: docker, started_at: todayAt(8), ended_at: null },
     { ...fixtureReviews()[2]!, run_id: "skipped-9", pr: 9, repo: "acme/sprockets", title: "drop the sprocket shim", submitted: null, skipped_by_user: true, started_at: todayAt(7), ended_at: todayAt(8) },
+    { ...fixtureReviews()[0]!, run_id: "removed-8", pr: 8, title: "keep focus in the date picker", removed_by_user: true, needs_you: false, started_at: todayAt(5), ended_at: todayAt(6) },
   ] });
   const pluginEntries = (): PluginReview[] => newestRuns(entries()).map((review) => ({ plugin: "whooper", review }));
   const causes = (): PluginCause[] => blockingCauses(entries(), null).map((cause) => ({ plugin: "whooper", cause }));
   const names = (tree: HTMLElement) => [...tree.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")].map((item) => item.getAttribute("aria-label"));
+  const toggles = () => [...document.querySelectorAll<HTMLButtonElement>(".work-group-toggle")].map((button) => `${button.textContent} ${button.getAttribute("aria-expanded")}`);
+  const waitingRoot = { ...root, id: "waiting", title: "Waiting conversation", projectRoot: null, rollupStatus: "needsAttention" as const };
 
-  it("puts a cause that blocks every review and the reviews to decide under Needs you, with their findings, verdict, and dot", async () => {
-    const waitingRoot = { ...root, id: "waiting", title: "Waiting conversation", rollupStatus: "needsAttention" as const };
-    const view = renderWork({ conversations: [waitingRoot, sibling], reviews: pluginEntries(), causes: causes(), selectedReview: "cause:whooper:docker" });
+  it("folds every section but Needs you to its heading with a count, and splits Needs you by what each review needs", async () => {
+    const view = renderWork({ conversations: [waitingRoot, sibling], conversationsById: { waiting: waitingRoot, sibling }, reviews: pluginEntries(), causes: causes(), open: null });
 
-    const needsYou = screen.getByRole("tree", { name: "Needs you" });
-    expect(names(needsYou)).toEqual([
-      "Docker isn't running, 1 review waiting",
-      "separate cache configuration, 2 findings, widgets#101 · approve once CI passes",
-      expect.stringContaining("Waiting conversation"),
+    expect(toggles()).toEqual([
+      "Needs you 4 true", "Reviewing 1 false", "Waiting · Docker isn't running 1 false", "Chats · no folder 1 false", "Done 2 false",
     ]);
-    const items = [...needsYou.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")];
-    expect(items[0]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-    expect(items[0]).toHaveAttribute("aria-selected", "true");
-    expect(items[1]!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
+      .toEqual(["Ready to approve", "Needs a look", "Review failed", "Chats waiting on you"]);
+    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toEqual(["separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
+    expect(names(screen.getByRole("tree", { name: "Needs a look" }))).toEqual(["cap the upload retry delay, widgets#103 · 1 finding"]);
+    expect(names(screen.getByRole("tree", { name: "Review failed" }))).toEqual(["move the projection, gadgets#55 · review failed"]);
+    expect(names(screen.getByRole("tree", { name: "Chats waiting on you" }))).toEqual([expect.stringContaining("Waiting conversation")]);
+    const ready = screen.getByRole("treeitem", { name: /^separate cache configuration/ });
+    expect(ready).toHaveClass("work-review");
+    expect(ready.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(screen.getByRole("treeitem", { name: /^move the projection/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    expect(screen.queryByRole("treeitem", { name: /keep focus in the date picker/ })).not.toBeInTheDocument();
 
-    fireEvent.click(items[0]!);
-    expect(view.onOpenCause).toHaveBeenCalledWith("whooper", "docker");
-    fireEvent.click(items[1]!);
+    fireEvent.click(ready);
     expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261126T150000Z-101");
     expect(view.onSelect).not.toHaveBeenCalled();
     expect(await axeViolations()).toEqual([]);
   });
 
-  it("puts the other reviews in their repository's project, else a group named after it, and those finished before today in a folded Done", async () => {
-    const widgets = node("widgets-chat", "Retry budget", null, { projectRoot: "/work/widgets" });
-    const view = renderWork({ conversations: [widgets, sibling], conversationsById: { widgets, sibling }, reviews: pluginEntries(), causes: causes() });
-
-    expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-      .toEqual(["Needs you", "gadgets", "sprockets", "widgets", "No project"]);
-    expect(names(screen.getByRole("tree", { name: "widgets" }))).toEqual([
-      "Retry budget, Codex, working",
-      "acme/widgets#102, widgets#102 · Reviewing…",
-    ]);
-    expect(names(screen.getByRole("tree", { name: "gadgets" }))).toEqual([
-      "speed up the gadget index, gadgets#60 · Waiting · Docker isn't running",
-      "move the projection, gadgets#55 · Review failed",
-    ]);
-    expect(screen.getByRole("treeitem", { name: /gadgets#55 · Review failed/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-    expect(names(screen.getByRole("tree", { name: "sprockets" }))).toEqual(["drop the sprocket shim, sprockets#9 · Skipped"]);
-
-    const done = screen.getByRole("button", { name: "Done 1" });
-    expect(done).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("treeitem", { name: /add the tags package/ })).not.toBeInTheDocument();
-    fireEvent.click(done);
+  it("opens a folded section, keeps which are open across launches, and opens a cause from its Waiting row", () => {
+    const view = renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: {} });
+    fireEvent.click(screen.getByRole("button", { name: "Waiting · Docker isn't running 1" }));
     flush();
-    expect(done).toHaveAttribute("aria-expanded", "true");
-    const commented = screen.getByRole("treeitem", { name: /^add the tags package, gadgets#77 · Commented · Nov 25/ });
-    fireEvent.click(commented);
-    expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261125T100000Z-77");
-    expect(await axeViolations()).toEqual([]);
+    const cause = screen.getByRole("treeitem", { name: "Docker isn't running, 1 review waiting" });
+    expect(cause.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    fireEvent.click(cause);
+    expect(view.onOpenCause).toHaveBeenCalledWith("whooper", "docker");
+    fireEvent.click(screen.getByRole("button", { name: "Needs you 3" }));
+    fireEvent.click(screen.getByRole("button", { name: "Done 2" }));
+    flush();
+    expect(names(screen.getByRole("tree", { name: "Done" }))).toEqual([
+      "drop the sprocket shim, sprockets#9 · skipped",
+      expect.stringMatching(/^add the tags package, gadgets#77 · commented /),
+    ]);
+    expect(JSON.parse(window.localStorage.getItem(SECTIONS)!)).toEqual({ "waiting:cause:whooper:docker": true, "needs-you": false, done: true });
+
+    view.unmount();
+    renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: null });
+    expect(toggles()).toEqual(["Needs you 3 false", "Reviewing 1 false", "Waiting · Docker isn't running 1 true", "Chats · no folder 1 false", "Done 2 true"]);
+    expect(screen.getByRole("tree", { name: "Waiting · Docker isn't running" })).toBeVisible();
   });
 
-  it("moves between review and conversation rows with the arrow keys and opens a review with Enter", () => {
-    const view = renderWork({ conversations: [sibling], reviews: pluginEntries().filter(({ review }) => review.pr === 101 || review.pr === 55), selectedId: null });
+  it("shows five items per part of Needs you until Show N more, and the selected review even past them", () => {
+    const many: PluginReview[] = Array.from({ length: 7 }, (_, index) => ({ plugin: "whooper", review: { ...entries()[0]!, run_id: `run-${index}`, pr: 200 + index, title: `ready ${index}`, ended_at: todayAt(20 - index) } }));
+    const view = renderWork({ conversations: [], reviews: many });
+    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toHaveLength(5);
+    expect(screen.getByRole("heading", { name: "Ready to approve · 7" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Show 2 more" }));
+    flush();
+    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toHaveLength(7);
+    expect(screen.queryByRole("button", { name: /more$/ })).not.toBeInTheDocument();
+
+    view.unmount();
+    renderWork({ conversations: [], reviews: many, selectedReview: "review:whooper:run-6" });
+    expect(screen.getByRole("treeitem", { name: /^ready 6,/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("button", { name: /more$/ })).not.toBeInTheDocument();
+  });
+
+  it("moves between review and conversation rows with the arrow keys, past folded sections, and opens a review with Enter", () => {
+    const view = renderWork({ conversations: [sibling], reviews: pluginEntries().filter(({ review }) => review.pr === 101 || review.pr === 55 || review.pr === 102), selectedId: null });
     const [first, second] = screen.getAllByRole("treeitem");
     first!.focus();
     press(first!, "ArrowDown");
@@ -148,6 +168,8 @@ describe("AllWork", () => {
     expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261124T090000Z-55");
     press(second!, "End");
     expect(document.activeElement).toHaveAttribute("aria-label", expect.stringContaining(sibling.title));
+    press(document.activeElement as HTMLElement, "ArrowUp");
+    expect(document.activeElement).toBe(second);
     expect(view.onToggle).not.toHaveBeenCalled();
   });
 
@@ -171,33 +193,34 @@ describe("AllWork", () => {
     const blocked = node("blocked", "Tag names", null, { projectRoot: "/work/beta", rollupStatus: "needsAttention", runStatus: "running" });
     renderWork({ conversations: [root, waiting, sibling, blocked], conversationsById: { root, child, grandchild, sibling, waiting, blocked } });
     expect(screen.getAllByRole("tree").map((tree) => tree.getAttribute("aria-labelledby") && document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-      .toEqual(["Needs you", "alpha", "No project"]);
-    const needsYou = screen.getByRole("tree", { name: "Needs you" });
+      .toEqual(["Chats waiting on you", "Chats · alpha", "Chats · no folder"]);
+    const needsYou = screen.getByRole("tree", { name: "Chats waiting on you" });
     expect([...needsYou.querySelectorAll("[role=treeitem]")].map((row) => row.getAttribute("aria-label"))).toEqual([
       "Evaluation rows, Codex, waiting for you", "Tag names, Codex, waiting for you",
     ]);
     expect(needsYou.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
-    expect(screen.queryByRole("tree", { name: "beta" })).not.toBeInTheDocument();
-    expect(groupWork([sibling, root]).map(({ label }) => label)).toEqual(["alpha", "No project"]);
+    expect(screen.queryByRole("tree", { name: "Chats · beta" })).not.toBeInTheDocument();
+    expect(groupWork([sibling, root]).map(({ label }) => label)).toEqual(["alpha", "no folder"]);
   });
 
-  it("groups by project, takes the caller's filtered roots, and says when none match", () => {
+  it("groups chats by project, takes the caller's filtered roots, and says when nothing needs you", () => {
     const view = renderWork();
-    expect(screen.getByRole("tree", { name: "alpha" })).toBeVisible();
-    expect(screen.getByRole("tree", { name: "No project" })).toBeVisible();
+    expect(screen.getByRole("tree", { name: "Chats · alpha" })).toBeVisible();
+    expect(screen.getByRole("tree", { name: "Chats · no folder" })).toBeVisible();
     view.setConversations([sibling]);
     flush();
-    expect(screen.queryByRole("tree", { name: "alpha" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tree", { name: "Chats · alpha" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("treeitem")).toHaveLength(1);
     view.setConversations([]);
     flush();
-    expect(screen.getByText("No conversations match this status.")).toBeVisible();
+    expect(screen.getByText("Nothing needs you right now.")).toBeVisible();
+    expect(screen.queryByRole("tree")).not.toBeInTheDocument();
   });
 
   it("names projects with the same folder name by their full paths", () => {
-    renderWork({ conversations: [node("a", "First", null, { projectRoot: "/one/compiler" }), node("b", "Second", null, { projectRoot: "/two/compiler" })] });
-    expect(screen.getByRole("tree", { name: "compiler — /one/compiler" })).toBeVisible();
-    expect(screen.getByRole("tree", { name: "compiler — /two/compiler" })).toBeVisible();
+    renderWork({ conversations: [node("a", "First", null, { projectRoot: "/one/compiler" }), node("b", "Second", null, { projectRoot: "/two/compiler" })], open: { "chats:/one/compiler": true, "chats:/two/compiler": true } });
+    expect(screen.getByRole("tree", { name: "Chats · compiler — /one/compiler" })).toBeVisible();
+    expect(screen.getByRole("tree", { name: "Chats · compiler — /two/compiler" })).toBeVisible();
   });
 
   it("selects each conversation by its own ID without the disclosure button selecting", () => {

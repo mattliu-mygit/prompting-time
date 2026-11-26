@@ -13,8 +13,10 @@ export type ReviewCause = { id: string; summary: string; scope: "all" | "pr" };
  * versions. `head_sha` is the commit the run reviewed and `pr_head_sha` the pull request's head as
  * Whooper last saw it. A run "waiting" did not start because a cause that blocks every review
  * stopped its round. `skipped_by_user` says the user skipped it; `skipped` that Whooper's review
- * skipped the change. The fields after `needs_you` came later in format version 1, so an entry
- * without them reads as having none.
+ * skipped the change. `author` is the pull request's author's login, and `removed_by_user` says the
+ * user took the review out of the lists (its files stay, and Whooper no longer needs the user for
+ * it). The fields after `needs_you` came later in format version 1, so an entry without them reads
+ * as having none.
  */
 export type ReviewEntry = {
   run_id: string;
@@ -34,6 +36,8 @@ export type ReviewEntry = {
   pr_head_sha: string | null;
   cause: ReviewCause | null;
   skipped_by_user: boolean;
+  author: string | null;
+  removed_by_user: boolean;
 };
 
 /** A review and the plugin that lists it. */
@@ -52,7 +56,9 @@ export function readCause(value: unknown): ReviewCause | null {
     : null;
 }
 
-function fitsReview(value: unknown): value is Omit<ReviewEntry, "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user"> & Partial<ReviewEntry> {
+type LaterFields = "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user" | "author" | "removed_by_user";
+
+function fitsReview(value: unknown): value is Omit<ReviewEntry, LaterFields> & Partial<ReviewEntry> {
   if (!isRecord(value)) return false;
   const submitted = value.submitted;
   return typeof value.run_id === "string" && value.run_id !== ""
@@ -65,7 +71,9 @@ function fitsReview(value: unknown): value is Omit<ReviewEntry, "head_sha" | "pr
     && (submitted === null || (isRecord(submitted) && (submitted.event === "APPROVE" || submitted.event === "COMMENT") && typeof submitted.at === "string"))
     && optional(value.head_sha, stringOrNull) && optional(value.pr_head_sha, stringOrNull)
     && optional(value.cause, (cause) => cause === null || readCause(cause) !== null)
-    && optional(value.skipped_by_user, (skipped) => typeof skipped === "boolean");
+    && optional(value.skipped_by_user, (skipped) => typeof skipped === "boolean")
+    && optional(value.author, stringOrNull)
+    && optional(value.removed_by_user, (removed) => typeof removed === "boolean");
 }
 
 /** The reviews a plugin's status lists, leaving out any entry that does not fit the format. */
@@ -77,6 +85,8 @@ export function readReviews(status: unknown): ReviewEntry[] {
     pr_head_sha: review.pr_head_sha ?? null,
     cause: readCause(review.cause),
     skipped_by_user: review.skipped_by_user ?? false,
+    author: review.author ?? null,
+    removed_by_user: review.removed_by_user ?? false,
   }));
 }
 
@@ -114,15 +124,34 @@ export function readyToDecide(review: ReviewEntry): boolean {
   return review.outcome === "reviewed" && review.needs_you && !isFinished(review);
 }
 
+/** Where the sidebar lists a pull request's newest run. */
+export type ReviewCategory = "ready" | "look" | "failed" | "reviewing" | "waiting" | "done" | "removed";
+
 /**
- * Where All work lists a pull request's newest run: under "Needs you" while it waits on a decision,
- * in Done once the user finished with it before today, and otherwise in its repository's group:
- * running, waiting, failed, or finished today.
+ * Where the sidebar lists a pull request's newest run: in no list once the user removed it; under
+ * "Needs you" as ready to approve ("ready": the plugin says approve once CI passes and read the
+ * whole change), as needing a look ("look": any other review waiting on a decision), or as failed
+ * for a cause of its own pull request's ("failed"); on the row of a cause that blocks every review
+ * while it waits or failed on one ("waiting"); under Reviewing while it runs, or waits without such
+ * a cause; and in Done once the user finished with it. The status does not say whether every
+ * finding is a nit, which Whooper also asks of a review it calls safe to approve.
  */
-export function reviewPlace(review: ReviewEntry, now = new Date()): "needs-you" | "project" | "done" {
-  if (readyToDecide(review)) return "needs-you";
-  if (isFinished(review) && new Date(reviewTime(review)).toDateString() !== now.toDateString()) return "done";
-  return "project";
+export function reviewCategory(review: ReviewEntry): ReviewCategory {
+  if (review.removed_by_user) return "removed";
+  if (readyToDecide(review)) return review.verdict === "approve_once_ci_passes" && !review.skipped ? "ready" : "look";
+  if (isFinished(review)) return "done";
+  if (review.outcome === "running") return "reviewing";
+  const blocking = review.cause?.scope === "all";
+  if (review.outcome === "waiting") return blocking ? "waiting" : "reviewing";
+  return blocking ? "waiting" : "failed";
+}
+
+const newestEnd = (left: PluginReview, right: PluginReview) => reviewTime(right.review).localeCompare(reviewTime(left.review));
+
+/** The reviews under "Needs you", each part newest first: what the sidebar lists, and Command-J steps through, in this order. */
+export function needsYou(reviews: readonly PluginReview[]): Record<"ready" | "look" | "failed", PluginReview[]> {
+  const of = (category: ReviewCategory) => reviews.filter(({ review }) => reviewCategory(review) === category).sort(newestEnd);
+  return { ready: of("ready"), look: of("look"), failed: of("failed") };
 }
 
 /** A cause that blocks every review, with the newest runs it stopped, waiting or failed, newest first. */
@@ -138,7 +167,7 @@ export function blockingCauses(reviews: readonly ReviewEntry[], blocked: { id: s
   if (blocked) causes.set(blocked.id, { id: blocked.id, summary: blocked.summary, since: blocked.since, reviews: [] });
   for (const review of newestRuns(reviews)) {
     const cause = review.cause;
-    if (!cause || cause.scope !== "all" || review.skipped_by_user || (review.outcome !== "waiting" && review.outcome !== "failed")) continue;
+    if (!cause || reviewCategory(review) !== "waiting") continue;
     const entry = causes.get(cause.id) ?? { id: cause.id, summary: cause.summary, since: null, reviews: [] };
     entry.reviews.push(review);
     causes.set(cause.id, entry);
@@ -198,6 +227,33 @@ export function reviewTitle(review: ReviewEntry): string {
 /** The pull request as rows name it: the repo's last part and the number, such as widgets#101. */
 export function shortPullRequest(review: ReviewEntry): string {
   return `${review.repo.split("/").at(-1)}#${review.pr}`;
+}
+
+const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
+/**
+ * The gray line under a review's title in the sidebar: the pull request, its author, and where it
+ * stands, such as "widgets#101 · @sam · 2 findings", "widgets#55 · @sam · The agent exited" for a
+ * failure, "widgets#104 · reviewing since 3:05 PM", or "gadgets#77 · commented Nov 25". A removed
+ * review's line says where it stood.
+ */
+export function reviewRowMeta(review: ReviewEntry, now = new Date()): string {
+  const who = review.author ? `${shortPullRequest(review)} · @${review.author}` : shortPullRequest(review);
+  return `${who} · ${standing(review, now)}`;
+}
+
+function standing(review: ReviewEntry, now: Date): string {
+  if (review.submitted) return `${review.submitted.event === "APPROVE" ? "approved" : "commented"} ${shortDate(review.submitted.at, now)}`;
+  if (review.skipped_by_user) return "skipped";
+  switch (review.outcome) {
+    case "running": return `reviewing since ${shortDate(review.started_at, now)}`;
+    case "waiting": return review.cause ? `waiting · ${review.cause.summary}` : "waiting for the next round";
+    case "failed": return review.cause?.summary ?? "review failed";
+    case "reviewed":
+      if (!review.needs_you) return "not submitted";
+      if (review.skipped) return "skipped, look first";
+      return review.findings > 0 ? plural(review.findings, "finding") : "no findings";
+  }
 }
 
 /** The verdict in words, such as "approve once CI passes". */

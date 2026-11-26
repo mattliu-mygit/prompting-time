@@ -34,7 +34,11 @@ function renderApp(api: AppApi) {
   return { store, ...view };
 }
 
+/** The chat sections of these tests' conversations, as a past launch left them open; Needs you is open by default. */
+const OPEN_CHATS = { "chats:no-folder": true, "chats:/tmp/synthetic-project": true, "chats:/tmp/other": true, "chats:/projects/compiler": true, "chats:/projects/renderer": true };
+
 beforeEach(() => {
+  window.localStorage.setItem("prompting-time.sidebar-sections", JSON.stringify(OPEN_CHATS));
   mediaQueries();
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
 });
@@ -139,17 +143,17 @@ describe("All work and ⌘J", () => {
 
   it("lists roots waiting on you first under Needs you, then by project", async () => {
     renderApp(waitingApi());
-    const needsYou = await screen.findByRole("tree", { name: "Needs you" });
+    const needsYou = await screen.findByRole("tree", { name: "Chats waiting on you" });
     expect(within(needsYou).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual([
       "Evaluation rows, Codex, waiting for you", "Tag names, Codex, waiting for you",
     ]);
     expect(screen.getAllByRole("tree").map((tree) => tree.getAttribute("aria-labelledby") && document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-      .toEqual(["Needs you", "synthetic-project"]);
+      .toEqual(["Chats waiting on you", "Chats · synthetic-project"]);
   });
 
   it("jumps to the next root waiting on you with ⌘J or Ctrl+J, wrapping around", async () => {
     const { store } = renderApp(waitingApi());
-    await screen.findByRole("tree", { name: "Needs you" });
+    await screen.findByRole("tree", { name: "Chats waiting on you" });
     expect(store.getSnapshot().selectedConversationId).toBe("working");
     press("j");
     await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("first"));
@@ -212,7 +216,7 @@ describe("plugin pages", () => {
     await settle();
     await settle();
 
-    fireEvent.click(await screen.findByRole("treeitem", { name: /^separate cache configuration, 2 findings/ }));
+    fireEvent.click(await screen.findByRole("treeitem", { name: /^separate cache configuration, widgets#101 · @sam-fixture · 2 findings/ }));
     await settle();
     const page = frame();
     expect(page.element).toHaveAttribute("sandbox", "allow-scripts");
@@ -243,7 +247,7 @@ describe("plugin pages", () => {
     await settle();
     await settle();
 
-    fireEvent.click(await screen.findByRole("treeitem", { name: /^move the projection, gadgets#55 · Review failed/ }));
+    fireEvent.click(await screen.findByRole("treeitem", { name: /^move the projection, gadgets#55 · review failed/ }));
     await settle();
     await settle();
     expect(document.querySelector("iframe.plugin-frame")).toBeNull();
@@ -255,7 +259,7 @@ describe("plugin pages", () => {
     expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [FAILED], confirmedFingerprint: null });
     expect(screen.queryByText(/has no findings to show/)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("treeitem", { name: /^separate cache configuration, 2 findings/ }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /^separate cache configuration, widgets#101 · @sam-fixture · 2 findings/ }));
     await settle();
     expect(frame().element).toHaveAttribute("src", "pt-plugin://whooper/index.html");
     expect(screen.queryByRole("heading", { name: "Review failed" })).not.toBeInTheDocument();
@@ -492,10 +496,11 @@ describe("agent controls and blocking causes", () => {
     expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Settings", "Open logs"]);
   });
 
-  it("opens a blocking cause from Needs you and retries each review it stopped, then offers Run now", async () => {
+  it("opens a blocking cause from its folded Waiting section and retries each review it stopped, then offers Run now", async () => {
     const { api, pluginRequest } = controlsApi();
     renderApp(api);
-    click(await screen.findByRole("treeitem", { name: "Docker isn't running, 2 reviews waiting" }));
+    click(await screen.findByRole("button", { name: "Waiting · Docker isn't running 2" }));
+    click(await screen.findByRole("treeitem", { name: /^Docker isn't running, 2 reviews waiting · since / }));
     await settle();
 
     const cause = screen.getByRole("main", { name: "Blocked reviews" });
@@ -612,7 +617,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByRole("menuitemradio", { name: "Completed" })).toHaveAttribute("data-highlighted"));
     fireEvent.keyDown(menu, { key: "Enter" });
     await waitFor(() => expect(screen.queryByRole("treeitem", { name: /Auth refactor/ })).not.toBeInTheDocument());
-    expect(screen.getByText("No conversations match this status.")).toBeVisible();
+    expect(screen.getByText("Nothing needs you right now.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Filter conversations: Completed" })).toBeVisible();
     click(screen.getByRole("button", { name: "Hide All work" }));
     expect(screen.getByRole("button", { name: "Show All work" })).toHaveAttribute("aria-expanded", "false");

@@ -1,13 +1,10 @@
+import { readPreference, savePreference } from "./preferences";
+
 const preferenceKey = "prompting-time.zoom";
 
 function readZoom(): number {
-  try {
-    const value = Number(window.localStorage.getItem(preferenceKey));
-    if (Number.isFinite(value) && value >= 0.75 && value <= 2) return value;
-  } catch {
-    // The display preference is optional when storage is unavailable.
-  }
-  return 1;
+  const value = Number(readPreference(preferenceKey));
+  return Number.isFinite(value) && value >= 0.75 && value <= 2 ? value : 1;
 }
 
 function reportZoomFailure(error: unknown): void {
@@ -21,12 +18,8 @@ export function installAppZoom(setZoom: (factor: number) => Promise<void>): () =
   async function applyZoom(next: number): Promise<void> {
     await setZoom(next);
     zoom = next;
-    if (disposed) return;
-    try {
-      window.localStorage.setItem(preferenceKey, String(zoom));
-    } catch {
-      // Storage failure must not undo a successful native change.
-    }
+    // A storage failure must not undo a successful native change, so the save never throws.
+    if (!disposed) savePreference(preferenceKey, String(zoom));
   }
 
   // Each shortcut uses the last successful scale, after earlier requests finish.
