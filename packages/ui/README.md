@@ -4,7 +4,7 @@ Prompting Time's shared UI library, for Prompting Time's Solid UI and for plugin
 Whooper's.
 
 - **Theme:** Sigil's `default` preset from `@sigil-ui/presets`, unchanged except for the fonts:
-  Katagami Sans for text and Katagami Mono for code. `theme.ts` merges them with `mergePresets`,
+  Katagami Text for all text and Katagami Mono for code. `theme.ts` merges them with `mergePresets`,
   and `@sigil-ui/tokens` compiles the result to CSS variables (`src/theme/sigil.css`) and a typed
   token object (`src/theme/tokens.ts`). Prompting Time is dark only, so the dark colors apply.
 - **Fonts:** the Katagami WOFF2 files and their license are in `fonts/`, so pages work offline.

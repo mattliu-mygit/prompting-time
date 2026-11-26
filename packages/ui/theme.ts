@@ -1,16 +1,16 @@
-// Prompting Time's theme: Sigil's `default` preset unchanged, with Katagami Sans for the UI and
+// Prompting Time's theme: Sigil's `default` preset unchanged, with Katagami Text for all text and
 // Katagami Mono for code as the only override. src/theme.test.ts checks that the committed files
 // in src/theme/ equal what this produces; `pnpm --filter @prompting-time/ui test -u` rewrites them.
 import { compileToCss, compileToTs, mergePresets } from "@sigil-ui/tokens";
 import { defaultPreset } from "@sigil-ui/presets";
 
-const sans = "'Katagami Sans', system-ui, sans-serif";
+const text = "'Katagami Text', system-ui, sans-serif";
 const mono = "'Katagami Mono', ui-monospace, monospace";
 
 export const theme = mergePresets(
   defaultPreset,
   {
-    typography: { "font-display": sans, "font-body": sans, "heading-family": sans, "font-mono": mono },
+    typography: { "font-display": text, "font-body": text, "heading-family": text, "font-mono": mono },
     // The preset sets the code font a second time here.
     code: { "font-family": mono },
   },

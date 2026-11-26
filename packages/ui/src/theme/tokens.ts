@@ -129,8 +129,8 @@ export const tokens: SigilTokens = {
     }
   },
   "typography": {
-    "font-display": "'Katagami Sans', system-ui, sans-serif",
-    "font-body": "'Katagami Sans', system-ui, sans-serif",
+    "font-display": "'Katagami Text', system-ui, sans-serif",
+    "font-body": "'Katagami Text', system-ui, sans-serif",
     "font-mono": "'Katagami Mono', ui-monospace, monospace",
     "size-xs": "0.75rem",
     "size-sm": "0.875rem",
@@ -159,7 +159,7 @@ export const tokens: SigilTokens = {
     "heading-tracking": "-0.015em",
     "heading-weight": "600",
     "heading-transform": "none",
-    "heading-family": "'Katagami Sans', system-ui, sans-serif"
+    "heading-family": "'Katagami Text', system-ui, sans-serif"
   },
   "spacing": {
     "scale": [

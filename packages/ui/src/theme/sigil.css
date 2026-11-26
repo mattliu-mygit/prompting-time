@@ -36,8 +36,8 @@
   --s-gradient-end: oklch(0.5517 0.0138 285.9384);
   --s-glow: oklch(0.2103 0.0059 285.8851 / 0.15);
   --s-highlight: oklch(0.9729 0.0693 103.1933);
-  --s-font-display: 'Katagami Sans', system-ui, sans-serif;
-  --s-font-body: 'Katagami Sans', system-ui, sans-serif;
+  --s-font-display: 'Katagami Text', system-ui, sans-serif;
+  --s-font-body: 'Katagami Text', system-ui, sans-serif;
   --s-font-mono: 'Katagami Mono', ui-monospace, monospace;
   --s-size-xs: 0.75rem;
   --s-size-sm: 0.875rem;
@@ -66,7 +66,7 @@
   --s-heading-tracking: -0.015em;
   --s-heading-weight: 600;
   --s-heading-transform: none;
-  --s-heading-family: 'Katagami Sans', system-ui, sans-serif;
+  --s-heading-family: 'Katagami Text', system-ui, sans-serif;
   --s-space-4: 0.25rem;
   --s-space-8: 0.5rem;
   --s-space-12: 0.75rem;

@@ -114,7 +114,7 @@ function Gallery() {
         <header class="gallery-header">
           <div>
             <h1>@prompting-time/ui</h1>
-            <p>Sigil's default preset with Katagami Sans and Mono; every component reads the theme's variables.</p>
+            <p>Sigil's default preset with Katagami Text and Mono; every component reads the theme's variables.</p>
           </div>
           <div class="gallery-toolbar">
             <IconButton label="Open on GitHub">
@@ -136,6 +136,16 @@ function Gallery() {
           </div>
         </header>
         <p class="gallery-note">Last menu action: {lastAction()}</p>
+
+        <section class="gallery-section" aria-labelledby="type-heading">
+          <h2 id="type-heading">Type</h2>
+          <ul class="gallery-type">
+            <li class="gallery-type-lg">Katagami Text 16px: chat and composer text, for reading at length.</li>
+            <li class="gallery-type-sm">Katagami Text 14px: labels, buttons, fields, and sidebar titles.</li>
+            <li class="gallery-type-code">Katagami Mono 13px: code, such as {"func (s *Store) Save(ctx context.Context) error"}</li>
+            <li class="gallery-type-xs">Katagami Text 12px: a row's gray line, counts, and section names; the smallest size.</li>
+          </ul>
+        </section>
 
         <section class="gallery-section" aria-labelledby="buttons-heading">
           <h2 id="buttons-heading">Buttons</h2>

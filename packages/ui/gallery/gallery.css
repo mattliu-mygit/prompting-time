@@ -176,3 +176,30 @@
 .gallery-thread-actions .pt-checkbox {
   margin-inline-end: auto;
 }
+
+.gallery-type {
+  display: grid;
+  gap: var(--s-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gallery-type-lg {
+  font-size: var(--s-size-lg);
+  line-height: var(--s-leading-relaxed);
+}
+
+.gallery-type-sm {
+  font-size: var(--s-size-sm);
+}
+
+.gallery-type-code {
+  font-family: var(--s-code-font-family);
+  font-size: var(--s-code-font-size);
+}
+
+.gallery-type-xs {
+  color: var(--s-text-subtle);
+  font-size: var(--s-size-xs);
+}

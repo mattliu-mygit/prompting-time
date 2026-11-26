@@ -1,8 +1,8 @@
-/* Katagami Sans and Mono, bundled so the app works offline (../fonts/README.md). The rules follow
+/* Katagami Text and Mono, bundled so the app works offline (../fonts/README.md). The rules follow
    https://katagami.kevinliu.studio/fonts/katagami.css for the four files bundled. */
 @font-face {
-  font-family: "Katagami Sans";
-  src: url("../fonts/KatagamiSans.woff2") format("woff2");
+  font-family: "Katagami Text";
+  src: url("../fonts/KatagamiText.woff2") format("woff2");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
@@ -10,8 +10,8 @@
 }
 
 @font-face {
-  font-family: "Katagami Sans";
-  src: url("../fonts/KatagamiSans-Italic.woff2") format("woff2");
+  font-family: "Katagami Text";
+  src: url("../fonts/KatagamiText-Italic.woff2") format("woff2");
   font-weight: 100 900;
   font-style: italic;
   font-display: swap;
