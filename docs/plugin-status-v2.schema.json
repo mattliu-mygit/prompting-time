@@ -2,10 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mattliu-mygit/prompting-time/docs/plugin-status-v2.schema.json",
   "title": "Prompting Time plugin status, format 2",
-  "description": "What a plugin's `status` action prints when its manifest declares `\"status\": {\"format\": 2, ...}`. Prompting Time draws the plugin's agent row, its blockers, and its items in All work, Needs you, Command-J, and the menu bar from this output. An item's `group` must be one of the manifest's `status.groups` ids, and its `actions` must be among the manifest's `status.item_actions`. Prompting Time drops an item or blocker that does not fit this schema, an item whose group the manifest does not declare, and an item past the 50th or with an id already listed; it ignores row actions the manifest does not allow and a blocker action the manifest does not declare, and keeps the rest.",
+  "description": "What a plugin's `status` action prints when its manifest declares `\"status\": {\"format\": 2, ...}`. Prompting Time draws the plugin's agent row, its blockers, and its items in All work, Needs you, Command-J, and the menu bar from this output. An item's `group` must be one of the manifest's `status.groups` ids, and its `actions` must be among the manifest's `status.item_actions`. Prompting Time drops an item or blocker that does not fit this schema, an item whose group the manifest does not declare, and an item past the 50th or with an id already listed; it ignores row actions the manifest does not allow and a blocker action the manifest does not declare, and keeps the rest. The output may hold other top-level fields, such as data the plugin's own page reads; Prompting Time ignores them. The agent, blockers, and items allow only the fields listed here.",
   "type": "object",
   "required": ["format", "agent", "blockers", "items", "truncated"],
-  "additionalProperties": false,
   "properties": {
     "format": { "const": 2 },
     "agent": {
@@ -60,7 +59,8 @@
         }
       }
     },
-    "truncated": { "type": "boolean", "description": "Whether the plugin left items out to stay within 50." }
+    "truncated": { "type": "boolean", "description": "Whether the plugin left items out to stay within 50." },
+    "paused": { "type": "boolean", "description": "Whether the plugin is paused. When true, the agent's row and the menu bar offer the manifest's `resume` action in place of `pause`." }
   },
   "$defs": {
     "id": { "type": "string", "minLength": 1 },
