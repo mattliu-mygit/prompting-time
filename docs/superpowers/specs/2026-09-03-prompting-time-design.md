@@ -39,7 +39,7 @@ Additional providers, remote execution, learned routing, scheduled tasks, mobile
 
 The main window uses a three-pane command-center layout:
 
-- The left pane groups root conversations by project and status. Expanding any conversation reveals its child conversations, recursively. Each node shows its own provider and current status.
+- The left pane, All work, lists the root conversations waiting on you first, under "Needs you", then groups the rest by project; a status filter narrows the list. Expanding any conversation reveals its child conversations, recursively. Each row shows its own provider and current status in one muted line with a status dot.
 - The center pane prioritizes the selected conversation: readable assistant responses, compact user messages, expandable tool activity, approvals, and the composer. Provider identity stays visible without dominating the text.
 - The right inspector shows routing rationale, workspace and worktree state, changed files, active agents, and explicitly disclosed diagnostics. It is collapsible for focus and smaller windows.
 
@@ -59,7 +59,7 @@ is noninteractive, keyboard focus stays inside, and closing restores the trigger
 New windows default to 1440 × 900, with a minimum of 960 × 600. This does not reset
 the size of an already open window.
 
-Readable defaults use 17px chat, preview and composer text, 14px controls/sidebar
+Readable defaults use 16px chat, preview and composer text (Sigil's large size), 14px controls/sidebar
 labels and code, and at least 13px secondary text at standard root scaling. Existing
 larger headings retain their hierarchy. Typed text uses the normal foreground color;
 placeholder and metadata remain secondary. Shared rem-based sizes preserve scaling
@@ -91,10 +91,11 @@ new-conversation, pane-toggle, and focus-message actions. It is not message-cont
 search. Conversation selection focuses its composer when messaging is available;
 read-only views retain an accessible reading or navigation target. Cancellation
 restores the prior focus. Existing blocking dialogs and narrow inspector overlays retain
-keyboard priority. The palette uses cmdk for filtering and selection, Radix Dialog
-for dialog and focus management, and react-hotkeys-hook for shortcut registration,
-with our existing styling and store actions; no parallel action framework or
-additional state library.
+keyboard priority. The palette is `@prompting-time/ui`'s CommandPalette, a Zag.js
+dialog over a listbox that matches every typed word, with our store actions; no
+parallel action framework or additional state library. Command-J (Control-J) opens
+the next root conversation waiting on you, in list order. Both shortcuts are one
+window key listener.
 
 Reading context is session-local. Returning to a recently visited conversation
 restores its visible message and expanded activity, including explicitly loaded
@@ -336,7 +337,7 @@ parent run.
 
 ## Architecture
 
-Prompting Time uses Tauri 2 for the macOS application shell, React and TypeScript for presentation, and Rust for all orchestration, persistence, routing, process supervision, and provider integration. The webview never starts or communicates with provider processes directly.
+Prompting Time uses Tauri 2 for the macOS application shell, Solid 2.0 and TypeScript for presentation, and Rust for all orchestration, persistence, routing, process supervision, and provider integration. The webview never starts or communicates with provider processes directly.
 
 The Rust core is organized around these responsibilities:
 
@@ -348,7 +349,7 @@ The Rust core is organized around these responsibilities:
 - Notification service: emits macOS notifications for actionable background transitions.
 - Resource boundary: provides the extension point for Milestone 2 without importing resources in Milestone 1.
 
-Tauri commands expose typed application operations. Tauri events publish typed state changes. React owns transient presentation state only; orchestration policy and durable truth remain in Rust.
+Tauri commands expose typed application operations. Tauri events publish typed state changes. The Solid interface owns transient presentation state only; orchestration policy and durable truth remain in Rust.
 
 ### Provider adapter boundary
 
@@ -576,7 +577,7 @@ Examples and test fixtures use invented projects, prompts, users, paths, and pro
 ## Engineering constraints
 
 - Prefer small modules with one responsibility and explicit ownership.
-- Keep domain types independent of Tauri, SQLite, React, and provider protocols.
+- Keep domain types independent of Tauri, SQLite, the UI framework, and provider protocols.
 - Use exhaustive Rust enums for lifecycle states and typed conversion at protocol boundaries.
 - Use one canonical decision path for routing, status rollup, approvals, and cleanup eligibility.
 - Avoid speculative interfaces beyond the provider adapter and resource boundary already justified by the second provider and Milestone 2.
@@ -599,7 +600,7 @@ Integration tests use temporary SQLite databases and temporary Git repositories 
 
 ### UI tests
 
-React component tests cover the recursive tree, status rollup display, timeline pagination, provider labels and overrides, routing explanations, approval prompts, inspector collapse behavior, and queued work. Rust tests cover Tauri command/state boundaries, notification policy, and event synchronization. No real native Tauri E2E or visual smoke test has been run for this release candidate.
+Solid component tests, written with Testing Library's DOM queries, cover the recursive tree, status rollup display, timeline pagination, provider labels and overrides, routing explanations, approval prompts, inspector collapse behavior, and queued work. Rust tests cover Tauri command/state boundaries, notification policy, and event synchronization. No real native Tauri E2E or visual smoke test has been run for this release candidate.
 
 ### Live smoke tests
 

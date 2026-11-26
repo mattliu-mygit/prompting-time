@@ -14,7 +14,9 @@ The current release candidate integrates Codex App Server and Claude Code. Suppo
 - SQLite-backed conversation state with bounded queries, stable pagination, and startup recovery.
 - A narrow Tauri macOS notification integration for background completion, failure, and needs-attention transitions, with hermetic policy and deduplication tests. Native delivery has not been exercised by an automated Tauri E2E or visual smoke test.
 
-The React/TypeScript interface talks to a typed Tauri command boundary. Rust owns provider processes, routing, lifecycle supervision, SQLite persistence, and Git worktree safety. Provider-specific protocol data is normalized at adapter boundaries before it reaches the shared application model.
+The interface is Solid 2.0 and TypeScript, built from the shared components in `packages/ui` (`@prompting-time/ui`), and talks to a typed Tauri command boundary. Rust owns provider processes, routing, lifecycle supervision, SQLite persistence, and Git worktree safety. Provider-specific protocol data is normalized at adapter boundaries before it reaches the shared application model.
+
+The Solid interface is arriving in two halves. The first, on this branch, only reads: All work, timelines, the inspector, and the command palette. Sending, steering, answering approvals and questions, creating, and archiving conversations return with the second half; until then, use a build of the main branch for those actions.
 
 ## Runtime compatibility
 
