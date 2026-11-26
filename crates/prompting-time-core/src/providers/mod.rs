@@ -25,6 +25,7 @@ pub mod codex;
 mod command;
 pub mod process;
 
+pub(crate) use command::child_path;
 pub use command::provider_command;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]

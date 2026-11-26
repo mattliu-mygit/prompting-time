@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use tokio::process::Command;
@@ -13,11 +13,26 @@ pub fn provider_command(binary: impl AsRef<OsStr>) -> Command {
     )
 }
 
+/// The child-only PATH that `provider_command` gives the CLIs it starts. Plugin commands get the
+/// same PATH, and prerequisite checks search it.
+pub(crate) fn child_path() -> OsString {
+    path_with_environment(
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+}
+
 fn command_with_environment(
     binary: impl AsRef<OsStr>,
     inherited_path: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Command {
+    let mut command = Command::new(binary);
+    command.env("PATH", path_with_environment(inherited_path, home));
+    command
+}
+
+fn path_with_environment(inherited_path: Option<&OsStr>, home: Option<&OsStr>) -> OsString {
     let candidates = env::split_paths(inherited_path.unwrap_or_default())
         .chain(home.map(|home| PathBuf::from(home).join(".local/bin")))
         .chain(
@@ -39,12 +54,7 @@ fn command_with_environment(
             paths.push(path);
         }
     }
-    let mut command = Command::new(binary);
-    command.env(
-        "PATH",
-        env::join_paths(paths).expect("PATH entries were validated"),
-    );
-    command
+    env::join_paths(paths).expect("PATH entries were validated")
 }
 
 #[cfg(test)]

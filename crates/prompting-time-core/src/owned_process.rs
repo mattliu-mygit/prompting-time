@@ -77,6 +77,20 @@ impl OwnedProcess {
         }
     }
 
+    /// Asks the group to stop with SIGTERM, so its members can clean up after themselves, and
+    /// kills it after `grace` when the leader has not exited by then.
+    pub(crate) async fn stop(&mut self, grace: Duration) -> io::Result<ExitStatus> {
+        if let Some(group) = self.group {
+            // A failed SIGTERM, such as for a group already gone, leaves the outcome to wait() and
+            // terminate(), which handle and report those cases.
+            let _ = kill_process_group(group, Signal::TERM);
+        }
+        match tokio::time::timeout(grace, self.wait()).await {
+            Ok(status) => status,
+            Err(_) => self.terminate().await,
+        }
+    }
+
     pub(crate) async fn terminate(&mut self) -> io::Result<ExitStatus> {
         let deadline = self.cleanup_group().await?;
         tokio::time::timeout_at(deadline, self.child.wait())
@@ -249,6 +263,53 @@ mod tests {
         );
         process.signal_permission_failures = 0;
         assert!(process.terminate().await.unwrap().success());
+    }
+
+    #[tokio::test]
+    async fn stop_lets_the_group_clean_up_before_its_grace_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("cleaned");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "trap 'touch \"{}\"; exit 0' TERM; while :; do sleep 0.05; done",
+                marker.display()
+            ))
+            // The shell reports its killed sleep on stderr.
+            .stderr(std::process::Stdio::null());
+        let mut process = OwnedProcess::spawn(&mut command).unwrap();
+        // Give the shell time to install its trap.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let status =
+            tokio::time::timeout(Duration::from_secs(5), process.stop(Duration::from_secs(3)))
+                .await
+                .expect("stop must be bounded")
+                .unwrap();
+        assert!(status.success(), "the trap's exit 0 is the status");
+        assert!(marker.exists(), "SIGTERM reached the trap");
+        assert!(process.id().is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_kills_a_group_that_ignores_sigterm() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' TERM; while :; do sleep 0.05; done"])
+            .stderr(std::process::Stdio::null());
+        let mut process = OwnedProcess::spawn(&mut command).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = tokio::time::Instant::now();
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            process.stop(Duration::from_millis(300)),
+        )
+        .await
+        .expect("stop must be bounded")
+        .unwrap();
+        assert!(!status.success());
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(process.id().is_none());
     }
 
     #[tokio::test]
