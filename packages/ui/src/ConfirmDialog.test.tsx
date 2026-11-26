@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/dom";
+import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import { Button } from "./Button";
@@ -62,5 +62,44 @@ describe("ConfirmDialog", () => {
     await openDialog(opener);
     await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus());
     vi.restoreAllMocks();
+  });
+
+  it("disables its buttons and ignores Escape while busy", async () => {
+    const [open, setOpen] = createSignal(false);
+    const [busy, setBusy] = createSignal(false);
+    const onCancel = vi.fn(() => setOpen(false));
+    render(() => (
+      <main>
+        <Button onClick={() => setOpen(true)}>Archive</Button>
+        <ConfirmDialog open={open()} busy={busy()} title="Archive Work?" confirmLabel="Archive" onConfirm={() => setBusy(true)} onCancel={onCancel}>
+          <p>History is kept.</p>
+        </ConfirmDialog>
+      </main>
+    ));
+    const opener = screen.getByRole("button", { name: "Archive" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole("alertdialog", { name: "Archive Work?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(dialog).toHaveAttribute("aria-busy", "true"));
+    for (const button of within(dialog).getAllByRole("button")) expect(button).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onCancel).not.toHaveBeenCalled();
+    setBusy(false);
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(onCancel).toHaveBeenCalledOnce());
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it("can disable only its confirm button", async () => {
+    render(() => (
+      <ConfirmDialog open title="Interrupt Codex" confirmLabel="Interruption unavailable" confirmDisabled onConfirm={vi.fn()} onCancel={vi.fn()}>
+        <p>Codex does not report interruption support.</p>
+      </ConfirmDialog>
+    ));
+    const dialog = await screen.findByRole("alertdialog", { name: "Interrupt Codex" });
+    expect(within(dialog).getByRole("button", { name: "Interruption unavailable" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
   });
 });
