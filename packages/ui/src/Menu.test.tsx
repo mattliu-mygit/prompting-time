@@ -56,4 +56,28 @@ describe("Menu", () => {
     flush();
     expect(screen.getByRole("menuitem", { name: "Skip PR" })).toBe(row);
   });
+
+  it("draws radio choices as menuitemradio with the chosen one checked", async () => {
+    const [chosen, setChosen] = createSignal("all");
+    const statuses = ["all", "failed"].map((value) => ({ value, label: value === "all" ? "All statuses" : "Failed" }));
+    render(() => (
+      <Menu
+        label="Filter"
+        icon={<svg />}
+        items={statuses.map((status) => ({ ...status, type: "radio" as const, checked: status.value === chosen() }))}
+        onSelect={setChosen}
+      />
+    ));
+    const trigger = screen.getByRole("button", { name: "Filter" });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menuitemradio", { name: "All statuses" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("menuitemradio", { name: "Failed" })).toHaveAttribute("aria-checked", "false");
+    expect(await axeViolations()).toEqual([]);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Failed" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(chosen()).toBe("failed");
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menuitemradio", { name: "Failed" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("menuitemradio", { name: "All statuses" })).toHaveAttribute("aria-checked", "false");
+  });
 });

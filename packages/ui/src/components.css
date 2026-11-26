@@ -329,6 +329,20 @@
   cursor: pointer;
 }
 
+/* The check mark's column, kept for unchecked choices so labels line up. */
+.pt-menu-item-check {
+  display: inline-grid;
+  place-items: center;
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+  margin-inline-end: var(--s-space-8);
+}
+
+.pt-menu-item-check svg {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
 .pt-menu-item[data-highlighted] {
   background: var(--s-secondary-hover);
 }

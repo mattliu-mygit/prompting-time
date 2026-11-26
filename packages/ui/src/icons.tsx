@@ -76,6 +76,11 @@ export const CopyIcon = () => (
     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
   </Icon>
 );
+export const CheckIcon = () => (
+  <Icon>
+    <path d="M20 6 9 17l-5-5" />
+  </Icon>
+);
 export const CloseIcon = () => (
   <Icon>
     <path d="M18 6 6 18" />
