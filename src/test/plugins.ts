@@ -76,6 +76,7 @@ export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSn
     folder: "/synthetic/plugins/whooper",
     stateFolder: "/synthetic/state/whooper",
     settingsSchema: fixtureSchema,
+    pageUrl: "pt-plugin://whooper/index.html",
     actions: [
       { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
       { name: "get-settings", title: "Read settings", description: "Prints the settings as JSON.", confirm: false },

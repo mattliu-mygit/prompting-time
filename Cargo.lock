@@ -3209,6 +3209,7 @@ name = "prompting-time"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "percent-encoding",
  "prompting-time-core",
  "serde",
  "serde_json",

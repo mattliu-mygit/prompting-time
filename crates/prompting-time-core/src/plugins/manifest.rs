@@ -78,6 +78,24 @@ pub struct Action {
 #[error("{0}")]
 pub struct ManifestError(pub String);
 
+impl Page {
+    /// The folder of the page's files, relative to the plugin's folder: the entry's folder, such as
+    /// `page/dist` for `page/dist/index.html`.
+    pub fn folder(&self) -> &Path {
+        Path::new(&self.entry)
+            .parent()
+            .expect("validated paths have a parent, if only the empty one")
+    }
+
+    /// The entry's path in the page's folder, such as `index.html`.
+    pub fn file_name(&self) -> &str {
+        Path::new(&self.entry)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("validated paths end in a normal component")
+    }
+}
+
 impl Manifest {
     /// Reads a manifest and checks the rules of manifest version 1.
     pub fn parse(bytes: &[u8]) -> Result<Self, ManifestError> {
@@ -300,6 +318,8 @@ mod tests {
                 value: "devin".into()
             })
         );
+        assert_eq!(manifest.page.folder(), Path::new("page/dist"));
+        assert_eq!(manifest.page.file_name(), "index.html");
         assert!(manifest.action("submit").unwrap().confirm);
         assert!(manifest.action("missing").is_none());
     }

@@ -916,6 +916,9 @@ pub struct PluginSnapshot {
     pub state_folder: String,
     /// The settings' JSON Schema, as JSON text.
     pub settings_schema: String,
+    /// Where the window loads the plugin's page, in a frame sandboxed to scripts only, such as
+    /// "pt-plugin://whooper/index.html".
+    pub page_url: String,
     pub actions: Vec<PluginAction>,
     pub prerequisites: Vec<PluginPrerequisite>,
     /// Why the settings that decide which programs are needed could not be read; the plugin

@@ -913,6 +913,7 @@ impl From<CorePluginSnapshot> for PluginSnapshot {
     fn from(snapshot: CorePluginSnapshot) -> Self {
         let manifest = snapshot.manifest;
         Self {
+            page_url: crate::plugin_pages::page_url(&manifest.name, manifest.page.file_name()),
             name: manifest.name,
             title: manifest.title,
             version: manifest.version,

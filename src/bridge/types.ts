@@ -387,6 +387,11 @@ export type PluginSnapshot = {
 	stateFolder: string,
 	/**  The settings' JSON Schema, as JSON text. */
 	settingsSchema: string,
+	/**
+	 *  Where the window loads the plugin's page, in a frame sandboxed to scripts only, such as
+	 *  "pt-plugin://whooper/index.html".
+	 */
+	pageUrl: string,
 	actions: PluginAction[],
 	prerequisites: PluginPrerequisite[],
 	/**

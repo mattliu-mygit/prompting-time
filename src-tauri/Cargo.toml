@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 async-trait.workspace = true
+percent-encoding = "2"
 prompting-time-core = { path = "../crates/prompting-time-core" }
 serde.workspace = true
 serde_json.workspace = true

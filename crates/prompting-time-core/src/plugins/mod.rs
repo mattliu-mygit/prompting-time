@@ -2,8 +2,9 @@
 //! manifest (`manifest.rs`) and the commands it names. PT installs it from a release archive pinned
 //! by its SHA-256, or, for development, from a local archive or folder; checks the programs it
 //! needs; starts its start command when PT opens, unless a copy already holds the plugin's run lock;
-//! runs its actions and returns their output and exit code; watches its state folder; and stops the
-//! process group it started when PT quits, leaving a copy started elsewhere running.
+//! runs its actions and returns their output and exit code; serves its page's files; watches its
+//! state folder; and stops the process group it started when PT quits, leaving a copy started
+//! elsewhere running.
 //!
 //! Beyond the manifest, PT relies on conventions that Whooper follows:
 //! - A plugin keeps its state in `$XDG_STATE_HOME/<name>` (default `~/.local/state/<name>`), and PT
@@ -18,6 +19,7 @@
 
 mod install;
 pub mod manifest;
+mod page;
 mod prerequisites;
 mod run;
 mod watcher;
@@ -41,6 +43,7 @@ use crate::owned_process::OwnedProcess;
 use crate::providers::child_path;
 use install::{Installed, STAGING_DIR};
 pub use manifest::{GET_SETTINGS_ACTION, Manifest, ManifestError, SAVE_SETTINGS_ACTION};
+pub use page::PageFileError;
 pub use prerequisites::PrerequisiteStatus;
 use watcher::StateWatcher;
 

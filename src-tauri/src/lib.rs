@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod plugin_pages;
 pub mod state;
 
 use std::sync::Arc;
@@ -13,6 +14,21 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(command_builder.invoke_handler())
+        .register_asynchronous_uri_scheme_protocol(
+            plugin_pages::SCHEME,
+            |context, request, responder| {
+                let state = context
+                    .app_handle()
+                    .try_state::<Arc<AppState>>()
+                    .map(|state| Arc::clone(state.inner()));
+                // Reading a file can wait on the disk, and this runs on the thread that draws the
+                // window.
+                tauri::async_runtime::spawn_blocking(move || {
+                    let plugins = state.as_ref().and_then(|state| state.plugins().ok());
+                    responder.respond(plugin_pages::respond(plugins, &request));
+                });
+            },
+        )
         .setup(|app| {
             let state = match app.path().app_data_dir() {
                 Ok(app_data_dir) => {
