@@ -1,9 +1,12 @@
 import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
-import type { ApprovalSnapshot, CompactionActivity, ConversationSummary, ProviderId, TimelineItem } from "../../bridge/types";
+import type { ApprovalDetailSnapshot, ApprovalSnapshot, CompactionActivity, ConversationSummary, ProviderId, TimelineItem } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
+import { ApprovalCard } from "../inspector/ApprovalCard";
 import { TimelineEntry } from "./TimelineEntry";
 
 const PAGE_SIZE = 80;
+const APPROVAL_PAGE_SIZE = 30;
+const MAX_APPROVALS = APPROVAL_PAGE_SIZE * 4;
 const MAX_OLDER_PAGES = 4;
 const MAX_RETAINED_VIEWS = 10;
 
@@ -24,7 +27,10 @@ type TimelineProps = {
   /** One Timeline shows one conversation; the caller makes a new one for another conversation. */
   conversation: ConversationSummary;
   refreshVersion: number;
-  actions: Pick<ConversationActions, "loadTimeline" | "loadEventDetail">;
+  actions: Pick<
+    ConversationActions,
+    "loadTimeline" | "loadEventDetail" | "loadApprovals" | "loadApprovalDetail" | "loadApprovalQuestions" | "respondToApproval"
+  >;
   /** Reading positions of recently visited conversations, kept in memory for this session. */
   viewStates?: Map<string, TimelineViewState>;
 };
@@ -44,7 +50,11 @@ export function Timeline(props: TimelineProps) {
   const [olderPages, setOlderPages] = createSignal<TimelineItem[][]>(saved?.olderPages ?? []);
   const [cursor, setCursor] = createSignal<string | null>(saved?.cursor ?? null);
   const [historyEvicted, setHistoryEvicted] = createSignal(saved?.historyEvicted ?? false);
-  const [approvals, setApprovals] = createSignal<{ items: ApprovalSnapshot[]; more: boolean }>({ items: [], more: false });
+  const [approvals, setApprovals] = createSignal<ApprovalSnapshot[]>([]);
+  const [approvalCursor, setApprovalCursor] = createSignal<string | null>(null);
+  const [approvalHistoryEvicted, setApprovalHistoryEvicted] = createSignal(false);
+  const [loadingApprovals, setLoadingApprovals] = createSignal(false);
+  const [resolvedApprovalFocus, setResolvedApprovalFocus] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [loadingOlder, setLoadingOlder] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -69,13 +79,21 @@ export function Timeline(props: TimelineProps) {
   let scrollToEnd = saved?.following ?? false;
   let operationFocus: { id: string; control: HTMLElement } | null = null;
   let scrollBox: HTMLDivElement | undefined;
+  let heading: HTMLHeadingElement | undefined;
+  // Pending requests: up to four pages of 30, each read from its cursor. A refresh re-reads the
+  // pages shown by following the refreshed cursor chain; paging has its own busy token, so an
+  // overlapping refresh cannot leave the paging button disabled.
+  let approvalGeneration = 0;
+  let approvalPagerToken = 0;
+  let approvalPagerInFlight = false;
+  let approvalPageCursors: Array<string | null> = [];
+  let approvalPages: ApprovalSnapshot[][] = [];
+  let approvalReadTail: Promise<unknown> = Promise.resolve();
 
   const items = createMemo(() => mergeTimeline(olderPages().flat(), newestItems()).filter((item) => item.presentation !== "telemetry"));
   const groups = createMemo(() => groupActivity(items()));
   const active = () => ["queued", "running", "waiting"].includes(props.conversation.runStatus ?? "");
   const compacting = () => active() && compaction()?.runId === props.conversation.currentRunId;
-  // Requests answered after a run ended describe nothing you can act on.
-  const pendingApprovals = () => (active() ? approvals() : { items: [], more: false });
 
   function rememberOperationFocus() {
     const control = document.activeElement;
@@ -91,6 +109,24 @@ export function Timeline(props: TimelineProps) {
     return result;
   }
 
+  function loadApprovalPage(pageCursor: string | null) {
+    const result = approvalReadTail.catch(() => undefined).then(() => props.actions.loadApprovals({ conversationId, cursor: pageCursor, limit: APPROVAL_PAGE_SIZE, kind: "pending" }));
+    approvalReadTail = result.catch(() => undefined);
+    return result;
+  }
+
+  function resetApprovals() {
+    approvalGeneration += 1;
+    approvalPagerToken += 1;
+    approvalPagerInFlight = false;
+    approvalPageCursors = [];
+    approvalPages = [];
+    setApprovalCursor(null);
+    setApprovals([]);
+    setApprovalHistoryEvicted(false);
+    setLoadingApprovals(false);
+  }
+
   function requestRefresh() {
     refreshQueued = true;
     if (refreshing) return;
@@ -99,11 +135,11 @@ export function Timeline(props: TimelineProps) {
       while (refreshQueued && !disposed) {
         refreshQueued = false;
         const replacing = !loaded;
+        const approvalRead = ++approvalGeneration;
         try {
           const page = await loadPage(null);
           if (disposed) return;
           setCompaction(page.activeCompaction);
-          setApprovals({ items: page.approvals.filter(({ status }) => status === "pending"), more: page.approvalsNextCursor !== null });
           const box = scrollBox ?? null;
           scrollToEnd = replacing || box === null || (following && box.scrollHeight - box.scrollTop - box.clientHeight < 32);
           if (!scrollToEnd && !prependAnchor) prependAnchor = captureScrollAnchor(box);
@@ -134,6 +170,30 @@ export function Timeline(props: TimelineProps) {
             rememberOperationFocus();
             setOlderPages(olderRetained);
           }
+          // A failed history refresh above must not hold back fresh requests for a response.
+          if (disposed) return;
+          const refreshedPages = [pendingApprovalPage(page.approvals)];
+          const refreshedCursors: Array<string | null> = [null];
+          let refreshedCursor = page.approvalsNextCursor;
+          for (let pageIndex = 0; pageIndex < approvalPages.length - 1; pageIndex += 1) {
+            const disclosedCursor = refreshedCursor;
+            if (!disclosedCursor || refreshedPages.length >= MAX_OLDER_PAGES) break;
+            const disclosed = await loadApprovalPage(disclosedCursor);
+            if (disposed || approvalRead !== approvalGeneration) break;
+            refreshedPages.push(pendingApprovalPage(disclosed.items));
+            refreshedCursors.push(disclosedCursor);
+            refreshedCursor = disclosed.nextCursor;
+            if (!disclosed.nextCursor) break;
+          }
+          if (disposed || approvalRead !== approvalGeneration) continue;
+          const reconciled = mergeApprovals(refreshedPages.flat());
+          const focusedApprovalId = document.activeElement?.closest<HTMLElement>("[data-approval-id]")?.dataset.approvalId;
+          if (focusedApprovalId && !reconciled.some(({ id }) => id === focusedApprovalId)) setResolvedApprovalFocus(focusedApprovalId);
+          setApprovals(reconciled);
+          approvalPages = refreshedPages;
+          approvalPageCursors = refreshedCursors;
+          setApprovalHistoryEvicted(false);
+          setApprovalCursor(refreshedCursor);
         } catch (reason) {
           if (!disposed) {
             setCompaction(null);
@@ -153,6 +213,22 @@ export function Timeline(props: TimelineProps) {
     setError(null);
     requestRefresh();
   });
+
+  // A run that ended has no pending requests to answer; drop the pages until the next read.
+  const runStatus = createMemo(() => props.conversation.runStatus);
+  createEffect(runStatus, (status) => {
+    if (status === "completed" || status === "interrupted" || status === "failed") resetApprovals();
+  });
+
+  // A request that was answered while focus was inside it hands focus to the timeline heading.
+  createEffect(
+    () => ({ resolved: resolvedApprovalFocus(), approvals: approvals() }),
+    ({ resolved, approvals: current }) => {
+      if (!resolved || current.some(({ id }) => id === resolved)) return;
+      heading?.focus();
+      setResolvedApprovalFocus(null);
+    },
+  );
 
   // After rows change: keep focus on a disclosure that was redrawn, then hold the reading position.
   createEffect(items, () => {
@@ -268,6 +344,70 @@ export function Timeline(props: TimelineProps) {
     }
   }
 
+  async function loadMoreApprovals() {
+    const requested = approvalCursor();
+    if (!requested || approvalPagerInFlight) return;
+    const generation = approvalGeneration;
+    const pagerToken = ++approvalPagerToken;
+    approvalPagerInFlight = true;
+    setLoadingApprovals(true);
+    setError(null);
+    try {
+      const page = await loadApprovalPage(requested);
+      if (disposed || generation !== approvalGeneration || approvalCursor() !== requested) return;
+      const cursors = [...approvalPageCursors, requested];
+      approvalPageCursors = cursors.slice(-MAX_OLDER_PAGES);
+      approvalPages = [...approvalPages, pendingApprovalPage(page.items)].slice(-MAX_OLDER_PAGES);
+      if (cursors.length > MAX_OLDER_PAGES) setApprovalHistoryEvicted(true);
+      setApprovals(mergeApprovals(approvalPages.flat()).slice(0, MAX_APPROVALS));
+      setApprovalCursor(page.nextCursor);
+    } catch (reason) {
+      if (!disposed && generation === approvalGeneration) setError(messageFor(reason));
+    } finally {
+      if (!disposed && pagerToken === approvalPagerToken) {
+        approvalPagerInFlight = false;
+        setLoadingApprovals(false);
+      }
+    }
+  }
+
+  async function reloadNewestApprovals() {
+    if (approvalPagerInFlight) return;
+    const generation = ++approvalGeneration;
+    const pagerToken = ++approvalPagerToken;
+    approvalPagerInFlight = true;
+    setLoadingApprovals(true);
+    setError(null);
+    try {
+      const page = await loadApprovalPage(null);
+      if (disposed || generation !== approvalGeneration) return;
+      approvalPageCursors = [null];
+      approvalPages = [pendingApprovalPage(page.items)];
+      setApprovals(approvalPages[0]!);
+      setApprovalCursor(page.nextCursor);
+      setApprovalHistoryEvicted(false);
+    } catch (reason) {
+      if (!disposed && generation === approvalGeneration) setError(messageFor(reason));
+    } finally {
+      if (!disposed && pagerToken === approvalPagerToken) {
+        approvalPagerInFlight = false;
+        setLoadingApprovals(false);
+      }
+    }
+  }
+
+  /** Applies a request's exact durable state: still pending updates it; anything else removes it. */
+  async function reconcileApproval(approvalId: string, known?: ApprovalDetailSnapshot) {
+    const exact = known ?? (await props.actions.loadApprovalDetail({ approvalId }));
+    const apply = (list: ApprovalSnapshot[]) => (exact.status === "pending"
+      ? list.map((approval) => (approval.id === approvalId ? { ...approval, status: exact.status, responsePending: exact.responsePending } : approval))
+      : list.filter(({ id }) => id !== approvalId));
+    approvalPages = approvalPages.map(apply);
+    setApprovals(apply);
+    if (exact.status !== "pending") setResolvedApprovalFocus(approvalId);
+    return exact;
+  }
+
   function reloadNewestHistory() {
     historyGeneration += 1;
     prependAnchor = null;
@@ -283,7 +423,7 @@ export function Timeline(props: TimelineProps) {
 
   return (
     <section class="timeline-region" aria-labelledby="timeline-heading">
-      <h2 class="pt-visually-hidden" id="timeline-heading" tabindex={-1}>Timeline</h2>
+      <h2 ref={heading} class="pt-visually-hidden" id="timeline-heading" tabindex={-1}>Timeline</h2>
       <Show when={loading()}><span role="status" class="timeline-status">Loading activity…</span></Show>
       <Show when={compacting()}><span role="status" class="timeline-status compaction-status">Compacting…</span></Show>
       <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>
@@ -327,23 +467,27 @@ export function Timeline(props: TimelineProps) {
               )}
             </For>
           </ol>
-          <Show when={pendingApprovals().items.length > 0}>
+          <Show when={approvals().length > 0}>
             <section class="approval-list" aria-labelledby="approvals-heading">
               <h3 id="approvals-heading">Needs your response</h3>
-              <p class="approval-note">You can read these requests here. Answering them from this view is not available yet.</p>
-              <For each={pendingApprovals().items} keyed={(approval) => approval.id}>
+              <For each={approvals()} keyed={(approval) => approval.id}>
                 {(approval) => (
-                  <article class="approval-summary" data-approval-id={approval().id} aria-label={`${providerNames[approval().provider]} request: ${approval().operation}`}>
-                    <header>
-                      <span>{providerNames[approval().provider]}</span> · <span>{agentLabel(approval())}</span>
-                    </header>
-                    <p class="approval-operation">{approval().operation}</p>
-                    <p class="approval-scope">{approval().scope}</p>
-                    <p class="approval-state">{approval().responsePending ? "Your response is recorded and still being delivered." : "Waiting for your response."}</p>
-                  </article>
+                  <ApprovalCard approval={approval()} actions={props.actions} onReconcile={(detail) => reconcileApproval(approval().id, detail)} />
                 )}
               </For>
-              <Show when={pendingApprovals().more}><p class="approval-note">More requests are waiting than this view shows.</p></Show>
+              <Show when={approvalCursor()}>
+                <button type="button" class="pt-button" disabled={loadingApprovals()} onClick={() => void loadMoreApprovals()}>
+                  {loadingApprovals() ? "Loading approvals…" : "Load more approvals"}
+                </button>
+              </Show>
+              <Show when={approvalHistoryEvicted()}>
+                <div class="history-window-note" role="note">
+                  <span>Newer approvals are outside this bounded view.</span>
+                  <button type="button" class="pt-button" disabled={loadingApprovals()} onClick={() => void reloadNewestApprovals()}>
+                    Reload newest approvals
+                  </button>
+                </div>
+              </Show>
             </section>
           </Show>
         </div>
@@ -393,9 +537,14 @@ function ActivityGroup(props: {
   );
 }
 
-function agentLabel(approval: ApprovalSnapshot) {
-  const path = approval.agentPath.join("/") || "Conversation";
-  return approval.agentPathTruncated ? `…/${path}` : path;
+function mergeApprovals(incoming: readonly ApprovalSnapshot[]) {
+  const byId = new Map<string, ApprovalSnapshot>();
+  incoming.forEach((approval) => byId.set(approval.id, approval));
+  return [...byId.values()].filter(({ status }) => status === "pending");
+}
+
+function pendingApprovalPage(items: readonly ApprovalSnapshot[]) {
+  return items.filter(({ status }) => status === "pending").slice(0, APPROVAL_PAGE_SIZE);
 }
 
 function isGroupActivity(item: TimelineItem) {

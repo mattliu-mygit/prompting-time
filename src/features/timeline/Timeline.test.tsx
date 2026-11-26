@@ -333,7 +333,7 @@ describe("Timeline", () => {
     refresh = true;
     view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     expect(await screen.findByRole("alert")).toHaveTextContent("Older history unavailable");
-    expect(screen.getByRole("article", { name: "Codex request: Run checks" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review Run checks" })).toBeEnabled();
     expect(screen.getByText("Running")).toBeVisible();
   });
 
@@ -423,12 +423,12 @@ describe("Timeline", () => {
     const height = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => screen.queryByText("fresh output") ? 2000 : 1000);
     const mount = (id: string) => ({ conversation: conversation({ id }), refreshVersion: 0, actions: api, viewStates });
     const view = renderTimeline(mount("a"));
-    await screen.findByRole("article", { name: "Codex request: Old approval" });
+    await screen.findByRole("button", { name: "Review Old approval" });
     view.rerender(mount("b"));
     await screen.findByText("No activity yet.");
     view.rerender(mount("a"));
     expect(screen.getByText("first output")).toBeVisible();
-    expect(screen.queryByRole("article", { name: "Codex request: Old approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review Old approval" })).not.toBeInTheDocument();
     await act(async () => resolveReturn(timelinePage([event({ id: "fresh", sequence: "2", content: "fresh output" })], null)));
     expect(screen.getByLabelText("Conversation activity").scrollTop).toBe(2000);
     expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
@@ -991,6 +991,312 @@ describe("Timeline", () => {
 
 
 
+
+  it("mounts only the first 30 approval summaries and loads detail on explicit review", async () => {
+    const first = Array.from({ length: 30 }, (_, index) => ({
+      id: `approval-${index}`, runId: "run-1", agentId: "root", provider: "codex" as const,
+      agentPath: ["Root"], agentPathTruncated: false,
+      operation: `Action ${index}`, scope: "One action", status: "pending" as const, responsePending: false,
+    }));
+    const second = Array.from({ length: 30 }, (_, index) => ({
+      ...first[index]!, id: `approval-${index + 30}`, operation: `Action ${index + 30}`,
+    }));
+    const api = actions({
+      loadTimeline: vi.fn().mockResolvedValue({
+        items: [], nextCursor: null, approvals: first, approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "approvals-2",
+      }),
+      loadApprovals: vi.fn().mockResolvedValue({ items: second, nextCursor: null }),
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "approval-0", status: "pending", responsePending: false, agentPath: ["Root"], agentPathTruncated: false,
+        operation: "Action 0", scope: "One action", input: null, details: null, questionCount: 0, truncated: false,
+      }),
+    });
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    await screen.findByRole("heading", { name: "Needs your response" });
+    expect(document.querySelectorAll(".approval-card")).toHaveLength(30);
+    expect(api.loadApprovalDetail).not.toHaveBeenCalled();
+    expect(api.loadApprovalQuestions).not.toHaveBeenCalled();
+
+    click(screen.getByRole("button", { name: "Review Action 0" }));
+    await screen.findByRole("button", { name: "Allow Action 0" });
+    expect(api.loadApprovalDetail).toHaveBeenCalledTimes(1);
+    click(screen.getByRole("button", { name: "Load more approvals" }));
+    await waitFor(() => expect(document.querySelectorAll(".approval-card")).toHaveLength(60));
+    expect(api.loadApprovalDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("traverses every approval through a sliding four-page window and reloads the newest page", async () => {
+    const approval = (index: number) => ({
+      id: `approval-${index}`, runId: "run-1", agentId: "root", provider: "codex" as const,
+      agentPath: ["Root"], agentPathTruncated: false,
+      operation: `Action ${index}`, scope: "One action", status: "pending" as const, responsePending: false,
+    });
+    const all = Array.from({ length: 226 }, (_, index) => approval(index));
+    const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
+      const offset = cursor === null ? 0 : Number(cursor);
+      const nextOffset = Math.min(offset + 30, all.length);
+      return Promise.resolve({
+        items: all.slice(offset, nextOffset),
+        nextCursor: nextOffset < all.length ? String(nextOffset) : null,
+      });
+    });
+    const api = actions({
+      loadTimeline: vi.fn().mockResolvedValue({
+        items: [], nextCursor: null, approvals: all.slice(0, 30),
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "30",
+      }),
+      loadApprovals,
+    });
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+
+    for (let page = 1; page <= 7; page += 1) {
+      click(await screen.findByRole("button", { name: "Load more approvals" }));
+      await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(page));
+      const lastIndex = Math.min((page + 1) * 30 - 1, 225);
+      expect(await screen.findByRole("button", { name: `Review Action ${lastIndex}` })).toBeVisible();
+      expect(document.querySelectorAll(".approval-card").length).toBeLessThanOrEqual(120);
+    }
+
+    expect(screen.getByRole("button", { name: "Review Action 225" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review Action 120" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review Action 119" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review Action 0" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more approvals" })).not.toBeInTheDocument();
+    expect(loadApprovals.mock.calls.map(([request]) => request.cursor)).toEqual([
+      "30", "60", "90", "120", "150", "180", "210",
+    ]);
+    click(screen.getByRole("button", { name: "Reload newest approvals" }));
+    await waitFor(() => expect(loadApprovals).toHaveBeenLastCalledWith({
+      conversationId: "conversation-1", cursor: null, limit: 30, kind: "pending",
+    }));
+    expect(await screen.findByRole("button", { name: "Review Action 0" })).toBeVisible();
+    expect(document.querySelectorAll(".approval-card")).toHaveLength(30);
+
+    for (let page = 1; page <= 7; page += 1) {
+      click(await screen.findByRole("button", { name: "Load more approvals" }));
+      await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(page + 8));
+    }
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
+    await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(18));
+    expect(loadApprovals.mock.calls.slice(-3).map(([request]) => request.cursor)).toEqual(["30", "60", "90"]);
+    expect(await screen.findByRole("button", { name: "Review Action 0" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review Action 119" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review Action 120" })).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".approval-card")).toHaveLength(120);
+    click(screen.getByRole("button", { name: "Load more approvals" }));
+    await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(19));
+    expect(loadApprovals.mock.calls.at(-1)?.[0].cursor).toBe("120");
+    expect(await screen.findByRole("button", { name: "Review Action 149" })).toBeVisible();
+  });
+
+  it("ignores a stale approval page that resolves after a newer refresh", async () => {
+    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
+    const stale = { ...first, id: "stale", operation: "Stale" };
+    let resolvePage!: (value: { items: typeof stale[]; nextCursor: string | null }) => void;
+    const page = new Promise<{ items: typeof stale[]; nextCursor: string | null }>((resolve) => { resolvePage = resolve; });
+    const loadTimeline = vi.fn()
+      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" })
+      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" });
+    const api = actions({ loadTimeline, loadApprovals: vi.fn(() => page) });
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load more approvals" }));
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
+    await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(2));
+    await act(async () => resolvePage({ items: [stale], nextCursor: null }));
+
+    expect(screen.queryByRole("button", { name: "Review Stale" })).not.toBeInTheDocument();
+  });
+
+  it("preserves explicitly disclosed approval pages across newest refreshes", async () => {
+    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
+    const older = { ...first, id: "older", operation: "Older" };
+    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" });
+    const api = actions({ loadTimeline, loadApprovals: vi.fn().mockResolvedValue({ items: [older], nextCursor: null }) });
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load more approvals" }));
+    expect(await screen.findByRole("button", { name: "Review Older" })).toBeVisible();
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
+
+    expect(await screen.findByRole("button", { name: "Review Older" })).toBeVisible();
+  });
+
+  it("reconciles a resolved later approval page and restores focus", async () => {
+    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
+    const older = { ...first, id: "older", operation: "Older" };
+    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older-page" });
+    const loadApprovals = vi.fn()
+      .mockResolvedValueOnce({ items: [older], nextCursor: null })
+      .mockResolvedValueOnce({ items: [], nextCursor: null });
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: actions({ loadTimeline, loadApprovals }) });
+    click(await screen.findByRole("button", { name: "Load more approvals" }));
+    const olderReview = await screen.findByRole("button", { name: "Review Older" });
+    olderReview.focus();
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: actions({ loadTimeline, loadApprovals }) });
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Review Older" })).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "Timeline" })).toHaveFocus();
+  });
+
+  it("reconciles a later-page approval by exact durable ID", async () => {
+    let laterReads = 0;
+    const loadApprovalDetail = vi.fn(({ approvalId }: { approvalId: string }) => {
+      if (approvalId === "later") laterReads += 1;
+      return Promise.resolve({
+        id: approvalId,
+        status: approvalId === "later" && laterReads > 1 ? "approved" as const : "pending" as const,
+        responsePending: false,
+        agentPath: ["Root"],
+        agentPathTruncated: false,
+        operation: approvalId === "later" ? "Later action" : "First action",
+        scope: "One action", input: null, details: null, questionCount: 0, truncated: false,
+      });
+    });
+    const api = actions({
+      loadTimeline: vi.fn().mockResolvedValue({
+        items: [], nextCursor: null,
+        approvals: [{ id: "first", runId: "run-1", agentId: "root", provider: "codex", agentPath: ["Root"], agentPathTruncated: false, operation: "First action", scope: "One action", status: "pending", responsePending: false }],
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "approval-page-2",
+      }),
+      loadApprovals: vi.fn().mockResolvedValue({
+        items: [{ id: "later", runId: "run-1", agentId: "root", provider: "codex", agentPath: ["Root"], agentPathTruncated: false, operation: "Later action", scope: "One action", status: "pending", responsePending: false }],
+        nextCursor: null,
+      }),
+      loadApprovalDetail,
+      respondToApproval: vi.fn().mockResolvedValue(undefined),
+    });
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load more approvals" }));
+    click(await screen.findByRole("button", { name: "Review Later action" }));
+    const allowLater = await screen.findByRole("button", { name: "Allow Later action" });
+    await waitFor(() => expect(allowLater).toBeEnabled());
+    click(allowLater);
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Allow Later action" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Review First action" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Timeline" })).toHaveFocus();
+    expect(api.loadApprovals).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes disclosed approval pages by the new cursor chain without gaps or duplicates", async () => {
+    const approval = (index: number) => ({
+      id: `approval-${index}`, runId: "run-1", agentId: "root", provider: "codex" as const,
+      agentPath: ["Root"], agentPathTruncated: false,
+      operation: `Action ${index}`, scope: "One action", status: "pending" as const, responsePending: false,
+    });
+    const newest = (id: string) => ({ ...approval(-1), id, operation: `New ${id}` });
+    const loadTimeline = vi.fn()
+      .mockResolvedValueOnce({
+        items: [], nextCursor: null, approvals: Array.from({ length: 30 }, (_, index) => approval(index)),
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "old-page-2",
+      })
+      .mockResolvedValueOnce({
+        items: [], nextCursor: null,
+        approvals: [newest("new-1"), newest("new-2"), ...Array.from({ length: 28 }, (_, index) => approval(index))],
+        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "new-page-2",
+      });
+    const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
+      if (cursor === "old-page-2") return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => approval(index + 30)), nextCursor: "old-page-3" });
+      if (cursor === "new-page-2") return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => approval(index + 28)), nextCursor: "new-page-3" });
+      if (cursor === "new-page-3") return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => approval(index + 58)), nextCursor: null });
+      return Promise.resolve({ items: [], nextCursor: null });
+    });
+    const api = actions({ loadTimeline, loadApprovals });
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load more approvals" }));
+    await screen.findByRole("button", { name: "Review Action 59" });
+
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
+    await waitFor(() => expect(loadApprovals.mock.calls.map(([request]) => request.cursor)).toEqual([
+      "old-page-2", "new-page-2",
+    ]));
+    expect(screen.getByRole("button", { name: "Review Action 28" })).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "Review Action 30" })).toHaveLength(1);
+
+    click(screen.getByRole("button", { name: "Load more approvals" }));
+    expect(await screen.findByRole("button", { name: "Review Action 87" })).toBeVisible();
+    expect(loadApprovals.mock.calls.map(([request]) => request.cursor)).toEqual([
+      "old-page-2", "new-page-2", "new-page-3",
+    ]);
+    expect(screen.getAllByRole("button", { name: "Review Action 58" })).toHaveLength(1);
+  });
+
+  it("re-enables approval paging when an overlapping timeline refresh fails", async () => {
+    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
+    const later = { ...first, id: "later", operation: "Later" };
+    let resolvePage!: (value: { items: typeof later[]; nextCursor: string | null }) => void;
+    const pendingPage = new Promise<{ items: typeof later[]; nextCursor: string | null }>((resolve) => { resolvePage = resolve; });
+    const loadTimeline = vi.fn()
+      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "page-2" })
+      .mockRejectedValueOnce(new Error("Timeline refresh unavailable"));
+    const loadApprovals = vi.fn()
+      .mockReturnValueOnce(pendingPage)
+      .mockResolvedValueOnce({ items: [later], nextCursor: null });
+    const api = actions({ loadTimeline, loadApprovals });
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load more approvals" }));
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Timeline refresh unavailable");
+    await act(async () => resolvePage({ items: [later], nextCursor: null }));
+
+    const retry = await screen.findByRole("button", { name: "Load more approvals" });
+    expect(retry).toBeEnabled();
+    click(retry);
+    expect(await screen.findByRole("button", { name: "Review Later" })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("re-enables approval controls when a disclosed-page refresh fails", async () => {
+    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
+    const second = { ...first, id: "second", operation: "Second" };
+    const third = { ...first, id: "third", operation: "Third" };
+    let resolveThird!: (value: { items: typeof third[]; nextCursor: string | null }) => void;
+    const pendingThird = new Promise<{ items: typeof third[]; nextCursor: string | null }>((resolve) => { resolveThird = resolve; });
+    const loadTimeline = vi.fn().mockResolvedValue({
+      items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "page-2",
+    });
+    const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
+      if (cursor === "page-2" && loadApprovals.mock.calls.length === 1) return Promise.resolve({ items: [second], nextCursor: "page-3" });
+      if (cursor === "page-3" && loadApprovals.mock.calls.length === 2) return pendingThird;
+      if (cursor === "page-2" && loadApprovals.mock.calls.length === 3) return Promise.reject(new Error("Approval refresh unavailable"));
+      if (cursor === "page-3") return Promise.resolve({ items: [third], nextCursor: null });
+      return Promise.resolve({ items: [], nextCursor: null });
+    });
+    const api = actions({ loadTimeline, loadApprovals });
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load more approvals" }));
+    await screen.findByRole("button", { name: "Review Second" });
+    click(screen.getByRole("button", { name: "Load more approvals" }));
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
+    await act(async () => resolveThird({ items: [third], nextCursor: null }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Approval refresh unavailable");
+
+    const retry = screen.getByRole("button", { name: "Load more approvals" });
+    expect(retry).toBeEnabled();
+    click(retry);
+    expect(await screen.findByRole("button", { name: "Review Third" })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("uses exact approval-detail ancestry when the requesting agent is not loaded", async () => {
+    const api = actions({
+      loadTimeline: vi.fn().mockResolvedValue({
+        items: [], nextCursor: null,
+        approvals: [{ id: "deep", runId: "run-1", agentId: "unloaded", provider: "claude", agentPath: ["Root", "Orchestrator", "Reviewer"], agentPathTruncated: false, operation: "Edit deep file", scope: "One file", status: "pending", responsePending: false }],
+        approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
+      }),
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "deep", status: "pending", responsePending: false,
+        agentPath: ["Root", "Orchestrator", "Reviewer"], agentPathTruncated: false,
+        operation: "Edit deep file", scope: "One file", input: null, details: null,
+        questionCount: 0, truncated: false,
+      }),
+    });
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+
+    expect(await screen.findByText("Root/Orchestrator/Reviewer")).toBeVisible();
+    expect(screen.queryByText(/^Agent$/)).not.toBeInTheDocument();
+    expect(api.loadApprovalDetail).not.toHaveBeenCalled();
+  });
 
 });
 

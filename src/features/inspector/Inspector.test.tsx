@@ -1,9 +1,10 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { createSignal, flush, Show } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
-import type { ConversationSummary, ProviderInstallation, TimelineItem } from "../../bridge/types";
+import type { ApprovalSnapshot, ConversationSummary, ProviderInstallation, TimelineItem } from "../../bridge/types";
 import type { AppActions, ConversationActions } from "../../app/store";
-import { render, settle } from "../../test/render";
+import { axeViolations, render, settle } from "../../test/render";
+import { ApprovalCard } from "./ApprovalCard";
 import { Inspector } from "./Inspector";
 
 function actions(overrides: Partial<AppActions> = {}): AppActions {
@@ -89,6 +90,285 @@ const click = (element: Element) => {
   fireEvent.click(element);
   flush();
 };
+
+const approval: ApprovalSnapshot = {
+  id: "approval-1", runId: "run-1", agentId: "root/reviewer", provider: "codex",
+  operation: "Run command", scope: "This command", status: "pending", responsePending: false,
+  agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+};
+
+describe("ApprovalCard", () => {
+  it("shows the selected run's frozen thinking and configuration independently of next-turn choice", async () => {
+    const api = actions({
+      listRunAudits: vi.fn().mockResolvedValue({ items: [{ id: "old-run", provider: "codex", status: "completed", reason: null, hasHandoff: false }], nextCursor: null }),
+      loadRunAudit: vi.fn().mockResolvedValue({ id: "old-run", provider: "codex", status: "completed", routing: null, reason: null,
+        handoff: null, handoffTruncated: false, routingTruncated: false,
+        thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "Engineering task." },
+        thinkingConfiguration: { model: "fixture-model", supportedEfforts: ["low", "medium", "high"], configuredEffort: "medium" } }),
+    });
+    renderInspector({ conversation: { ...conversation, thinkingPreference: { kind: "manual", level: "low" } }, refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Inspect Codex run 1" }));
+    expect(await screen.findByText("Requested: high · configured: medium · model: fixture-model")).toBeVisible();
+    expect(screen.getByText("Engineering task.")).toBeVisible();
+    expect(screen.queryByText("Requested: low")).not.toBeInTheDocument();
+  });
+  it("keeps inherited workspace but hides unavailable child control metadata", async () => {
+    const api = actions({ loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }) });
+    renderInspector({ conversation: { ...conversation, id: "reviewer", parentId: "conversation-1", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } }, refreshVersion: 0, actions: api });
+    expect(await screen.findByText("/app-support/worktrees/conversation-1")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: /Provider run history|Routing|Context handoff|Active child conversations/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/active descendants/)).not.toBeInTheDocument();
+    expect(api.listRunAudits).not.toHaveBeenCalled();
+  });
+  it("recovers an initial detail failure through an accessible focused retry", async () => {
+    const api = actions({
+      loadApprovalDetail: vi.fn()
+        .mockRejectedValueOnce(new Error("Detail unavailable"))
+        .mockResolvedValueOnce({
+          id: "approval-1", status: "pending", responsePending: false,
+          agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+          operation: "Run command", scope: "This command", input: null, details: null,
+          questionCount: 0, truncated: false,
+        }),
+    });
+    render(() => <ApprovalCard approval={approval} actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Run command" }));
+    const retry = await screen.findByRole("button", { name: "Retry request details" });
+    expect(retry).toHaveFocus();
+    click(retry);
+    expect(await screen.findByRole("button", { name: "Allow Run command" })).toBeEnabled();
+    expect(api.loadApprovalDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it("immediately reconciles a terminal exact detail", async () => {
+    const terminal = {
+      id: "approval-1", status: "denied" as const, responsePending: false,
+      agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+      operation: "Run command", scope: "This command", input: null, details: null,
+      questionCount: 0, truncated: false,
+    };
+    const onReconcile = vi.fn();
+    render(() => <ApprovalCard approval={approval} actions={actions({ loadApprovalDetail: vi.fn().mockResolvedValue(terminal) })} onReconcile={onReconcile} />);
+    click(screen.getByRole("button", { name: "Review Run command" }));
+    await waitFor(() => expect(onReconcile).toHaveBeenCalledWith(terminal));
+    expect(screen.getByRole("button", { name: "Allow Run command" })).toBeDisabled();
+  });
+
+  it("recovers an initial question-page failure without remounting the approval", async () => {
+    const api = actions({
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "approval-1", status: "pending", responsePending: false,
+        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+        operation: "Run command", scope: "This command", input: null, details: null,
+        questionCount: 1, truncated: false,
+      }),
+      loadApprovalQuestions: vi.fn()
+        .mockRejectedValueOnce(new Error("Questions unavailable"))
+        .mockResolvedValueOnce({
+          items: [{ id: "question-1", header: "Reason", question: "Why?", options: null, isOther: false, isSecret: false, truncated: false }],
+          totalCount: 1, nextCursor: null,
+        }),
+    });
+    render(() => <ApprovalCard approval={approval} actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Run command" }));
+    const retry = await screen.findByRole("button", { name: "Retry request details" });
+    expect(retry).toHaveFocus();
+    click(retry);
+
+    expect(await screen.findByRole("textbox", { name: "Answer" })).toBeEnabled();
+    expect(api.loadApprovalQuestions).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows exact operation context and permits only one response click", async () => {
+    const api = actions();
+    render(() => <ApprovalCard approval={approval} agentPath="Root/Reviewer" actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Run command" }));
+    expect(await screen.findByText("cargo test")).toBeVisible();
+    expect(screen.getByText("Requesting conversation")).toBeVisible();
+    expect(screen.getByText("Root/Reviewer")).toBeVisible();
+    const allow = screen.getByRole("button", { name: "Allow Run command" });
+    click(allow);
+    click(allow);
+    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledTimes(1));
+    expect(allow).toBeDisabled();
+  });
+
+  it("reconciles a stale response against durable approval state", async () => {
+    const onReconcile = vi.fn().mockResolvedValue(undefined);
+    const api = actions({ respondToApproval: vi.fn().mockRejectedValue(new Error("Approval is no longer pending")) });
+    render(() => <ApprovalCard approval={approval} actions={api} onReconcile={onReconcile} />);
+    click(screen.getByRole("button", { name: "Review Run command" }));
+    await screen.findByText("cargo test");
+    click(screen.getByRole("button", { name: "Deny Run command" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Approval is no longer pending"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveFocus());
+    expect(onReconcile).toHaveBeenCalled();
+  });
+
+  it("allows a retry only when durable state confirms no response is owned", async () => {
+    const api = actions({ respondToApproval: vi.fn().mockRejectedValue(new Error("Connection closed")) });
+    render(() => <ApprovalCard approval={approval} actions={api} onReconcile={vi.fn().mockResolvedValue(approval)} />);
+    click(screen.getByRole("button", { name: "Review Run command" }));
+    await screen.findByText("cargo test");
+    const deny = screen.getByRole("button", { name: "Deny Run command" });
+    click(deny);
+    await waitFor(() => expect(deny).toBeEnabled());
+    expect(screen.getByRole("status")).toHaveTextContent("Connection closed");
+  });
+
+  it("pages exact questions and submits answers by app-owned question ID", async () => {
+    const api = actions({
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "approval-1", status: "pending", responsePending: false, operation: "Choose rollout", scope: "This request", input: null,
+        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+        details: null, questionCount: 2, truncated: true,
+      }),
+      loadApprovalQuestions: vi.fn()
+        .mockResolvedValueOnce({
+          items: [{ id: "question-1", header: "Provider", question: "Which provider?", options: [{ label: "Codex", description: "Use Codex" }], isOther: false, isSecret: false, truncated: false }],
+          totalCount: 2, nextCursor: "questions-2",
+        })
+        .mockResolvedValueOnce({
+          items: [{ id: "question-2", header: "Reason", question: "Why?", options: null, isOther: true, isSecret: false, truncated: false }],
+          totalCount: 2, nextCursor: null,
+        }),
+    });
+    render(() => <ApprovalCard approval={{ ...approval, operation: "Choose rollout" }} actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Choose rollout" }));
+    click(await screen.findByRole("radio", { name: /Codex/ }));
+    click(screen.getByRole("button", { name: "Load more questions" }));
+    fireEvent.input(await screen.findByRole("textbox", { name: "Answer" }), { target: { value: "Best fit" } });
+    flush();
+    click(screen.getByRole("button", { name: "Answer Choose rollout" }));
+    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledWith({
+      approvalId: "approval-1",
+      response: { kind: "answers", value: { "question-1": ["Codex"], "question-2": ["Best fit"] } },
+    }));
+  });
+
+  it("coalesces repeated question-page disclosure and deduplicates durable question IDs", async () => {
+    let resolveNextPage!: (page: {
+      items: Array<{
+        id: string; header: string; question: string; options: null;
+        isOther: boolean; isSecret: boolean; truncated: boolean;
+      }>;
+      totalCount: number;
+      nextCursor: string | null;
+    }) => void;
+    const nextPage = new Promise<Parameters<typeof resolveNextPage>[0]>((resolve) => { resolveNextPage = resolve; });
+    const api = actions({
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "approval-1", status: "pending", responsePending: false, operation: "Answer questions", scope: "This request", input: null,
+        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+        details: null, questionCount: 2, truncated: true,
+      }),
+      loadApprovalQuestions: vi.fn()
+        .mockResolvedValueOnce({
+          items: [{ id: "question-1", header: "First", question: "First?", options: null, isOther: false, isSecret: false, truncated: false }],
+          totalCount: 2, nextCursor: "questions-2",
+        })
+        .mockReturnValueOnce(nextPage),
+    });
+    render(() => <ApprovalCard approval={{ ...approval, operation: "Answer questions" }} actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Answer questions" }));
+    const loadMore = await screen.findByRole("button", { name: "Load more questions" });
+
+    click(loadMore);
+    click(loadMore);
+    expect(api.loadApprovalQuestions).toHaveBeenCalledTimes(2);
+
+    await act(async () => resolveNextPage({
+      items: [
+        { id: "question-1", header: "First", question: "First?", options: null, isOther: false, isSecret: false, truncated: false },
+        { id: "question-2", header: "Second", question: "Second?", options: null, isOther: false, isSecret: false, truncated: false },
+      ],
+      totalCount: 2,
+      nextCursor: null,
+    }));
+
+    expect(screen.getAllByRole("textbox")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Load more questions" })).not.toBeInTheDocument();
+  });
+
+  it("blocks arbitrary answers when non-other choices are incomplete", async () => {
+    const api = actions({
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "approval-1", status: "pending", responsePending: false, operation: "Choose rollout", scope: "This request", input: null,
+        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+        details: null, questionCount: 1, truncated: true,
+      }),
+      loadApprovalQuestions: vi.fn().mockResolvedValue({
+        items: [{ id: "question-1", header: "Provider", question: "Which provider?", options: null, isOther: false, isSecret: false, truncated: true }],
+        totalCount: 1, nextCursor: null,
+      }),
+    });
+    render(() => <ApprovalCard approval={{ ...approval, operation: "Choose rollout" }} actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Choose rollout" }));
+
+    expect(await screen.findByText(/Exact choices are unavailable/)).toBeVisible();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Answer Choose rollout" })).toBeDisabled();
+    expect(api.respondToApproval).not.toHaveBeenCalled();
+  });
+
+  it("accepts a complete canonical free-text question with null options", async () => {
+    const api = actions({
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "approval-1", status: "pending", responsePending: false, operation: "Explain rollout", scope: "This request", input: null,
+        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+        details: null, questionCount: 1, truncated: false,
+      }),
+      loadApprovalQuestions: vi.fn().mockResolvedValue({
+        items: [{ id: "question-1", header: "Reason", question: "Why?", options: null, isOther: false, isSecret: true, truncated: false }],
+        totalCount: 1, nextCursor: null,
+      }),
+    });
+    render(() => <ApprovalCard approval={{ ...approval, operation: "Explain rollout" }} actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Explain rollout" }));
+
+    fireEvent.input(await screen.findByLabelText("Answer"), { target: { value: "Because it is safer" } });
+    flush();
+    click(screen.getByRole("button", { name: "Answer Explain rollout" }));
+    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledWith({
+      approvalId: "approval-1", response: { kind: "answers", value: { "question-1": ["Because it is safer"] } },
+    }));
+  });
+
+  it("uses complete canonical detail choices when the paged preview is truncated", async () => {
+    const api = actions({
+      loadApprovalDetail: vi.fn().mockResolvedValue({
+        id: "approval-1", status: "pending", responsePending: false, operation: "Choose rollout", scope: "This request",
+        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
+        input: { questions: [{
+          id: "question-1", header: "Provider", question: "Which provider?",
+          options: [{ label: "Codex", description: "Use Codex" }, { label: "Claude", description: "Use Claude" }],
+          isOther: false, isSecret: false,
+        }], autoResolutionMs: null },
+        details: null, questionCount: 1, truncated: false,
+      }),
+      loadApprovalQuestions: vi.fn().mockResolvedValue({
+        items: [{ id: "question-1", header: "Provider", question: "Which provider?", options: null, isOther: false, isSecret: false, truncated: true }],
+        totalCount: 1, nextCursor: null,
+      }),
+    });
+    render(() => <ApprovalCard approval={{ ...approval, operation: "Choose rollout" }} actions={api} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Choose rollout" }));
+
+    click(await screen.findByRole("radio", { name: /Claude/ }));
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    click(screen.getByRole("button", { name: "Answer Choose rollout" }));
+    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledWith({
+      approvalId: "approval-1", response: { kind: "answers", value: { "question-1": ["Claude"] } },
+    }));
+  });
+
+  it("has no detectable axe violations in an approval prompt", async () => {
+    render(() => <ApprovalCard approval={approval} actions={actions()} onReconcile={vi.fn()} />);
+    click(screen.getByRole("button", { name: "Review Run command" }));
+    await screen.findByText("cargo test");
+    expect(await axeViolations()).toEqual([]);
+  });
+});
 
 describe("Inspector", () => {
   it("opens diagnostics independently before workspace inspection returns and never refreshes them implicitly", async () => {
