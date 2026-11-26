@@ -2,14 +2,16 @@ import { createSignal, Show } from "solid-js";
 import type { AppApi, AppStore } from "../../src/app/store";
 import type { AppEvent, PluginActionRequest, PluginActionResult, PluginSnapshot } from "../../src/bridge/types";
 import { ConfirmActionDialog } from "../../src/features/agents/ConfirmActionDialog";
-import { answerReviewAction, dockerCause, fixtureReviewEntries, fixtureRounds, fixtureSubmitRequest, markFixtureSubmitted, reviewActions } from "./reviews-fixture";
+import { answerReviewAction, dockerCause, fixtureReviewEntries, fixtureRounds, fixtureStatusV2Parts, fixtureSubmitRequest, markFixtureSubmitted, reviewActions } from "./reviews-fixture";
 import { answerV2Action, V2_PLUGIN, v2Plugin } from "./status-v2-fixture";
 
 /**
- * `?agents=1`: an invented Whooper under Background agents, running with its next poll at 3:45 PM.
- * `?agents=missing` shows it stopped for a missing program; `?agents=confirm` opens the submit
- * confirmation over the app, and `?agents=mentions` opens it on a refusal for an @-mention first.
- * `?agents=reviews` lists invented reviews, which open in the plugin page the dev server serves.
+ * `?agents=1`: an invented Whooper under Background agents, running with its next poll at 3:45 PM,
+ * whose status prints status format 2 as whooper-status --json does. `?agents=missing` shows it
+ * stopped for a missing program; `?agents=confirm` opens the submit confirmation over the app, and
+ * `?agents=mentions` opens it on Whooper's refusal for an @-mention first, which shows Whooper's own
+ * words. `?agents=reviews` lists invented reviews as items in Whooper's groups, which open in the
+ * plugin page the dev server serves.
  * `?agents=v2` adds an invented plugin that prints status format 2 (status-v2-fixture.ts), whose
  * actions send pluginChanged events.
  */
@@ -87,10 +89,9 @@ const plugin: PluginSnapshot = {
   stateFolder: "/synthetic/state/whooper",
   settingsSchema: JSON.stringify(schema),
   pageUrl: "/plugin-page/index.html",
-  pageProtocol: 1,
   actions: [
     { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
-    { name: "round", title: "Poll now", description: "Runs a round now. Posts nothing.", confirm: false },
+    ...(agentsScenario === "reviews" ? [] : [{ name: "round", title: "Poll now", description: "Runs a round now. Posts nothing.", confirm: false }]),
     { name: "pause", title: "Pause", description: "Skips scheduled rounds until resume; reviews in progress finish.", confirm: false },
     { name: "resume", title: "Resume", description: "Runs scheduled rounds again.", confirm: false },
     { name: "get-settings", title: "Read settings", description: "Prints the settings as JSON.", confirm: false },
@@ -107,7 +108,19 @@ const plugin: PluginSnapshot = {
   ],
   settingsError: null,
   process: agentsScenario === "missing" ? { kind: "notRunning", exit: null } : { kind: "started", pid: 4242 },
-  status: null,
+  // Whooper's manifest `status` key.
+  status: {
+    format: 2,
+    groups: [
+      { id: "ready", title: "Ready to approve", needsYou: true, order: 1, folded: false },
+      { id: "look", title: "Needs a look", needsYou: true, order: 2, folded: false },
+      { id: "failed", title: "Review failed", needsYou: true, order: 3, folded: false },
+      { id: "reviewing", title: "Reviewing", needsYou: false, order: 4, folded: false },
+      { id: "waiting", title: "Waiting", needsYou: false, order: 5, folded: false },
+      { id: "done", title: "Done", needsYou: false, order: 6, folded: true },
+    ],
+    itemActions: ["retry", "skip", "remove"],
+  },
 };
 
 const nextPoll = new Date();
@@ -154,10 +167,17 @@ async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionRes
       const blockedSince = new Date();
       blockedSince.setHours(14, 30, 0, 0);
       const waiting = reviews.filter((review) => review.outcome === "waiting").length;
+      const blocked = agentsScenario === "reviews" && waiting > 0;
+      const time = nextPoll.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      // The agent row's words and dot, as whooper-status's status_v2 words them.
+      const agent = blocked ? { words: `Can't review · ${dockerCause.summary}`, dot: "error" }
+        : paused ? { words: "Paused", dot: "idle" } : { words: `Running · next poll ${time}`, dot: "idle" };
       return result({ stdout: JSON.stringify({
         version: 1, loop: { running: running, pid: running ? 4242 : null }, paused, next_round: running && !paused ? nextPoll.toISOString() : null,
         round: { running: false, started_at: null, reviewing: null }, last_round: null,
-        ...(agentsScenario === "reviews" ? { reviews, rounds: fixtureRounds(), blocked: waiting > 0 ? { ...dockerCause, since: blockedSince.toISOString(), waiting } : null } : {}),
+        ...(agentsScenario === "reviews" ? { reviews, rounds: fixtureRounds(), blocked: blocked ? { ...dockerCause, since: blockedSince.toISOString(), waiting } : null } : {}),
+        format: 2, agent,
+        ...(agentsScenario === "reviews" ? fixtureStatusV2Parts() : { blockers: [], items: [], truncated: false }),
       }) });
     }
     case "round":

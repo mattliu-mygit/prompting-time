@@ -914,7 +914,6 @@ impl From<CorePluginSnapshot> for PluginSnapshot {
         let manifest = snapshot.manifest;
         Self {
             page_url: crate::plugin_pages::page_url(&manifest.name, manifest.page.file_name()),
-            page_protocol: manifest.page.protocol,
             name: manifest.name,
             title: manifest.title,
             version: manifest.version,

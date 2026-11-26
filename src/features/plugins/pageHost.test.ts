@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PluginActionRequest, PluginActionResult } from "../../bridge/types";
 import { actionResult, fixtureV2Plugin, fixtureV2Status } from "../../test/plugins";
 import { createPageHost } from "./pageHost";
-import { MAX_CALL_ARGS, MAX_CALL_ARGS_LENGTH, readPageMessageV2 } from "./protocol";
+import { MAX_CALL_ARGS, MAX_CALL_ARGS_LENGTH, readPageMessage } from "./protocol";
 
 const call = (id: number, action: string, args: string[] = []) => ({ version: 2, type: "call", id, action, args });
 
@@ -37,9 +37,9 @@ function setup(confirm: (action: string, args: readonly string[]) => Promise<Plu
 
 describe("page protocol 2 messages", () => {
   it("reads ready and call", () => {
-    expect(readPageMessageV2({ version: 2, type: "ready" })).toEqual({ version: 2, type: "ready" });
-    expect(readPageMessageV2(call(1, "rerun", ["--item", "run-1"]))).toEqual(call(1, "rerun", ["--item", "run-1"]));
-    expect(readPageMessageV2(call(2, "status"))).toEqual(call(2, "status"));
+    expect(readPageMessage({ version: 2, type: "ready" })).toEqual({ version: 2, type: "ready" });
+    expect(readPageMessage(call(1, "rerun", ["--item", "run-1"]))).toEqual(call(1, "rerun", ["--item", "run-1"]));
+    expect(readPageMessage(call(2, "status"))).toEqual(call(2, "status"));
   });
 
   it("refuses a message that does not fit, including one with too many or too long arguments", () => {
@@ -67,10 +67,10 @@ describe("page protocol 2 messages", () => {
       call(1, "rerun", Array.from({ length: MAX_CALL_ARGS + 1 }, () => "x")),
       call(1, "rerun", ["x".repeat(MAX_CALL_ARGS_LENGTH), "y"]),
     ]) {
-      expect(readPageMessageV2(message), JSON.stringify(message)?.slice(0, 80)).toBeNull();
+      expect(readPageMessage(message), JSON.stringify(message)?.slice(0, 80)).toBeNull();
     }
-    expect(readPageMessageV2(call(1, "rerun", Array.from({ length: MAX_CALL_ARGS }, () => "x")))).not.toBeNull();
-    expect(readPageMessageV2(call(1, "rerun", ["x".repeat(MAX_CALL_ARGS_LENGTH)]))).not.toBeNull();
+    expect(readPageMessage(call(1, "rerun", Array.from({ length: MAX_CALL_ARGS }, () => "x")))).not.toBeNull();
+    expect(readPageMessage(call(1, "rerun", ["x".repeat(MAX_CALL_ARGS_LENGTH)]))).not.toBeNull();
   });
 });
 

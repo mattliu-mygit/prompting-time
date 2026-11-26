@@ -17,6 +17,8 @@ export type StatusV2 = {
   items: StatusV2Item[];
   /** Whether the plugin left items out to stay within 50. */
   truncated: boolean;
+  /** Whether the plugin says it is paused, which offers its resume action in place of pause. */
+  paused: boolean;
 };
 
 export type StatusV2Blocker = {
@@ -102,7 +104,7 @@ export function readStatusV2(plugin: PluginSnapshot, read: PluginStatusRead | un
       actions: [...new Set(actions.filter((name): name is string => typeof name === "string" && allowed.has(name)))],
     });
   }
-  return { format: 2, agent, blockers, items, truncated: value.truncated === true };
+  return { format: 2, agent, blockers, items, truncated: value.truncated === true, paused: value.paused === true };
 }
 
 /** A blocker and the plugin that reports it. */

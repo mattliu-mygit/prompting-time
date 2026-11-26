@@ -245,7 +245,7 @@ body {
   margin: 0;
 }
 
-/* Background agents, pinned on top: one compact box per agent, with a red edge while a cause blocks every review. */
+/* Background agents, pinned on top: one compact box per agent. */
 .agents-pinned {
   display: grid;
   gap: var(--s-space-4);
@@ -325,9 +325,7 @@ body {
 }
 
 .agent-pin-name:hover span,
-.agent-pin-name[aria-current="true"] span,
-.agent-pin-blocked:hover span,
-.agent-pin-blocked[aria-current="true"] span {
+.agent-pin-name[aria-current="true"] span {
   text-decoration: underline;
   text-underline-offset: 0.2em;
 }
@@ -360,11 +358,6 @@ body {
 .agent-pin-status .pt-status-dot {
   flex: none;
   margin-block-start: 0.35em;
-}
-
-.agent-pin-blocked {
-  color: var(--s-error);
-  cursor: pointer;
 }
 
 /* Each section folds to its heading, a toggle with the section's name and count. */
@@ -422,17 +415,17 @@ body {
   font-weight: var(--s-weight-medium);
 }
 
-/* A review's title gets two lines before it is cut, and its gray line wraps once. */
-.work-review.pt-list-row {
+/* A plugin item's title gets two lines before it is cut, and its gray line wraps once. */
+.work-entry.pt-list-row {
   align-items: start;
 }
 
-.work-review .pt-list-row-icon {
+.work-entry .pt-list-row-icon {
   margin-block-start: 0.125rem;
 }
 
-.work-review .pt-list-row-title,
-.work-review .pt-list-row-meta-text {
+.work-entry .pt-list-row-title,
+.work-entry .pt-list-row-meta-text {
   display: -webkit-box;
   line-height: 1.35;
   white-space: normal;
@@ -440,28 +433,16 @@ body {
   -webkit-line-clamp: 2;
 }
 
-.work-review .pt-list-row-meta {
+.work-entry .pt-list-row-meta {
   align-items: flex-start;
 }
 
-/* A removed review, which only search finds, is muted and tagged. */
-.work-review[data-removed] .pt-list-row-title {
-  color: var(--s-text-muted);
-}
-
-.work-review[data-removed] .pt-list-row-count {
-  padding: 0 var(--s-space-4);
-  border: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
-  color: var(--s-text-muted);
-  line-height: 1.4;
-}
-
-.work-review .pt-list-row-meta .pt-status-dot {
+.work-entry .pt-list-row-meta .pt-status-dot {
   flex: none;
   margin-block-start: 0.35em;
 }
 
-/* A plugin's page fills the workspace; a notice above it says why it cannot show what you opened. */
+/* A plugin's page fills the workspace. */
 .plugin-page {
   display: flex;
   flex: 1;
@@ -475,14 +456,6 @@ body {
   min-block-size: 0;
   border: 0;
   background: var(--s-background);
-}
-
-.plugin-page-notice {
-  margin: 0;
-  padding: var(--s-space-8) var(--s-space-16);
-  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
-  color: var(--s-text-muted);
-  font-size: var(--s-size-sm);
 }
 
 /* The conversation */
@@ -1189,18 +1162,6 @@ body {
   padding: var(--s-space-24) var(--s-space-16);
 }
 
-.plugin-heading {
-  display: grid;
-  gap: var(--s-space-4);
-}
-
-.plugin-heading h2 {
-  margin: 0;
-  font-size: var(--s-size-xl);
-  font-weight: var(--s-heading-weight);
-}
-
-.plugin-heading p,
 .plugin-section p {
   margin: 0;
 }
@@ -1359,58 +1320,7 @@ body {
   color: var(--s-warning);
 }
 
-/* A failed review, which Prompting Time shows itself: why it failed, Retry and Ask why, and the answers. */
-.failed-review {
-  gap: var(--s-space-12);
-  padding: var(--s-space-12) var(--s-space-16);
-  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
-  background: var(--s-surface);
-}
-
-.failed-review h3 {
-  display: flex;
-  align-items: center;
-  gap: var(--s-space-8);
-  margin: 0;
-  font-size: var(--s-size-base);
-  font-weight: var(--s-weight-semibold);
-}
-
-.failed-review-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-space-8);
-}
-
-.failed-review-ask {
-  display: grid;
-  gap: var(--s-space-8);
-}
-
-.review-answers {
-  display: grid;
-  gap: var(--s-space-16);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.review-answers > li {
-  display: grid;
-  gap: var(--s-space-8);
-}
-
-.review-answers > li + li {
-  padding-block-start: var(--s-space-16);
-  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
-}
-
-.review-answer-question {
-  color: var(--s-text-muted);
-}
-
-/* A background agent's screen: its header and health, then tabs whose panel fills the rest. */
+/* A background agent's screen: its header, then tabs whose panel fills the rest. */
 .agent-screen {
   display: flex;
   flex: 1;
@@ -1473,81 +1383,6 @@ body {
   gap: var(--s-space-8);
 }
 
-.agent-health {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
-}
-
-.agent-health-cell {
-  display: grid;
-  align-content: start;
-  gap: var(--s-space-4);
-  padding: var(--s-space-12) var(--s-space-16);
-  font-size: var(--s-size-sm);
-}
-
-.agent-health-cell + .agent-health-cell {
-  border-inline-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
-}
-
-.agent-health-cell small {
-  color: var(--s-text-muted);
-  font-size: var(--s-size-xs);
-  letter-spacing: var(--s-tracking-wider);
-  text-transform: uppercase;
-}
-
-.agent-health-cell span {
-  color: var(--s-text-muted);
-  font-size: var(--s-size-xs);
-}
-
-.agent-health-cell span[data-bad] {
-  color: var(--s-error);
-}
-
-.agent-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--s-space-4);
-  block-size: var(--s-space-32);
-}
-
-.agent-bar {
-  display: flex;
-  flex: 1;
-  flex-direction: column-reverse;
-  block-size: 100%;
-  background: var(--s-surface);
-}
-
-/* One gray ramp for the rounds that went as planned, and red, named in the key, for failures. */
-.agent-bar-done {
-  background: var(--s-text-subtle);
-}
-
-.agent-bar-failed {
-  background: var(--s-error);
-}
-
-.agent-bar-skipped {
-  background: var(--s-border-strong);
-}
-
-.agent-bars-key {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-space-4);
-}
-
-.agent-bars-key::before {
-  content: "";
-  inline-size: calc(var(--s-space-12) / 2);
-  block-size: calc(var(--s-space-12) / 2);
-  background: var(--s-error);
-}
-
 .agent-tabs {
   display: flex;
   flex: 1;
@@ -1571,58 +1406,8 @@ body {
   overflow-y: auto;
 }
 
-.agent-filters {
-  display: flex;
-  gap: var(--s-space-4);
-}
-
-.agent-filters .pt-button[aria-pressed="true"] {
-  border-color: var(--s-border-strong);
-  background: var(--s-secondary-hover);
-  color: var(--s-text);
-}
-
-.agent-table {
-  inline-size: 100%;
-  border-collapse: collapse;
-  font-size: var(--s-size-sm);
-}
-
-.agent-table th {
-  padding: var(--s-space-4) var(--s-space-8);
-  color: var(--s-text-muted);
-  font-size: var(--s-size-xs);
-  font-weight: var(--s-weight-medium);
-  text-align: start;
-}
-
-.agent-table td {
-  padding: var(--s-space-4) var(--s-space-8);
-  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
-}
-
 .agent-muted {
   color: var(--s-text-muted);
-}
-
-.agent-result {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-space-8);
-}
-
-.agent-link {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--s-text);
-  font: inherit;
-  text-align: start;
-  cursor: pointer;
-}
-
-.agent-link:hover {
-  text-decoration: underline;
 }
 
 .agent-log {
@@ -1648,78 +1433,7 @@ body {
   padding-inline: 0;
 }
 
-/* A review: its header bar and banners over the plugin's page or Prompting Time's own screen. */
-.review-screen {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-block-size: 0;
-}
-
-.review-header {
-  display: grid;
-  gap: var(--s-space-8);
-  padding: var(--s-space-8) var(--s-space-16);
-  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
-}
-
-.review-header-bar {
-  display: flex;
-  align-items: center;
-  gap: var(--s-space-8);
-  min-inline-size: 0;
-}
-
-.review-version {
-  font-size: var(--s-size-sm);
-}
-
-.review-header-spacer {
-  flex: 1;
-}
-
-.review-banner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-space-8);
-  padding: var(--s-space-8) var(--s-space-12);
-  border: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
-  background: var(--s-surface);
-  font-size: var(--s-size-sm);
-}
-
-.review-body {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-block-size: 0;
-}
-
-.run-now {
-  display: grid;
-  gap: var(--s-space-8);
-}
-
-.run-now p {
-  margin: 0;
-}
-
-.cause-title {
-  display: flex;
-  align-items: center;
-  gap: var(--s-space-8);
-}
-
-.cause-title svg {
-  flex: none;
-  inline-size: var(--s-space-20);
-  block-size: var(--s-space-20);
-  color: var(--s-error);
-}
-
-.cause-refusals,
+/* The items in progress that Stop names. */
 .stop-reviews {
   margin: var(--s-space-4) 0 0;
   padding-inline-start: var(--s-space-16);
@@ -1741,40 +1455,8 @@ body {
   }
 }
 
-/* Remove on a review's row shows while the pointer is on the row or the row has focus. */
-.work-remove,
-.row-remove {
-  display: inline-grid;
-  place-items: center;
-  inline-size: var(--s-space-20);
-  block-size: var(--s-space-20);
-  padding: 0;
-  border: 0;
-  border-radius: var(--s-radius-sm);
-  background: transparent;
-  color: var(--s-text-muted);
-  cursor: pointer;
-}
-
-.work-remove:hover,
-.row-remove:hover {
-  background: var(--s-secondary-hover);
-  color: var(--s-text);
-}
-
-.work-remove svg,
-.row-remove svg {
-  inline-size: 0.875rem;
-  block-size: 0.875rem;
-}
-
-.work-review:not(:hover, :focus-within) .work-remove,
-.cause-row:not(:hover, :focus-within) .row-remove {
-  opacity: 0;
-}
-
 /*
- * The ⋯ menu of a plugin item's row (status format 2), the size of Remove. It shows on the row you
+ * The ⋯ menu of a plugin item's row (status format 2), 20 pixels square. It shows on the row you
  * point at, focus, or open, and while its menu is open; it opens only on a click.
  */
 .work-entry-menu {
@@ -1799,17 +1481,7 @@ body {
   opacity: 0;
 }
 
-.cause-row {
-  position: relative;
-}
-
-.cause-row .row-remove {
-  position: absolute;
-  inset-block-start: var(--s-space-4);
-  inset-inline-end: var(--s-space-4);
-}
-
-/* What a Submit, Skip, or Remove did, with Undo, at the bottom of the window. */
+/* What a row action did, at the bottom of the window. */
 .app-notice {
   position: fixed;
   inset-block-end: var(--s-space-16);
@@ -1935,23 +1607,4 @@ body {
 .new-chat-advanced svg {
   inline-size: var(--s-space-16);
   block-size: var(--s-space-16);
-}
-
-/* The Runs tab's search and filters, and each review run's title line. */
-.agent-runs-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--s-space-12);
-}
-
-.agent-runs-bar .pt-field {
-  flex: 1;
-  min-inline-size: 12rem;
-}
-
-.agent-run-pr {
-  display: block;
-  color: var(--s-text-muted);
-  font-size: var(--s-size-xs);
 }

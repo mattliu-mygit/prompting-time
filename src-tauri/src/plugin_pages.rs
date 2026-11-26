@@ -125,7 +125,7 @@ mod tests {
             "description": "An invented plugin with a page.",
             "start": ["bin/run"],
             "prerequisites": [],
-            "page": { "entry": "page/dist/index.html", "protocol": 1 },
+            "page": { "entry": "page/dist/index.html", "protocol": 2 },
             "settings": "schemas/settings.json",
             "actions": []
         });

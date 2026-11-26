@@ -341,11 +341,6 @@ export type MenuBarAgent = {
 	 *  "Can't review · Docker isn't running".
 	 */
 	status: string,
-	/**
-	 *  The ID of the cause that blocks every review, which the status words name; choosing them
-	 *  opens its screen.
-	 */
-	cause: string | null,
 	/**  Whether the agent fails, is blocked, or can't start, which a dot on the icon shows. */
 	alert: boolean,
 	/**  The row's buttons in order: Pause, Resume, or Start while it is stopped, then Poll now. */
@@ -362,9 +357,7 @@ export type MenuBarCommand =
 { kind: "agent"; plugin: string; action: MenuBarAction } | 
 /**  The agent's screen. */
 { kind: "openAgent"; plugin: string } | 
-/**  The screen of the cause that blocks every review. */
-{ kind: "openCause"; plugin: string; cause: string } | 
-/**  The first review under Needs you. */
+/**  The first item under Needs you. */
 { kind: "openNeedsYou" };
 
 export type MenuBarControl = {
@@ -470,11 +463,6 @@ export type PluginSnapshot = {
 	 *  "pt-plugin://whooper/index.html".
 	 */
 	pageUrl: string,
-	/**
-	 *  The page protocol the page speaks: 1, Whooper's review messages, or 2, in which the page
-	 *  runs the manifest's actions itself and opens the route of an item the user clicks.
-	 */
-	pageProtocol: number,
 	actions: PluginAction[],
 	prerequisites: PluginPrerequisite[],
 	/**
@@ -716,7 +704,7 @@ export type ToolOperationSummary = {
 
 /**
  *  What the menu bar extra shows, as the window's sidebar shows it: each background agent's status
- *  in the same words, with its row's buttons, and how many reviews need you.
+ *  in the same words, with its row's buttons, and how many items need you.
  */
 export type UpdateMenuBarRequest = {
 	/**
@@ -725,8 +713,8 @@ export type UpdateMenuBarRequest = {
 	 */
 	visible: boolean,
 	agents: MenuBarAgent[],
-	/**  The reviews under Needs you. */
-	reviewsNeedingYou: number,
+	/**  The items of status format 2 under Needs you. */
+	needsYou: number,
 };
 
 export type UserInputOption = {

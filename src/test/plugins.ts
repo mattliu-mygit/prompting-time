@@ -70,6 +70,20 @@ export const fixtureSettings = {
   review: { skills: ["fixture-review", "fixture-style"] },
 };
 
+/** Whooper's manifest `status` key: its six groups, three of them under Needs you, and its row actions. */
+export const whooperStatusConfig: NonNullable<PluginSnapshot["status"]> = {
+  format: 2,
+  groups: [
+    { id: "ready", title: "Ready to approve", needsYou: true, order: 1, folded: false },
+    { id: "look", title: "Needs a look", needsYou: true, order: 2, folded: false },
+    { id: "failed", title: "Review failed", needsYou: true, order: 3, folded: false },
+    { id: "reviewing", title: "Reviewing", needsYou: false, order: 4, folded: false },
+    { id: "waiting", title: "Waiting", needsYou: false, order: 5, folded: false },
+    { id: "done", title: "Done", needsYou: false, order: 6, folded: true },
+  ],
+  itemActions: ["retry", "skip", "remove"],
+};
+
 /** An invented copy of Whooper as list_plugins reports it, started by Prompting Time from a release archive. */
 export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSnapshot {
   return {
@@ -82,7 +96,6 @@ export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSn
     stateFolder: "/synthetic/state/whooper",
     settingsSchema: fixtureSchema,
     pageUrl: "pt-plugin://whooper/index.html",
-    pageProtocol: 1,
     actions: [
       { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
       { name: "get-settings", title: "Read settings", description: "Prints the settings as JSON.", confirm: false },
@@ -95,7 +108,7 @@ export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSn
     ],
     settingsError: null,
     process: { kind: "started", pid: 4242 },
-    status: null,
+    status: whooperStatusConfig,
     ...overrides,
   };
 }
@@ -113,7 +126,6 @@ export function fixtureV2Plugin(overrides: Partial<PluginSnapshot> = {}): Plugin
     folder: "/synthetic/plugins/fixture-runs",
     stateFolder: "/synthetic/state/fixture-runs",
     pageUrl: "pt-plugin://fixture-runs/index.html",
-    pageProtocol: 2,
     actions: [
       { name: "status", title: "Status", description: "Prints status format 2.", confirm: false },
       { name: "rerun", title: "Rerun", description: "Runs the evaluation again.", confirm: false },
@@ -156,88 +168,32 @@ export function fixtureV2Status(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** `whooper-status --json` output, waiting for its next round at `nextRound`. */
-export function fixtureStatus(nextRound: string, overrides: Record<string, unknown> = {}) {
-  return {
-    version: 1,
-    loop: { running: true, pid: 4242 },
-    paused: false,
-    next_round: nextRound,
-    round: { running: false, started_at: null, reviewing: null },
-    last_round: null,
-    ...overrides,
-  };
+/**
+ * Whooper's status in format 2 with the agent row's `words`, no blockers, and no items, plus the
+ * overrides, such as `paused` or `items`.
+ */
+export function fixtureStatus(words = "Running · next poll 3:45 PM", overrides: Record<string, unknown> = {}) {
+  return { format: 2, agent: { words, dot: "idle" }, blockers: [], items: [], truncated: false, ...overrides };
+}
+
+/**
+ * Invented reviews as Whooper's status format 2 lists them, one in each group but Waiting: #101
+ * ready to approve, #77 needing a look, #55 failed, #102 reviewing, and #88 done.
+ */
+export function fixtureWhooperItems() {
+  const item = (pr: number, repo: string, group: string, title: string, detail: string, dot: string, updated: string, actions: string[]) => ({
+    id: `run-${pr}`, group, title, detail: `${repo.split("/")[1]}#${pr} · ${detail}`, dot, project: null, updated_at: updated, route: `/reviews/run-${pr}`, actions,
+  });
+  return [
+    item(101, "acme/widgets", "ready", "separate cache configuration", "@sam-fixture · 2 findings", "success", "2026-11-26T15:20:00Z", ["retry", "skip", "remove"]),
+    item(77, "acme/gadgets", "look", "add the tags package", "@lin-fixture · 1 finding", "attention", "2026-11-26T14:30:00Z", ["retry", "skip", "remove"]),
+    item(55, "acme/gadgets", "failed", "move the projection", "The review agent left no usable findings", "error", "2026-11-24T09:01:00Z", ["retry", "skip", "remove"]),
+    item(102, "acme/widgets", "reviewing", "stream uploads in chunks", "reviewing since 2:00 PM", "running", "2026-11-26T14:00:00Z", []),
+    item(88, "acme/gadgets", "done", "rename the queue settings", "approved Nov 25", "idle", "2026-11-25T11:00:00Z", ["retry", "remove"]),
+  ];
 }
 
 /** A plugin action's result, exit 0 unless the overrides say otherwise. */
 export function actionResult(overrides: Partial<PluginActionResult> = {}): PluginActionResult {
   return { exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides };
-}
-
-/**
- * The actions Whooper's page and Prompting Time's screen for a failed review run: status, show-review,
- * draft, ask, retry, round, and submit, which asks first.
- */
-export const pageActions = [
-  { name: "status", title: "Status", description: "Prints the status as JSON.", confirm: false },
-  { name: "show-review", title: "Show a review", description: "Prints one review as JSON.", confirm: false },
-  { name: "draft", title: "Change a draft", description: "Changes a review's drafts.", confirm: false },
-  { name: "ask", title: "Ask about this", description: "Answers a question about a review from its record, and writes nothing else.", confirm: false },
-  { name: "retry", title: "Retry a review", description: "Queues the pull request of a failed review for the next round.", confirm: false },
-  { name: "round", title: "Poll now", description: "Runs a round now. Posts nothing.", confirm: false },
-  { name: "submit", title: "Submit review", description: "Posts the chosen comments to GitHub as one review.", confirm: true },
-];
-
-/**
- * Invented reviews as `whooper-status --json` lists them, newest first. Only #101's newest run is
- * safe to approve: it says approve once CI passes, read the whole change, and found only nits.
- */
-export function fixtureReviews() {
-  return [
-    { run_id: "20261126T150000Z-101", repo: "acme/widgets", pr: 101, title: "separate cache configuration", url: "https://example.invalid/acme/widgets/pull/101",
-      started_at: "2026-11-26T15:00:00Z", ended_at: "2026-11-26T15:20:00Z", outcome: "reviewed", verdict: "approve_once_ci_passes",
-      skipped: false, findings: 2, submitted: null, needs_you: true, author: "sam-fixture", safe_to_approve: true },
-    { run_id: "20261126T140000Z-102", repo: "acme/widgets", pr: 102, title: null, url: null,
-      started_at: "2026-11-26T14:00:00Z", ended_at: null, outcome: "running", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: false, safe_to_approve: false },
-    { run_id: "20261125T100000Z-77", repo: "acme/gadgets", pr: 77, title: "add the tags package", url: null,
-      started_at: "2026-11-25T10:00:00Z", ended_at: "2026-11-25T10:30:00Z", outcome: "reviewed", verdict: "look_first",
-      skipped: false, findings: 1, submitted: { event: "COMMENT", at: "2026-11-25T11:00:00Z" }, needs_you: false, safe_to_approve: false },
-    // An earlier run of #101 failed without recording why; the newer run means it no longer needs you.
-    { run_id: "20261125T080000Z-101", repo: "acme/widgets", pr: 101, title: "separate cache configuration", url: "https://example.invalid/acme/widgets/pull/101",
-      started_at: "2026-11-25T08:00:00Z", ended_at: "2026-11-25T08:02:00Z", outcome: "failed", verdict: null,
-      skipped: false, findings: 0, submitted: null, needs_you: false, safe_to_approve: false },
-    { run_id: "20261124T090000Z-55", repo: "acme/gadgets", pr: 55, title: "move the projection", url: null,
-      started_at: "2026-11-24T09:00:00Z", ended_at: "2026-11-24T09:01:00Z", outcome: "failed", verdict: null,
-      skipped: false, findings: 0, submitted: null, needs_you: true, safe_to_approve: false },
-  ];
-}
-
-/** Why each invented failed run failed, as its failure.txt says, or null for a run that recorded no reason. */
-const fixtureFailures: Record<string, string | null> = {
-  "20261124T090000Z-55": "the review run exited 1 without findings; see runs/20261124T090000Z-55/stderr.log",
-  "20261125T080000Z-101": null,
-};
-
-/**
- * What the show-review action prints for one invented run, with the title the status lists for it.
- * A failed run has no findings, drafts, or diff, and says why it failed if it recorded a reason.
- */
-export function fixtureShown(runId: string, overrides: Record<string, unknown> = {}) {
-  const review = fixtureReviews().find((entry) => entry.run_id === runId);
-  const failed = review?.outcome === "failed";
-  return {
-    version: 1,
-    run_id: runId,
-    run: review ? { repo: review.repo, pr: review.pr } : null,
-    title: review?.title ?? null,
-    author: "fixture-author",
-    outcome: failed ? "failed" : "reviewed",
-    findings: failed ? null : { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Invented reason." }, findings: [{ id: "1", path: "src/a.rs", line: 3, side: "RIGHT", title: "A nit", draft: "**nit:** invented", kind: "nit" }] },
-    drafts: failed ? null : { event: "APPROVE", message: "", findings: { "1": { included: true } } },
-    diff: failed ? null : "diff --git a/src/a.rs b/src/a.rs\n",
-    failure: fixtureFailures[runId] ?? null,
-    asks: [],
-    submitted: null,
-    ...overrides,
-  };
 }

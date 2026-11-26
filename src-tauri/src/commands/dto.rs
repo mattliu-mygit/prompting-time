@@ -919,9 +919,6 @@ pub struct PluginSnapshot {
     /// Where the window loads the plugin's page, in a frame sandboxed to scripts only, such as
     /// "pt-plugin://whooper/index.html".
     pub page_url: String,
-    /// The page protocol the page speaks: 1, Whooper's review messages, or 2, in which the page
-    /// runs the manifest's actions itself and opens the route of an item the user clicks.
-    pub page_protocol: u32,
     pub actions: Vec<PluginAction>,
     pub prerequisites: Vec<PluginPrerequisite>,
     /// Why the settings that decide which programs are needed could not be read; the plugin
@@ -1055,7 +1052,7 @@ pub struct SavePluginSettingsRequest {
 }
 
 /// What the menu bar extra shows, as the window's sidebar shows it: each background agent's status
-/// in the same words, with its row's buttons, and how many reviews need you.
+/// in the same words, with its row's buttons, and how many items need you.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMenuBarRequest {
@@ -1063,8 +1060,8 @@ pub struct UpdateMenuBarRequest {
     /// installed.
     pub visible: bool,
     pub agents: Vec<MenuBarAgent>,
-    /// The reviews under Needs you.
-    pub reviews_needing_you: u32,
+    /// The items of status format 2 under Needs you.
+    pub needs_you: u32,
 }
 
 /// One background agent in the menu bar extra.
@@ -1077,9 +1074,6 @@ pub struct MenuBarAgent {
     /// The status words of the agent's sidebar row, such as "Running · next poll 3:45 PM" or
     /// "Can't review · Docker isn't running".
     pub status: String,
-    /// The ID of the cause that blocks every review, which the status words name; choosing them
-    /// opens its screen.
-    pub cause: Option<String>,
     /// Whether the agent fails, is blocked, or can't start, which a dot on the icon shows.
     pub alert: bool,
     /// The row's buttons in order: Pause, Resume, or Start while it is stopped, then Poll now.
@@ -1121,8 +1115,6 @@ pub enum MenuBarCommand {
     },
     /// The agent's screen.
     OpenAgent { plugin: String },
-    /// The screen of the cause that blocks every review.
-    OpenCause { plugin: String, cause: String },
-    /// The first review under Needs you.
+    /// The first item under Needs you.
     OpenNeedsYou,
 }

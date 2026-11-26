@@ -4,10 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChildPageSnapshot, SelectedPath } from "../../app/store";
 import type { ConversationSummary } from "../../bridge/types";
 import { axeViolations, render, settle } from "../../test/render";
-import { fixtureReviews, fixtureV2Plugin, fixtureV2Status } from "../../test/plugins";
-import { blockingCauses, newestRuns, readReviews, type PluginReview, type ReviewEntry } from "../agents/reviews";
+import { fixturePlugin, fixtureStatus, fixtureV2Plugin, fixtureV2Status, fixtureWhooperItems } from "../../test/plugins";
 import { NO_STATUS_V2_WORK, statusV2Work, type StatusV2Work } from "../agents/statusV2";
-import { AllWork, groupWork, type PluginCause } from "./AllWork";
+import { AllWork, groupWork } from "./AllWork";
 
 function node(id: string, title: string, parentId: string | null = null, overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return { id, title, parentId, hasChildren: false, summary: null,
@@ -30,13 +29,9 @@ type Options = {
   expandedById?: Record<string, boolean>;
   selectedId?: string | null;
   selectedPath?: SelectedPath | null;
-  reviews?: PluginReview[];
-  causes?: PluginCause[];
-  selectedReview?: string | null;
+  selectedEntry?: string | null;
   /** The sections a past launch left open, saved before rendering; null leaves what is saved. By default the chat sections this file uses are open. */
   open?: Record<string, boolean> | null;
-  /** Whether the plugin has a remove action, which puts Remove on review rows. */
-  canRemove?: boolean;
   /** What plugins that print status format 2 add. */
   pluginWork?: StatusV2Work;
 };
@@ -55,21 +50,12 @@ function renderWork(options: Options = {}) {
   const onSelect = vi.fn((id: string) => setSelected(id));
   const onToggle = vi.fn((id: string) => setExpanded((current) => ({ ...current, [id]: !current[id] })));
   const onLoadChildPage = vi.fn();
-  const onOpenReview = vi.fn();
-  const onOpenCause = vi.fn();
-  const onRemoveReview = vi.fn();
   const onOpenEntry = vi.fn();
   const onEntryAction = vi.fn();
   const view = render(() => (
     <AllWork
-      reviews={options.reviews ?? []}
-      causes={options.causes ?? []}
-      selectedReview={options.selectedReview ?? null}
+      selectedEntry={options.selectedEntry ?? null}
       query={query()}
-      onOpenReview={onOpenReview}
-      onOpenCause={onOpenCause}
-      canRemove={() => options.canRemove ?? false}
-      onRemoveReview={onRemoveReview}
       pluginWork={options.pluginWork ?? NO_STATUS_V2_WORK}
       actionTitle={(_plugin, action) => `${action[0]!.toUpperCase()}${action.slice(1)}`}
       onOpenEntry={onOpenEntry}
@@ -90,7 +76,7 @@ function renderWork(options: Options = {}) {
     setQuery(text);
     flush();
   };
-  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, onRemoveReview, onOpenEntry, onEntryAction, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenEntry, onEntryAction, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -98,97 +84,63 @@ const press = (element: HTMLElement, key: string) => {
 };
 
 describe("AllWork", () => {
-  /** The fixture's reviews, today's being those of Nov 26, 2026, plus one to look at, one waiting on Docker, one skipped, and one removed. */
-  const docker = { id: "docker", summary: "Docker isn't running", scope: "all" as const };
   const today = new Date();
   const todayAt = (hours: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours).toISOString();
-  const entries = (): ReviewEntry[] => readReviews({ reviews: [
-    ...fixtureReviews().map((review) => ({ ...review, ...(review.started_at.startsWith("2026-11-26") ? { started_at: todayAt(9), ended_at: review.ended_at && todayAt(10) } : {}) })),
-    { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", safe_to_approve: false, findings: 1, author: null, started_at: todayAt(6), ended_at: todayAt(7) },
-    { ...fixtureReviews()[1]!, run_id: "waiting-60", pr: 60, repo: "acme/gadgets", title: "speed up the gadget index", outcome: "waiting", cause: docker, started_at: todayAt(8), ended_at: null },
-    { ...fixtureReviews()[2]!, run_id: "skipped-9", pr: 9, repo: "acme/sprockets", title: "drop the sprocket shim", submitted: null, skipped_by_user: true, started_at: todayAt(7), ended_at: todayAt(8) },
-    { ...fixtureReviews()[0]!, run_id: "removed-8", pr: 8, title: "keep focus in the date picker", removed_by_user: true, needs_you: false, started_at: todayAt(5), ended_at: todayAt(6) },
-  ] });
-  const pluginEntries = (): PluginReview[] => newestRuns(entries()).map((review) => ({ plugin: "whooper", review }));
-  const causes = (): PluginCause[] => blockingCauses(entries(), null).map((cause) => ({ plugin: "whooper", cause }));
+  const whooperWork = (items: unknown[] = fixtureWhooperItems(), overrides: Record<string, unknown> = {}) => statusV2Work({
+    loaded: true, error: null, items: [fixturePlugin()], statuses: { whooper: { value: fixtureStatus("Running", { items, ...overrides }), error: null } },
+  });
   const names = (tree: HTMLElement) => [...tree.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")].map((item) => item.getAttribute("aria-label"));
   const toggles = () => [...document.querySelectorAll<HTMLButtonElement>(".work-group-toggle")].map((button) => `${button.textContent} ${button.getAttribute("aria-expanded")}`);
   /** The headings of the open sections (".work-open") or of the folded ones stacked at the bottom (".work-folded"), in order. */
   const headings = (place: ".work-open" | ".work-folded") => [...document.querySelectorAll<HTMLButtonElement>(`${place} .work-group-toggle`)].map((button) => button.textContent);
   const waitingRoot = { ...root, id: "waiting", title: "Waiting conversation", projectRoot: null, rollupStatus: "needsAttention" as const };
 
-  it("folds every section but Needs you to its heading with a count, and splits Needs you by what each review needs", async () => {
-    const view = renderWork({ conversations: [waitingRoot, sibling], conversationsById: { waiting: waitingRoot, sibling }, reviews: pluginEntries(), causes: causes(), open: null });
+  it("puts the items of the groups marked needs_you under Needs you, each group as a part, and the other groups in sections of their own", async () => {
+    const view = renderWork({ conversations: [waitingRoot, sibling], conversationsById: { waiting: waitingRoot, sibling }, pluginWork: whooperWork(), open: null });
 
-    expect(toggles()).toEqual([
-      "Needs you 4 true", "Reviewing 1 false", "Waiting · Docker isn't running 1 false", "Chats · no folder 1 false", "Done 2 false",
-    ]);
+    // Reviewing starts open, as its group isn't folded; Done is folded, as the manifest says; chats start folded.
+    expect(toggles()).toEqual(["Needs you 4 true", "Reviewing 1 true", "Done 1 false", "Chats · no folder 1 false"]);
     expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-      .toEqual(["Ready to approve", "Needs a look", "Review failed", "Chats waiting on you"]);
-    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toEqual(["separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
-    expect(names(screen.getByRole("tree", { name: "Needs a look" }))).toEqual(["cap the upload retry delay, widgets#103 · 1 finding"]);
-    expect(names(screen.getByRole("tree", { name: "Review failed" }))).toEqual(["move the projection, gadgets#55 · review failed"]);
-    expect(names(screen.getByRole("tree", { name: "Chats waiting on you" }))).toEqual([expect.stringContaining("Waiting conversation")]);
+      .toEqual(["Ready to approve", "Needs a look", "Review failed", "Chats waiting on you", "Reviewing"]);
+    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toEqual([expect.stringMatching(/^separate cache configuration, widgets#101 · @sam-fixture · 2 findings · /)]);
+    expect(names(screen.getByRole("tree", { name: "Review failed" }))).toEqual([expect.stringMatching(/^move the projection, gadgets#55 · The review agent left no usable findings · /)]);
     const ready = screen.getByRole("treeitem", { name: /^separate cache configuration/ });
-    expect(ready).toHaveClass("work-review");
-    // Each part's heading says its rows' status, so the rows draw no dot for it.
-    expect(ready.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
-    expect(screen.getByRole("treeitem", { name: /^cap the upload retry delay/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
-    expect(screen.getByRole("treeitem", { name: /^move the projection/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(ready).toHaveClass("work-entry");
+    // An item keeps the dot its plugin gives it; "Chats waiting on you" says its rows' status, so they draw none.
+    expect(ready.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
+    expect(screen.getByRole("treeitem", { name: /^add the tags package/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
+    expect(screen.getByRole("treeitem", { name: /^move the projection/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
     expect(screen.getByRole("treeitem", { name: /^Waiting conversation/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
-    expect(screen.queryByRole("treeitem", { name: /keep focus in the date picker/ })).not.toBeInTheDocument();
 
     fireEvent.click(ready);
-    expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261126T150000Z-101");
+    expect(view.onOpenEntry).toHaveBeenCalledWith("whooper", "item:whooper:run-101", "/reviews/run-101");
     expect(view.onSelect).not.toHaveBeenCalled();
     expect(await axeViolations()).toEqual([]);
   });
 
-  it("lists a review under Ready to approve or Needs a look by whether the plugin judges it safe to approve", () => {
-    // Whooper says approve once CI passes, but a finding that is not a nit makes the run not safe to approve.
-    const notSafe: PluginReview = { plugin: "whooper", review: { ...entries()[0]!, run_id: "not-safe-104", pr: 104, title: "retry uploads on every error", safe_to_approve: false, ended_at: todayAt(11) } };
-    renderWork({ conversations: [], reviews: [...pluginEntries(), notSafe] });
-    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toEqual([expect.stringMatching(/^separate cache configuration,/)]);
-    expect(names(screen.getByRole("tree", { name: "Needs a look" }))).toEqual([expect.stringMatching(/^retry uploads on every error,/), expect.stringMatching(/^cap the upload retry delay,/)]);
-  });
-
-  it("opens a folded section, keeps which are open across launches, and opens a cause from its Waiting row", () => {
-    const view = renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: {} });
-    fireEvent.click(screen.getByRole("button", { name: "Waiting · Docker isn't running 1" }));
-    flush();
-    // Its red dot comes with the words for it.
-    const cause = screen.getByRole("treeitem", { name: "Docker isn't running, Blocks every review, 1 review waiting" });
-    expect(cause).toHaveTextContent("Blocks every review");
-    expect(cause.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-    fireEvent.click(cause);
-    expect(view.onOpenCause).toHaveBeenCalledWith("whooper", "docker");
+  it("opens a folded section and keeps which are open across launches", () => {
+    const view = renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: {} });
     fireEvent.click(screen.getByRole("button", { name: "Needs you 3" }));
-    fireEvent.click(screen.getByRole("button", { name: "Done 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Done 1" }));
     flush();
-    expect(names(screen.getByRole("tree", { name: "Done" }))).toEqual([
-      "drop the sprocket shim, sprockets#9 · skipped",
-      expect.stringMatching(/^add the tags package, gadgets#77 · commented /),
-    ]);
-    expect(JSON.parse(window.localStorage.getItem(SECTIONS)!)).toEqual({ "waiting:cause:whooper:docker": true, "needs-you": false, done: true });
+    expect(names(screen.getByRole("tree", { name: "Done" }))).toEqual([expect.stringMatching(/^rename the queue settings, gadgets#88 · approved Nov 25 · /)]);
+    expect(JSON.parse(window.localStorage.getItem(SECTIONS)!)).toEqual({ "needs-you": false, "group:whooper:done": true });
 
     view.unmount();
-    renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: null });
+    renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: null });
     // The open sections come back above the stack, and the folded ones in it, each in list order.
-    expect(toggles()).toEqual(["Waiting · Docker isn't running 1 true", "Done 2 true", "Needs you 3 false", "Reviewing 1 false", "Chats · no folder 1 false"]);
-    expect(headings(".work-open")).toEqual(["Waiting · Docker isn't running 1", "Done 2"]);
-    expect(headings(".work-folded")).toEqual(["Needs you 3", "Reviewing 1", "Chats · no folder 1"]);
-    expect(screen.getByRole("tree", { name: "Waiting · Docker isn't running" })).toBeVisible();
+    expect(headings(".work-open")).toEqual(["Reviewing 1", "Done 1"]);
+    expect(headings(".work-folded")).toEqual(["Needs you 3", "Chats · no folder 1"]);
   });
 
   it("stacks the folded sections' headings below the open ones, outside their scrolling rows, and lists every item of a long Needs you", async () => {
-    const many: PluginReview[] = Array.from({ length: 12 }, (_, index) => ({ plugin: "whooper", review: { ...entries()[0]!, run_id: `run-${index}`, pr: 200 + index, title: `ready ${index}`, ended_at: todayAt(20 - index) } }));
-    renderWork({ conversations: [sibling], reviews: [...many, ...pluginEntries()], causes: causes(), open: null });
+    const many = Array.from({ length: 12 }, (_, index) => ({ ...fixtureWhooperItems()[0]!, id: `run-${200 + index}`, title: `ready ${index}`, updated_at: todayAt(20 - index) }));
+    renderWork({ conversations: [sibling], pluginWork: whooperWork([...many, ...fixtureWhooperItems()]), open: { "group:whooper:reviewing": false } });
 
     expect(screen.getByRole("heading", { name: "Ready to approve · 13" })).toBeVisible();
     expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toHaveLength(13);
-    expect(screen.queryByRole("button", { name: /more$/ })).not.toBeInTheDocument();
     expect(headings(".work-open")).toEqual(["Needs you 15"]);
-    expect(headings(".work-folded")).toEqual(["Reviewing 1", "Waiting · Docker isn't running 1", "Chats · no folder 1", "Done 2"]);
+    expect(headings(".work-folded")).toEqual(["Reviewing 1", "Done 1", "Chats · no folder 1"]);
     // The rows scroll inside Needs you's body; the stack follows the open sections, outside it.
     const stack = document.querySelector(".work-folded")!;
     expect(screen.getByRole("tree", { name: "Ready to approve" }).closest(".work-section-body")).not.toBeNull();
@@ -198,11 +150,11 @@ describe("AllWork", () => {
   });
 
   it("splits the space above the stack between the open sections, each with its own rows, and moves across them with the arrow keys", () => {
-    renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: { reviewing: true, done: true }, selectedId: null });
-    expect(headings(".work-open")).toEqual(["Needs you 3", "Reviewing 1", "Done 2"]);
-    expect(headings(".work-folded")).toEqual(["Waiting · Docker isn't running 1", "Chats · no folder 1"]);
+    renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: { "group:whooper:done": true }, selectedId: null });
+    expect(headings(".work-open")).toEqual(["Needs you 3", "Reviewing 1", "Done 1"]);
+    expect(headings(".work-folded")).toEqual(["Chats · no folder 1"]);
     const bodies = [...document.querySelectorAll(".work-open > .work-section > .work-section-body")];
-    expect(bodies.map((body) => body.querySelectorAll("[role=treeitem]").length)).toEqual([3, 1, 2]);
+    expect(bodies.map((body) => body.querySelectorAll("[role=treeitem]").length)).toEqual([3, 1, 1]);
 
     const last = screen.getByRole("treeitem", { name: /^move the projection/ });
     last.focus();
@@ -212,59 +164,54 @@ describe("AllWork", () => {
   });
 
   it("opens a section from the stack and folds it back with its heading, which keeps the focus as it moves", async () => {
-    renderWork({ conversations: [sibling], reviews: pluginEntries(), causes: causes(), open: null });
-    const folded = screen.getByRole("button", { name: "Done 2" });
+    renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: null });
+    const folded = screen.getByRole("button", { name: "Done 1" });
     expect(folded).toHaveAttribute("aria-expanded", "false");
     // Enter or Space on the focused heading, which is a button, clicks it.
     folded.focus();
     fireEvent.click(folded);
     flush();
     await settle();
-    const opened = screen.getByRole("button", { name: "Done 2" });
+    const opened = screen.getByRole("button", { name: "Done 1" });
     expect(opened).toHaveAttribute("aria-expanded", "true");
     expect(opened.closest(".work-open")).not.toBeNull();
     expect(opened).toHaveFocus();
-    expect(names(screen.getByRole("tree", { name: "Done" }))).toHaveLength(2);
-    expect(headings(".work-open")).toEqual(["Needs you 3", "Done 2"]);
+    expect(headings(".work-open")).toEqual(["Needs you 3", "Reviewing 1", "Done 1"]);
 
     fireEvent.click(opened);
     flush();
     await settle();
-    const again = screen.getByRole("button", { name: "Done 2" });
+    const again = screen.getByRole("button", { name: "Done 1" });
     expect(again).toHaveAttribute("aria-expanded", "false");
     expect(again.closest(".work-folded")).not.toBeNull();
     expect(again).toHaveFocus();
     expect(screen.queryByRole("tree", { name: "Done" })).not.toBeInTheDocument();
-    expect(headings(".work-folded")).toEqual(["Reviewing 1", "Waiting · Docker isn't running 1", "Chats · no folder 1", "Done 2"]);
   });
 
-  it("finds a pull request by number, title words, author, or repo in every state, tags removed ones, and finds chats by title or folder", async () => {
-    const view = renderWork({ conversations: [root, sibling], reviews: pluginEntries(), causes: causes(), open: {} });
+  it("finds blockers by title, items in every group by title, detail, or project folder, and chats by title or folder", async () => {
+    const blocker = { id: "docker", title: "Docker isn't running", dot: "error", route: "/causes/docker", action: "round" };
+    const inProject = { ...fixtureWhooperItems()[3]!, id: "run-60", title: "speed up the gadget index", detail: "gadgets#60 · waiting", group: "waiting", project: "/work/gadgets" };
+    const view = renderWork({ conversations: [root, sibling], pluginWork: whooperWork([...fixtureWhooperItems(), inProject], { blockers: [blocker] }), open: {} });
     const results = () => screen.getByRole("region", { name: "Search results" });
-    const found = () => screen.getAllByRole("tree").map((tree) => `${document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent}: ${names(tree).join(" | ")}`);
+    const found = () => screen.getAllByRole("tree").map((tree) => `${document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent}: ${names(tree).map((name) => name?.split(" · ").slice(0, 2).join(" · ")).join(" | ")}`);
 
     view.search("#101");
-    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
-    // Each group's label says its reviews' status, as the sections' headings do, so no dot repeats it.
-    expect(within(results()).getByRole("treeitem").querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture"]);
+    // Rows in results keep their own dots.
+    expect(within(results()).getByRole("treeitem").querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
     expect(within(results()).getByRole("status")).toHaveTextContent("1 result · Esc clears");
-    view.search("101");
-    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
-    view.search("sprocket shim");
-    expect(found()).toEqual(["Done: drop the sprocket shim, sprockets#9 · skipped"]);
+    view.search("queue settings");
+    expect(found()).toEqual(["Done: rename the queue settings, gadgets#88 · approved Nov 25"]);
     view.search("@sam-fixture");
+    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture"]);
+    view.search("docker");
+    expect(found()).toEqual(["Blocks every job: Docker isn't running, Whooper · blocks every job"]);
+    view.search("gadgets");
     expect(found()).toEqual([
-      "Ready to approve: separate cache configuration, widgets#101 · @sam-fixture · 2 findings",
-      "Removed: keep focus in the date picker, removed, widgets#8 · @sam-fixture · 2 findings",
-    ]);
-    const removed = screen.getByRole("treeitem", { name: /^keep focus in the date picker, removed/ });
-    expect(removed).toHaveTextContent("removed");
-    expect(removed).toHaveAttribute("data-removed");
-    view.search("acme/gadgets");
-    expect(found()).toEqual([
-      "Review failed: move the projection, gadgets#55 · review failed",
-      "Waiting: speed up the gadget index, gadgets#60 · waiting · Docker isn't running",
-      expect.stringMatching(/^Done: add the tags package, gadgets#77 · commented /),
+      "Needs a look: add the tags package, gadgets#77 · @lin-fixture",
+      "Review failed: move the projection, gadgets#55 · The review agent left no usable findings",
+      expect.stringMatching(/^Waiting: speed up the gadget index, gadgets#60 · waiting/),
+      "Done: rename the queue settings, gadgets#88 · approved Nov 25",
     ]);
     // The results scroll on their own, and a new search shows them from the top.
     results().scrollTop = 40;
@@ -277,22 +224,12 @@ describe("AllWork", () => {
     view.search("release no folder");
     expect(found()).toEqual(["Chats: Release notes, no folder, Claude, queued"]);
     view.search("nothing like this");
-    expect(within(results()).getByRole("status")).toHaveTextContent("No PRs or chats match · Esc clears");
+    expect(within(results()).getByRole("status")).toHaveTextContent("Nothing matches · Esc clears");
     expect(await axeViolations()).toEqual([]);
 
     view.search("");
     expect(screen.queryByRole("region", { name: "Search results" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Needs you 3" })).toBeVisible();
-  });
-
-  it("puts Remove on each review's row when the plugin can remove, without opening the review", () => {
-    const view = renderWork({ conversations: [], reviews: pluginEntries(), canRemove: true });
-    fireEvent.click(screen.getByRole("button", { name: "Remove widgets#101" }));
-    expect(view.onRemoveReview).toHaveBeenCalledExactlyOnceWith("whooper", "20261126T150000Z-101");
-    expect(view.onOpenReview).not.toHaveBeenCalled();
-    view.search("keep focus");
-    expect(screen.getByRole("treeitem", { name: /^keep focus in the date picker, removed/ })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Remove widgets#8" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Needs you 4" })).toBeVisible();
   });
 
   describe("a plugin that prints status format 2", () => {
@@ -302,7 +239,7 @@ describe("AllWork", () => {
     const failedTitle = "Review this stack of PRs · acme/widgets#60";
 
     it("draws its blockers first under Needs you, its Needs you groups after them, and its other groups as sections, folded as the manifest says", async () => {
-      const view = renderWork({ conversations: [], pluginWork: work(), selectedReview: "item:fixture-runs:run-review-2", open: {} });
+      const view = renderWork({ conversations: [], pluginWork: work(), selectedEntry: "item:fixture-runs:run-review-2", open: {} });
 
       expect(toggles()).toEqual(["Needs you 3 true", "Running 1 true", "Done 1 false"]);
       expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
@@ -348,15 +285,15 @@ describe("AllWork", () => {
     });
   });
 
-  it("moves between review and conversation rows with the arrow keys, past folded sections, and opens a review with Enter", () => {
-    const view = renderWork({ conversations: [sibling], reviews: pluginEntries().filter(({ review }) => review.pr === 101 || review.pr === 55 || review.pr === 102), selectedId: null });
+  it("moves between item and conversation rows with the arrow keys, past folded sections, and opens an item with Enter", () => {
+    const view = renderWork({ conversations: [sibling], pluginWork: whooperWork(fixtureWhooperItems().filter(({ id }) => id === "run-101" || id === "run-55")), selectedId: null });
     const [first, second] = screen.getAllByRole("treeitem");
     first!.focus();
     press(first!, "ArrowDown");
     expect(document.activeElement).toBe(second);
     press(second!, "ArrowRight");
     press(second!, "Enter");
-    expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261124T090000Z-55");
+    expect(view.onOpenEntry).toHaveBeenCalledWith("whooper", "item:whooper:run-55", "/reviews/run-55");
     press(second!, "End");
     expect(document.activeElement).toHaveAttribute("aria-label", expect.stringContaining(sibling.title));
     press(document.activeElement as HTMLElement, "ArrowUp");

@@ -1,14 +1,9 @@
 import type { PluginActions } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
 
-/** The plugin actions Prompting Time's own screens run, by the names Whooper's manifest gives them. */
+/** The actions a background agent's row and screen run as Poll now, Pause, and Resume, when its manifest declares them. */
 export const ACTIONS = {
-  showReview: "show-review",
-  ask: "ask",
-  retry: "retry",
   round: "round",
-  skip: "skip",
-  remove: "remove",
   pause: "pause",
   resume: "resume",
 } as const;
@@ -19,7 +14,7 @@ export function hasAction(plugin: PluginSnapshot, name: string): boolean {
 
 /**
  * Runs one of the plugin's actions to its end and returns what it printed, trimmed. A failure
- * throws the plugin's own words: its stderr, else its stdout. These screens offer no confirmation,
+ * throws the plugin's own words: its stderr, else its stdout. These callers offer no confirmation,
  * so an action the manifest marks confirm is refused.
  */
 export async function runPluginAction(actions: PluginActions, plugin: PluginSnapshot, name: string, args: string[] = []): Promise<string> {

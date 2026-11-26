@@ -24,11 +24,14 @@ describe("status format 2", () => {
       updated_at: "2026-11-26T18:50:00Z", route: "/runs/run-running-3", actions: [],
     });
     expect(status.truncated).toBe(true);
+    expect(status.paused).toBe(false);
+    // Other top-level fields, such as what the plugin's page reads, change nothing.
+    expect(readStatusV2(fixtureV2Plugin(), read(fixtureV2Status({ paused: true, reviews: [{ run_id: "r" }] })))!.paused).toBe(true);
   });
 
   it("reads nothing without format 2 in both the manifest and the output", () => {
-    expect(readStatusV2(fixturePlugin(), read(fixtureV2Status()))).toBeNull();
-    expect(readStatusV2(fixtureV2Plugin(), read(fixtureStatus("2026-11-26T15:45:00Z")))).toBeNull();
+    expect(readStatusV2(fixturePlugin({ status: null }), read(fixtureV2Status()))).toBeNull();
+    expect(readStatusV2(fixtureV2Plugin(), read({ version: 1, paused: false }))).toBeNull();
     expect(readStatusV2(fixtureV2Plugin(), read(fixtureV2Status({ format: 3 })))).toBeNull();
     expect(readStatusV2(fixtureV2Plugin(), { value: null, error: "status exited with 1" })).toBeNull();
     expect(readStatusV2(fixtureV2Plugin(), undefined)).toBeNull();
@@ -74,7 +77,7 @@ describe("status format 2", () => {
   it("splits the items into Needs you groups and other groups by the manifest's order, newest first, leaving out empty groups", () => {
     const newer = item({ id: "run-newer", updated_at: "2026-11-26T19:00:00Z" });
     const status = fixtureV2Status({ items: [...fixtureV2Status().items.filter(({ group }) => group !== "review"), newer] });
-    const work = statusV2Work(plugins([fixtureV2Plugin(), fixturePlugin()], { "fixture-runs": status, whooper: fixtureStatus("2026-11-26T15:45:00Z") }));
+    const work = statusV2Work(plugins([fixtureV2Plugin(), fixturePlugin({ status: null })], { "fixture-runs": status, whooper: fixtureStatus() }));
     expect(work.blockers).toEqual([{ plugin: "fixture-runs", pluginTitle: "Fixture runs", blocker: expect.objectContaining({ id: "codex-signed-out" }) }]);
     expect(work.needsYou.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([["Run failed", ["run-newer", "run-74c91b1d"]]]);
     expect(work.groups.map(({ label, group, items }) => [label, group.folded, items.map(({ id }) => id)])).toEqual([
@@ -100,7 +103,7 @@ describe("status format 2", () => {
     expect(describeAgent(fixtureV2Plugin({ process: { kind: "notRunning", exit: { code: 2, output: "" } } }), read(fixtureV2Status())).meta).toBe("Exited with code 2");
 
     const blocked = menuBarRequest(plugins([fixtureV2Plugin()], { "fixture-runs": fixtureV2Status() }), {}, 2, true);
-    expect(blocked.agents[0]).toMatchObject({ plugin: "fixture-runs", status: "Idle · last run 2 min ago", cause: null, alert: true });
+    expect(blocked.agents[0]).toMatchObject({ plugin: "fixture-runs", status: "Idle · last run 2 min ago", alert: true });
     expect(menuBarRequest(plugins([fixtureV2Plugin()], { "fixture-runs": fixtureV2Status({ blockers: [] }) }), {}, 0, true).agents[0]!.alert).toBe(false);
   });
 });

@@ -92,8 +92,8 @@ pub struct SettingCondition {
 #[serde(deny_unknown_fields)]
 pub struct Page {
     pub entry: String,
-    /// The page protocol the page speaks: 1, Whooper's review messages, or 2, in which the page runs
-    /// the manifest's actions itself. Protocol 1 goes once Whooper's page speaks 2.
+    /// The page protocol the page speaks. PT speaks only protocol 2, in which the page runs the
+    /// manifest's actions itself.
     pub protocol: u32,
 }
 
@@ -176,9 +176,9 @@ impl Manifest {
                 ));
             }
         }
-        if !matches!(self.page.protocol, 1 | 2) {
+        if self.page.protocol != 2 {
             return invalid(format!(
-                "page.protocol is {}, and Prompting Time speaks protocols 1 and 2",
+                "page.protocol is {}, and Prompting Time speaks page protocol 2",
                 self.page.protocol
             ));
         }
@@ -370,7 +370,7 @@ mod tests {
                 { "command": "devin", "purpose": "Runs jobs.",
                   "only_when": { "setting": "jobs", "value": "devin" } }
             ],
-            "page": { "entry": "page/dist/index.html", "protocol": 1 },
+            "page": { "entry": "page/dist/index.html", "protocol": 2 },
             "settings": "schemas/settings.json",
             "actions": [
                 { "name": "get-settings", "title": "Read settings", "description": "Prints them.",
@@ -404,11 +404,8 @@ mod tests {
     }
 
     #[test]
-    fn a_page_speaks_protocol_1_or_2() {
-        assert_eq!(parse(&whooper_like()).unwrap().page.protocol, 1);
-        let mut manifest = whooper_like();
-        manifest["page"]["protocol"] = 2.into();
-        assert_eq!(parse(&manifest).unwrap().page.protocol, 2);
+    fn a_page_speaks_protocol_2() {
+        assert_eq!(parse(&whooper_like()).unwrap().page.protocol, 2);
     }
 
     #[test]
@@ -440,8 +437,9 @@ mod tests {
             ("program name", |m| {
                 m["prerequisites"][0]["command"] = "bin/gh".into()
             }),
-            ("protocols 1 and 2", |m| m["page"]["protocol"] = 0.into()),
-            ("protocols 1 and 2", |m| m["page"]["protocol"] = 3.into()),
+            ("page protocol 2", |m| m["page"]["protocol"] = 0.into()),
+            ("page protocol 2", |m| m["page"]["protocol"] = 1.into()),
+            ("page protocol 2", |m| m["page"]["protocol"] = 3.into()),
             ("two actions", |m| {
                 let copy = m["actions"][0].clone();
                 m["actions"].as_array_mut().unwrap().push(copy);

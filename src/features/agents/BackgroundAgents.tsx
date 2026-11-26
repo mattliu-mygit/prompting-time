@@ -3,7 +3,6 @@ import { BotIcon, Button, EllipsisIcon, Menu, PlusIcon, StatusDot, type MenuItem
 import type { PluginsSnapshot, PluginStatusRead } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
 import { agentControls, agentMenuItems, rowButtons, type AgentAction } from "./agentMenu";
-import { causeKey } from "./reviews";
 import { describeAgent } from "./status";
 
 export type InstallKind = "archive" | "folder";
@@ -18,12 +17,9 @@ type Props = {
   plugins: PluginsSnapshot;
   /** The plugin whose screen the workspace shows. */
   selected: string | null;
-  /** The key (causeKey) of the cause whose screen the workspace shows, if any. */
-  selectedCause: string | null;
   /** The control that runs now for each plugin, by plugin name. */
   pending: Readonly<Record<string, AgentAction>>;
   onSelect(name: string): void;
-  onOpenCause(name: string, cause: string): void;
   onAction(name: string, action: AgentAction): void;
   onInstall(kind: InstallKind): void;
 };
@@ -52,10 +48,8 @@ export function BackgroundAgents(props: Props) {
                   plugin={plugin()}
                   status={props.plugins.statuses[plugin().name]}
                   selected={props.selected === plugin().name}
-                  selectedCause={props.selectedCause}
                   pending={props.pending[plugin().name] ?? null}
                   onSelect={() => props.onSelect(plugin().name)}
-                  onOpenCause={(cause) => props.onOpenCause(plugin().name, cause)}
                   onAction={(action) => props.onAction(plugin().name, action)}
                 />
               )}
@@ -71,18 +65,15 @@ type RowProps = {
   plugin: PluginSnapshot;
   status: PluginStatusRead | undefined;
   selected: boolean;
-  selectedCause: string | null;
   pending: AgentAction | null;
   onSelect(): void;
-  onOpenCause(cause: string): void;
   onAction(action: AgentAction): void;
 };
 
 /**
  * One agent: its name, which opens its screen; Pause or Resume, or Start while it is stopped, and
  * Poll now as buttons; a ⋯ menu with Stop, Settings, and Open logs; and its status in words under
- * them. While the status reports a cause that blocks every review, the words read in red, such as
- * "Can't review · Docker isn't running", until the plugin clears it, and open the cause's screen.
+ * them, red while it fails or can't start.
  */
 function AgentRow(props: RowProps) {
   const statusId = createUniqueId();
@@ -90,14 +81,14 @@ function AgentRow(props: RowProps) {
   const controls = () => agentControls(props.plugin, props.status, props.pending);
   const buttons = () => rowButtons(props.plugin, props.status, props.pending);
   return (
-    <li class="agent-pin" data-blocked={words().cause ? "" : undefined}>
+    <li class="agent-pin">
       <div class="agent-pin-top">
         <button
           type="button"
           class="agent-pin-name"
           aria-current={props.selected ? "true" : undefined}
           aria-describedby={statusId}
-          title={`Open ${props.plugin.title}'s screen: runs, logs, and settings`}
+          title={`Open ${props.plugin.title}'s screen: logs and settings`}
           onClick={() => props.onSelect()}
         >
           <BotIcon />
@@ -119,28 +110,10 @@ function AgentRow(props: RowProps) {
           />
         </span>
       </div>
-      <Show
-        when={words().cause}
-        fallback={
-          <p id={statusId} class="agent-pin-status">
-            <StatusDot status={words().status} />
-            <span>{words().meta}</span>
-          </p>
-        }
-      >
-        {(cause) => (
-          <button
-            id={statusId}
-            type="button"
-            class="agent-pin-status agent-pin-blocked"
-            aria-current={props.selectedCause === causeKey(props.plugin.name, cause()) ? "true" : undefined}
-            onClick={() => props.onOpenCause(cause())}
-          >
-            <StatusDot status="error" />
-            <span>{words().meta}</span>
-          </button>
-        )}
-      </Show>
+      <p id={statusId} class="agent-pin-status">
+        <StatusDot status={words().status} />
+        <span>{words().meta}</span>
+      </p>
     </li>
   );
 }

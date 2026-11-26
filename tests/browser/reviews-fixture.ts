@@ -1,10 +1,13 @@
 import type { PluginAction, PluginActionRequest, PluginActionResult } from "../../src/bridge/types";
 
-// `?agents=reviews`: the invented Whooper lists reviews in its status, and the actions its page and
-// the failed-review screen run (show-review, draft, ask, submit, retry, and round) answer in browser
-// memory the way Whooper's commands would. Every repo, person, and line of code is made up.
+// `?agents=reviews`: the invented Whooper lists reviews in its status, as whooper-status --json does:
+// in status format 2 (items in Whooper's groups, blockers from its causes) beside the reviews its page
+// reads. The actions its page and its rows run (show-review, draft, ask, submit, retry, skip, remove,
+// and round) answer in browser memory the way Whooper's commands would. Every repo, person, and line
+// of code is made up.
 
 export const reviewActions: PluginAction[] = [
+  { name: "round", title: "Poll now", description: "Runs a round now: polls and reviews what it finds. Posts nothing.", confirm: false },
   { name: "show-review", title: "Show a review", description: "Prints one review as JSON. Reads files only.", confirm: false },
   { name: "draft", title: "Change a draft", description: "Includes or leaves out a comment, edits its text, or sets the review's event or message.", confirm: false },
   { name: "ask", title: "Ask about this", description: "Answers a question about a review with a run of the review's agent that reads the review's record and writes nothing else.", confirm: false },
@@ -203,9 +206,10 @@ export function markFixtureSubmitted(runId: string) {
   if (entry) Object.assign(entry, { submitted: { event: drafts[runId]!.event, at: new Date().toISOString() }, needs_you: false });
 }
 
-/** Answers show-review, draft, ask, retry, and round; null for the other actions. */
+/** Answers show-review, draft, ask, retry, skip, remove, and round; null for the other actions. A row passes the run as `--item <run>`, the page as the first argument. */
 export function answerReviewAction(sent: PluginActionRequest): PluginActionResult | null {
-  const [runId = "", ...rest] = sent.args;
+  const args = sent.args[0] === "--item" ? sent.args.slice(1) : sent.args;
+  const [runId = "", ...rest] = args;
   const entry = entries.find((item) => item.run_id === runId);
   switch (sent.action) {
     case "show-review": {
@@ -266,4 +270,74 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
     default:
       return null;
   }
+}
+
+/** A time as Whooper's rows say it: "3:12 PM" today, "Nov 24" before. */
+const shortDate = (iso: string) => {
+  const date = new Date(iso);
+  return date.toDateString() === new Date().toDateString()
+    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : date.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+/** The group of a pull request's newest review, by whooper-status's review_group; null once removed. */
+function groupOf(entry: Entry): string | null {
+  if (entry.removed_by_user) return null;
+  const finished = entry.submitted !== null || entry.skipped_by_user || (entry.outcome === "reviewed" && !entry.needs_you);
+  if (entry.outcome === "reviewed" && entry.needs_you && !finished) return entry.safe_to_approve ? "ready" : "look";
+  if (finished) return "done";
+  if (entry.outcome === "running") return "reviewing";
+  const blocking = entry.cause?.scope === "all";
+  if (entry.outcome === "waiting") return blocking ? "waiting" : "reviewing";
+  return blocking ? "waiting" : "failed";
+}
+
+/** A pull request's newest review as an item of status format 2, by whooper-status's review_item. */
+function itemOf(entry: Entry, group: string) {
+  const name = `${entry.repo.split("/").at(-1)}#${entry.pr}`;
+  const standing = entry.submitted ? `${entry.submitted.event === "APPROVE" ? "approved" : "commented"} ${shortDate(entry.submitted.at)}`
+    : entry.skipped_by_user ? "skipped"
+      : entry.outcome === "running" ? `reviewing since ${shortDate(entry.started_at)}`
+        : entry.outcome === "waiting" ? (entry.cause ? `waiting · ${entry.cause.summary}` : "waiting for the next round")
+          : entry.outcome === "failed" ? entry.cause?.summary ?? "review failed"
+            : !entry.needs_you ? "not submitted"
+              : entry.skipped ? "skipped, look first"
+                : entry.findings > 0 ? `${entry.findings} finding${entry.findings === 1 ? "" : "s"}` : "no findings";
+  const finished = entry.submitted !== null || entry.skipped_by_user;
+  const dot = finished ? "idle" : ({ running: "running", waiting: "idle", failed: "error" } as Record<string, string>)[entry.outcome]
+    ?? ({ ready: "success", look: "attention" } as Record<string, string>)[group] ?? "idle";
+  const running = entry.outcome === "running";
+  return {
+    id: entry.run_id, group, title: entry.title ?? `${entry.repo}#${entry.pr}`,
+    detail: [name, ...(entry.author ? [`@${entry.author}`] : []), standing].join(" · "), dot, project: null,
+    updated_at: entry.submitted?.at ?? entry.ended_at ?? entry.started_at, route: `/reviews/${entry.run_id}`,
+    actions: [...(running ? [] : ["retry"]), ...(!running && entry.submitted === null && !entry.skipped_by_user ? ["skip"] : []), ...(running ? [] : ["remove"])],
+  };
+}
+
+/**
+ * What whooper-status --json adds in status format 2 for these reviews, as its status_v2 does: the
+ * items (the newest review of each pull request the user did not remove, current ones before the
+ * finished ones, each part newest first) and a blocker, which a round rechecks, for each cause that
+ * stops every review.
+ */
+export function fixtureStatusV2Parts() {
+  const seen = new Set<string>();
+  const items = [...entries].sort((left, right) => right.started_at.localeCompare(left.started_at)).flatMap((entry) => {
+    const key = `${entry.repo}#${entry.pr}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    const group = groupOf(entry);
+    return group ? [itemOf(entry, group)] : [];
+  });
+  const ordered = items.sort((left, right) => right.updated_at.localeCompare(left.updated_at)).sort((left, right) => Number(left.group === "done") - Number(right.group === "done"));
+  const causes = new Map(items.flatMap((item) => {
+    const cause = entries.find((entry) => entry.run_id === item.id)?.cause;
+    return item.group === "waiting" && cause ? [[cause.id, cause.summary] as const] : [];
+  }));
+  return {
+    blockers: [...causes].map(([id, title]) => ({ id, title, dot: "error", route: `/causes/${id}`, action: "round" })),
+    items: ordered.slice(0, 50),
+    truncated: ordered.length > 50,
+  };
 }

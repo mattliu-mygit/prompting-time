@@ -333,7 +333,7 @@ describe("desktop bridge", () => {
 
   it("updates the menu bar extra and hears its choices on their own event", async () => {
     invokeMock.mockResolvedValueOnce(null);
-    const request = { visible: true, agents: [], reviewsNeedingYou: 2 };
+    const request = { visible: true, agents: [], needsYou: 2 };
     await updateMenuBar(request);
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith("update_menu_bar", { request });
 

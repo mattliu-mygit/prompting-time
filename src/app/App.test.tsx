@@ -6,7 +6,7 @@ import type { AppEvent, ConversationSummary, ListChildConversationsRequest, Load
 import { axeViolations, render, settle } from "../test/render";
 import { App } from "./App";
 import { createAppStore, type AppApi, type AppStore } from "./store";
-import { actionResult, fixturePlugin, fixtureReviews, fixtureSettings, fixtureShown, fixtureStatus, fixtureV2Plugin, fixtureV2Status, noPlugins, pageActions } from "../test/plugins";
+import { actionResult, fixturePlugin, fixtureSettings, fixtureStatus, fixtureV2Plugin, fixtureV2Status, fixtureWhooperItems, noPlugins } from "../test/plugins";
 
 const click = (element: Element) => {
   fireEvent.click(element);
@@ -189,114 +189,31 @@ describe("All work and ⌘J", () => {
   });
 });
 
-describe("plugin pages", () => {
-  const OPEN = "20261126T150000Z-101";
-  const SUBMITTED = "20261125T100000Z-77";
-  const FAILED = "20261124T090000Z-55";
-  const request = JSON.stringify({ event: "APPROVE", body: "", comments: [] }, null, 2);
-  const fingerprint = "9c".repeat(32);
-
-  /** Whooper with invented reviews; its page's actions answer as Whooper's commands would. */
-  function pagesApi() {
-    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
-      switch (sent.action) {
-        case "status": return actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews: fixtureReviews() })) });
-        case "show-review": return actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!)) });
-        case "submit": return sent.confirmedFingerprint === null
-          ? actionResult({ stdout: `printed the request; nothing posted\nfingerprint: ${fingerprint}\n`, fingerprint, preview: request })
-          : actionResult({ stdout: "posted the review: https://example.invalid/review/1\n" });
-        default: return actionResult({ stdout: JSON.stringify(fixtureSettings) });
-      }
-    });
-    return { pluginRequest, api: createApi({ listPlugins: vi.fn(async () => [fixturePlugin({ actions: pageActions })]), pluginRequest }) };
+describe("Whooper's reviews as status format 2 items", () => {
+  /** Whooper whose status lists invented reviews as items in its declared groups. */
+  function whooperApi() {
+    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => (sent.action === "status"
+      ? actionResult({ stdout: JSON.stringify(fixtureStatus("Running · next poll 3:45 PM", { items: fixtureWhooperItems(), reviews: [{ run_id: "run-101" }] })) })
+      : actionResult({ stdout: JSON.stringify(fixtureSettings) })));
+    return { pluginRequest, api: createApi({ listPlugins: vi.fn(async () => [fixturePlugin()]), pluginRequest }) };
   }
 
-  function frame() {
-    const element = document.querySelector<HTMLIFrameElement>("iframe.plugin-frame");
-    if (!element?.contentWindow) throw new Error("no plugin frame");
-    return { element, window: element.contentWindow, posted: vi.spyOn(element.contentWindow, "postMessage") };
-  }
-
-  async function fromPage(source: Window, data: unknown) {
-    window.dispatchEvent(new MessageEvent("message", { data, source }));
-    await settle();
-    await settle();
-  }
-
-  it("opens a review from Needs you in the plugin's sandboxed page and submits it through the confirmation", async () => {
-    const { api, pluginRequest } = pagesApi();
-    renderApp(api);
-    await settle();
-    await settle();
-
-    fireEvent.click(await screen.findByRole("treeitem", { name: /^separate cache configuration, widgets#101 · @sam-fixture · 2 findings/ }));
-    await settle();
-    const page = frame();
-    expect(page.element).toHaveAttribute("sandbox", "allow-scripts");
-    expect(page.element).toHaveAttribute("src", "pt-plugin://whooper/index.html");
-    expect(screen.getByRole("heading", { level: 1, name: "separate cache configuration" })).toBeVisible();
-
-    await fromPage(window, { version: 1, type: "ready", id: 1 });
-    expect(page.posted).not.toHaveBeenCalled();
-    await fromPage(page.window, { version: 1, type: "ready", id: 1 });
-    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "status", reply_to: 1 }), "*");
-    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: OPEN }) }), "*");
-
-    await fromPage(page.window, { version: 1, type: "submit", id: 2, run_id: OPEN });
-    const dialog = await screen.findByRole("alertdialog", { name: "Submit review" });
-    expect(within(dialog).getByLabelText("What it will send")).toHaveTextContent('"event": "APPROVE"');
-    expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "submit", confirmedFingerprint: fingerprint }));
-    fireEvent.click(within(dialog).getByRole("button", { name: "Submit review" }));
-    await settle();
-    await settle();
-    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "submit", args: [OPEN], confirmedFingerprint: fingerprint });
-    expect(page.posted).toHaveBeenLastCalledWith({ version: 1, type: "submit-result", reply_to: 2, run_id: OPEN, posted: true, message: "posted the review: https://example.invalid/review/1" }, "*");
-    expect(screen.queryByRole("alertdialog", { name: "Submit review" })).not.toBeInTheDocument();
-    // The next item in Needs you opens, and the notice names both.
-    expect(document.querySelector(".app-notice")).toHaveTextContent("Submitted widgets#101 · now showing gadgets#55");
-    expect(screen.getByRole("heading", { level: 1, name: "move the projection" })).toBeInTheDocument();
-  });
-
-  it("keeps the page loaded and sends it the next finished review the user opens", async () => {
-    const { api } = pagesApi();
-    renderApp(api);
-    await settle();
-    await settle();
-
-    fireEvent.click(await screen.findByRole("treeitem", { name: /^separate cache configuration, widgets#101/ }));
-    await settle();
-    const page = frame();
-    await fromPage(page.window, { version: 1, type: "ready", id: 1 });
-    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: OPEN }) }), "*");
-
-    // The page is ready, so opening another finished review sends it from the frame's effect.
-    const search = screen.getByRole("searchbox", { name: "Search PRs and chats" });
-    fireEvent.input(search, { target: { value: "#77" } });
-    flush();
-    fireEvent.keyDown(search, { key: "Enter" });
-    flush();
-    await settle();
-    await settle();
-    expect(screen.getByRole("heading", { level: 1, name: "add the tags package" })).toBeInTheDocument();
-    expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
-    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: SUBMITTED }) }), "*");
-  });
-
-  it("searches PRs and chats from the sidebar: Enter opens the first result, and Escape clears", async () => {
-    const { api } = pagesApi();
-    renderApp(api);
+  it("searches work and chats from the sidebar: Enter opens the first result in the plugin's page, and Escape clears", async () => {
+    renderApp(whooperApi().api);
     await screen.findByRole("treeitem", { name: /^separate cache configuration/ });
-    const search = screen.getByRole("searchbox", { name: "Search PRs and chats" });
+    const search = screen.getByRole("searchbox", { name: "Search work and chats" });
 
     fireEvent.input(search, { target: { value: "#55" } });
     flush();
     const results = screen.getByRole("region", { name: "Search results" });
-    expect(within(results).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual(["move the projection, gadgets#55 · review failed"]);
+    expect(within(results).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual([expect.stringMatching(/^move the projection, gadgets#55 · /)]);
     expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     fireEvent.keyDown(search, { key: "Enter" });
     flush();
     await settle();
-    expect(screen.getByRole("heading", { level: 1, name: "move the projection" })).toBeInTheDocument();
+    expect(document.querySelector("iframe.plugin-frame")).toHaveAttribute("src", "pt-plugin://whooper/index.html");
+    expect(screen.getByRole("heading", { level: 1, name: "Whooper" })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: /^move the projection/ })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.input(search, { target: { value: "auth" } });
     flush();
@@ -312,48 +229,19 @@ describe("plugin pages", () => {
     expect(screen.getByRole("button", { name: /^Needs you/ })).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("opens a failed review on Prompting Time's own screen instead of the page, and a finished one in the page", async () => {
-    const { api, pluginRequest } = pagesApi();
-    renderApp(api);
+  it("finds an item in the palette's Work group and opens it in the page", async () => {
+    renderApp(whooperApi().api);
+    await screen.findByRole("treeitem", { name: /^separate cache configuration/ });
+    press("k");
+    const input = await screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
+    fireEvent.input(input, { target: { value: "tags package" } });
+    flush();
+    expect(screen.getByRole("option", { name: /add the tags package/ })).toHaveTextContent("Needs a look · gadgets#77");
+    fireEvent.keyDown(input, { key: "Enter" });
+    flush();
     await settle();
-    await settle();
-
-    fireEvent.click(await screen.findByRole("treeitem", { name: /^move the projection, gadgets#55 · review failed/ }));
-    await settle();
-    await settle();
-    expect(document.querySelector("iframe.plugin-frame")).toBeNull();
-    const failed = screen.getByRole("main", { name: "Review" });
-    expect(within(failed).getByRole("heading", { name: "Review failed" })).toBeInTheDocument();
-    expect(within(failed).getByLabelText("Why it failed")).toHaveTextContent("the review run exited 1 without findings; see runs/20261124T090000Z-55/stderr.log");
-    expect(within(failed).getByRole("button", { name: "Retry review" })).toBeInTheDocument();
-    expect(within(failed).getByRole("button", { name: "Ask why" })).toBeInTheDocument();
-    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [FAILED], confirmedFingerprint: null });
-    expect(screen.queryByText(/has no findings to show/)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("treeitem", { name: /^separate cache configuration, widgets#101 · @sam-fixture · 2 findings/ }));
-    await settle();
-    expect(frame().element).toHaveAttribute("src", "pt-plugin://whooper/index.html");
-    expect(screen.queryByRole("heading", { name: "Review failed" })).not.toBeInTheDocument();
-  });
-
-  it("lists every review on the agent's Runs tab and opens a past one with what was submitted", async () => {
-    const { api } = pagesApi();
-    renderApp(api);
-    await settle();
-    await settle();
-
-    expect(screen.queryByRole("button", { name: /^Past reviews/ })).not.toBeInTheDocument();
-    click(within(await screen.findByRole("region", { name: "Background agents" })).getByRole("button", { name: "Whooper" }));
-    const runs = within(screen.getByRole("tabpanel", { name: "Runs" }));
-    expect(runs.getAllByRole("row").slice(1).map((row) => row.querySelector("td:nth-child(2)")?.firstChild?.textContent))
-      .toEqual(["Review widgets#101", "Review widgets#102", "Review gadgets#77", "Review widgets#101", "Review gadgets#55"]);
-
-    fireEvent.click(runs.getByRole("button", { name: "Review gadgets#77" }));
-    await settle();
-    const page = frame();
-    await fromPage(page.window, { version: 1, type: "ready", id: 1 });
-    expect(page.posted).toHaveBeenCalledWith(expect.objectContaining({ type: "review", review: expect.objectContaining({ run_id: SUBMITTED }) }), "*");
-    expect(page.posted).toHaveBeenLastCalledWith(expect.objectContaining({ type: "submit-result", run_id: SUBMITTED, posted: true, message: expect.stringMatching(/^commented /) }), "*");
+    expect(document.querySelector("iframe.plugin-frame")).not.toBeNull();
+    expect(screen.getByRole("treeitem", { name: /^add the tags package/ })).toHaveAttribute("aria-selected", "true");
   });
 });
 
@@ -366,7 +254,7 @@ describe("background agents", () => {
   const shortTime = (date: Date) => date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
   /** A fake bridge with Whooper installed; `status` answers its status action. */
-  function agentsApi(plugin = fixturePlugin(), status: () => unknown = () => fixtureStatus(nextPoll().toISOString())) {
+  function agentsApi(plugin = fixturePlugin(), status: () => unknown = () => fixtureStatus(`Running · next poll ${shortTime(nextPoll())}`)) {
     let handler: ((event: AppEvent) => void) | null = null;
     const api = createApi({
       listPlugins: vi.fn(async () => [plugin]),
@@ -393,14 +281,14 @@ describe("background agents", () => {
     // The rows scroll inside their section; the agents and the search stay above every section.
     expect(list.closest(".work-section-body")).not.toBeNull();
     expect(agents.closest(".all-work")).toBeNull();
-    expect(screen.getByRole("searchbox", { name: "Search PRs and chats" }).closest(".all-work")).toBeNull();
+    expect(screen.getByRole("searchbox", { name: "Search work and chats" }).closest(".all-work")).toBeNull();
     expect(await axeViolations()).toEqual([]);
   });
 
   it("reads the agent again when a pluginChanged event arrives", async () => {
     let reviewing: string | null = null;
-    const fake = agentsApi(fixturePlugin(), () => fixtureStatus(nextPoll().toISOString(),
-      reviewing ? { round: { running: true, started_at: null, reviewing } } : {}));
+    const fake = agentsApi(fixturePlugin(), () => fixtureStatus(`Running · next poll ${shortTime(nextPoll())}`,
+      reviewing ? { agent: { words: `Reviewing ${reviewing}`, dot: "running" } } : {}));
     renderApp(fake.api);
     await screen.findByText(/^Running · next poll/);
     reviewing = "acme/widgets#101";
@@ -429,7 +317,7 @@ describe("background agents", () => {
     click(name);
 
     expect(await screen.findByRole("heading", { name: "Whooper", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Runs" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
     click(screen.getByRole("tab", { name: "Settings" }));
     expect(await screen.findByRole("spinbutton", { name: "Poll every" })).toHaveValue(15);
     expect(name).toHaveAttribute("aria-current", "true");
@@ -477,7 +365,7 @@ describe("background agents", () => {
     await screen.findByRole("region", { name: "Background agents" });
     expect(screen.queryByRole("button", { name: "Add background agent" })).not.toBeInTheDocument();
     press("k");
-    const search = await screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
+    const search = await screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
     fireEvent.input(search, { target: { value: "Run a plugin folder in place" } });
     flush();
     fireEvent.keyDown(search, { key: "Enter" });
@@ -492,41 +380,42 @@ describe("background agents", () => {
   });
 });
 
-describe("agent controls and blocking causes", () => {
-  const docker = { id: "docker", summary: "Docker isn't running", scope: "all" };
-  /** Whooper with a review in progress and two reviews waiting on Docker; its actions succeed. */
+describe("agent controls", () => {
+  const controlActions = [
+    { name: "round", title: "Poll now", description: "Runs a round now.", confirm: false },
+    { name: "pause", title: "Pause", description: "Pauses the schedule.", confirm: false },
+    { name: "resume", title: "Resume", description: "Resumes the schedule.", confirm: false },
+  ];
+  /** Whooper blocked by Docker with a review in progress; its actions succeed. */
   function controlsApi() {
-    const reviews = [
-      ...fixtureReviews(),
-      { ...fixtureReviews()[1]!, run_id: "waiting-60", repo: "acme/gadgets", pr: 60, title: "speed up the gadget index", outcome: "waiting", cause: docker },
-      { ...fixtureReviews()[1]!, run_id: "waiting-61", repo: "acme/gadgets", pr: 61, title: "drop the legacy upload path", outcome: "waiting", cause: docker },
-    ];
-    const status = fixtureStatus("2026-11-26T23:45:00Z", { reviews, blocked: { ...docker, since: "2026-11-26T14:00:00Z", waiting: 2 } });
+    const status = fixtureStatus("Can't review · Docker isn't running", {
+      agent: { words: "Can't review · Docker isn't running", dot: "error" },
+      blockers: [{ id: "docker", title: "Docker isn't running", dot: "error", route: "/causes/docker", action: "round" }],
+      items: fixtureWhooperItems(),
+    });
     const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
       switch (sent.action) {
         case "status": return actionResult({ stdout: JSON.stringify(status) });
-        case "retry": return actionResult({ stdout: `queued ${sent.args[0]} for the next round\n` });
         case "round": return actionResult({ stdout: "polled: 2 retries\nround done\n" });
         case "pause": return actionResult({ stdout: "paused\n" });
         default: return actionResult({ stdout: JSON.stringify(fixtureSettings) });
       }
     });
-    const plugin = fixturePlugin({ actions: [...pageActions, { name: "pause", title: "Pause", description: "Pauses the schedule.", confirm: false }, { name: "resume", title: "Resume", description: "Resumes the schedule.", confirm: false }] });
+    const plugin = fixturePlugin({ actions: [...fixturePlugin().actions, ...controlActions] });
     const api = createApi({
       listPlugins: vi.fn(async () => [plugin]),
       pluginRequest,
       stopPlugin: vi.fn(async () => fixturePlugin({ process: { kind: "notRunning", exit: null } })),
     });
-    return { api, pluginRequest };
+    return { api, pluginRequest, plugin };
   }
 
-  it("runs Pause and Poll now from the agent's pinned row, and asks before Stop with the reviews it ends", async () => {
+  it("runs Pause and Poll now from the agent's pinned row, and asks before Stop with the items in progress it ends", async () => {
     const { api, pluginRequest } = controlsApi();
     renderApp(api);
     const agents = await screen.findByRole("region", { name: "Background agents" });
-    const words = await within(agents).findByRole("button", { name: "Can't review · Docker isn't running" });
-    expect(words.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-    expect(agents.querySelector(".agent-pin")).toHaveAttribute("data-blocked");
+    const words = await within(agents).findByText("Can't review · Docker isn't running");
+    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
 
     click(within(agents).getByRole("button", { name: "Pause" }));
     await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "pause", args: [], confirmedFingerprint: null }));
@@ -539,24 +428,21 @@ describe("agent controls and blocking causes", () => {
     expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Stop", "Settings", "Open logs"]);
     click(screen.getByRole("menuitem", { name: "Stop" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Stop Whooper?" });
-    expect(dialog).toHaveTextContent("widgets#102 · acme/widgets#102");
+    // The item whose dot says it runs now.
+    expect(within(dialog).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["stream uploads in chunks"]);
     expect(api.stopPlugin).not.toHaveBeenCalled();
     click(within(dialog).getByRole("button", { name: "Stop Whooper" }));
     await waitFor(() => expect(api.stopPlugin).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
-  it("opens the cause from the pinned row's red words, and offers Start in place of Pause once stopped", async () => {
-    const { api } = controlsApi();
-    const stopped = fixturePlugin({ actions: [...pageActions, { name: "pause", title: "Pause", description: "Pauses the schedule.", confirm: false }, { name: "resume", title: "Resume", description: "Resumes the schedule.", confirm: false }], process: { kind: "notRunning", exit: null } });
+  it("offers Start in place of Pause once stopped", async () => {
+    const { api, plugin } = controlsApi();
+    const stopped = { ...plugin, process: { kind: "notRunning" as const, exit: null } };
     api.startPlugin = vi.fn(async () => stopped);
     renderApp(api);
     const agents = await screen.findByRole("region", { name: "Background agents" });
-    const words = await within(agents).findByRole("button", { name: "Can't review · Docker isn't running" });
-    click(words);
-    await settle();
-    expect(screen.getByRole("main", { name: "Blocked reviews" })).toBeInTheDocument();
-    expect(words).toHaveAttribute("aria-current", "true");
+    await within(agents).findByText("Can't review · Docker isn't running");
 
     api.listPlugins = vi.fn(async () => [stopped]);
     await stores[0]!.refreshPlugins();
@@ -569,42 +455,19 @@ describe("agent controls and blocking causes", () => {
     click(screen.getByRole("button", { name: "Whooper actions" }));
     expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Settings", "Open logs"]);
   });
-
-  it("opens a blocking cause from its folded Waiting section and retries each review it stopped, then offers Run now", async () => {
-    const { api, pluginRequest } = controlsApi();
-    renderApp(api);
-    click(await screen.findByRole("button", { name: "Waiting · Docker isn't running 2" }));
-    click(await screen.findByRole("treeitem", { name: /^Docker isn't running, Blocks every review · since .*, 2 reviews waiting$/ }));
-    await settle();
-    // The header says the red dot's words too.
-    expect(document.querySelector(".shell-meta")).toHaveTextContent("Whooper · Blocks every review · 2 reviews waiting");
-    expect(document.querySelector(".shell-meta .pt-status-dot")).toHaveAttribute("data-status", "error");
-
-    const cause = screen.getByRole("main", { name: "Blocked reviews" });
-    expect(screen.getByRole("heading", { level: 1, name: "Docker isn't running" })).toBeInTheDocument();
-    expect(within(cause).getByRole("heading", { name: "acme/gadgets · 2" })).toBeInTheDocument();
-    fireEvent.click(within(cause).getByRole("button", { name: "Retry all 2" }));
-    expect(await within(cause).findByText("Queued 2 reviews for Whooper's next round.")).toBeInTheDocument();
-    expect(pluginRequest.mock.calls.filter(([sent]) => sent.action === "retry").map(([sent]) => sent.args)).toEqual([["waiting-60"], ["waiting-61"]]);
-    fireEvent.click(within(cause).getByRole("button", { name: "Run now" }));
-    expect(await within(cause).findByLabelText("What the round printed")).toHaveTextContent("round done");
-
-    fireEvent.click(within(cause).getByRole("button", { name: "Open logs" }));
-    await settle();
-    expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
-    expect(api.readPluginLog).toHaveBeenCalledWith({ plugin: "whooper" });
-  });
 });
 
 describe("menu bar", () => {
-  const docker = { id: "docker", summary: "Docker isn't running", scope: "all" };
-  /** Whooper blocked by Docker, with a review ready to approve and one failed; its controls succeed, and `choose` makes a choice in the menu bar. */
+  /** Whooper whose row is red, with reviews in each group; its controls succeed, and `choose` makes a choice in the menu bar. */
   function menuBarApi() {
-    const status = fixtureStatus("2026-11-26T23:45:00Z", { reviews: fixtureReviews(), blocked: { ...docker, since: null, waiting: 0 } });
+    const status = fixtureStatus("Can't review · Docker isn't running", { agent: { words: "Can't review · Docker isn't running", dot: "error" }, items: fixtureWhooperItems() });
     const pluginRequest = vi.fn(async (sent: PluginActionRequest) => (sent.action === "status"
       ? actionResult({ stdout: JSON.stringify(status) })
-      : sent.action === "show-review" ? actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!)) }) : actionResult({ stdout: "done\n" })));
-    const plugin = fixturePlugin({ actions: [...pageActions, { name: "pause", title: "Pause", description: "Pauses the schedule.", confirm: false }, { name: "resume", title: "Resume", description: "Resumes the schedule.", confirm: false }] });
+      : actionResult({ stdout: "done\n" })));
+    const plugin = fixturePlugin({ actions: [...fixturePlugin().actions,
+      { name: "round", title: "Poll now", description: "Runs a round now.", confirm: false },
+      { name: "pause", title: "Pause", description: "Pauses the schedule.", confirm: false },
+      { name: "resume", title: "Resume", description: "Resumes the schedule.", confirm: false }] });
     let handler: (command: MenuBarCommand) => void = () => {};
     const api = createApi({
       listPlugins: vi.fn(async () => [plugin]),
@@ -622,16 +485,16 @@ describe("menu bar", () => {
     return { api, pluginRequest, lastRequest, choose };
   }
 
-  it("shows the pinned agent's words and buttons and how many reviews need you, and runs its choices as the sidebar does", async () => {
+  it("shows the pinned agent's words and buttons and how many items need you, and runs its choices as the sidebar does", async () => {
     const { api, pluginRequest, lastRequest, choose } = menuBarApi();
     renderApp(api);
-    await screen.findByRole("button", { name: "Can't review · Docker isn't running" });
+    await screen.findByText("Can't review · Docker isn't running");
     await waitFor(() => expect(lastRequest()).toEqual({
       visible: true,
-      // widgets#101 is ready to approve and gadgets#55 failed for a reason of its own.
-      reviewsNeedingYou: 2,
+      // One item each in Ready to approve, Needs a look, and Review failed.
+      needsYou: 3,
       agents: [{
-        plugin: "whooper", title: "Whooper", status: "Can't review · Docker isn't running", cause: "docker", alert: true,
+        plugin: "whooper", title: "Whooper", status: "Can't review · Docker isn't running", alert: true,
         controls: [{ action: "pause", label: "Pause", enabled: true }, { action: "poll", label: "Poll now", enabled: true }],
       }],
     }));
@@ -642,11 +505,9 @@ describe("menu bar", () => {
     // While the round runs, the menu says so, as the row does.
     expect(vi.mocked(api.updateMenuBar).mock.calls.slice(sent).some(([request]) => request.agents[0]?.controls[1]?.label === "Polling…")).toBe(true);
 
-    choose({ kind: "openCause", plugin: "whooper", cause: "docker" });
-    expect(screen.getByRole("main", { name: "Blocked reviews" })).toBeInTheDocument();
     choose({ kind: "openNeedsYou" });
-    expect(screen.getByRole("main", { name: "Review" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { level: 1, name: "separate cache configuration" })).toBeInTheDocument();
+    expect(document.querySelector("iframe.plugin-frame")).not.toBeNull();
+    expect(screen.getByRole("treeitem", { name: /^separate cache configuration/ })).toHaveAttribute("aria-selected", "true");
     choose({ kind: "openAgent", plugin: "whooper" });
     expect(screen.getByRole("main", { name: "Background agent" })).toBeInTheDocument();
   });
@@ -657,7 +518,7 @@ describe("menu bar", () => {
     await waitFor(() => expect(lastRequest()?.visible).toBe(true));
     const runCommand = async (label: string) => {
       press("k");
-      const input = await screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
+      const input = await screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
       fireEvent.input(input, { target: { value: label } });
       flush();
       fireEvent.keyDown(input, { key: "Enter" });
@@ -724,8 +585,8 @@ describe("status format 2", () => {
     renderApp(api);
     await screen.findByRole("treeitem", { name: /^Codex is signed out/ });
     await waitFor(() => expect(lastRequest()).toMatchObject({
-      reviewsNeedingYou: 2,
-      agents: [{ plugin: "fixture-runs", status: "Idle · last run 2 min ago", cause: null, alert: true }],
+      needsYou: 2,
+      agents: [{ plugin: "fixture-runs", status: "Idle · last run 2 min ago", alert: true }],
     }));
 
     press("j");
@@ -839,138 +700,6 @@ describe("status format 2", () => {
   });
 });
 
-describe("review header", () => {
-  it("says why a review that says approve once CI passes is not safe to approve", async () => {
-    const unsafe = { ...fixtureReviews()[0]!, safe_to_approve: false };
-    const findings = { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Invented reason." }, findings: [
-      { id: "1", path: "src/a.rs", line: 3, side: "RIGHT", title: "A nit", draft: "**nit:** invented", kind: "nit" },
-      { id: "2", path: "src/a.rs", line: 9, side: "RIGHT", title: "A question", draft: "**question:** invented", kind: "question" },
-    ] };
-    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => (sent.action === "status"
-      ? actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews: [unsafe] })) })
-      : actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!, { findings })) })));
-    renderApp(createApi({ listPlugins: vi.fn(async () => [fixturePlugin({ actions: pageActions })]), pluginRequest }));
-    click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
-    const meta = () => document.querySelector(".shell-meta");
-    await waitFor(() => expect(meta()).toHaveTextContent("Whooper review · acme/widgets#101 · approve once CI passes · has a question"));
-    // Orange, as the row would be outside Needs a look: the review needs a look.
-    expect(meta()!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
-    expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [unsafe.run_id], confirmedFingerprint: null });
-  });
-
-  it("puts a green dot before the words of a review that is ready to approve", async () => {
-    const pluginRequest = vi.fn(async () => actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews: [fixtureReviews()[0]!] })) }));
-    renderApp(createApi({ listPlugins: vi.fn(async () => [fixturePlugin({ actions: pageActions })]), pluginRequest }));
-    click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
-    const meta = () => document.querySelector(".shell-meta");
-    await waitFor(() => expect(meta()).toHaveTextContent("Whooper review · acme/widgets#101 · approve once CI passes"));
-    expect(meta()!.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
-  });
-});
-
-describe("triage", () => {
-  const docker = { id: "docker", summary: "Docker isn't running", scope: "all" };
-  const notice = () => document.querySelector<HTMLElement>(".app-notice");
-  /** Whooper with reviews to approve, to look at, failed, removed, and waiting on Docker; skip and remove succeed. */
-  function triageApi() {
-    const reviews = [
-      ...fixtureReviews(),
-      { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", safe_to_approve: false, findings: 1, started_at: "2026-11-26T12:00:00Z", ended_at: "2026-11-26T12:20:00Z" },
-      { ...fixtureReviews()[0]!, run_id: "removed-8", pr: 8, title: "keep focus in the date picker", removed_by_user: true, needs_you: false, started_at: "2026-11-26T10:00:00Z", ended_at: "2026-11-26T10:20:00Z" },
-      { ...fixtureReviews()[1]!, run_id: "waiting-60", repo: "acme/gadgets", pr: 60, title: "speed up the gadget index", outcome: "waiting", cause: docker },
-      { ...fixtureReviews()[1]!, run_id: "waiting-61", repo: "acme/gadgets", pr: 61, title: "drop the legacy upload path", outcome: "waiting", cause: docker },
-    ];
-    const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
-      switch (sent.action) {
-        case "status": return actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T23:45:00Z", { reviews })) });
-        case "show-review": return actionResult({ stdout: JSON.stringify(fixtureShown(sent.args[0]!)) });
-        case "skip": case "remove": return actionResult({ stdout: `${sent.action} ${sent.args.join(" ")}\n` });
-        default: return actionResult({ stdout: JSON.stringify(fixtureSettings) });
-      }
-    });
-    const plugin = fixturePlugin({ actions: [...pageActions,
-      { name: "skip", title: "Skip a review", description: "Marks a review done without submitting it.", confirm: false },
-      { name: "remove", title: "Remove a review", description: "Takes a review out of the lists; its files stay.", confirm: false }] });
-    return { pluginRequest, api: createApi({ listPlugins: vi.fn(async () => [plugin]), pluginRequest }) };
-  }
-  const calls = (pluginRequest: ReturnType<typeof triageApi>["pluginRequest"], action: string) => pluginRequest.mock.calls.filter(([sent]) => sent.action === action).map(([sent]) => sent.args);
-
-  it("opens the next item in Needs you after Skip and names it, and Undo brings the review back", async () => {
-    const { api, pluginRequest } = triageApi();
-    renderApp(api);
-    click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
-    await settle();
-    const reveal = vi.mocked(Element.prototype.scrollIntoView);
-    reveal.mockClear();
-    click(screen.getByRole("button", { name: "Skip" }));
-    await waitFor(() => expect(notice()).toHaveTextContent("Skipped widgets#101 · now showing widgets#103"));
-    expect(calls(pluginRequest, "skip")).toEqual([["20261126T150000Z-101"]]);
-    expect(screen.getByRole("heading", { level: 1, name: "cap the upload retry delay" })).toBeInTheDocument();
-    // The next item's row scrolls into view if its section shows it lower down.
-    await settle();
-    expect(reveal.mock.contexts).toContain(screen.getByRole("treeitem", { name: /^cap the upload retry delay/ }));
-
-    click(within(notice()!).getByRole("button", { name: "Undo" }));
-    await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "separate cache configuration" })).toBeInTheDocument());
-    expect(calls(pluginRequest, "skip")).toEqual([["20261126T150000Z-101"], ["20261126T150000Z-101", "--undo"]]);
-    expect(notice()).toBeNull();
-  });
-
-  it("removes a review from its row with Undo, and from the open review's header, which opens the next item", async () => {
-    const { api, pluginRequest } = triageApi();
-    renderApp(api);
-    click(await screen.findByRole("button", { name: "Remove widgets#103" }));
-    await waitFor(() => expect(notice()).toHaveTextContent("Removed widgets#103"));
-    expect(screen.getByRole("heading", { level: 1, name: "Auth refactor" })).toBeInTheDocument();
-    click(within(notice()!).getByRole("button", { name: "Undo" }));
-    await waitFor(() => expect(calls(pluginRequest, "remove")).toEqual([["look-103"], ["look-103", "--undo"]]));
-
-    click(screen.getByRole("treeitem", { name: /^separate cache configuration/ }));
-    await settle();
-    click(screen.getByRole("button", { name: "Remove" }));
-    await waitFor(() => expect(notice()).toHaveTextContent("Removed widgets#101 · now showing widgets#103"));
-    expect(calls(pluginRequest, "remove").at(-1)).toEqual(["20261126T150000Z-101"]);
-    expect(screen.getByRole("heading", { level: 1, name: "cap the upload retry delay" })).toBeInTheDocument();
-  });
-
-  it("restores a removed review, which search finds, from its page", async () => {
-    const { api, pluginRequest } = triageApi();
-    renderApp(api);
-    await screen.findByRole("treeitem", { name: /^separate cache configuration/ });
-    expect(screen.queryByRole("treeitem", { name: /keep focus in the date picker/ })).not.toBeInTheDocument();
-    const search = screen.getByRole("searchbox", { name: "Search PRs and chats" });
-    fireEvent.input(search, { target: { value: "keep focus" } });
-    flush();
-    fireEvent.keyDown(search, { key: "Enter" });
-    flush();
-    await settle();
-    const banner = screen.getByText(/its files stay on disk, and search still finds it/).closest<HTMLElement>("[role=note]")!;
-    expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
-    click(within(banner).getByRole("button", { name: "Restore" }));
-    await waitFor(() => expect(notice()).toHaveTextContent("Restored widgets#8 to your lists."));
-    expect(calls(pluginRequest, "remove")).toEqual([["removed-8", "--undo"]]);
-  });
-
-  it("asks before Remove all on a cause's screen, says the files stay and Whooper won't retry them, and removes each with Undo", async () => {
-    const { api, pluginRequest } = triageApi();
-    renderApp(api);
-    click(await screen.findByRole("button", { name: "Waiting · Docker isn't running 2" }));
-    click(screen.getByRole("treeitem", { name: /^Docker isn't running, Blocks every review.*, 2 reviews waiting$/ }));
-    await settle();
-    click(screen.getByRole("button", { name: "Remove all" }));
-    const dialog = await screen.findByRole("alertdialog", { name: "Remove 2 reviews?" });
-    expect(dialog).toHaveTextContent("Whooper won't retry them");
-    expect(dialog).toHaveTextContent("files stay on disk");
-    expect(calls(pluginRequest, "remove")).toEqual([]);
-    click(within(dialog).getByRole("button", { name: "Remove 2 reviews" }));
-    await waitFor(() => expect(notice()).toHaveTextContent("Removed 2 reviews. Their files stay on disk."));
-    expect(calls(pluginRequest, "remove")).toEqual([["waiting-60"], ["waiting-61"]]);
-    click(within(notice()!).getByRole("button", { name: "Undo" }));
-    await waitFor(() => expect(calls(pluginRequest, "remove")).toHaveLength(4));
-    expect(calls(pluginRequest, "remove").slice(2)).toEqual([["waiting-60", "--undo"], ["waiting-61", "--undo"]]);
-  });
-});
-
 describe("command palette", () => {
   async function openWorkspace(items = [
     createdConversation({ id: "a", title: "Alpha", projectRoot: "/projects/compiler" }),
@@ -981,7 +710,7 @@ describe("command palette", () => {
     await screen.findByRole("treeitem", { name: /Alpha/ });
     return view;
   }
-  const combobox = () => screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
+  const combobox = () => screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
 
   it("opens with ⌘K, searches conversations by project path, and opens the chosen one", async () => {
     const { store } = await openWorkspace();
@@ -994,7 +723,7 @@ describe("command palette", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     flush();
     await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("b"));
-    expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument();
   });
 
   it("toggles closed with Ctrl+K and ignores composition and held keys", async () => {
@@ -1002,11 +731,11 @@ describe("command palette", () => {
     press("k", { isComposing: true });
     press("k", { repeat: true });
     await settle();
-    expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument();
     press("k", { metaKey: false, ctrlKey: true });
     await combobox();
     press("k", { metaKey: false, ctrlKey: true });
-    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument());
   });
 
   it("runs layout commands after closing and names disabled ones", async () => {
@@ -1027,7 +756,7 @@ describe("command palette", () => {
     renderApp(createApi({ listConversations: vi.fn(() => new Promise<{ items: ConversationSummary[]; nextCursor: null }>((resolve) => { finish = resolve; })) }));
     press("k");
     await settle();
-    expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument();
     finish({ items: [createdConversation({ id: "a", title: "Alpha" })], nextCursor: null });
     await screen.findByRole("treeitem", { name: /Alpha/ });
     press("k");
@@ -1154,7 +883,7 @@ describe("App", () => {
     expect(screen.getByRole("main", { name: "Conversation workspace" })).toHaveAttribute("inert");
     press("k");
     await settle();
-    expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("complementary", { name: "Inspector" }), { key: "Tab", shiftKey: true });
     expect(document.activeElement).not.toBe(trigger);
     fireEvent.keyDown(screen.getByRole("complementary", { name: "Inspector" }), { key: "Escape" });
@@ -1297,7 +1026,7 @@ describe("composer and drafts", () => {
     expect(document.querySelector(".app-shell")).not.toContainElement(dialog);
     press("k");
     await settle();
-    expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument();
     click(within(dialog).getByRole("button", { name: "Keep Codex running" }));
     await waitFor(() => expect(document.querySelector(".app-shell")).not.toHaveAttribute("inert"));
     await waitFor(() => expect(provider).toHaveFocus());
@@ -1617,7 +1346,7 @@ describe("palette and the composer", () => {
   }
   async function openPalette() {
     click(screen.getByRole("button", { name: "Search (⌘K)" }));
-    return screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
+    return screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
   }
   const choose = (search: HTMLElement, text: string) => {
     fireEvent.input(search, { target: { value: text } });
@@ -1634,7 +1363,7 @@ describe("palette and the composer", () => {
     message.focus();
     message.setSelectionRange(4, 9);
     press("k");
-    const search = await screen.findByRole("combobox", { name: "Search conversations, reviews, and commands" });
+    const search = await screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
     await waitFor(() => expect(search).toHaveFocus());
     fireEvent.keyDown(search, { key: "Escape" });
     await waitFor(() => expect(message).toHaveFocus());
@@ -1669,10 +1398,10 @@ describe("palette and the composer", () => {
     choose(await openPalette(), "New chat");
     const dialog = await screen.findByRole("dialog", { name: "New chat" });
     await waitFor(() => expect(within(dialog).getByRole("button", { name: /^compiler/ })).toHaveFocus());
-    expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument();
     press("k");
     await settle();
-    expect(screen.queryByRole("combobox", { name: "Search conversations, reviews, and commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Search conversations, work, and commands" })).not.toBeInTheDocument();
     click(within(dialog).getByRole("button", { name: /^No folder/ }));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
   });

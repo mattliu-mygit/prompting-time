@@ -2,26 +2,26 @@ import type { MenuItem } from "@prompting-time/ui";
 import type { PluginStatusRead } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
 import { ACTIONS, hasAction } from "./actions";
-import { newestRuns, readReviews, type ReviewEntry } from "./reviews";
-import { missingPrograms, readAgentStatus } from "./status";
+import { missingPrograms } from "./status";
+import { readStatusV2, type StatusV2Item } from "./statusV2";
 
 /** What a background agent's row menu and screen can do: run its round, pause or resume it, stop or start it, or show a tab. */
 export type AgentAction = "poll" | "pause" | "resume" | "stop" | "start" | "settings" | "logs";
-export type AgentTab = "runs" | "logs" | "settings";
+export type AgentTab = "logs" | "settings";
 
 export type Control = { action: AgentAction; label: string; disabled: boolean };
 
 /**
- * The agent's controls as they stand: Poll now (its round action) while it runs and no round does;
- * Pause or Resume (its pause and resume actions) while it runs; Stop for the copy Prompting Time
- * started, else Start once nothing keeps it from starting. `pending` is the control that runs now,
- * which disables the others. A control the plugin has no action for is null.
+ * The agent's controls as they stand: Poll now (its round action) while it runs and Poll now isn't
+ * already running; Pause or Resume (its pause and resume actions) while it runs, Resume while its
+ * status format 2 says `paused`; Stop for the copy Prompting Time started, else Start once nothing
+ * keeps it from starting. `pending` is the control that runs now, which disables the others. A
+ * control the plugin has no action for is null.
  */
 export function agentControls(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null) {
-  const status = readAgentStatus(read);
   const running = plugin.process.kind !== "notRunning";
-  const polling = pending === "poll" || status?.round.running === true;
-  const paused = status?.paused === true;
+  const polling = pending === "poll";
+  const paused = readStatusV2(plugin, read)?.paused === true;
   const poll: Control | null = hasAction(plugin, ACTIONS.round)
     ? { action: "poll", label: polling ? "Polling…" : "Poll now", disabled: !running || polling || pending !== null }
     : null;
@@ -56,7 +56,7 @@ export function agentMenuItems(plugin: PluginSnapshot, read: PluginStatusRead | 
   ];
 }
 
-/** The reviews that run now, which stopping the agent ends. */
-export function reviewsInProgress(read: PluginStatusRead | undefined): ReviewEntry[] {
-  return newestRuns(readReviews(read?.value)).filter((review) => review.outcome === "running");
+/** The items whose status format 2 dot says they run now, which stopping the agent may end. */
+export function itemsInProgress(plugin: PluginSnapshot, read: PluginStatusRead | undefined): StatusV2Item[] {
+  return readStatusV2(plugin, read)?.items.filter((item) => item.dot === "running") ?? [];
 }

@@ -1,6 +1,6 @@
 //! The menu bar extra: Prompting Time's icon on the right of the macOS menu bar. Its menu lists each
 //! background agent with its status, its Pause or Resume (Start while it is stopped) and Poll now,
-//! how many reviews need you, Open Prompting Time, and Quit. The window sends what its sidebar shows
+//! how many items need you, Open Prompting Time, and Quit. The window sends what its sidebar shows
 //! (`UpdateMenuBarRequest`), so the menu reads the same plugin status in the same words. A choice
 //! that acts on an agent or opens a screen goes back to the window as a `MenuBarCommand`, which the
 //! window runs as the sidebar would.
@@ -121,8 +121,8 @@ enum Choice {
 }
 
 /// The menu for `request`. For each agent: its title, which opens its screen; its status words,
-/// which open the screen of a cause that blocks every review and are inert otherwise; and its row's
-/// buttons. Then how many reviews need you, which opens the first; then Open Prompting Time and Quit.
+/// which are inert; and its row's buttons. Then how many items need you, which opens the first;
+/// then Open Prompting Time and Quit.
 fn lines(request: &UpdateMenuBarRequest) -> Vec<Line> {
     let item = |id: String, text: &str, enabled: bool| Line::Item {
         id,
@@ -138,17 +138,11 @@ fn lines(request: &UpdateMenuBarRequest) -> Vec<Line> {
             &agent.title,
             true,
         ));
-        lines.push(match &agent.cause {
-            Some(cause) => item(
-                command_id(&MenuBarCommand::OpenCause {
-                    plugin: agent.plugin.clone(),
-                    cause: cause.clone(),
-                }),
-                &agent.status,
-                true,
-            ),
-            None => item(format!("status:{}", agent.plugin), &agent.status, false),
-        });
+        lines.push(item(
+            format!("status:{}", agent.plugin),
+            &agent.status,
+            false,
+        ));
         for control in &agent.controls {
             lines.push(item(
                 command_id(&MenuBarCommand::Agent {
@@ -161,15 +155,15 @@ fn lines(request: &UpdateMenuBarRequest) -> Vec<Line> {
         }
         lines.push(Line::Separator);
     }
-    let reviews = match request.reviews_needing_you {
-        0 => "No reviews need you".to_owned(),
-        1 => "1 review needs you".to_owned(),
-        count => format!("{count} reviews need you"),
+    let needs_you = match request.needs_you {
+        0 => "Nothing needs you".to_owned(),
+        1 => "1 item needs you".to_owned(),
+        count => format!("{count} items need you"),
     };
     lines.push(item(
         command_id(&MenuBarCommand::OpenNeedsYou),
-        &reviews,
-        request.reviews_needing_you > 0,
+        &needs_you,
+        request.needs_you > 0,
     ));
     lines.push(Line::Separator);
     lines.push(item(OPEN_ID.to_owned(), "Open Prompting Time", true));
@@ -264,7 +258,6 @@ mod tests {
             plugin: "whooper".to_owned(),
             title: "Whooper".to_owned(),
             status: status.to_owned(),
-            cause: None,
             alert: false,
             controls: vec![
                 control(MenuBarAction::Pause, "Pause", true),
@@ -273,11 +266,11 @@ mod tests {
         }
     }
 
-    fn request(agents: Vec<MenuBarAgent>, reviews_needing_you: u32) -> UpdateMenuBarRequest {
+    fn request(agents: Vec<MenuBarAgent>, needs_you: u32) -> UpdateMenuBarRequest {
         UpdateMenuBarRequest {
             visible: true,
             agents,
-            reviews_needing_you,
+            needs_you,
         }
     }
 
@@ -305,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_lists_each_agent_with_its_status_and_buttons_then_the_reviews_open_and_quit() {
+    fn the_menu_lists_each_agent_with_its_status_and_buttons_then_what_needs_you_open_and_quit() {
         let lines = lines(&request(vec![agent("Running · next poll 3:45 PM")], 3));
         assert_eq!(
             texts(&lines),
@@ -315,7 +308,7 @@ mod tests {
                 "Pause",
                 "Poll now",
                 "-",
-                "3 reviews need you",
+                "3 items need you",
                 "-",
                 "Open Prompting Time",
                 "Quit Prompting Time",
@@ -342,7 +335,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            choice_of(&lines, "3 reviews need you"),
+            choice_of(&lines, "3 items need you"),
             Some(Choice::Window(MenuBarCommand::OpenNeedsYou))
         );
         assert_eq!(choice_of(&lines, "Open Prompting Time"), Some(Choice::Open));
@@ -350,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn the_buttons_follow_the_row_and_the_review_count_reads_as_a_sentence() {
+    fn the_buttons_follow_the_row_and_the_count_reads_as_a_sentence() {
         let paused = MenuBarAgent {
             controls: vec![
                 control(MenuBarAction::Resume, "Resume", true),
@@ -384,7 +377,7 @@ mod tests {
                 "Resume",
                 "Poll now",
                 "-",
-                "1 review needs you"
+                "1 item needs you"
             ]
         );
         assert_eq!(
@@ -395,7 +388,7 @@ mod tests {
                 "Pause (off)",
                 "Polling… (off)",
                 "-",
-                "No reviews need you (off)"
+                "Nothing needs you (off)"
             ]
         );
         assert_eq!(
@@ -409,24 +402,18 @@ mod tests {
     }
 
     #[test]
-    fn a_blocking_cause_opens_its_screen_and_marks_the_icon() {
+    fn an_agent_in_trouble_marks_the_icon() {
         let blocked = MenuBarAgent {
             status: "Can't review · Docker & gh aren't ready".to_owned(),
-            cause: Some("docker:setup".to_owned()),
             alert: true,
             ..agent("")
         };
         let request = request(vec![blocked.clone()], 0);
         let lines = lines(&request);
         // AppKit shows "&&" as one "&".
-        let status = "Can't review · Docker && gh aren't ready";
-        assert_eq!(texts(&lines)[1], status);
         assert_eq!(
-            choice_of(&lines, status),
-            Some(Choice::Window(MenuBarCommand::OpenCause {
-                plugin: "whooper".to_owned(),
-                cause: "docker:setup".to_owned(),
-            }))
+            texts(&lines)[1],
+            "Can't review · Docker && gh aren't ready (off)"
         );
         assert!(alert(&request));
         // One agent in trouble is enough for the dot.
@@ -517,27 +504,19 @@ mod tests {
             serde_json::json!({ "kind": "agent", "plugin": "whooper", "action": "poll" })
         );
         assert_eq!(
-            serde_json::to_value(MenuBarCommand::OpenCause {
-                plugin: "whooper".to_owned(),
-                cause: "docker".to_owned(),
-            })
-            .unwrap(),
-            serde_json::json!({ "kind": "openCause", "plugin": "whooper", "cause": "docker" })
-        );
-        assert_eq!(
             serde_json::to_value(MenuBarCommand::OpenNeedsYou).unwrap(),
             serde_json::json!({ "kind": "openNeedsYou" })
         );
         let request: UpdateMenuBarRequest = serde_json::from_value(serde_json::json!({
             "visible": true,
-            "reviewsNeedingYou": 2,
+            "needsYou": 2,
             "agents": [{
-                "plugin": "whooper", "title": "Whooper", "status": "Paused", "cause": null, "alert": false,
+                "plugin": "whooper", "title": "Whooper", "status": "Paused", "alert": false,
                 "controls": [{ "action": "resume", "label": "Resume", "enabled": true }],
             }],
         }))
         .unwrap();
-        assert_eq!(request.reviews_needing_you, 2);
+        assert_eq!(request.needs_you, 2);
         assert_eq!(request.agents[0].controls[0].action, MenuBarAction::Resume);
     }
 

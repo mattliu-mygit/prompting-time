@@ -1,13 +1,13 @@
 import type { PluginActions } from "../../app/store";
 import type { PluginActionResult, PluginSnapshot } from "../../bridge/types";
-import { PROTOCOL_VERSION_2, readPageMessageV2, type HostMessageV2, type HostUpdateV2 } from "./protocol";
+import { PROTOCOL_VERSION, readPageMessage, type HostMessage, type HostUpdate } from "./protocol";
 
 export type PageHostOptions = {
   /** The plugin's latest snapshot: its title and declared actions, each with its confirm flag. */
   plugin(): PluginSnapshot;
   actions: PluginActions;
   /** Sends a message to the page's frame. */
-  post(message: HostMessageV2): void;
+  post(message: HostMessage): void;
   /** Runs a confirm action after the user's confirmation: the run for real, or null when cancelled. */
   confirm(action: string, args: readonly string[]): Promise<PluginActionResult | null>;
 };
@@ -40,8 +40,8 @@ export function createPageHost(options: PageHostOptions): PageHost {
   let disposed = false;
   let route: string | null = null;
 
-  function post(update: HostUpdateV2) {
-    if (!disposed) options.post({ ...update, version: PROTOCOL_VERSION_2 });
+  function post(update: HostUpdate) {
+    if (!disposed) options.post({ ...update, version: PROTOCOL_VERSION });
   }
 
   async function call(name: string, args: string[]): Promise<unknown> {
@@ -68,7 +68,7 @@ export function createPageHost(options: PageHostOptions): PageHost {
 
   return {
     receive(data) {
-      const message = readPageMessageV2(data);
+      const message = readPageMessage(data);
       if (!message || disposed) return;
       if (message.type === "ready") {
         // A page that loads again starts at its own start, so it hears the open route again.

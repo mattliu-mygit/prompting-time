@@ -687,7 +687,7 @@ describe("app store", () => {
 
   it("lists plugins and reads the status of each one that can run it, stopped or not", async () => {
     const fake = createFakeApi();
-    const status = fixtureStatus("2026-11-26T15:45:00-05:00");
+    const status = fixtureStatus();
     fake.api.listPlugins = vi.fn().mockResolvedValue([
       fixturePlugin(),
       fixturePlugin({ name: "stopped-agent", process: { kind: "notRunning", exit: null } }),
@@ -709,7 +709,7 @@ describe("app store", () => {
     const fake = createFakeApi();
     const stopped = fixturePlugin({ process: { kind: "notRunning", exit: null } });
     fake.api.listPlugins = vi.fn().mockResolvedValue([fixturePlugin()]);
-    fake.api.pluginRequest = vi.fn().mockResolvedValue(actionResult({ stdout: JSON.stringify(fixtureStatus("2026-11-26T15:45:00-05:00")) }));
+    fake.api.pluginRequest = vi.fn().mockResolvedValue(actionResult({ stdout: JSON.stringify(fixtureStatus()) }));
     fake.api.stopPlugin = vi.fn().mockResolvedValue(stopped);
     fake.api.startPlugin = vi.fn().mockResolvedValue(fixturePlugin({ process: { kind: "started", pid: 77 } }));
     const store = createAppStore(fake.api);
