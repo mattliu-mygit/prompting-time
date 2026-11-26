@@ -330,8 +330,7 @@ body {
 
 .truncation-note,
 .empty-note,
-.activity-fragment-note,
-.approval-note {
+.activity-fragment-note {
   margin: 0;
   color: var(--s-text-muted);
   font-size: var(--s-size-xs);
@@ -462,26 +461,224 @@ body {
   font-weight: var(--s-weight-semibold);
 }
 
-.approval-summary {
+.approval-card {
   display: grid;
-  gap: var(--s-space-4);
+  gap: var(--s-space-8);
   padding: var(--s-card-padding-sm);
   border: var(--s-card-border);
   border-radius: var(--s-card-radius);
   background: var(--s-surface);
 }
 
-.approval-summary header,
+.approval-card header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-space-4) var(--s-space-8);
+}
+
+.approval-card h4 {
+  flex: 1;
+  min-inline-size: 0;
+  margin: 0;
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-semibold);
+}
+
+.approval-provider,
 .approval-scope,
-.approval-state {
+.approval-meta dt {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.approval-meta {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+}
+
+.approval-meta div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-space-8);
+}
+
+.approval-meta dd {
+  margin: 0;
+  font-size: var(--s-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.operation-detail {
+  display: grid;
+  gap: var(--s-space-4);
+  font-size: var(--s-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.operation-detail :is(p, ul) {
+  margin: 0;
+}
+
+.operation-detail code {
+  font-family: var(--s-code-font-family);
+  white-space: pre-wrap;
+}
+
+.approval-question {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+  padding: var(--s-space-8);
+  border: var(--s-card-border);
+  border-radius: var(--s-radius-md);
+}
+
+.approval-question legend {
+  font-weight: var(--s-weight-semibold);
+}
+
+.approval-question p {
+  margin: 0;
+}
+
+.approval-question label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.approval-actions,
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s-space-8);
+}
+
+.approval-card [role="status"] {
   margin: 0;
   color: var(--s-text-muted);
   font-size: var(--s-size-xs);
 }
 
-.approval-operation {
-  margin: 0;
+/* Composer */
+.composer {
+  display: grid;
+  gap: var(--s-space-8);
+  inline-size: 100%;
+  max-inline-size: 48rem;
+  margin: 0 auto;
+  padding: var(--s-space-8) var(--s-space-12) var(--s-space-12);
+}
+
+.message-field[hidden] {
+  display: none;
+}
+
+.message-field .pt-textarea,
+.composer-preview {
+  font-size: var(--s-size-lg);
+}
+
+.composer-preview {
+  max-block-size: 30vh;
+  overflow: auto;
+  padding: var(--s-space-8);
+  border: var(--s-card-border);
+  border-radius: var(--s-radius-input);
+}
+
+.composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.composer-actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.composer-actions select {
+  block-size: var(--s-control-height-sm);
+  padding: 0 var(--s-space-4);
+  border: var(--s-input-border-width) var(--s-border-style) var(--s-border-strong);
+  border-radius: var(--s-radius-input);
+  background: var(--s-background);
+  color: var(--s-text);
+  font: inherit;
   font-size: var(--s-size-sm);
+}
+
+.composer-actions .pt-button[data-variant="primary"] {
+  margin-inline-start: auto;
+}
+
+.thinking-decision,
+.composer-explanation,
+.route-note,
+.composer-shortcut {
+  margin: 0;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.thinking-decision {
+  flex-basis: 100%;
+}
+
+.composer-help-content {
+  display: grid;
+  gap: var(--s-space-4);
+}
+
+.composer-help-content[hidden] {
+  display: none;
+}
+
+/* New conversation */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--s-overlay-z-index);
+  display: grid;
+  place-items: center;
+  padding: var(--s-space-16);
+  background: var(--s-overlay-bg);
+}
+
+.lifecycle-dialog {
+  display: grid;
+  gap: var(--s-space-12);
+  inline-size: min(28rem, 100%);
+  padding: var(--s-card-padding);
+  border: var(--s-overlay-border);
+  border-radius: var(--s-radius-popover);
+  background: var(--s-overlay-surface);
+  box-shadow: var(--s-shadow-dropdown);
+}
+
+.lifecycle-dialog h2 {
+  margin: 0;
+  font-size: var(--s-size-lg);
+}
+
+.lifecycle-dialog p {
+  margin: 0;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+}
+
+.conversation-options {
+  display: grid;
+  gap: var(--s-space-12);
 }
 
 .history-window-note {

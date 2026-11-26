@@ -1,10 +1,12 @@
 import { createMemo, createSignal, onSettled, Show, untrack } from "solid-js";
-import { CloseIcon, CommandPalette, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, SearchIcon } from "@prompting-time/ui";
+import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon } from "@prompting-time/ui";
 import type { ProviderId } from "../bridge/types";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { Inspector } from "../features/inspector/Inspector";
+import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
 import { AllWork, waitingRoots } from "../features/work/AllWork";
+import { NewConversationDialog } from "./NewConversationDialog";
 import { createSnapshot, effectiveConversationStatus, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
 
 const statusOptions: Array<{ value: StatusFilter; label: string }> = [
@@ -22,9 +24,8 @@ const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Cla
 const NARROW_INSPECTOR = "(max-width: 72rem)";
 
 /**
- * The command center: the All work list, the selected conversation's timeline, and the inspector.
- * This first Solid version only reads: it shows conversations and their activity but cannot send,
- * answer requests, create, or archive.
+ * The command center: the All work list, the selected conversation's timeline and composer, and the
+ * inspector, with the dialogs that create and archive conversations.
  */
 export function App(props: { store: AppStore }) {
   // One store for the app's lifetime. Read once: a prop written as a call, such as
@@ -36,7 +37,14 @@ export function App(props: { store: AppStore }) {
   const [inspectorOpen, setInspectorOpen] = createSignal(false);
   const [narrow, setNarrow] = createSignal(typeof window.matchMedia === "function" && window.matchMedia(NARROW_INSPECTOR).matches);
   const [paletteOpen, setPaletteOpen] = createSignal(false);
+  const [creating, setCreating] = createSignal(false);
+  const [archiveTarget, setArchiveTarget] = createSignal<string | null>(null);
+  const [archiving, setArchiving] = createSignal(false);
+  const [lifecycleError, setLifecycleError] = createSignal<string | null>(null);
+  const [composerModalOpen, setComposerModalOpen] = createSignal(false);
+  const [messageFocusRequested, setMessageFocusRequested] = createSignal(false);
   let inspectorTrigger: HTMLButtonElement | undefined;
+  let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
 
   const selected = createMemo(() => {
@@ -49,7 +57,8 @@ export function App(props: { store: AppStore }) {
     return parentId ? snapshot().conversationsById[parentId] : undefined;
   };
   const overlay = () => narrow() && inspectorOpen();
-  const paletteAvailable = () => snapshot().phase === "ready" && !overlay();
+  const lifecycleModalOpen = () => creating() || archiveTarget() !== null;
+  const paletteAvailable = () => snapshot().phase === "ready" && !overlay() && !lifecycleModalOpen() && !composerModalOpen();
   const waiting = () => waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []));
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
 
@@ -65,6 +74,32 @@ export function App(props: { store: AppStore }) {
     const index = roots.findIndex(({ id }) => id === selectedId());
     const next = roots[(index + 1) % roots.length]!;
     if (next.id !== selectedId()) selectConversation(next.id);
+  }
+
+  function openNewConversation() {
+    setLifecycleError(null);
+    setCreating(true);
+  }
+
+  /** After creating: close a narrow inspector overlay, which would hold focus, and focus the composer. */
+  function focusCreatedComposer() {
+    if (narrow() && inspectorOpen()) setInspectorOpen(false);
+    setMessageFocusRequested(true);
+  }
+
+  async function confirmArchive() {
+    const target = archiveTarget();
+    if (!target || archiving()) return;
+    setArchiving(true);
+    try {
+      await store.archiveConversation(target);
+      setArchiveTarget(null);
+      queueMicrotask(() => newConversationTrigger?.focus());
+    } catch (reason) {
+      setLifecycleError(reason instanceof Error ? reason.message : "Prompting Time could not archive the conversation.");
+    } finally {
+      setArchiving(false);
+    }
   }
 
   function closeInspector() {
@@ -118,16 +153,21 @@ export function App(props: { store: AppStore }) {
     }
   }
 
-  const searchButton = () => (
-    <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
-      <SearchIcon />
-    </IconButton>
+  const conversationActions = () => (
+    <>
+      <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
+        <SearchIcon />
+      </IconButton>
+      <IconButton ref={newConversationTrigger} label="New conversation" onClick={openNewConversation}>
+        <PlusIcon />
+      </IconButton>
+    </>
   );
 
   return (
     <Show when={snapshot().phase === "ready"} fallback={<StartupState store={store} snapshot={snapshot()} />}>
-      <div class="app-shell">
-        <header class="app-toolbar" inert={overlay()}>
+      <div class="app-shell" inert={composerModalOpen()}>
+        <header class="app-toolbar" inert={overlay() || lifecycleModalOpen()}>
           <IconButton
             label={sidebarOpen() ? "Hide All work" : "Show All work"}
             aria-expanded={sidebarOpen() ? "true" : "false"}
@@ -148,7 +188,7 @@ export function App(props: { store: AppStore }) {
             </Show>
           </div>
           <div class="toolbar-actions">
-            <Show when={!sidebarOpen()}>{searchButton()}</Show>
+            <Show when={!sidebarOpen()}>{conversationActions()}</Show>
             <IconButton
               ref={inspectorTrigger}
               label={inspectorOpen() ? "Hide inspector" : "Show inspector"}
@@ -158,20 +198,31 @@ export function App(props: { store: AppStore }) {
             >
               <PanelRightIcon />
             </IconButton>
+            <Show when={selected()?.capabilities.canArchive}>
+              <Menu
+                label="More"
+                icon={<EllipsisIcon />}
+                items={[{ value: "archive", label: "Archive conversation" }]}
+                onSelect={() => {
+                  setLifecycleError(null);
+                  setArchiveTarget(selectedId());
+                }}
+              />
+            </Show>
           </div>
         </header>
 
-        <div class="command-center">
+        <div class="command-center" inert={lifecycleModalOpen()}>
           <Show when={sidebarOpen()}>
             <aside id="work-pane" class="sidebar-pane" aria-label="All work" inert={overlay()}>
               <div class="sidebar-toolbar">
                 <h2>All work</h2>
                 <div class="toolbar-actions">
-                  {searchButton()}
+                  {conversationActions()}
                   <Menu
                     label={filterLabel()}
                     icon={<FilterIcon />}
-                    items={statusOptions.map((option) => ({ value: option.value, label: option.value === snapshot().statusFilter ? `${option.label} (shown)` : option.label }))}
+                    items={statusOptions.map((option) => ({ ...option, type: "radio" as const, checked: option.value === snapshot().statusFilter }))}
                     onSelect={(value) => store.setStatusFilter(value as StatusFilter)}
                   />
                 </div>
@@ -214,6 +265,21 @@ export function App(props: { store: AppStore }) {
                     }}
                   />
                   <SelectedTimeline store={store} snapshot={snapshot} conversationId={id} views={timelineViews} />
+                  <Show when={snapshot().conversationsById[id]}>
+                    {(conversation) => (
+                      <Composer
+                        conversation={conversation()}
+                        providers={snapshot().bootstrap?.providers ?? []}
+                        routingProfile={conversation().routingProfile}
+                        actions={store.actions}
+                        store={store}
+                        onMutation={() => store.refreshConversation(id)}
+                        onModalChange={setComposerModalOpen}
+                        focusRequested={messageFocusRequested()}
+                        onFocusHandled={() => setMessageFocusRequested(false)}
+                      />
+                    )}
+                  </Show>
                 </>
               )}
             </Show>
@@ -249,6 +315,34 @@ export function App(props: { store: AppStore }) {
           </Show>
         </div>
         <Show when={snapshot().error}><p role="alert" class="inline-error lifecycle-error">{snapshot().error}</p></Show>
+        <Show when={lifecycleError() && !creating() && !archiveTarget()}><p role="alert" class="inline-error lifecycle-error">{lifecycleError()}</p></Show>
+        <Show when={creating()}>
+          <NewConversationDialog
+            pickProjectDirectory={() => store.pickProjectDirectory()}
+            inspectProject={(path) => store.inspectProject(path)}
+            onCancel={() => {
+              setCreating(false);
+              queueMicrotask(() => newConversationTrigger?.focus());
+            }}
+            onCreate={(request) => store.createConversation(request)}
+            onCreated={() => {
+              setCreating(false);
+              focusCreatedComposer();
+            }}
+          />
+        </Show>
+        <ConfirmDialog
+          open={archiveTarget() !== null && archiveTarget() === selectedId()}
+          busy={archiving()}
+          title={`Archive ${selected()?.title ?? "conversation"}`}
+          cancelLabel="Keep conversation"
+          confirmLabel="Confirm archive"
+          onConfirm={() => void confirmArchive()}
+          onCancel={() => setArchiveTarget(null)}
+        >
+          <p>This removes the conversation from All work. Its durable history is retained.</p>
+          <Show when={lifecycleError()}><p role="alert" class="inline-error">{lifecycleError()}</p></Show>
+        </ConfirmDialog>
         <CommandPalette
           open={paletteOpen()}
           label="Search conversations and commands"
@@ -271,16 +365,27 @@ export function App(props: { store: AppStore }) {
             {
               heading: "Commands",
               items: [
+                { id: "command:new", label: "New conversation" },
                 { id: "command:next-waiting", label: "Next item waiting on you (⌘J)", disabled: waiting().length === 0 },
                 { id: "command:parent", label: "Go to parent conversation", disabled: !parent() },
                 { id: "command:sidebar", label: sidebarOpen() ? "Hide All work" : "Show All work" },
                 { id: "command:inspector", label: inspectorOpen() ? "Hide inspector" : "Show inspector" },
+                {
+                  id: "command:message",
+                  label: "Focus message",
+                  disabled: !selected()?.capabilities.canSend || snapshot().submissionsById[selectedId() ?? ""]?.pending === true,
+                },
               ],
             },
           ]}
           onClose={() => setPaletteOpen(false)}
           onSelect={(id) => {
-            if (id.startsWith("conversation:")) selectConversation(id.slice("conversation:".length));
+            if (id.startsWith("conversation:")) {
+              const conversationId = id.slice("conversation:".length);
+              selectConversation(conversationId);
+              if (snapshot().conversationsById[conversationId]?.capabilities.canSend) setMessageFocusRequested(true);
+            } else if (id === "command:new") openNewConversation();
+            else if (id === "command:message") setMessageFocusRequested(true);
             else if (id === "command:next-waiting") jumpToNextWaiting();
             else if (id === "command:parent") {
               const target = parent();
