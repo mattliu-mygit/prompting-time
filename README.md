@@ -232,6 +232,14 @@ checks, starts, and stops them, and the window shows them.
   its own, which lists them, newest first, with how each ended or what you submitted. Opening a
   review shows it in the plugin's page; a past one shows its diff, its findings, its drafts as
   submitted, and what was submitted.
+- **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
+  lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
+  `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a
+  line saying it recorded none), and earlier questions with their answers (`asks`). Retry runs
+  `retry <run>`, which queues the pull request for the plugin's next round, shows what it printed,
+  and then offers Run now, which runs `round`. Ask why runs `ask <run> <question>` and adds the
+  answer. A failure shows the plugin's own words. The screen runs only actions that need no
+  confirmation.
 
 ## Develop and verify
 

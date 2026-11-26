@@ -1,13 +1,14 @@
 import type { PluginAction, PluginActionRequest, PluginActionResult } from "../../src/bridge/types";
 
-// `?agents=reviews`: the invented Whooper lists reviews in its status, and its page's actions
-// (show-review, draft, ask, submit) answer in browser memory the way Whooper's commands would.
-// Every repo, person, and line of code is made up.
+// `?agents=reviews`: the invented Whooper lists reviews in its status, and the actions its page and
+// the failed-review screen run (show-review, draft, ask, submit, retry, and round) answer in browser
+// memory the way Whooper's commands would. Every repo, person, and line of code is made up.
 
 export const reviewActions: PluginAction[] = [
   { name: "show-review", title: "Show a review", description: "Prints one review as JSON. Reads files only.", confirm: false },
   { name: "draft", title: "Change a draft", description: "Includes or leaves out a comment, edits its text, or sets the review's event or message.", confirm: false },
-  { name: "ask", title: "Ask about this", description: "Answers a question about a review from its record, and writes nothing else.", confirm: false },
+  { name: "ask", title: "Ask about this", description: "Answers a question about a review with a run of the review's agent that reads the review's record and writes nothing else.", confirm: false },
+  { name: "retry", title: "Retry a review", description: "Queues the pull request of a failed review for the next round.", confirm: false },
 ];
 
 const at = (daysAgo: number, hours: number, minutes = 0) => {
@@ -24,14 +25,16 @@ type Entry = {
 };
 type Drafts = { event: "APPROVE" | "COMMENT"; message: string; findings: Record<string, { included: boolean; text?: string }> };
 type Finding = { id: string; path: string; line: number; side: "RIGHT"; title: string; draft: string; kind: string };
+type Ask = { question: string; finding: string | null; answer: string; agent: string; started_at: string; ended_at: string; transcript: string | null };
 
 const entries: Entry[] = [
   { run_id: "fixture-run-104", repo: "acme/widgets", pr: 104, title: "stream uploads in chunks", url: null, started_at: at(0, 15, 30), ended_at: null, outcome: "running", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: false },
   { run_id: "fixture-run-101", repo: "acme/widgets", pr: 101, title: "add a retry policy for uploads", url: null, started_at: at(0, 14, 0), ended_at: at(0, 14, 25), outcome: "reviewed", verdict: "approve_once_ci_passes", skipped: false, findings: 2, submitted: null, needs_you: true },
   { run_id: "fixture-run-103", repo: "acme/widgets", pr: 103, title: "cap the upload retry delay", url: null, started_at: at(0, 11, 0), ended_at: at(0, 11, 20), outcome: "reviewed", verdict: "look_first", skipped: false, findings: 1, submitted: null, needs_you: true },
+  { run_id: "fixture-run-61", repo: "acme/gadgets", pr: 61, title: "drop the legacy upload path", url: null, started_at: at(1, 16, 0), ended_at: at(1, 16, 1), outcome: "failed", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: true },
   { run_id: "fixture-run-88", repo: "acme/gadgets", pr: 88, title: "move the projection into the domain package", url: null, started_at: at(1, 10, 0), ended_at: at(1, 10, 30), outcome: "reviewed", verdict: "approve_once_ci_passes", skipped: false, findings: 1, submitted: { event: "APPROVE", at: at(1, 11, 5) }, needs_you: false },
   { run_id: "fixture-run-77", repo: "acme/gadgets", pr: 77, title: "add the tags package", url: null, started_at: at(2, 15, 0), ended_at: at(2, 15, 40), outcome: "reviewed", verdict: "look_first", skipped: false, findings: 1, submitted: { event: "COMMENT", at: at(2, 16, 10) }, needs_you: false },
-  { run_id: "fixture-run-55", repo: "acme/widgets", pr: 55, title: "keep only shared types in the core package", url: null, started_at: at(3, 9, 0), ended_at: at(3, 9, 1), outcome: "failed", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: false },
+  { run_id: "fixture-run-55", repo: "acme/widgets", pr: 55, title: "keep only shared types in the core package", url: null, started_at: at(3, 9, 0), ended_at: at(3, 9, 1), outcome: "failed", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: true },
 ];
 
 const patch = `diff --git a/src/upload/retry.rs b/src/upload/retry.rs
@@ -98,6 +101,24 @@ const drafts: Record<string, Drafts> = {
   "fixture-run-77": { event: "COMMENT", message: "", findings: { "1": { included: true, text: "**question:** Should the delay stop doubling at a cap, such as 30 seconds?" } } },
 };
 
+/** Why each failed run failed, as its failure.txt says; fixture-run-61 recorded no reason. */
+const failures: Record<string, string> = {
+  "fixture-run-55": "the review run exited 1 without findings; see /synthetic/state/whooper/runs/fixture-run-55/stderr.log and the transcript in /synthetic/state/whooper/runs/fixture-run-55",
+};
+
+/** The questions asked about each run, with their answers, as asks/<n>.json holds them. */
+const asks: Record<string, Ask[]> = {
+  "fixture-run-55": [{
+    question: "Why did this review fail?",
+    finding: null,
+    answer: "The run's `stderr.log` ends with `Error: Agent connection lost: agent child exited: exit status: 0`, two seconds after the run started. Devin's agent stopped before it read the pull request, so nothing in the PR caused the failure, and a retry should work.",
+    agent: "devin",
+    started_at: at(3, 9, 30),
+    ended_at: at(3, 9, 32),
+    transcript: null,
+  }],
+};
+
 /** The reviews the status lists, newest first. */
 export function fixtureReviewEntries(): Entry[] {
   return entries.map((entry) => ({ ...entry }));
@@ -122,7 +143,7 @@ export function markFixtureSubmitted(runId: string) {
   if (entry) Object.assign(entry, { submitted: { event: drafts[runId]!.event, at: new Date().toISOString() }, needs_you: false });
 }
 
-/** Answers show-review, draft, and ask; null for the other actions. */
+/** Answers show-review, draft, ask, retry, and round; null for the other actions. */
 export function answerReviewAction(sent: PluginActionRequest): PluginActionResult | null {
   const [runId = "", ...rest] = sent.args;
   const entry = entries.find((item) => item.run_id === runId);
@@ -134,8 +155,7 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
         version: 1, run_id: runId, run: { repo: entry.repo, pr: entry.pr }, title: entry.title, author: "fixture-author", outcome: entry.outcome,
         findings: found ? { status: "reviewed", skip_reason: "", approval: { verdict: found.verdict, reason: found.reason }, findings: found.findings } : null,
         drafts: drafts[runId] ?? null, diff: found ? patch : null,
-        failure: entry.outcome === "failed" ? "Devin's agent shut down before it read the PR: Agent connection lost" : null,
-        asks: [], submitted: entry.submitted,
+        failure: failures[runId] ?? null, asks: asks[runId] ?? [], submitted: entry.submitted,
       }) });
     }
     case "draft": {
@@ -149,8 +169,21 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
       else if (op === "message") choice.message = finding!;
       return result({ stdout: JSON.stringify(choice) });
     }
-    case "ask":
-      return result({ stdout: "A cancelled upload is one the user stopped on purpose, so trying it again restarts work they meant to end. Returning false, or retrying only after network failures, keeps the policy to what it is for.\n" });
+    case "ask": {
+      if (!entry) return refused(`whooper-ask: no run ${runId} in /synthetic/state/whooper/runs`);
+      const [question = "", , finding = null] = rest;
+      const answer = entry.outcome === "failed"
+        ? "Whooper's log for this run stops right after the agent started: it never read the pull request or wrote findings. That points at the agent, not the PR; retry it, and if the next run fails the same way, check that the agent's CLI still signs in."
+        : "A cancelled upload is one the user stopped on purpose, so trying it again restarts work they meant to end. Returning false, or retrying only after network failures, keeps the policy to what it is for.";
+      (asks[runId] ??= []).push({ question, finding, answer, agent: "devin", started_at: new Date().toISOString(), ended_at: new Date().toISOString(), transcript: null });
+      return result({ stdout: `${answer}\n` });
+    }
+    case "retry":
+      if (!entry) return refused(`whooper-retry: no run ${runId} in /synthetic/state/whooper/runs`);
+      if (entry.outcome !== "failed") return refused(`whooper-retry: ${runId} did not fail`);
+      return result({ stdout: `queued ${entry.repo}#${entry.pr} for the next round\n` });
+    case "round":
+      return result({ stdout: "polled: 2 review requests, 1 retry\nreviewing acme/widgets#55\nacme/widgets#55: approve once CI passes, 1 finding\nround done\n" });
     default:
       return null;
   }

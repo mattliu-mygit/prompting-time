@@ -62,14 +62,20 @@ first. The fixture answers in browser memory and runs no plugin.
 
 ## Plugin pages
 
-Use `?agents=reviews` for invented Whooper reviews: two under "Needs you", one running, and three
-past ones under "Past reviews". Start the server with `PROMPTING_TIME_FIXTURE_PAGE` set to a built
-plugin page folder, such as Whooper's `page/dist` after `npm ci && npm run build` in its `page/`,
-and the server serves it at `/plugin-page/` with the headers the app's `pt-plugin://` scheme sends.
-Open a review to see it in the page; Submit review opens the confirmation with the request built
-from the drafts, and confirming returns the result to the page. Draft changes and asks answer in
-browser memory. The fixture sends no pluginChanged events, so All work keeps a submitted review
-until a reload. None of this shows how WKWebView treats `pt-plugin://`.
+Use `?agents=reviews` for invented Whooper reviews: four under "Needs you", two of them failed,
+one running, and two submitted; "Past reviews" lists every review that ended. Start the server
+with `PROMPTING_TIME_FIXTURE_PAGE` set to a built plugin page folder, such as Whooper's `page/dist`
+after `npm ci && npm run build` in its `page/`, and the server serves it at `/plugin-page/` with
+the headers the app's `pt-plugin://` scheme sends. Open a review to see it in the page; Submit
+review opens the confirmation with the request built from the drafts, and confirming returns the
+result to the page. Draft changes and asks answer in browser memory. The fixture sends no
+pluginChanged events, so All work keeps a submitted review until a reload. None of this shows how
+WKWebView treats `pt-plugin://`.
+
+A failed review opens on Prompting Time's own screen and needs no built page. "keep only shared
+types in the core package" has Whooper's reason and an earlier answer; "drop the legacy upload
+path" recorded no reason. Retry prints that it queued the pull request and offers Run now, whose
+round prints invented output; Ask why answers in browser memory and adds the answer.
 
 ## Chat readability and streaming
 
