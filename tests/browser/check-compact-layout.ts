@@ -8,6 +8,8 @@ export function checkCompactLayout() {
   const header = required(".app-toolbar").getBoundingClientRect();
   const timeline = required(".timeline-scroll").getBoundingClientRect();
   const composer = required(".composer").getBoundingClientRect();
+  // What the idle composer shows; Composer help's content takes no space while it is closed.
+  const composerParts = [...required(".composer").children].filter((part) => part.getBoundingClientRect().height > 0);
   const input = getComputedStyle(required(".message-field textarea"));
   const controls = [...required(".app-toolbar").querySelectorAll<HTMLElement>("button")];
   const measurements = {
@@ -15,6 +17,7 @@ export function checkCompactLayout() {
     timelineTop: timeline.top,
     timelineHeight: timeline.height,
     composerHeight: composer.height,
+    composerParts: composerParts.map((part) => part.className),
     composerBottom: composer.bottom,
     inputFont: input.fontSize,
     horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
@@ -24,8 +27,10 @@ export function checkCompactLayout() {
   const failures: string[] = [];
   if (header.height < 48 || header.height > 56) failures.push("header must occupy one 48–56px row");
   if (timeline.top > 72) failures.push("root timeline starts too far below the header");
-  if (composer.height > 144) failures.push("idle composer should have only field and footer");
-  if (measurements.inputFont !== "17px") failures.push("input typography shrank");
+  if (composerParts.length !== 2 || !composerParts[0].matches(".message-field") || !composerParts[1].matches(".composer-actions")) {
+    failures.push("idle composer should have only field and footer");
+  }
+  if (measurements.inputFont !== "16px") failures.push("input typography changed");
   if (measurements.headerTargets.some(height => height < 31.5)) failures.push("header targets shrank below 32px");
   if (composer.bottom > innerHeight + 1 || measurements.horizontalOverflow || measurements.verticalOverflow) failures.push("layout escapes the window");
   if (failures.length) throw new Error(JSON.stringify({ failures, measurements }));

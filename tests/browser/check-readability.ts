@@ -9,11 +9,11 @@ export function checkReadability({ inspectorOpen = false } = {}) {
     && getComputedStyle(element).visibility !== "hidden";
   const px = (element: HTMLElement) => Number.parseFloat(getComputedStyle(element).fontSize);
   const input = required(".message-field textarea");
-  const assistant = required(".timeline-message.assistant .message-markdown");
-  const row = required(".tree-row");
+  const assistant = required(".timeline-message.assistant .pt-markdown");
+  const row = required('[role="treeitem"]');
   const composer = required(".composer").getBoundingClientRect();
   const inspector = document.querySelector<HTMLElement>(".inspector-pane");
-  const labelWidths = [...document.querySelectorAll<HTMLElement>(".tree-label")].slice(0, 3).map((label) => label.clientWidth);
+  const labelWidths = [...document.querySelectorAll<HTMLElement>('[role="treeitem"] .pt-list-row-title')].slice(0, 3).map((label) => label.clientWidth);
   const controls = [...document.querySelectorAll<HTMLElement>("button, select, textarea, input:not([type=checkbox]):not([type=radio])")].filter(visible);
   const smallText = [...document.querySelectorAll<HTMLElement>("body *")]
     .filter((element) => visible(element) && [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) && px(element) < 13)
@@ -23,7 +23,7 @@ export function checkReadability({ inspectorOpen = false } = {}) {
   const smallControlText = controls.filter((element) => px(element) < 14)
     .map((element) => ({ tag: element.tagName, className: element.className, size: px(element) }));
   const measurements = {
-    inputSize: px(input), replySize: px(assistant), sidebarSize: px(required(".tree-label")), codeSize: px(required(".code-block pre")),
+    inputSize: px(input), replySize: px(assistant), sidebarSize: px(required('[role="treeitem"] .pt-list-row-title')), codeSize: px(required(".pt-code-block pre")),
     inputColor: getComputedStyle(input).color, foregroundColor: getComputedStyle(document.body).color,
     inputLineHeight: getComputedStyle(input).lineHeight, replyLineHeight: getComputedStyle(assistant).lineHeight,
     labelWidths, inspectorOverflow: inspector ? inspector.scrollWidth > inspector.clientWidth : false,
@@ -34,11 +34,11 @@ export function checkReadability({ inspectorOpen = false } = {}) {
     smallText, smallTargets, smallControlText,
   };
   const failures = [];
-  if (measurements.inputSize !== 17 || measurements.replySize !== 17) failures.push("chat and input must be 17px");
+  if (measurements.inputSize !== 16 || measurements.replySize !== 16) failures.push("chat and input must be 16px");
   if (measurements.sidebarSize !== 14) failures.push("sidebar labels must be 14px");
   if (labelWidths.some((width) => width < 120)) failures.push("sidebar names are crowded by metadata");
   if (measurements.inspectorOverflow) failures.push("inspector content overflows horizontally");
-  if (measurements.inputLineHeight !== "27.2px" || measurements.replyLineHeight !== "27.2px") failures.push("chat and input line height must be 1.6");
+  if (measurements.inputLineHeight !== "26px" || measurements.replyLineHeight !== "26px") failures.push("chat and input line height must be 1.625");
   if (measurements.inputColor !== measurements.foregroundColor) failures.push("typed text must use normal foreground");
   if (measurements.rowHeight < 36) failures.push("tree rows must be at least 36px");
   if (measurements.inspectorOpen !== inspectorOpen) failures.push("unexpected inspector visibility");

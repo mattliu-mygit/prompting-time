@@ -1,5 +1,7 @@
-// Run in real Chromium through Playwright CLI; jsdom cannot measure these bounds.
-export function checkLayout() {
+// Run in real Chromium through Playwright CLI; jsdom cannot measure these bounds. Each pane named
+// must scroll internally; a child conversation shows only its captured activity, so check it with
+// checkLayout([".inspector-pane"]).
+export function checkLayout(scrolling = [".timeline-scroll", ".inspector-pane"]) {
   const element = (selector: string) => {
     const result = document.querySelector<HTMLElement>(selector);
     if (!result) throw new Error(`Missing ${selector}`);
@@ -8,7 +10,7 @@ export function checkLayout() {
   const shell = element(".app-shell").getBoundingClientRect();
   const composer = element(".composer").getBoundingClientRect();
   // All work's open sections scroll on their own, each in its own body; check-sidebar-panes.ts checks them.
-  const panes = [".timeline-scroll", ".inspector-pane"].map((selector) => {
+  const panes = scrolling.map((selector) => {
     const pane = element(selector);
     const previous = pane.scrollTop;
     pane.scrollTop = 0;

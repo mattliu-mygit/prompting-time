@@ -3,13 +3,14 @@
 export function checkConversationTreeGeometry() {
   const levels = [1, 2, 3].map((level) => {
     const item = document.querySelector<HTMLElement>(`[role="treeitem"][aria-level="${level}"]`);
-    const label = item?.querySelector<HTMLElement>(".tree-label");
+    const label = item?.querySelector<HTMLElement>(".pt-list-row-title");
     if (!item || !label) throw new Error(`Missing visible conversation at depth ${level}`);
     return {
       level,
       label: label.textContent,
       x: label.getBoundingClientRect().x,
-      height: item.querySelector(".tree-row")?.getBoundingClientRect().height ?? 0,
+      // The row without the paging controls a parent shows under it.
+      height: item.getBoundingClientRect().height - (item.querySelector(":scope > .pt-list-row-children")?.getBoundingClientRect().height ?? 0),
     };
   });
   const failures: string[] = [];

@@ -24,9 +24,10 @@ playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/c
 
 Using fresh snapshot refs, open **Chats · no folder** in the sidebar, expand Synthetic
 conversation 0, and select Synthetic child 0. Confirm the selected tree item and repeat
-the measurement command. The check throws if the shell/composer escape the viewport or
-the timeline or inspector cannot scroll internally; the sidebar's sections have their own
-check, under All work. Close only this session with
+the measurement as `checkLayout([".inspector-pane"])`: a child shows only its captured
+activity, one item here, so its timeline has nothing to scroll. The check throws if the
+shell/composer escape the viewport or a pane it names cannot scroll internally; the
+sidebar's sections have their own check, under All work. Close only this session with
 `playwright-cli -s=layout-check close`, then stop the dev server you started.
 
 The fixture also supports folder-first creation entirely in browser memory. Open
@@ -277,7 +278,8 @@ Provider-observed children explain why they are read-only and offer no Send,
 Steer, Interrupt, routing, or archive control. Returning to the parent preserves
 its draft, nondefault provider choice, Markdown preview, and reading position.
 
-At 960 × 600 and 1440 × 900, expand root and child, then check actual geometry:
+At 960 × 600 and 1440 × 900, open **Chats · no folder**, expand root and child, then
+check actual geometry:
 
 ```sh
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-conversation-tree.ts")).checkConversationTreeGeometry()'
@@ -395,7 +397,8 @@ Truncated lifecycle events must retain explicit full-detail disclosure, rather t
 being treated as ordinary one-line status updates.
 
 Use `?chat=reading` at 1440 × 900 and 960 × 600. With the inspector initially closed,
-run the computed-font/target/layout check:
+open **Chats · no folder**, so the sidebar shows rows, and run the
+computed-font/target/layout check:
 
 ```sh
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-readability.ts")).checkReadability()'

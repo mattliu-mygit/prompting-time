@@ -8,7 +8,7 @@ export function checkToolOperations() {
   const row = (sequence: number) => required(`[data-timeline-id="conversation-0-operation-${sequence}"]`);
   const running = row(5);
   const failed = row(6);
-  const message = getComputedStyle(required(".message-markdown"));
+  const message = getComputedStyle(required(".timeline-message .pt-markdown"));
   const visibleButtons = [running, failed].flatMap(element => [...element.querySelectorAll<HTMLButtonElement>("button")]);
   const result = {
     runningHeight: running.getBoundingClientRect().height,
@@ -24,7 +24,7 @@ export function checkToolOperations() {
   const failures: string[] = [];
   if (!result.runningTitle || !result.failedTitle) failures.push("running and failed operations must remain directly visible");
   if (result.runningHeight > 56 || result.failedHeight > 56) failures.push("closed operation rows are too tall");
-  if (result.messageFont !== "17px" || result.messageLineHeight !== "27.2px") failures.push("message readability changed");
+  if (result.messageFont !== "16px" || result.messageLineHeight !== "26px") failures.push("message readability changed");
   if (!visibleButtons.length || result.targets.some(({ width, height }) => width < 31.5 || height < 31.5)) failures.push("detail controls need 32px targets");
   if (result.horizontalOverflow || result.verticalOverflow) failures.push("layout escapes viewport");
   if (failures.length) throw new Error(JSON.stringify({ failures, result }));

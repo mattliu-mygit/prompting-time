@@ -14,8 +14,8 @@ export function measureMessageDensity() {
     assistantHeight: assistant.getBoundingClientRect().height,
     lifecycleHeight: lifecycle.getBoundingClientRect().height,
     transcriptHeight: required(".timeline-list").getBoundingClientRect().height,
-    messageFont: getComputedStyle(required(".message-markdown")).fontSize,
-    messageLineHeight: getComputedStyle(required(".message-markdown")).lineHeight,
+    messageFont: getComputedStyle(required(".timeline-message .pt-markdown")).fontSize,
+    messageLineHeight: getComputedStyle(required(".timeline-message .pt-markdown")).lineHeight,
     copyWidth: copy.getBoundingClientRect().width,
     copyHeight: copy.getBoundingClientRect().height,
     copyInHeader: user.querySelector("header")?.contains(copy) ?? false,
@@ -29,7 +29,7 @@ export function checkMessageDensity() {
   if (result.userHeight > 84) failures.push("short user message too tall");
   if (result.assistantHeight > 76) failures.push("short assistant message too tall");
   if (result.lifecycleHeight > 28) failures.push("ordinary lifecycle needs one compact line");
-  if (result.messageFont !== "17px" || result.messageLineHeight !== "27.2px") failures.push("message readability changed");
+  if (result.messageFont !== "16px" || result.messageLineHeight !== "26px") failures.push("message readability changed");
   if (result.copyWidth < 31.5 || result.copyHeight < 31.5 || !result.copyInHeader) failures.push("copy must use an accessible header target");
   if (result.overflow) failures.push("layout escapes viewport");
   if (failures.length) throw new Error(JSON.stringify({ failures, result }));
