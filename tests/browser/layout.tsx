@@ -10,6 +10,7 @@ import { archiveSyntheticRoot, listenToTreeEvents, treeConversationPath, treeIds
 import { thinkingScenario, withThinkingFixture } from "./thinking-fixture";
 import { contextBudgetScenario, withContextBudgetFixture } from "./context-budget-fixture";
 import { workConversations, workScenario } from "./work-fixture";
+import { AgentsConfirmation, agentsScenario, withAgentsFixture } from "./agents-fixture";
 import "../../src/styles/app.css";
 
 // Invented data only. This entry point never uses the native bridge or providers.
@@ -172,6 +173,12 @@ const fixtureApi = treeScenario ? {
 } : api;
 
 const thinkingApi = thinkingScenario ? withThinkingFixture(fixtureApi) : fixtureApi;
-const scenarioApi = contextBudgetScenario ? withContextBudgetFixture(thinkingApi) : thinkingApi;
+const budgetApi = contextBudgetScenario ? withContextBudgetFixture(thinkingApi) : thinkingApi;
+const scenarioApi = agentsScenario ? withAgentsFixture(budgetApi) : budgetApi;
 const store = createAppStore(scenarioApi);
-render(() => <App store={store} />, document.getElementById("root")!);
+render(() => (
+  <>
+    <App store={store} />
+    <AgentsConfirmation store={store} />
+  </>
+), document.getElementById("root")!);

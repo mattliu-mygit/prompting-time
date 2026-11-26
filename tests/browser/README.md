@@ -49,6 +49,17 @@ group per project and "No project". Combine it with a chat scenario, such as
 `?work=1&chat=reading`, for timeline content. Command-J (Control-J) moves to the next
 root waiting on you; Command-K (Control-K) opens the palette.
 
+## Background agents
+
+Use `?agents=1` for an invented Whooper under Background agents, running with its next
+poll at 3:45 PM; combine it with `?work=1` for a full All work list. Select Whooper to
+open its settings: change a value and Save, or set "Stop a poll after" below 5 to see
+Whooper's refusal. The add button offers a synthetic archive, whose install is refused to
+show the message, and a synthetic folder. `?agents=missing` shows Whooper stopped for a
+missing program. `?agents=confirm` opens the submit confirmation over the app with an
+invented request, and `?agents=mentions` opens it on Whooper's refusal for an @-mention
+first. The fixture answers in browser memory and runs no plugin.
+
 ## Chat readability and streaming
 
 Use `?chat=reading` for a formatted coding answer, a table/code block, compact activity,

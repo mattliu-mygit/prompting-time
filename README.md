@@ -172,7 +172,16 @@ leaves the outcome unconfirmed, with no replay.
 ## Background agent plugins
 
 Prompting Time can host background agents, such as Whooper, as plugins. The Rust core installs,
-checks, starts, and stops them; their screens are not built yet.
+checks, starts, and stops them, and the window shows them.
+
+- **Screens.** Installed plugins sit at the bottom of All work, under Background agents, one quiet
+  row each: the name, one gray line from the plugin's process and its `status` action, such as
+  "running · next poll 3:45 PM", and a status dot. A row opens the plugin's screen: its version
+  and where it came from, who runs its start command, the programs it needs and which are missing,
+  and its settings in a form drawn from its settings schema. The plugin checks and saves the
+  settings; a refusal shows in its own words. The add button beside Background agents installs a
+  release archive on this Mac, checked by its SHA-256, or runs a plugin folder in place, for
+  development.
 
 - **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
   and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
@@ -193,8 +202,11 @@ checks, starts, and stops them; their screens are not built yet.
   the request it would run in a file in the plugin's state folder, names that file in its output,
   and prints `fingerprint: <hex>`, the file's SHA-256, last. Prompting Time returns that file's
   text for the confirmation, and runs the action for real only with the fingerprint the user
-  confirmed, as `--expect <hex>`. Settings are saved through the `save-settings` action, which
-  checks them.
+  confirmed, as `--expect <hex>`. The confirmation explains the refusals Whooper's submit exits
+  with: 10 (new commits since the review), 11 (not safe to approve; Approve anyway reruns the
+  preview with `--approve-anyway`), 12 (an @-mention; Send with the mentions reruns it with
+  `--allow-mentions`), and 13 (the request changed, so it shows the new one and asks again).
+  Settings are saved through the `save-settings` action, which checks them.
 - **State.** A plugin keeps its state in `$XDG_STATE_HOME/<name>` (default
   `~/.local/state/<name>`). Prompting Time passes its `XDG_STATE_HOME` to plugin commands, watches
   that folder, and sends the window a `pluginChanged` event naming the files that changed.
