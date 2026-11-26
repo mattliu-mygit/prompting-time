@@ -128,24 +128,27 @@ export const pageActions = [
   { name: "submit", title: "Submit review", description: "Posts the chosen comments to GitHub as one review.", confirm: true },
 ];
 
-/** Invented reviews as `whooper-status --json` lists them, newest first. */
+/**
+ * Invented reviews as `whooper-status --json` lists them, newest first. Only #101's newest run is
+ * safe to approve: it says approve once CI passes, read the whole change, and found only nits.
+ */
 export function fixtureReviews() {
   return [
     { run_id: "20261126T150000Z-101", repo: "acme/widgets", pr: 101, title: "separate cache configuration", url: "https://example.invalid/acme/widgets/pull/101",
       started_at: "2026-11-26T15:00:00Z", ended_at: "2026-11-26T15:20:00Z", outcome: "reviewed", verdict: "approve_once_ci_passes",
-      skipped: false, findings: 2, submitted: null, needs_you: true, author: "sam-fixture" },
+      skipped: false, findings: 2, submitted: null, needs_you: true, author: "sam-fixture", safe_to_approve: true },
     { run_id: "20261126T140000Z-102", repo: "acme/widgets", pr: 102, title: null, url: null,
-      started_at: "2026-11-26T14:00:00Z", ended_at: null, outcome: "running", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: false },
+      started_at: "2026-11-26T14:00:00Z", ended_at: null, outcome: "running", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: false, safe_to_approve: false },
     { run_id: "20261125T100000Z-77", repo: "acme/gadgets", pr: 77, title: "add the tags package", url: null,
       started_at: "2026-11-25T10:00:00Z", ended_at: "2026-11-25T10:30:00Z", outcome: "reviewed", verdict: "look_first",
-      skipped: false, findings: 1, submitted: { event: "COMMENT", at: "2026-11-25T11:00:00Z" }, needs_you: false },
+      skipped: false, findings: 1, submitted: { event: "COMMENT", at: "2026-11-25T11:00:00Z" }, needs_you: false, safe_to_approve: false },
     // An earlier run of #101 failed without recording why; the newer run means it no longer needs you.
     { run_id: "20261125T080000Z-101", repo: "acme/widgets", pr: 101, title: "separate cache configuration", url: "https://example.invalid/acme/widgets/pull/101",
       started_at: "2026-11-25T08:00:00Z", ended_at: "2026-11-25T08:02:00Z", outcome: "failed", verdict: null,
-      skipped: false, findings: 0, submitted: null, needs_you: false },
+      skipped: false, findings: 0, submitted: null, needs_you: false, safe_to_approve: false },
     { run_id: "20261124T090000Z-55", repo: "acme/gadgets", pr: 55, title: "move the projection", url: null,
       started_at: "2026-11-24T09:00:00Z", ended_at: "2026-11-24T09:01:00Z", outcome: "failed", verdict: null,
-      skipped: false, findings: 0, submitted: null, needs_you: true },
+      skipped: false, findings: 0, submitted: null, needs_you: true, safe_to_approve: false },
   ];
 }
 

@@ -9,17 +9,33 @@ const now = new Date(2026, 10, 26, 16);
 const review = (overrides: Record<string, unknown> = {}): ReviewEntry => readReviews({ reviews: [{ ...fixtureReviews()[0]!, ...overrides }] })[0]!;
 
 describe("reviews", () => {
-  it("reads the author and the user's removal, and an entry without them as having none", () => {
-    expect(review()).toMatchObject({ author: "sam-fixture", removed_by_user: false });
-    expect(readReviews({ reviews: [fixtureReviews()[1]] })[0]).toMatchObject({ author: null, removed_by_user: false });
+  it("reads the author, the user's removal, and whether the plugin judges the run safe to approve, and an entry without them as having none", () => {
+    expect(review()).toMatchObject({ author: "sam-fixture", removed_by_user: false, safe_to_approve: true });
+    expect(readReviews({ reviews: [fixtureReviews()[1]] })[0]).toMatchObject({ author: null, removed_by_user: false, safe_to_approve: false });
     expect(review({ removed_by_user: true })).toMatchObject({ removed_by_user: true });
+    expect(review({ safe_to_approve: undefined })).toMatchObject({ safe_to_approve: null });
+    expect(review({ safe_to_approve: null })).toMatchObject({ safe_to_approve: null });
     expect(readReviews({ reviews: [{ ...fixtureReviews()[0]!, author: 7 }] })).toEqual([]);
+    expect(readReviews({ reviews: [{ ...fixtureReviews()[0]!, safe_to_approve: "yes" }] })).toEqual([]);
+  });
+
+  it("puts a review that waits on a decision under Ready to approve or Needs a look by the plugin's safe_to_approve, or by its verdict when the status doesn't say", () => {
+    expect(reviewCategory(review({ safe_to_approve: true }))).toBe("ready");
+    // Whooper says approve once CI passes, but a finding that is not a nit makes the run not safe to approve.
+    expect(reviewCategory(review({ safe_to_approve: false }))).toBe("look");
+    // A status from before the field: approve once CI passes, with the whole change read, is ready.
+    for (const safe of [undefined, null]) {
+      expect(reviewCategory(review({ safe_to_approve: safe }))).toBe("ready");
+      expect(reviewCategory(review({ safe_to_approve: safe, skipped: true }))).toBe("look");
+      expect(reviewCategory(review({ safe_to_approve: safe, verdict: "look_first" }))).toBe("look");
+    }
+    // The judgement sorts only what waits on a decision.
+    expect(reviewCategory(review({ safe_to_approve: true, submitted: { event: "APPROVE", at: "2026-11-26T15:30:00Z" }, needs_you: false }))).toBe("done");
+    expect(reviewCategory(review({ safe_to_approve: true, outcome: "running", needs_you: false }))).toBe("reviewing");
   });
 
   it("places each review in the list where it waits", () => {
     expect(reviewCategory(review())).toBe("ready");
-    expect(reviewCategory(review({ skipped: true }))).toBe("look");
-    expect(reviewCategory(review({ verdict: "look_first" }))).toBe("look");
     expect(reviewCategory(review({ outcome: "failed", verdict: null, cause: agentExit }))).toBe("failed");
     expect(reviewCategory(review({ outcome: "failed", verdict: null, cause: null }))).toBe("failed");
     expect(reviewCategory(review({ outcome: "failed", verdict: null, cause: docker }))).toBe("waiting");
@@ -36,7 +52,7 @@ describe("reviews", () => {
     const reviews = [
       review({ run_id: "a", pr: 1, ended_at: at(9) }),
       review({ run_id: "b", pr: 2, ended_at: at(11) }),
-      review({ run_id: "c", pr: 3, verdict: "look_first", ended_at: at(10) }),
+      review({ run_id: "c", pr: 3, verdict: "look_first", safe_to_approve: false, ended_at: at(10) }),
       review({ run_id: "d", pr: 4, outcome: "failed", verdict: null, cause: null, ended_at: at(8) }),
     ].map((entry) => ({ plugin: "whooper", review: entry }));
     const parts = needsYou(reviews);

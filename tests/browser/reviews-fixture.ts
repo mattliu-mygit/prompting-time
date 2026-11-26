@@ -26,7 +26,7 @@ type Entry = {
   outcome: "running" | "reviewed" | "failed" | "waiting"; verdict: string | null; skipped: boolean; findings: number;
   submitted: { event: "APPROVE" | "COMMENT"; at: string } | null; needs_you: boolean;
   head_sha: string | null; pr_head_sha: string | null; cause: Cause | null; skipped_by_user: boolean;
-  author: string | null; removed_by_user: boolean;
+  author: string | null; removed_by_user: boolean; safe_to_approve: boolean;
 };
 
 /** The cause that blocks every review in this fixture: Docker stopped, so each review's setup failed. */
@@ -39,9 +39,15 @@ type Ask = { question: string; finding: string | null; answer: string; agent: st
 
 /** Invented GitHub logins, one per pull request number's last digit. */
 const authors = ["ade-o", "lin-w", "rhea-k", "jon-b", "mika-s", "priya-r", "tomasz-p", "sam-t", "noor-a", "eli-v"];
-const run = (entry: Omit<Entry, "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user" | "url" | "skipped" | "author" | "removed_by_user"> & Partial<Entry>): Entry => ({
+/**
+ * A run as the status lists it. Whooper calls a run safe to approve when it reviewed the whole
+ * change, says approve once CI passes, and found only nits, as this fixture's approvals do unless
+ * an entry says otherwise.
+ */
+const run = (entry: Omit<Entry, "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user" | "url" | "skipped" | "author" | "removed_by_user" | "safe_to_approve"> & Partial<Entry>): Entry => ({
   url: null, skipped: false, head_sha: sha(entry.pr), pr_head_sha: sha(entry.pr), cause: null, skipped_by_user: false,
-  author: authors[entry.pr % 10]!, removed_by_user: false, ...entry,
+  author: authors[entry.pr % 10]!, removed_by_user: false,
+  safe_to_approve: entry.outcome === "reviewed" && entry.verdict === "approve_once_ci_passes" && !entry.skipped, ...entry,
 });
 /** A finished review that waits on the user, `minutes` after 9:00 today. */
 const reviewed = (pr: number, repo: string, title: string, verdict: string, findings: number, minutes: number) => run({
@@ -56,7 +62,8 @@ const entries: Entry[] = [
   run({ run_id: "fixture-run-103", repo: "acme/widgets", pr: 103, title: "cap the upload retry delay", started_at: at(0, 11, 0), ended_at: at(0, 11, 20), outcome: "reviewed", verdict: "look_first", findings: 1, submitted: null, needs_you: true }),
   // Enough reviews that Needs you scrolls on its own above the stack of folded sections.
   reviewed(105, "acme/widgets", "drop the unused metrics exporter from the upload client", "approve_once_ci_passes", 0, 30),
-  reviewed(106, "acme/widgets", "fix the timezone in exported traces", "approve_once_ci_passes", 1, 20),
+  // Approve once CI passes, but its one finding is a question, so Whooper calls it not safe to approve and it needs a look.
+  run({ ...reviewed(106, "acme/widgets", "fix the timezone in exported traces", "approve_once_ci_passes", 1, 20), safe_to_approve: false }),
   reviewed(66, "acme/gadgets", "lazy-load the chart bundle", "approve_once_ci_passes", 0, 10),
   reviewed(67, "acme/gadgets", "rename the queue worker settings", "approve_once_ci_passes", 1, 5),
   reviewed(68, "acme/gadgets", "validate project names before creating buckets", "approve_once_ci_passes", 2, 0),
@@ -204,11 +211,12 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
     case "show-review": {
       if (!entry) return refused(`whooper-show: no run ${runId}`);
       if (entry.outcome === "reviewed" && !findings[runId]) {
-        // A review without findings of its own gets the nits, or the question when Whooper says look first.
-        findings[runId] = entry.verdict === "look_first"
-          ? { verdict: "look_first", reason: "One question about the delay.", findings: [question] }
-          : { verdict: "approve_once_ci_passes", reason: "Small and tested.", findings: nits.slice(0, Math.min(entry.findings, 2)) };
-        drafts[runId] = { event: entry.verdict === "look_first" ? "COMMENT" : "APPROVE", message: "", findings: Object.fromEntries(findings[runId]!.findings.map((finding) => [finding.id, { included: entry.verdict !== "look_first" }])) };
+        // A review without findings of its own gets the nits when Whooper calls it safe to approve,
+        // else the question; like Whooper, only a safe run's drafts start as an approval.
+        findings[runId] = entry.safe_to_approve
+          ? { verdict: "approve_once_ci_passes", reason: "Small and tested.", findings: nits.slice(0, Math.min(entry.findings, 2)) }
+          : { verdict: entry.verdict ?? "look_first", reason: entry.verdict === "look_first" ? "One question about the delay." : "Small and tested, with one open question.", findings: [question] };
+        drafts[runId] = { event: entry.safe_to_approve ? "APPROVE" : "COMMENT", message: "", findings: Object.fromEntries(findings[runId]!.findings.map((finding) => [finding.id, { included: entry.safe_to_approve }])) };
       }
       const found = findings[runId];
       return result({ stdout: JSON.stringify({

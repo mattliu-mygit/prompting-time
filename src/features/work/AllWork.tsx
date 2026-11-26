@@ -152,8 +152,8 @@ export function AllWork(props: Props) {
     const waitingChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
     const { ready, look, failed } = needsYou(props.reviews);
     const needsParts: Part[] = [
-      { key: "ready", label: "Ready to approve", hint: "The plugin says approve once CI passes.", entries: ready.map(reviewRow) },
-      { key: "look", label: "Needs a look", hint: "The plugin says look first, or skipped part of the change.", entries: look.map(reviewRow) },
+      { key: "ready", label: "Ready to approve", hint: "The plugin judges each safe to approve, or, when it doesn't say, says approve once CI passes.", entries: ready.map(reviewRow) },
+      { key: "look", label: "Needs a look", hint: "The plugin judges each not safe to approve, or, when it doesn't say, says look first or skipped part of the change.", entries: look.map(reviewRow) },
       { key: "failed", label: "Review failed", hint: "Each failed for a reason of its own; open one for the reason, Retry review, and Ask why.", entries: failed.map(reviewRow) },
       { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", entries: chatEntries(waitingChats) },
     ].filter((part) => part.entries.length > 0);

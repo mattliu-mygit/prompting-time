@@ -95,7 +95,7 @@ describe("AllWork", () => {
   const todayAt = (hours: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours).toISOString();
   const entries = (): ReviewEntry[] => readReviews({ reviews: [
     ...fixtureReviews().map((review) => ({ ...review, ...(review.started_at.startsWith("2026-11-26") ? { started_at: todayAt(9), ended_at: review.ended_at && todayAt(10) } : {}) })),
-    { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", findings: 1, author: null, started_at: todayAt(6), ended_at: todayAt(7) },
+    { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", safe_to_approve: false, findings: 1, author: null, started_at: todayAt(6), ended_at: todayAt(7) },
     { ...fixtureReviews()[1]!, run_id: "waiting-60", pr: 60, repo: "acme/gadgets", title: "speed up the gadget index", outcome: "waiting", cause: docker, started_at: todayAt(8), ended_at: null },
     { ...fixtureReviews()[2]!, run_id: "skipped-9", pr: 9, repo: "acme/sprockets", title: "drop the sprocket shim", submitted: null, skipped_by_user: true, started_at: todayAt(7), ended_at: todayAt(8) },
     { ...fixtureReviews()[0]!, run_id: "removed-8", pr: 8, title: "keep focus in the date picker", removed_by_user: true, needs_you: false, started_at: todayAt(5), ended_at: todayAt(6) },
@@ -130,6 +130,14 @@ describe("AllWork", () => {
     expect(view.onOpenReview).toHaveBeenCalledWith("whooper", "20261126T150000Z-101");
     expect(view.onSelect).not.toHaveBeenCalled();
     expect(await axeViolations()).toEqual([]);
+  });
+
+  it("lists a review under Ready to approve or Needs a look by whether the plugin judges it safe to approve", () => {
+    // Whooper says approve once CI passes, but a finding that is not a nit makes the run not safe to approve.
+    const notSafe: PluginReview = { plugin: "whooper", review: { ...entries()[0]!, run_id: "not-safe-104", pr: 104, title: "retry uploads on every error", safe_to_approve: false, ended_at: todayAt(11) } };
+    renderWork({ conversations: [], reviews: [...pluginEntries(), notSafe] });
+    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toEqual([expect.stringMatching(/^separate cache configuration,/)]);
+    expect(names(screen.getByRole("tree", { name: "Needs a look" }))).toEqual([expect.stringMatching(/^retry uploads on every error,/), expect.stringMatching(/^cap the upload retry delay,/)]);
   });
 
   it("opens a folded section, keeps which are open across launches, and opens a cause from its Waiting row", () => {

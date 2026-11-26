@@ -561,7 +561,7 @@ describe("triage", () => {
   function triageApi() {
     const reviews = [
       ...fixtureReviews(),
-      { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", findings: 1, started_at: "2026-11-26T12:00:00Z", ended_at: "2026-11-26T12:20:00Z" },
+      { ...fixtureReviews()[0]!, run_id: "look-103", pr: 103, title: "cap the upload retry delay", verdict: "look_first", safe_to_approve: false, findings: 1, started_at: "2026-11-26T12:00:00Z", ended_at: "2026-11-26T12:20:00Z" },
       { ...fixtureReviews()[0]!, run_id: "removed-8", pr: 8, title: "keep focus in the date picker", removed_by_user: true, needs_you: false, started_at: "2026-11-26T10:00:00Z", ended_at: "2026-11-26T10:20:00Z" },
       { ...fixtureReviews()[1]!, run_id: "waiting-60", repo: "acme/gadgets", pr: 60, title: "speed up the gadget index", outcome: "waiting", cause: docker },
       { ...fixtureReviews()[1]!, run_id: "waiting-61", repo: "acme/gadgets", pr: 61, title: "drop the legacy upload path", outcome: "waiting", cause: docker },

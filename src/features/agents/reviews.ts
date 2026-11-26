@@ -15,8 +15,10 @@ export type ReviewCause = { id: string; summary: string; scope: "all" | "pr" };
  * stopped its round. `skipped_by_user` says the user skipped it; `skipped` that Whooper's review
  * skipped the change. `author` is the pull request's author's login, and `removed_by_user` says the
  * user took the review out of the lists (its files stay, and Whooper no longer needs the user for
- * it). The fields after `needs_you` came later in format version 1, so an entry without them reads
- * as having none.
+ * it). `safe_to_approve` is the plugin's own judgement that the run is safe to approve: Whooper
+ * calls a run safe when it reviewed the whole change, says approve once CI passes, and found only
+ * nits; null when the status doesn't say. The fields after `needs_you` came later in format version
+ * 1, so an entry without them reads as having none.
  */
 export type ReviewEntry = {
   run_id: string;
@@ -38,6 +40,7 @@ export type ReviewEntry = {
   skipped_by_user: boolean;
   author: string | null;
   removed_by_user: boolean;
+  safe_to_approve: boolean | null;
 };
 
 /** A review and the plugin that lists it. */
@@ -56,7 +59,7 @@ export function readCause(value: unknown): ReviewCause | null {
     : null;
 }
 
-type LaterFields = "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user" | "author" | "removed_by_user";
+type LaterFields = "head_sha" | "pr_head_sha" | "cause" | "skipped_by_user" | "author" | "removed_by_user" | "safe_to_approve";
 
 function fitsReview(value: unknown): value is Omit<ReviewEntry, LaterFields> & Partial<ReviewEntry> {
   if (!isRecord(value)) return false;
@@ -73,7 +76,8 @@ function fitsReview(value: unknown): value is Omit<ReviewEntry, LaterFields> & P
     && optional(value.cause, (cause) => cause === null || readCause(cause) !== null)
     && optional(value.skipped_by_user, (skipped) => typeof skipped === "boolean")
     && optional(value.author, stringOrNull)
-    && optional(value.removed_by_user, (removed) => typeof removed === "boolean");
+    && optional(value.removed_by_user, (removed) => typeof removed === "boolean")
+    && optional(value.safe_to_approve, (safe) => safe === null || typeof safe === "boolean");
 }
 
 /** The reviews a plugin's status lists, leaving out any entry that does not fit the format. */
@@ -87,6 +91,7 @@ export function readReviews(status: unknown): ReviewEntry[] {
     skipped_by_user: review.skipped_by_user ?? false,
     author: review.author ?? null,
     removed_by_user: review.removed_by_user ?? false,
+    safe_to_approve: review.safe_to_approve ?? null,
   }));
 }
 
@@ -129,16 +134,17 @@ export type ReviewCategory = "ready" | "look" | "failed" | "reviewing" | "waitin
 
 /**
  * Where the sidebar lists a pull request's newest run: in no list once the user removed it; under
- * "Needs you" as ready to approve ("ready": the plugin says approve once CI passes and read the
- * whole change), as needing a look ("look": any other review waiting on a decision), or as failed
- * for a cause of its own pull request's ("failed"); on the row of a cause that blocks every review
- * while it waits or failed on one ("waiting"); under Reviewing while it runs, or waits without such
- * a cause; and in Done once the user finished with it. The status does not say whether every
- * finding is a nit, which Whooper also asks of a review it calls safe to approve.
+ * "Needs you" as ready to approve ("ready": the plugin judges the run safe to approve, or, when its
+ * status doesn't say, the plugin says approve once CI passes and read the whole change), as needing
+ * a look ("look": any other review waiting on a decision), or as failed for a cause of its own pull
+ * request's ("failed"); on the row of a cause that blocks every review while it waits or failed on
+ * one ("waiting"); under Reviewing while it runs, or waits without such a cause; and in Done once
+ * the user finished with it. Without the plugin's judgement, a review whose findings are more than
+ * nits lists as ready when its verdict says approve, since the verdict alone doesn't say.
  */
 export function reviewCategory(review: ReviewEntry): ReviewCategory {
   if (review.removed_by_user) return "removed";
-  if (readyToDecide(review)) return review.verdict === "approve_once_ci_passes" && !review.skipped ? "ready" : "look";
+  if (readyToDecide(review)) return (review.safe_to_approve ?? (review.verdict === "approve_once_ci_passes" && !review.skipped)) ? "ready" : "look";
   if (isFinished(review)) return "done";
   if (review.outcome === "running") return "reviewing";
   const blocking = review.cause?.scope === "all";
