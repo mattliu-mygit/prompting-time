@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor } from "@testing-library/dom";
 import { createSignal, onCleanup } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
-import { Diff, type DiffLineAnnotation, type FileContents } from "./index";
+import { DIFF_THEME, Diff, diffTheme, parsePatchFiles, type DiffLineAnnotation, type FileContents } from "./index";
 import { axeViolations, render } from "./test/render";
 
 const oldFile: FileContents = { name: "score.go", contents: 'package score\n\n// Pass is the lowest passing score.\nconst Pass = 0.5\n\nfunc Name() string {\n\treturn "old"\n}\n' };
@@ -92,5 +92,38 @@ describe("Diff", () => {
     ));
     expect(await screen.findByText("This comment could not be shown: Error: bad draft", undefined, { timeout: 10_000 })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Include Say why the name changed." })).toBeChecked();
+  });
+
+  it("draws one file of a parsed patch, with threads under its lines", async () => {
+    const patch = [
+      "diff --git a/score.go b/score.go",
+      "--- a/score.go",
+      "+++ b/score.go",
+      "@@ -3,6 +3,6 @@ package score",
+      " // Pass is the lowest passing score.",
+      "-const Pass = 0.5",
+      "+const Pass = 0.6",
+      " ",
+      " func Name() string {",
+      '-\treturn "old"',
+      '+\treturn "new"',
+      " }",
+      "",
+    ].join("\n");
+    const [file] = parsePatchFiles(patch).flatMap((parsed) => parsed.files);
+    render(() => (
+      <Diff
+        file={file!}
+        layout="unified"
+        annotations={[passThread]}
+        annotationKey={(annotation) => annotation.metadata.id}
+        renderAnnotation={(annotation) => <ThreadView annotation={annotation} />}
+      />
+    ));
+    const checkbox = await screen.findByRole("checkbox", { name: "Include Why 0.6?" }, { timeout: 10_000 });
+    expect(checkbox.closest("[data-annotation-slot]")).toHaveAttribute("slot", "annotation-additions-4");
+    const styles = [...host()!.shadowRoot!.querySelectorAll("[style]")].map((element) => element.getAttribute("style"));
+    expect(styles).toContain("color:var(--s-code-string-color)");
+    expect(diffTheme.name).toBe(DIFF_THEME);
   });
 });

@@ -1,6 +1,9 @@
 import { registerCustomTheme } from "@pierre/diffs";
 
-/** The name Diff gives Pierre for the Shiki theme below. */
+/**
+ * The name Diff gives Pierre for the Shiki theme below. The package exports both, with
+ * registerDiffTheme, for a page that calls Pierre or Shiki itself, so its code looks the same.
+ */
 export const DIFF_THEME = "prompting-time-sigil";
 
 const sigil = (name: string) => `var(--s-${name})`;

@@ -1,11 +1,24 @@
-import { FileDiff, type DiffLineAnnotation, type FileContents, type FileDiffOptions } from "@pierre/diffs";
+import { FileDiff, type DiffLineAnnotation, type FileContents, type FileDiffMetadata, type FileDiffOptions } from "@pierre/diffs";
 import { createEffect, createSignal, Errored, For, onSettled, untrack } from "solid-js";
 import { Portal, type JSX } from "@solidjs/web";
 import { DIFF_THEME, registerDiffTheme } from "./diffTheme";
 
-export interface DiffProps<T> {
-  oldFile: FileContents;
-  newFile: FileContents;
+/** What Diff draws: a file's old and new contents, or one file of a parsed patch. */
+export type DiffSource =
+  | { oldFile: FileContents; newFile: FileContents; file?: never }
+  | {
+      /**
+       * One file of a unified diff, from parsePatchFiles, for a page that keeps only the patch,
+       * such as a review's diff.patch. Only the patch's hunks show; there is no context to expand.
+       */
+      file: FileDiffMetadata;
+      oldFile?: never;
+      newFile?: never;
+    };
+
+export type DiffProps<T> = DiffSource & DiffOptions<T>;
+
+interface DiffOptions<T> {
   /** Side by side ("split", the default) or in one column ("unified"). */
   layout?: "split" | "unified";
   /**
@@ -26,7 +39,7 @@ interface Placed<T> {
 }
 
 /**
- * A file diff drawn by @pierre/diffs, with comment threads drawn by this component's own Solid
+ * A file diff drawn by @pierre/diffs, from whole files or from one file of a patch, with comment threads drawn by this component's own Solid
  * tree. Pierre asks for an element per annotation and may rebuild it, for example when a thread is
  * inserted above it; each thread is a Portal keyed by `annotationKey`, so the same thread, with its
  * half-typed draft and checkboxes, moves into the new element. Each thread has its own error
@@ -59,16 +72,15 @@ export function Diff<T>(props: DiffProps<T>) {
   // synchronously, and Solid's dev build throws if that happens inside onSettled.
   createEffect(
     () => ({
-      oldFile: props.oldFile,
-      newFile: props.newFile,
+      source: props.file ? { fileDiff: props.file } : { oldFile: props.oldFile, newFile: props.newFile },
       layout: props.layout ?? "split",
       annotations: props.annotations ?? [],
     }),
-    ({ oldFile, newFile, layout, annotations }) => {
+    ({ source, layout, annotations }) => {
       // setOptions replaces every option, so the callbacks above go in each time.
       if (instance) instance.setOptions(options(layout));
       else instance = new FileDiff<T>(options(layout));
-      instance.render({ oldFile, newFile, lineAnnotations: [...annotations], containerWrapper: wrapper, forceRender: true });
+      instance.render({ ...source, lineAnnotations: [...annotations], containerWrapper: wrapper, forceRender: true });
     },
   );
   onSettled(() => () => instance?.cleanUp());

@@ -16,7 +16,8 @@ Whooper's.
   framework-free `VanillaMachine` in `src/zag.ts`, because Zag's Solid adapter targets Solid 1. A
   menu item can be a radio or checkbox choice, which shows a check mark while it is on.
   `Diff` wraps `@pierre/diffs` and draws comment threads from its own Solid tree, one keyed portal
-  per thread. `Markdown` parses with `unified` (remark and GitHub's extensions) and highlights code
+  per thread. It draws a file from its old and new contents, or one file of a unified diff parsed
+  with the exported `parsePatchFiles`; its Shiki theme is exported as `diffTheme`. `Markdown` parses with `unified` (remark and GitHub's extensions) and highlights code
   with the same Shiki highlighter and Sigil theme as `Diff`, so a page has one highlighter.
 
 ## Use
