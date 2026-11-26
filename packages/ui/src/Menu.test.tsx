@@ -1,4 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/dom";
+import { createSignal, flush } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import { Menu } from "./Menu";
 import { axeViolations, render } from "./test/render";
@@ -44,5 +45,15 @@ describe("Menu", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
     await waitFor(() => expect(trigger).toHaveFocus());
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("keeps its rows when the caller rebuilds the same items", async () => {
+    const [current, setCurrent] = createSignal(items);
+    render(() => <Menu label="More actions" icon={<svg />} items={current()} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const row = await screen.findByRole("menuitem", { name: "Skip PR" });
+    setCurrent(items.map((item) => ({ ...item })));
+    flush();
+    expect(screen.getByRole("menuitem", { name: "Skip PR" })).toBe(row);
   });
 });

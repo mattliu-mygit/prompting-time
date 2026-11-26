@@ -35,10 +35,11 @@ export function Menu(props: MenuProps) {
       <Portal>
         <div ref={spread(() => api().getPositionerProps())} class="pt-menu-positioner">
           <ul ref={spread(() => api().getContentProps())} class="pt-menu">
-            <For each={props.items}>
+            {/* Keyed by value, so a caller that rebuilds its items keeps the same rows. */}
+            <For each={props.items} keyed={(item) => item.value}>
               {(item) => (
-                <li ref={spread(() => api().getItemProps({ value: item.value, disabled: item.disabled }))} class="pt-menu-item">
-                  {item.label}
+                <li ref={spread(() => api().getItemProps({ value: item().value, disabled: item().disabled }))} class="pt-menu-item">
+                  {item().label}
                 </li>
               )}
             </For>
