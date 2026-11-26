@@ -12,12 +12,23 @@
     "./styles.css": "./src/styles.css"
   },
   "files": [
-    "src",
-    "fonts",
-    "!src/**/*.test.*",
-    "!src/test"
+    "dist",
+    "src/*.css",
+    "src/theme/sigil.css",
+    "src/icons.LICENSE",
+    "fonts"
   ],
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./styles.css": "./src/styles.css"
+    }
+  },
   "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
     "gallery": "vite",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
@@ -26,29 +37,27 @@
     "@solidjs/web": "^2.0.1",
     "solid-js": "^2.0.1"
   },
-  "dependencies": {
-    "@pierre/diffs": "1.6.4",
-    "@sigil-ui/tokens": "3.0.0",
-    "@zag-js/core": "1.48.0",
-    "@zag-js/dialog": "1.48.0",
-    "@zag-js/menu": "1.48.0",
-    "@zag-js/vanilla": "1.48.0",
-    "remark-gfm": "4.0.1",
-    "remark-parse": "11.0.0",
-    "remark-rehype": "11.1.2",
-    "unified": "11.0.5"
-  },
   "devDependencies": {
+    "@pierre/diffs": "1.6.4",
     "@sigil-ui/presets": "3.0.0",
+    "@sigil-ui/tokens": "3.0.0",
     "@solidjs/vite-plugin": "3.0.1",
     "@solidjs/web": "2.0.1",
     "@testing-library/dom": "10.4.1",
     "@testing-library/jest-dom": "6.10.0",
     "@types/hast": "3.0.5",
+    "@zag-js/core": "1.48.0",
+    "@zag-js/dialog": "1.48.0",
+    "@zag-js/menu": "1.48.0",
+    "@zag-js/vanilla": "1.48.0",
     "axe-core": "4.13.0",
     "jsdom": "30.0.1",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "remark-rehype": "11.1.2",
     "solid-js": "2.0.1",
     "typescript": "5.9.3",
+    "unified": "11.0.5",
     "vite": "8.2.2",
     "vitest": "4.1.11"
   }
