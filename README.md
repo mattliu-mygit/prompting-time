@@ -80,7 +80,7 @@ supported, with the inspector opening as an overlay when it would crowd the chat
 
 A single compact header holds the conversation title, provider, current status,
 and pane controls. **More → Archive conversation** keeps archival out of the main
-reading area. The sidebar starts with the pinned background agents, then **Search PRs
+reading area. The sidebar starts with the pinned background agents, then **Search work
 and chats**, **New chat**, and the status filter above its list; New chat moves into the
 header when the sidebar is hidden, and the palette's **Search** stays in the header. The
 list's sections work like VS Code's sidebar panes: every section's heading, with its count,
@@ -188,26 +188,24 @@ checks, starts, and stops them, and the window shows them.
 - **Screens.** Installed plugins sit pinned at the top of the sidebar, above its sections,
   one compact row each: the name, which opens the plugin's screen; Pause or Resume (`pause`,
   `resume`), Start while it is stopped, and Poll now (`round`) as buttons; a ⋯ menu with Stop,
-  Settings, and Open logs; and its status in words from its process and its `status` action, such
-  as "Running · next poll 3:45 PM", "Paused", or "Stopped". While the status reports a cause that
-  blocks every review (`blocked`), the words read in red, "Can't review · Docker isn't running",
-  until the plugin clears it, and open the cause's screen. The plugin's screen has the same words
-  and controls, its health (the last poll, today's counts, and its `rounds` per day for 15 days),
-  and the tabs Runs (rounds and every review run, filtered to all, failed, or skipped, and searched
-  by pull request: number, title, author, or repo), Logs (the end of its log, with search and
-  copy), and Settings (where it came from, who runs it, the programs it needs, and its settings in
-  a form drawn from its settings schema, which the plugin checks and saves). Stop asks first and
-  names the reviews in progress it ends. With no plugin installed the pinned row offers to install
-  one, and the palette always does: from a release archive on this Mac, checked by its SHA-256, or
-  by running a plugin folder in place, for development.
+  Settings, and Open logs; and its status in words and a dot, from its process and the `agent`
+  of its status format 2, such as "Running · next poll 3:45 PM" or, in red, "Missing gh". Resume
+  replaces Pause while the status says `paused`. The plugin's screen has the same words and
+  controls and the tabs Logs (the end of its log, with search and copy) and Settings (where it
+  came from, who runs it, the programs it needs, and its settings in a form drawn from its
+  settings schema, which the plugin checks and saves). Everything else the plugin shows, such as
+  its history, is on its page. Stop asks first and names the items whose dot says they run now.
+  With no plugin installed the pinned row offers to install one, and the palette always does:
+  from a release archive on this Mac, checked by its SHA-256, or by running a plugin folder in
+  place, for development.
 - **Menu bar.** While a background agent is installed, Prompting Time puts a clock in the macOS menu
   bar, a template image that macOS draws in the menu bar's own color, with a dot at its top right
-  while an agent fails, is blocked, or can't start. Its menu repeats the pinned rows, from the same
-  status in the same words: each agent's name, which opens its screen; its status words, which
-  open a blocking cause's screen; its Pause or Resume (Start while it is stopped) and Poll now; then
-  how many reviews need you, which opens the first; then Open Prompting Time and Quit Prompting
-  Time. It is on by default; the palette's "Hide background agents from the menu bar" turns it off
-  and "Show background agents in the menu bar" back on, and this device remembers the choice.
+  while an agent's row is red, its status lists a blocker, or it can't start. Its menu repeats the
+  pinned rows, from the same status in the same words: each agent's name, which opens its screen;
+  its status words; its Pause or Resume (Start while it is stopped) and Poll now; then how many
+  items need you, which opens the first; then Open Prompting Time and Quit Prompting Time. It is
+  on by default; the palette's "Hide background agents from the menu bar" turns it off and "Show
+  background agents in the menu bar" back on, and this device remembers the choice.
 
 - **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
   and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
@@ -230,11 +228,9 @@ checks, starts, and stops them, and the window shows them.
   the request it would run in a file in the plugin's state folder, names that file in its output,
   and prints `fingerprint: <hex>`, the file's SHA-256, last. Prompting Time returns that file's
   text for the confirmation, and runs the action for real only with the fingerprint the user
-  confirmed, as `--expect <hex>`. The confirmation explains the refusals Whooper's submit exits
-  with: 10 (new commits since the review), 11 (not safe to approve; Approve anyway reruns the
-  preview with `--approve-anyway`), 12 (an @-mention; Send with the mentions reruns it with
-  `--allow-mentions`), and 13 (the request changed, so it shows the new one and asks again).
-  Settings are saved through the `save-settings` action, which checks them.
+  confirmed, as `--expect <hex>`. Exit 13 means the request changed, so the confirmation shows the
+  new one and asks again; any other refusal shows the exit code and what the plugin printed on
+  stderr. Settings are saved through the `save-settings` action, which checks them.
 - **State.** A plugin keeps its state in `$XDG_STATE_HOME/<name>` (default
   `~/.local/state/<name>`). Prompting Time passes its `XDG_STATE_HOME` to plugin commands, watches
   that folder, and sends the window a `pluginChanged` event naming the files that changed.
@@ -247,73 +243,34 @@ checks, starts, and stops them, and the window shows them.
   files, inline styles, and data URLs, and no fetches. The window has its own policy, in
   `tauri.conf.json`, which frames only `pt-plugin:`; the Vite server sends it too, so development
   and the browser fixture run under it.
-- **Page messages.** The page talks to Prompting Time only through postMessage, in page protocol 1
-  (Whooper's `page/src/protocol.ts`). Prompting Time drops any message that does not fit, acts
-  only on runs the plugin's status lists, and maps each request to an action: `show-review <run>`
-  for a review, `draft <run> <change>` for a draft, `ask <run> <question> [--finding <id>]` for Ask
-  about this, and `submit <run>`, which goes through the confirmation; an action marked `confirm`
-  always does. Each result goes back to the page, which also hears of a new status and of changes
-  to the shown run's files. A page whose manifest says `page.protocol: 2` speaks the generic page
-  protocol 2 instead: it sends `ready`, then `call {id, action, args}` to run one of its manifest's
-  actions with `args` after the action's command, and gets back `result {reply_to, json}`, what the
-  action printed (parsed when it is JSON, else the text), or `error {reply_to, message}`. Prompting
-  Time refuses an action the manifest does not declare, runs an action marked `confirm` only
-  through the confirmation, and refuses `--print` and `--expect` from the page for one. Unasked, the
-  page gets `open {route}` for the item or blocker the user opened and `changed {files}` when files
-  in the plugin's state folder change, null when more changed than one event lists. A call holds at
-  most 64 arguments of at most 64 KiB together.
-- **Reviews.** A plugin's status may list `reviews`, as `whooper-status --json` does: the runs of the
-  last 30 days, each with the commit it reviewed (`head_sha`), the pull request's head
-  (`pr_head_sha`), its `author`, a `cause` when it failed or waits, whether you skipped or removed
-  it (`skipped_by_user`, `removed_by_user`), and whether the plugin judges it safe to approve
-  (`safe_to_approve`). The sidebar lists the newest run of each pull request in sections that fold
-  to a heading with a count, stacked at the bottom of the sidebar; only "Needs you" starts open,
-  and it lists every item and scrolls on its own. It holds Ready to approve (the plugin judges the
-  run safe to approve, or, in a status without `safe_to_approve`, says approve once CI passes and
-  read the whole change), Needs a look, Review failed (a cause of the pull request's own), and
-  Chats waiting on you. Then come Reviewing, one "Waiting · <cause>" section per cause that blocks
-  every review (`blocked`, or a cause with scope `all`), the chats of each project, and Done. A
-  review's row has a two-line title and "widgets#101 · @author · 2 findings". "Search PRs and
-  chats" finds a pull request by number, title words, author, or repo in every state, removed ones
-  tagged "removed", and chats by title or folder; Escape clears it and Enter opens the first
-  result. A cause's screen retries each waiting or failed review with `retry <run>` and then offers
-  Run now, asks about one with `ask`, opens the logs, and has Remove all, which asks first. Remove,
-  on each review's row and in its header, runs `remove <run>`: the review leaves the lists, its
-  files stay on disk, and a notice offers Undo (`remove <run> --undo`); a removed review's page has
-  Restore. After Submit, Skip, or Remove of the open review, the next item in "Needs you" opens and
-  the notice names it. Command-J steps through "Needs you", and Command-K finds every review; when
-  either, the next item, or the menu bar selects a row below or above the visible part of its
-  section, the section scrolls just far enough to show it. The window's header names the review's
-  state, and for one that says approve once CI passes but that the plugin judges not safe to
-  approve it says why, from the kinds of its findings (`show-review`): "approve once CI passes · has
-  a question", or "didn't read the whole change" for a review that skipped it. A review's header
-  also shows "Review N · <short sha> · <time>" with the pull request's other versions
-  (an earlier one is read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run>
-  [--undo]`), Remove, and a banner when the pull request has commits after the reviewed one.
+- **Page messages.** The page talks to Prompting Time only through postMessage, in page protocol 2,
+  the only one Prompting Time speaks; a manifest must say `page.protocol: 2`. The page sends
+  `ready`, then `call {id, action, args}` to run one of its manifest's actions with `args` after
+  the action's command, and gets back `result {reply_to, json}`, what the action printed (parsed
+  when it is JSON, else the text), or `error {reply_to, message}`. Prompting Time drops any
+  message that does not fit, refuses an action the manifest does not declare, runs an action
+  marked `confirm` only through the confirmation, and refuses `--print` and `--expect` from the
+  page for one. Unasked, the page gets `open {route}` for the item or blocker the user opened and
+  `changed {files}` when files in the plugin's state folder change, null when more changed than
+  one event lists. A call holds at most 64 arguments of at most 64 KiB together.
 - **Status format 2.** A plugin whose manifest has a `status` key, `{"format": 2, "groups": [{"id",
   "title", "needs_you", "order", "folded"?}], "item_actions": [...]}`, prints the format in
   [`docs/plugin-status-v2.schema.json`](docs/plugin-status-v2.schema.json) from its `status` action:
-  its row's words and dot (`agent`), problems that stop every job (`blockers`), and at most 50
-  `items`, each in one of the declared groups. Group IDs are unique and lowercase-kebab, and
-  `item_actions` name declared actions. The pinned row and the menu bar show the plugin's words and
-  dot, and a blocker puts the dot on the menu bar's icon. All work lists the blockers first under
-  Needs you, then the items of each group marked `needs_you` after the reviews, and each other group
-  in a section of its own, open unless `folded`, ordered by `order` with each group's items newest
-  first; Command-J and the menu bar's count include them. A row's ⋯ menu, opened by a click, lists
-  the item's `actions` and runs the chosen one as `<command> --item <id>`, through the confirmation
-  for an action marked `confirm`; a blocker's `action` runs with no extra arguments. An item or
-  blocker that does not fit is left out, as are row actions the manifest does not allow. A click on
-  an item or blocker, or Command-J landing on one, opens the plugin's page at its `route` when the
-  page speaks page protocol 2, keeping the page loaded from one row to the next; with a page of
-  protocol 1 it shows the plugin's screen instead.
-- **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
-  lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
-  `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a
-  line saying it recorded none), and earlier questions with their answers (`asks`); a review waiting
-  on a blocking cause links to that cause's screen. Retry review in the header runs `retry <run>`,
-  which queues the pull request for the plugin's next round, shows what it printed, and then offers
-  Run now, which runs `round`. Ask why runs `ask <run> <question>` and adds the answer. A failure shows the plugin's own words. The screen runs only actions that need no
-  confirmation.
+  its row's words and dot (`agent`), problems that stop every job (`blockers`), at most 50
+  `items`, each in one of the declared groups, and optionally `paused`. Other top-level fields,
+  such as what the plugin's page reads, are ignored. Group IDs are unique and lowercase-kebab,
+  and `item_actions` name declared actions. All work lists the blockers first under Needs you,
+  then the items of each group marked `needs_you`, one part per group, and each other group in a
+  section of its own, open unless `folded`, ordered by `order` with each group's items newest
+  first; Command-J steps through the blockers and those items, and the menu bar counts the items.
+  "Search work and chats" finds blockers by title and items in every group by title, detail, or
+  project folder; Escape clears it and Enter opens the first result. A row's ⋯ menu, opened by a
+  click, lists the item's `actions` and runs the chosen one as `<command> --item <id>`, through
+  the confirmation for an action marked `confirm`; a blocker's `action` runs with no extra
+  arguments. An item or blocker that does not fit is left out, as are row actions the manifest
+  does not allow. A click on an item or blocker, Command-J landing on one, or choosing one in the
+  palette opens the plugin's page at its `route`, keeping the page loaded from one row to the
+  next. Whooper's page draws a review's diff and header and a failed review itself.
 
 ## Develop and verify
 

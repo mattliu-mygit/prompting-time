@@ -71,21 +71,23 @@ focus staying on it.
 ## Background agents
 
 Use `?agents=1` for an invented Whooper pinned at the top of the sidebar, running with its
-next poll at 3:45 PM; combine it with `?work=1` for a full All work list. Select Whooper to
+next poll at 3:45 PM, whose status prints status format 2 as `whooper-status --json` does; combine
+it with `?work=1` for a full All work list. Select Whooper to
 open its screen, and its Settings tab to change a value and Save, or set "Stop a poll after"
 below 5 to see Whooper's refusal. Pause, Resume, Stop, and Start change the invented Whooper in
-browser memory; Stop asks first. The palette's "Add background agent" commands offer a synthetic
+browser memory; Pause turns the row to "Paused" with Resume, and Stop asks first. The palette's "Add background agent" commands offer a synthetic
 archive, whose install is refused to show the message, and a synthetic folder. `?agents=missing` shows Whooper stopped for a
 missing program. `?agents=confirm` opens the submit confirmation over the app with an
 invented request, and `?agents=mentions` opens it on Whooper's refusal for an @-mention
-first. The fixture answers in browser memory and runs no plugin.
+first, which shows the exit code and Whooper's own words with no way to send. The fixture answers in browser memory and runs no plugin.
 
 ## Status format 2
 
 Use `?agents=v2` (with `?work=1` for chats too) for an invented "Fixture runs" plugin beside
-Whooper that prints status format 2. Its pinned row reads "Running 1 evaluation". Needs you starts
-with the red blocker "Codex is signed out", then Run failed (two runs) and Review needed (one);
-Running starts open and Done, folded in the stack, holds six nightly runs. Command-J steps through
+Whooper; both print status format 2, so each group's label starts with its plugin's title. Its
+pinned row reads "Running 1 evaluation". Needs you starts with the red blocker "Codex is signed
+out", then Fixture runs · Run failed (two runs) and · Review needed (one); · Running starts open and
+· Done, folded in the stack, holds six nightly runs. Command-J steps through
 the blocker and those three items. Each row's ⋯ menu opens on a click: Rerun moves a run to Running,
 Delete run opens the confirmation with the invented request and deletes the run after Confirm, and
 the blocker's Check providers clears it. Everything answers in browser memory.
@@ -99,32 +101,28 @@ Confirm, the page shows "deleted <id>" and "Changed: runs/<id>/run.json", since 
 pluginChanged event for each action that changes something. Call an undeclared action shows
 Prompting Time's refusal, "Fixture runs declares no rm-everything action."
 
-## Plugin pages
+## Whooper's reviews
 
-Use `?agents=reviews` for invented Whooper reviews. Whooper's pinned row reads "Can't review ·
-Docker isn't running" in red and opens the cause screen: Retry all prints what each retry queued,
-then Run now prints an invented round, and Remove all asks first, then removes the five waiting
-reviews with Undo. "Needs you" lists six reviews ready to approve, three that need a look, and two
-failed ones, and scrolls on its own; acme/widgets#106 says approve once CI passes, but its one
-finding is a question, so Whooper's `safe_to_approve` is false and it needs a look. Reviewing,
-"Waiting · Docker isn't running", the chats, and Done start folded at the bottom. "Search PRs and
-chats" finds a review by number, title words, author, or repo, and "keep focus" finds a removed
-review, whose page offers Restore. Remove on a row or in a review's header, Skip, and Submit open
-the next item in Needs you and say so in a notice with Undo. Whooper's Runs tab has its own
-search. "add a retry policy for uploads" is review 2, with a new-commits banner and review 1 in its
-versions menu, read-only. Drag the sidebar's right edge to resize it; the width stays after a
-reload. Start the server with `PROMPTING_TIME_FIXTURE_PAGE`
-set to a built plugin page folder, such as Whooper's `page/dist` after `npm ci && npm run build`
-in its `page/`, and the server serves it at `/plugin-page/` with the headers the app's
-`pt-plugin://` scheme sends. Open a finished review to see it in the page; Submit review opens the
-confirmation with the request built from the drafts. The fixture sends no pluginChanged events,
-so a change shows after the next status read. None of this shows how WKWebView treats
-`pt-plugin://`.
+Use `?agents=reviews` for invented Whooper reviews, which its status lists as format 2 items in
+Whooper's groups, beside the reviews its page reads. Whooper's pinned row reads "Can't review ·
+Docker isn't running" in red, and Needs you starts with the blocker "Docker isn't running", whose
+⋯ menu runs Poll now. "Needs you" then lists six reviews ready to approve, three that need a look,
+and two failed ones, and scrolls on its own; acme/widgets#106 says approve once CI passes, but its
+one finding is a question, so it needs a look. Reviewing and Waiting start open, and Done and the
+chats folded at the bottom. "Search work and chats" finds a review by its title, its number
+("#101"), its author ("@lin-w"), or its repo's short name. Each review's ⋯ menu runs Retry, Skip,
+or Remove with `--item <run>`; a notice names what ran. Drag the sidebar's right edge to resize
+it; the width stays after a reload.
 
-A failed review opens on Prompting Time's own screen and needs no built page. "keep only shared
-types in the core package" has Whooper's reason and an earlier answer; "drop the legacy upload
-path" recorded no reason. Retry review prints that it queued the pull request and offers Run now;
-Ask why answers in browser memory and adds the answer.
+A review opens in Whooper's page, which needs a build: start the server with
+`PROMPTING_TIME_FIXTURE_PAGE` set to a built plugin page folder, such as Whooper's `page/dist`
+after `npm ci && npm run build` in its `page/`, and the server serves it at `/plugin-page/` with
+the headers the app's `pt-plugin://` scheme sends. The page speaks page protocol 2 and draws the
+review, its header (versions, Skip, Remove, Rerun review, and the new-commits banner on "add a
+retry policy for uploads"), and failed reviews ("keep only shared types in the core package" has
+Whooper's reason and an earlier answer) itself. Submit review opens the confirmation with the
+request built from the drafts. The fixture sends no pluginChanged events for Whooper, so a change
+shows after the next status read. None of this shows how WKWebView treats `pt-plugin://`.
 
 ## Chat readability and streaming
 
