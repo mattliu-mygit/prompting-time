@@ -9,7 +9,7 @@ Whooper's.
   token object (`src/theme/tokens.ts`). Prompting Time is dark only, so the dark colors apply.
 - **Fonts:** the Katagami WOFF2 files and their license are in `fonts/`, so pages work offline.
 - **Components:** Solid 2.0 components that read the theme's `--s-*` variables and nothing else:
-  `Button`, `IconButton`, `CopyButton`, `Checkbox`, `TextField`, `NumberField`, `Select`,
+  `Button`, `IconButton`, `CopyButton`, `Checkbox`, `TextField`, `NumberField`, `Textarea`, `Select`,
   `StatusDot`, `ListRow`, `ConfirmDialog`, `Menu`, `CommandPalette`, `Markdown`, and `Diff`, plus
   the icons in `src/icons.tsx` (Lucide's paths; license in `src/icons.LICENSE`). The dialogs and the
   menu get their focus and keyboard behavior from Zag.js state machines, run through Zag's

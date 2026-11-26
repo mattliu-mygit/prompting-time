@@ -172,6 +172,40 @@
   cursor: not-allowed;
 }
 
+/* Textarea */
+.pt-textarea {
+  inline-size: 100%;
+  min-inline-size: 0;
+  padding: var(--s-space-8) var(--s-input-px);
+  border: var(--s-input-border-width) var(--s-border-style) var(--s-border-strong);
+  border-radius: var(--s-radius-input);
+  background: var(--s-background);
+  color: var(--s-text);
+  font: inherit;
+  font-size: var(--s-size-sm);
+  line-height: var(--s-leading-relaxed);
+  resize: vertical;
+}
+
+.pt-textarea[data-grow] {
+  max-block-size: 30vh;
+  overflow-y: auto;
+  resize: none;
+}
+
+.pt-textarea::placeholder {
+  color: var(--s-input-placeholder-color);
+}
+
+.pt-textarea[aria-invalid="true"] {
+  border-color: var(--s-input-error-border-color);
+}
+
+.pt-textarea:disabled {
+  color: var(--s-text-disabled);
+  cursor: not-allowed;
+}
+
 .pt-select {
   position: relative;
   display: inline-flex;
