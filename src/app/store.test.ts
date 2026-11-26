@@ -1,4 +1,4 @@
-import { waitFor } from "@testing-library/react";
+import { waitFor } from "@testing-library/dom";
 import { describe, expect, it, vi } from "vitest";
 import type {
   BootstrapSnapshot,

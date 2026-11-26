@@ -1,18 +1,20 @@
-import { useEffect, useRef, useState } from "react";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import type {
   CleanupBlocker,
   ConversationSummary,
   InspectorSnapshot,
   ProviderInstallation,
-  RunAuditDetailSnapshot,
-  RunAuditSummarySnapshot,
   RoutingBlocker,
   RoutingCriterion,
+  RunAuditDetailSnapshot,
+  RunAuditSummarySnapshot,
 } from "../../bridge/types";
 import type { AppActions } from "../../app/store";
 import { Diagnostics } from "./Diagnostics";
 
 type InspectorProps = {
+  /** One Inspector shows one conversation; the caller makes a new one for another conversation. */
   conversation: ConversationSummary;
   providers: readonly ProviderInstallation[];
   refreshVersion: number;
@@ -23,179 +25,126 @@ const providerNames = { codex: "Codex", claude: "Claude" } as const;
 const RUN_AUDIT_PAGE_SIZE = 10;
 const MAX_RUN_AUDIT_ITEMS = 40;
 
-export function Inspector({ conversation, providers, refreshVersion, actions }: InspectorProps) {
-  const [snapshot, setSnapshot] = useState<InspectorSnapshot | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
-  const [refreshAvailable, setRefreshAvailable] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const inspectGeneration = useRef(0);
-  const inspectInFlight = useRef(false);
-  const renderedRefreshVersion = useRef(refreshVersion);
-  const latestRefreshVersion = useRef(refreshVersion);
-  latestRefreshVersion.current = refreshVersion;
-  const [runAudits, setRunAudits] = useState<RunAuditSummarySnapshot[]>([]);
-  const [runCursor, setRunCursor] = useState<string | null>(null);
-  const [runHistoryEvicted, setRunHistoryEvicted] = useState(false);
-  const [selectedRun, setSelectedRun] = useState<RunAuditDetailSnapshot | null>(null);
-  const [runError, setRunError] = useState<string | null>(null);
-  const [loadingRuns, setLoadingRuns] = useState(false);
-  const runListGeneration = useRef(0);
-  const runDetailGeneration = useRef(0);
-  const runConversation = useRef<string | null>(null);
-  const runPagingStarted = useRef(false);
-  const runListInFlight = useRef(false);
-  const runListRefreshQueued = useRef(false);
-  const runListResetQueued = useRef(false);
-  const actionsRef = useRef(actions);
-  actionsRef.current = actions;
+/**
+ * Routing, workspace, provider runs, and diagnostics for the selected conversation. The workspace
+ * snapshot runs Git, so streamed activity only marks it stale; you refresh it explicitly.
+ */
+export function Inspector(props: InspectorProps) {
+  const conversationId = untrack(() => props.conversation.id);
+  const [snapshot, setSnapshot] = createSignal<InspectorSnapshot | null>(null);
+  const [error, setError] = createSignal<string | null>(null);
+  const [collapsed, setCollapsed] = createSignal<ReadonlySet<string>>(new Set());
+  const [renderedVersion, setRenderedVersion] = createSignal(untrack(() => props.refreshVersion));
+  const [loading, setLoading] = createSignal(false);
+  const [runAudits, setRunAudits] = createSignal<RunAuditSummarySnapshot[]>([]);
+  const [runCursor, setRunCursor] = createSignal<string | null>(null);
+  const [runHistoryEvicted, setRunHistoryEvicted] = createSignal(false);
+  const [selectedRun, setSelectedRun] = createSignal<RunAuditDetailSnapshot | null>(null);
+  const [runError, setRunError] = createSignal<string | null>(null);
+  const [loadingRuns, setLoadingRuns] = createSignal(false);
+  let disposed = false;
+  let inspecting = false;
+  let runDetailGeneration = 0;
+  let runPagingStarted = false;
+  let runListInFlight = false;
+  let runListRefreshQueued = false;
+  let runListResetQueued = false;
+  onSettled(() => () => {
+    disposed = true;
+  });
+  const refreshAvailable = () => snapshot() !== null && props.refreshVersion !== renderedVersion();
 
   function refreshRunAudits(reset: boolean) {
-    if (!conversation.capabilities.canSend) return;
-    runListRefreshQueued.current = true;
-    runListResetQueued.current ||= reset;
-    drainRunAuditRefreshes();
-  }
-
-  function drainRunAuditRefreshes() {
-    if (runListInFlight.current) return;
-    runListInFlight.current = true;
+    if (!props.conversation.capabilities.canSend) return;
+    runListRefreshQueued = true;
+    runListResetQueued ||= reset;
+    if (runListInFlight) return;
+    runListInFlight = true;
     setLoadingRuns(true);
     void (async () => {
-      while (runListRefreshQueued.current) {
-        const reset = runListResetQueued.current;
-        runListRefreshQueued.current = false;
-        runListResetQueued.current = false;
-        const generation = runListGeneration.current;
-        const conversationId = runConversation.current;
-        if (!conversationId) continue;
+      while (runListRefreshQueued && !disposed) {
+        const resetting = runListResetQueued;
+        runListRefreshQueued = false;
+        runListResetQueued = false;
         setRunError(null);
         try {
-          const page = await actionsRef.current.listRunAudits({ conversationId, cursor: null, limit: RUN_AUDIT_PAGE_SIZE });
-          if (
-            generation !== runListGeneration.current
-            || conversationId !== runConversation.current
-          ) continue;
-          setRunAudits((current) => {
-            const currentIds = new Set(current.map(({ id }) => id));
-            const introduced = page.items.some(({ id }) => !currentIds.has(id));
-            const merged = reset ? page.items : mergeRunAudits(page.items, current);
-            if (!reset && introduced && current.length >= MAX_RUN_AUDIT_ITEMS) {
-              setRunHistoryEvicted(true);
-              setRunCursor(null);
-            }
-            return merged;
-          });
-          if (reset || !runPagingStarted.current) setRunCursor(page.nextCursor);
+          const page = await props.actions.listRunAudits({ conversationId, cursor: null, limit: RUN_AUDIT_PAGE_SIZE });
+          if (disposed) return;
+          const current = runAudits();
+          const introduced = page.items.some(({ id }) => !current.some((run) => run.id === id));
+          if (!resetting && introduced && current.length >= MAX_RUN_AUDIT_ITEMS) {
+            setRunHistoryEvicted(true);
+            setRunCursor(null);
+          }
+          setRunAudits(resetting ? page.items : mergeRunAudits(page.items, current));
+          if (resetting || !runPagingStarted) setRunCursor(page.nextCursor);
         } catch (reason) {
-          if (
-            generation === runListGeneration.current
-            && conversationId === runConversation.current
-          ) setRunError(messageFor(reason));
+          if (!disposed) setRunError(messageFor(reason));
         }
       }
-    })().finally(() => {
-      runListInFlight.current = false;
-      setLoadingRuns(false);
-      if (runListRefreshQueued.current) drainRunAuditRefreshes();
-    });
+      runListInFlight = false;
+      if (!disposed) setLoadingRuns(false);
+    })();
   }
 
   function refreshInspector(includeRunHistory = false) {
-    if (inspectInFlight.current) return;
-    inspectInFlight.current = true;
-    const generation = inspectGeneration.current;
-    const conversationId = conversation.id;
-    const requestedRefreshVersion = refreshVersion;
+    if (inspecting) return;
+    inspecting = true;
+    const requestedVersion = props.refreshVersion;
     setLoading(true);
     setError(null);
     if (includeRunHistory) refreshRunAudits(false);
-    void actions.inspectWorkspace({ conversationId })
+    void props.actions.inspectWorkspace({ conversationId })
       .then((next) => {
-        if (generation === inspectGeneration.current) {
-          setSnapshot(next);
-          renderedRefreshVersion.current = requestedRefreshVersion;
-          setRefreshAvailable(latestRefreshVersion.current !== requestedRefreshVersion);
-        }
+        if (disposed) return;
+        setSnapshot(next);
+        setRenderedVersion(requestedVersion);
       })
       .catch((reason: unknown) => {
-        if (generation === inspectGeneration.current) setError(messageFor(reason));
+        if (!disposed) setError(messageFor(reason));
       })
       .finally(() => {
-        if (generation === inspectGeneration.current) {
-          inspectInFlight.current = false;
-          setLoading(false);
-        }
+        inspecting = false;
+        if (!disposed) setLoading(false);
       });
   }
 
-  useEffect(() => {
-    inspectGeneration.current += 1;
-    inspectInFlight.current = false;
-    setSnapshot(null);
-    setRefreshAvailable(false);
-    renderedRefreshVersion.current = refreshVersion;
-    refreshInspector();
-    return () => { inspectGeneration.current += 1; };
-  }, [actions, conversation.id]);
-
-  useEffect(() => {
-    if (refreshVersion !== renderedRefreshVersion.current) setRefreshAvailable(true);
-  }, [refreshVersion]);
-
-  useEffect(() => {
-    const reset = runConversation.current !== conversation.id;
-    runConversation.current = conversation.id;
-    if (reset) {
-      runListGeneration.current += 1;
-      runDetailGeneration.current += 1;
-      runPagingStarted.current = false;
-      setRunAudits([]);
-      setRunCursor(null);
-      setRunHistoryEvicted(false);
-      setSelectedRun(null);
-      setRunError(null);
-      setLoadingRuns(false);
-    }
-    refreshRunAudits(reset);
-    return () => { runDetailGeneration.current += 1; };
-  }, [actions, conversation.id, conversation.currentRunId]);
+  onSettled(() => refreshInspector());
+  // A new run of this conversation adds to its run history.
+  const currentRunId = createMemo(() => props.conversation.currentRunId);
+  createEffect(currentRunId, () => refreshRunAudits(false));
 
   async function loadMoreRuns() {
-    if (!runCursor || runListInFlight.current) return;
-    const generation = runListGeneration.current;
-    runListInFlight.current = true;
+    const requested = runCursor();
+    if (!requested || runListInFlight) return;
+    runListInFlight = true;
     setLoadingRuns(true);
     setRunError(null);
     try {
-      const page = await actions.listRunAudits({
-        conversationId: conversation.id, cursor: runCursor, limit: RUN_AUDIT_PAGE_SIZE,
-      });
-      if (generation !== runListGeneration.current) return;
-      runPagingStarted.current = true;
-      setRunAudits((current) => {
-        const combined = [...current, ...page.items];
-        if (combined.length > MAX_RUN_AUDIT_ITEMS) setRunHistoryEvicted(true);
-        return combined.slice(-MAX_RUN_AUDIT_ITEMS);
-      });
+      const page = await props.actions.listRunAudits({ conversationId, cursor: requested, limit: RUN_AUDIT_PAGE_SIZE });
+      if (disposed) return;
+      runPagingStarted = true;
+      const combined = [...runAudits(), ...page.items];
+      if (combined.length > MAX_RUN_AUDIT_ITEMS) setRunHistoryEvicted(true);
+      setRunAudits(combined.slice(-MAX_RUN_AUDIT_ITEMS));
       setRunCursor(page.nextCursor);
     } catch (reason) {
-      if (generation === runListGeneration.current) setRunError(messageFor(reason));
+      if (!disposed) setRunError(messageFor(reason));
     } finally {
-      runListInFlight.current = false;
-      if (generation === runListGeneration.current) setLoadingRuns(false);
-      if (runListRefreshQueued.current) drainRunAuditRefreshes();
+      runListInFlight = false;
+      if (!disposed) setLoadingRuns(false);
+      if (runListRefreshQueued) refreshRunAudits(false);
     }
   }
 
   async function inspectRun(runId: string) {
-    const generation = ++runDetailGeneration.current;
+    const generation = ++runDetailGeneration;
     setRunError(null);
     try {
-      const detail = await actions.loadRunAudit({ conversationId: conversation.id, runId });
-      if (generation === runDetailGeneration.current) setSelectedRun(detail);
+      const detail = await props.actions.loadRunAudit({ conversationId, runId });
+      if (!disposed && generation === runDetailGeneration) setSelectedRun(detail);
     } catch (reason) {
-      if (generation === runDetailGeneration.current) setRunError(messageFor(reason));
+      if (!disposed && generation === runDetailGeneration) setRunError(messageFor(reason));
     }
   }
 
@@ -207,144 +156,144 @@ export function Inspector({ conversation, providers, refreshVersion, actions }: 
       return next;
     });
   }
+  const section = (id: string, title: string, children: () => JSX.Element) => (
+    <InspectorSection id={id} title={title} collapsed={collapsed().has(id)} onToggle={toggle}>{children()}</InspectorSection>
+  );
 
   return (
-    <div className="inspector-content">
-      <Diagnostics conversationId={conversation.id} actions={actions} />
-      {!snapshot ? error ? <p role="alert" className="inline-error">{error}</p> : <p role="status">Loading inspector…</p> : <>
-      <div className="inspector-refresh">
-        <button type="button" className="secondary-button" disabled={loading} onClick={() => refreshInspector(true)}>Refresh inspector</button>
-        {refreshAvailable ? <small>New conversation activity is available. Refresh to update workspace details.</small> : null}
-        {error ? <p role="alert" className="inline-error">{error}</p> : null}
-      </div>
-      {conversation.capabilities.canSend ? <InspectorSection id="run-history" title="Provider run history" collapsed={collapsed.has("run-history")} onToggle={toggle}>
-        {runAudits.length ? (
-          <ol className="run-audit-list">
-            {runAudits.map((run, index) => (
-              <li key={run.id}>
-                <button type="button" className="secondary-button" onClick={() => void inspectRun(run.id)}>
-                  Inspect {providerNames[run.provider]} run {index + 1}
-                </button>
-                <small>{humanize(run.status)} · {run.reason ? humanize(run.reason) : "Routing unavailable"}{run.hasHandoff ? " · handoff" : ""}</small>
-              </li>
-            ))}
-          </ol>
-        ) : <p>{loadingRuns ? "Loading provider runs…" : "No provider runs yet."}</p>}
-        {runCursor ? <button type="button" className="secondary-button" disabled={loadingRuns} onClick={() => void loadMoreRuns()}>Load older provider runs</button> : null}
-        {runHistoryEvicted ? <div className="history-window-note" role="note"><span>Some provider runs are outside this bounded view.</span><button type="button" className="secondary-button" disabled={loadingRuns} onClick={() => { setRunHistoryEvicted(false); runPagingStarted.current = false; refreshRunAudits(true); }}>Reload newest provider runs</button></div> : null}
-        {runError ? <p role="alert" className="inline-error">{runError}</p> : null}
-        {selectedRun ? (
-          <div className="run-audit-detail">
-            <h3>{providerNames[selectedRun.provider]} run detail</h3>
-            <h4>Thinking</h4>
-            {selectedRun.thinkingDecision ? <>
-              <p>Requested: {selectedRun.thinkingDecision.requestedEffort ?? "Provider default"} · configured: {selectedRun.thinkingConfiguration ? selectedRun.thinkingConfiguration.configuredEffort ?? "not set" : "unreported"} · model: {selectedRun.thinkingConfiguration?.model ?? "unreported"}</p>
-              <p>{selectedRun.thinkingDecision.reason}</p>
-              <p className="route-note">Configured effort reports a provider setting, not a thinking-token count.</p>
-            </> : <p>No thinking decision was recorded for this run.</p>}
-            <p>{selectedRun.routing?.explanation ?? "No routing decision was recorded for this run."}</p>
-            <p><strong>Reason:</strong> {selectedRun.reason ? humanize(selectedRun.reason) : "Unavailable"}</p>
-            {selectedRun.routingTruncated ? <p>Detailed routing evaluation exceeded the audit display limit.</p> : null}
-            {selectedRun.handoff ? <pre className="handoff-content">{selectedRun.handoff}</pre> : <p>No handoff was sent for this run.</p>}
-            {selectedRun.handoffTruncated ? <p className="truncation-note">The stored handoff exceeds the bounded audit view.</p> : null}
-          </div>
-        ) : null}
-      </InspectorSection> : null}
-      {conversation.capabilities.canRoute ? <InspectorSection id="routing" title="Routing" collapsed={collapsed.has("routing")} onToggle={toggle}>
-        {snapshot.routing ? (
+    <div class="inspector-content">
+      <Diagnostics conversationId={conversationId} actions={props.actions} />
+      <Show when={snapshot()} fallback={<Show when={error()} fallback={<p role="status">Loading inspector…</p>}><p role="alert" class="inline-error">{error()}</p></Show>}>
+        {(current) => (
           <>
-            <p><strong>{providerNames[snapshot.routing.provider]}</strong> · {humanize(snapshot.routing.profile)} · {humanize(snapshot.routing.taskKind)}</p>
-            <p>{snapshot.routing.explanation}</p>
-            <dl className="inspector-list">
-              <div><dt>Reason</dt><dd>{humanize(snapshot.routing.reason)}</dd></div>
-              <div><dt>Override</dt><dd>{snapshot.routing.overrideProvider ? providerNames[snapshot.routing.overrideProvider] : "Automatic"}</dd></div>
-              <div><dt>Required</dt><dd>{snapshot.routing.requiredCapabilities.map(humanize).join(", ") || "No special capabilities"}</dd></div>
-            </dl>
-            <ul className="evaluation-list">
-              {snapshot.routing.evaluations.map((evaluation) => (
-                <li key={evaluation.provider}>
-                  {providerNames[evaluation.provider]}: {evaluation.eligible
-                    ? "eligible"
-                    : `unavailable — ${evaluation.blockers.map(blockerLabel).join(", ")}`}
-                </li>
+            <div class="inspector-refresh">
+              <button type="button" class="pt-button" disabled={loading()} onClick={() => refreshInspector(true)}>Refresh inspector</button>
+              <Show when={refreshAvailable()}><small>New conversation activity is available. Refresh to update workspace details.</small></Show>
+              <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>
+            </div>
+            <Show when={props.conversation.capabilities.canSend}>
+              {section("run-history", "Provider run history", () => (
+                <>
+                  <Show when={runAudits().length > 0} fallback={<p>{loadingRuns() ? "Loading provider runs…" : "No provider runs yet."}</p>}>
+                    <ol class="run-audit-list">
+                      <For each={runAudits()}>
+                        {(run, index) => (
+                          <li>
+                            <button type="button" class="pt-button" onClick={() => void inspectRun(run.id)}>Inspect {providerNames[run.provider]} run {index() + 1}</button>
+                            <small>{humanize(run.status)} · {run.reason ? humanize(run.reason) : "Routing unavailable"}{run.hasHandoff ? " · handoff" : ""}</small>
+                          </li>
+                        )}
+                      </For>
+                    </ol>
+                  </Show>
+                  <Show when={runCursor()}><button type="button" class="pt-button" disabled={loadingRuns()} onClick={() => void loadMoreRuns()}>Load older provider runs</button></Show>
+                  <Show when={runHistoryEvicted()}>
+                    <div class="history-window-note" role="note">
+                      <span>Some provider runs are outside this bounded view.</span>
+                      <button type="button" class="pt-button" disabled={loadingRuns()} onClick={() => { setRunHistoryEvicted(false); runPagingStarted = false; refreshRunAudits(true); }}>Reload newest provider runs</button>
+                    </div>
+                  </Show>
+                  <Show when={runError()}><p role="alert" class="inline-error">{runError()}</p></Show>
+                  <Show when={selectedRun()}>{(run) => <RunDetail run={run()} />}</Show>
+                </>
               ))}
-            </ul>
-            <ol className="rationale-list">
-              {snapshot.routing.rationale.map((criterion, index) => (
-                <li key={`${criterion.kind}-${index}`}>{criterionLabel(criterion)}</li>
+            </Show>
+            <Show when={props.conversation.capabilities.canRoute}>
+              {section("routing", "Routing", () => (
+                <Show when={current().routing} fallback={<p>No route has been selected yet.</p>}>
+                  {(routing) => (
+                    <>
+                      <p><strong>{providerNames[routing().provider]}</strong> · {humanize(routing().profile)} · {humanize(routing().taskKind)}</p>
+                      <p>{routing().explanation}</p>
+                      <dl class="inspector-list">
+                        <div><dt>Reason</dt><dd>{humanize(routing().reason)}</dd></div>
+                        <div><dt>Override</dt><dd>{routing().overrideProvider ? providerNames[routing().overrideProvider!] : "Automatic"}</dd></div>
+                        <div><dt>Required</dt><dd>{routing().requiredCapabilities.map(humanize).join(", ") || "No special capabilities"}</dd></div>
+                      </dl>
+                      <ul class="evaluation-list">
+                        <For each={routing().evaluations}>
+                          {(evaluation) => <li>{providerNames[evaluation.provider]}: {evaluation.eligible ? "eligible" : `unavailable — ${evaluation.blockers.map(blockerLabel).join(", ")}`}</li>}
+                        </For>
+                      </ul>
+                      <ol class="rationale-list"><For each={routing().rationale}>{(criterion) => <li>{criterionLabel(criterion)}</li>}</For></ol>
+                    </>
+                  )}
+                </Show>
               ))}
-            </ol>
-          </>
-        ) : <p>No route has been selected yet.</p>}
-      </InspectorSection> : null}
-
-      <InspectorSection id="workspace" title="Workspace" collapsed={collapsed.has("workspace")} onToggle={toggle}>
-        <dl className="inspector-list">
-          <div><dt>Mode</dt><dd>{humanize(snapshot.workspace.mode)}</dd></div>
-          <div><dt>Project</dt><dd>{conversation.projectRoot ?? "No project"}</dd></div>
-          <div><dt>Execution path</dt><dd>{snapshot.executionPath}</dd></div>
-          <div><dt>Worktree</dt><dd>{snapshot.ownedWorktree ? "Prompting Time owned" : "Not app-owned"}</dd></div>
-          <div><dt>Cleanup</dt><dd>{snapshot.cleanup.eligible ? "Eligible" : `Cleanup blocked: ${cleanupLabel(snapshot.cleanup.blocker)}`}</dd></div>
-        </dl>
-        {snapshot.workspace.changes.length ? (
-          <ul className="change-list">
-            {snapshot.workspace.changes.map((change, index) => (
-              <li key={`${change.relativePath}-${index}`}><span>{humanize(change.kind)}</span> {change.relativePath}</li>
+            </Show>
+            {section("workspace", "Workspace", () => (
+              <>
+                <dl class="inspector-list">
+                  <div><dt>Mode</dt><dd>{humanize(current().workspace.mode)}</dd></div>
+                  <div><dt>Project</dt><dd>{props.conversation.projectRoot ?? "No project"}</dd></div>
+                  <div><dt>Execution path</dt><dd>{current().executionPath}</dd></div>
+                  <div><dt>Worktree</dt><dd>{current().ownedWorktree ? "Prompting Time owned" : "Not app-owned"}</dd></div>
+                  <div><dt>Cleanup</dt><dd>{current().cleanup.eligible ? "Eligible" : `Cleanup blocked: ${cleanupLabel(current().cleanup.blocker)}`}</dd></div>
+                </dl>
+                <Show when={current().workspace.changes.length > 0} fallback={<p>No changed files.</p>}>
+                  <ul class="change-list"><For each={current().workspace.changes}>{(change) => <li><span>{humanize(change.kind)}</span> {change.relativePath}</li>}</For></ul>
+                </Show>
+                <Show when={current().workspace.truncated}><p class="truncation-note">Changed-file summary is truncated.</p></Show>
+              </>
             ))}
-          </ul>
-        ) : <p>No changed files.</p>}
-        {snapshot.workspace.truncated ? <p className="truncation-note">Changed-file summary is truncated.</p> : null}
-      </InspectorSection>
-
-      {conversation.capabilities.canSend ? <InspectorSection id="children" title="Active child conversations" collapsed={collapsed.has("children")} onToggle={toggle}>
-        <p>{snapshot.activeDescendantCount} active descendants</p>
-      </InspectorSection> : null}
-
-      {conversation.capabilities.canRoute ? <InspectorSection id="handoff" title="Context handoff" collapsed={collapsed.has("handoff")} onToggle={toggle}>
-        {snapshot.handoff ? <pre className="handoff-content">{snapshot.handoff}</pre> : <p>No cross-provider handoff for this run.</p>}
-      </InspectorSection> : null}
-
-      <InspectorSection id="providers" title="Provider versions" collapsed={collapsed.has("providers")} onToggle={toggle}>
-        <ul className="provider-list">
-          {providers.map((provider) => (
-            <li key={provider.id}>
-              {provider.available
-                ? `${providerNames[provider.id]} ${provider.version ?? "version unknown"}`
-                : `${providerNames[provider.id]} unavailable: ${provider.diagnostic ?? "Not installed"}`}
-              {!provider.available && provider.version ? <small> · Version {provider.version}</small> : null}
-            </li>
-          ))}
-        </ul>
-      </InspectorSection>
-      </>}
+            <Show when={props.conversation.capabilities.canSend}>
+              {section("children", "Active child conversations", () => <p>{current().activeDescendantCount} active descendants</p>)}
+            </Show>
+            <Show when={props.conversation.capabilities.canRoute}>
+              {section("handoff", "Context handoff", () => (
+                <Show when={current().handoff} fallback={<p>No cross-provider handoff for this run.</p>}><pre class="handoff-content">{current().handoff}</pre></Show>
+              ))}
+            </Show>
+            {section("providers", "Provider versions", () => (
+              <ul class="provider-list">
+                <For each={props.providers}>
+                  {(provider) => (
+                    <li>
+                      {provider.available ? `${providerNames[provider.id]} ${provider.version ?? "version unknown"}` : `${providerNames[provider.id]} unavailable: ${provider.diagnostic ?? "Not installed"}`}
+                      <Show when={!provider.available && provider.version}><small> · Version {provider.version}</small></Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            ))}
+          </>
+        )}
+      </Show>
     </div>
   );
 }
 
-function InspectorSection({
-  id,
-  title,
-  collapsed,
-  onToggle,
-  children,
-}: {
-  id: string;
-  title: string;
-  collapsed: boolean;
-  onToggle(id: string): void;
-  children: React.ReactNode;
-}) {
-  const headingId = `inspector-${id}-heading`;
-  const contentId = `inspector-${id}-content`;
+function RunDetail(props: { run: RunAuditDetailSnapshot }) {
   return (
-    <section className="inspector-section" aria-labelledby={headingId}>
-      <div className="inspector-section-heading">
-        <h2 id={headingId}>{title}</h2>
-        <button type="button" className="disclosure-button" aria-expanded={!collapsed} aria-controls={contentId} aria-label={`${collapsed ? "Expand" : "Collapse"} ${id}`} onClick={() => onToggle(id)}>
-          {collapsed ? "+" : "−"}
+    <div class="run-audit-detail">
+      <h3>{providerNames[props.run.provider]} run detail</h3>
+      <h4>Thinking</h4>
+      <Show when={props.run.thinkingDecision} fallback={<p>No thinking decision was recorded for this run.</p>}>
+        <p>
+          Requested: {props.run.thinkingDecision.requestedEffort ?? "Provider default"} · configured: {props.run.thinkingConfiguration ? props.run.thinkingConfiguration.configuredEffort ?? "not set" : "unreported"} · model: {props.run.thinkingConfiguration?.model ?? "unreported"}
+        </p>
+        <p>{props.run.thinkingDecision.reason}</p>
+        <p class="route-note">Configured effort reports a provider setting, not a thinking-token count.</p>
+      </Show>
+      <p>{props.run.routing?.explanation ?? "No routing decision was recorded for this run."}</p>
+      <p><strong>Reason:</strong> {props.run.reason ? humanize(props.run.reason) : "Unavailable"}</p>
+      <Show when={props.run.routingTruncated}><p>Detailed routing evaluation exceeded the audit display limit.</p></Show>
+      <Show when={props.run.handoff} fallback={<p>No handoff was sent for this run.</p>}><pre class="handoff-content">{props.run.handoff}</pre></Show>
+      <Show when={props.run.handoffTruncated}><p class="truncation-note">The stored handoff exceeds the bounded audit view.</p></Show>
+    </div>
+  );
+}
+
+function InspectorSection(props: { id: string; title: string; collapsed: boolean; onToggle(id: string): void; children: JSX.Element }) {
+  return (
+    <section class="inspector-section" aria-labelledby={`inspector-${props.id}-heading`}>
+      <div class="inspector-section-heading">
+        <h2 id={`inspector-${props.id}-heading`}>{props.title}</h2>
+        <button type="button" class="disclosure-button" aria-expanded={props.collapsed ? "false" : "true"} aria-controls={`inspector-${props.id}-content`} aria-label={`${props.collapsed ? "Expand" : "Collapse"} ${props.id}`} onClick={() => props.onToggle(props.id)}>
+          {props.collapsed ? "+" : "−"}
         </button>
       </div>
-      {!collapsed ? <div id={contentId}>{children}</div> : null}
+      <Show when={!props.collapsed}><div id={`inspector-${props.id}-content`}>{props.children}</div></Show>
     </section>
   );
 }
@@ -363,9 +312,7 @@ function criterionLabel(criterion: RoutingCriterion) {
     case "eligibleProviders": return `Eligible: ${criterion.providers.map((provider) => providerNames[provider]).join(", ") || "none"}`;
     case "requiredCapabilities": return `Required: ${criterion.capabilities.map(humanize).join(", ") || "none"}`;
     case "continuity": return `Continuity: ${providerNames[criterion.provider]}`;
-    case "rankedCandidates": return `Ranked: ${criterion.candidates.map(({ provider, recentRootRuns, stableOrder }) => (
-      `${providerNames[provider]} (${recentRootRuns} recent root runs, stable order ${stableOrder})`
-    )).join(", ")}`;
+    case "rankedCandidates": return `Ranked: ${criterion.candidates.map(({ provider, recentRootRuns, stableOrder }) => `${providerNames[provider]} (${recentRootRuns} recent root runs, stable order ${stableOrder})`).join(", ")}`;
     case "safeFallback": return `Safe fallback: ${providerNames[criterion.from]} to ${providerNames[criterion.to]}`;
   }
 }
@@ -375,20 +322,13 @@ function cleanupLabel(blocker: CleanupBlocker | null) {
 }
 
 function humanize(value: string) {
-  const words = value.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
-  return words.replace(/^./, (letter) => letter.toUpperCase());
+  return value.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function mergeRunAudits(
-  newest: readonly RunAuditSummarySnapshot[],
-  disclosed: readonly RunAuditSummarySnapshot[],
-) {
+function mergeRunAudits(newest: readonly RunAuditSummarySnapshot[], disclosed: readonly RunAuditSummarySnapshot[]) {
   const byId = new Map(disclosed.map((run) => [run.id, run]));
   newest.forEach((run) => byId.set(run.id, run));
-  return [
-    ...newest,
-    ...disclosed.filter((run) => !newest.some(({ id }) => id === run.id)),
-  ].map((run) => byId.get(run.id)!).slice(0, MAX_RUN_AUDIT_ITEMS);
+  return [...newest, ...disclosed.filter((run) => !newest.some(({ id }) => id === run.id))].map((run) => byId.get(run.id)!).slice(0, MAX_RUN_AUDIT_ITEMS);
 }
 
 function messageFor(reason: unknown) {

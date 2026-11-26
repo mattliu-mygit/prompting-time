@@ -1,7 +1,7 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { createSignal, Show } from "solid-js";
+import { CopyButton, Markdown } from "@prompting-time/ui";
 import type { TimelineItem } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
-import { CopyButton, MessageContent } from "./MessageContent";
 import { ToolOperation } from "./ToolOperation";
 
 type EntryProps = {
@@ -14,84 +14,102 @@ type EntryProps = {
 };
 
 export function TimelineEntry(props: EntryProps) {
-  return props.item.kind === "tool" ? <ToolOperation {...props} /> : <TextEntry {...props} />;
+  return (
+    <Show when={props.item.kind === "tool"} fallback={<TextEntry {...props} />}>
+      <ToolOperation {...props} />
+    </Show>
+  );
 }
 
-function TextEntry({ item, actions, agentPath }: EntryProps) {
-  const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<{ content: string; truncated: boolean } | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const detailVersion = `${item.id}:${item.contentBytes}:${item.truncated}:${item.content}`;
-  const detailVersionRef = useRef(detailVersion);
-  const detailRequestGeneration = useRef(0);
-  const provider = item.provider === "codex" ? "Codex" : "Claude";
+type Disclosure = { version: string; detail: { content: string; truncated: boolean } | null; error: string | null };
 
-  useLayoutEffect(() => {
-    detailVersionRef.current = detailVersion;
-    detailRequestGeneration.current += 1;
-    setExpanded(false);
-    setDetail(null);
-    setDetailError(null);
-    return () => { detailRequestGeneration.current += 1; };
-  }, [detailVersion]);
+function TextEntry(props: EntryProps) {
+  // Disclosed detail belongs to one version of the entry; a streamed change closes it.
+  const version = () => `${props.item.id}:${props.item.contentBytes}:${props.item.truncated}:${props.item.content}`;
+  const [disclosure, setDisclosure] = createSignal<Disclosure | null>(null);
+  const open = () => (disclosure()?.version === version() ? disclosure() : null);
+  let attempt = 0;
+  const provider = () => (props.item.provider === "codex" ? "Codex" : "Claude");
 
   async function loadDetail() {
-    setDetailError(null);
-    const generation = ++detailRequestGeneration.current;
+    const requested = version();
+    const current = ++attempt;
+    setDisclosure({ version: requested, detail: null, error: null });
     try {
-      const result = await actions.loadEventDetail({ eventId: item.id });
-      if (detailVersionRef.current === detailVersion && generation === detailRequestGeneration.current) {
-        setDetail({ content: result.content, truncated: result.truncated });
-      }
+      const result = await props.actions.loadEventDetail({ eventId: props.item.id });
+      if (current === attempt && disclosure()?.version === requested) setDisclosure({ version: requested, detail: { content: result.content, truncated: result.truncated }, error: null });
     } catch (reason) {
-      if (detailVersionRef.current === detailVersion && generation === detailRequestGeneration.current) {
-        setDetailError(reason instanceof Error ? reason.message : "Could not load this activity.");
+      if (current === attempt && disclosure()?.version === requested) {
+        setDisclosure({ version: requested, detail: null, error: reason instanceof Error ? reason.message : "Could not load this activity." });
       }
     }
   }
 
   function toggleDetail() {
-    if (expanded) {
-      detailRequestGeneration.current += 1;
-      setExpanded(false);
-      setDetail(null);
-      setDetailError(null);
-    } else {
-      setExpanded(true);
-      if (item.truncated) void loadDetail();
-    }
+    if (open()) {
+      attempt += 1;
+      setDisclosure(null);
+    } else if (props.item.truncated) void loadDetail();
+    else setDisclosure({ version: version(), detail: null, error: null });
   }
 
-  const displayedDetail = expanded ? detail : null;
-  const content = displayedDetail?.content ?? item.content;
-  const truncated = displayedDetail?.truncated ?? item.truncated;
-  const message = item.kind === "message";
-  const user = message && item.role === "user";
-  const label = item.presentation === "failure" ? "Failure"
-    : item.presentation === "notice" ? "Notice"
-    : item.kind === "progress" ? "Progress"
-    : item.kind === "lifecycle" ? "Run lifecycle" : "Provider activity";
-  const detailLabel = message ? "full message" : `full ${label.toLowerCase()}`;
-  const compactLifecycle = item.kind === "lifecycle" && item.presentation === "normal" && !item.truncated;
-  if (compactLifecycle) return <article className="timeline-activity lifecycle normal compact-lifecycle" aria-label={`${provider} run lifecycle`}>
-    <span>{provider}{agentPath ? ` · ${agentPath}` : ""}</span>{" · "}<span className="literal-content">{content}</span>
-  </article>;
-  return <article
-    className={message ? `timeline-message ${user ? "user" : "assistant"}` : `timeline-activity ${item.kind} ${item.presentation}`}
-    aria-label={message ? user ? "You message" : `${provider} assistant message` : `${provider} ${label.toLowerCase()}`}
-  >
-    <header>
-      {user ? <span>You</span> : <><span>{provider}{agentPath ? ` · ${agentPath}` : ""}</span>{message ? null : <span>{label}</span>}</>}
-      {message ? <CopyButton content={content} label={truncated ? "Copy preview" : "Copy message"} iconOnly /> : null}
-    </header>
-    {message ? <MessageContent content={content} /> : <p className="literal-content">{content}</p>}
-    {truncated ? <p className="truncation-note">{displayedDetail ? "Bounded detail remains truncated." : "Preview truncated."}</p> : null}
-    {item.truncated ? <div className="entry-actions">
-      <button type="button" className="disclosure-link" aria-expanded={expanded} onClick={toggleDetail}>
-        {expanded ? `Hide ${detailLabel}` : `Show ${detailLabel}`}
-      </button>
-    </div> : null}
-    {expanded && item.truncated && !detail && !detailError ? <span className="truncation-note">Loading bounded detail…</span> : null}
-    {detailError ? <div><p role="alert">{detailError}</p><button type="button" className="disclosure-link" onClick={() => void loadDetail()}>Retry detail</button></div> : null}
-  </article>;
+  const content = () => open()?.detail?.content ?? props.item.content;
+  const truncated = () => open()?.detail?.truncated ?? props.item.truncated;
+  const message = () => props.item.kind === "message";
+  const user = () => message() && props.item.role === "user";
+  const label = () => (props.item.presentation === "failure" ? "Failure"
+    : props.item.presentation === "notice" ? "Notice"
+      : props.item.kind === "progress" ? "Progress"
+        : props.item.kind === "lifecycle" ? "Run lifecycle" : "Provider activity");
+  const detailLabel = () => (message() ? "full message" : `full ${label().toLowerCase()}`);
+  const attribution = () => `${provider()}${props.agentPath ? ` · ${props.agentPath}` : ""}`;
+  const compactLifecycle = () => props.item.kind === "lifecycle" && props.item.presentation === "normal" && !props.item.truncated;
+
+  return (
+    <Show
+      when={!compactLifecycle()}
+      fallback={
+        <article class="timeline-activity lifecycle normal compact-lifecycle" aria-label={`${provider()} run lifecycle`}>
+          <span>{attribution()}</span>{" · "}<span class="literal-content">{content()}</span>
+        </article>
+      }
+    >
+      <article
+        class={message() ? ["timeline-message", user() ? "user" : "assistant"] : ["timeline-activity", props.item.kind, props.item.presentation]}
+        aria-label={message() ? (user() ? "You message" : `${provider()} assistant message`) : `${provider()} ${label().toLowerCase()}`}
+      >
+        <header>
+          <Show when={!user()} fallback={<span>You</span>}>
+            <span>{attribution()}</span>
+            <Show when={!message()}><span>{label()}</span></Show>
+          </Show>
+          <Show when={message()}>
+            <CopyButton content={content()} label={truncated() ? "Copy preview" : "Copy message"} iconOnly />
+          </Show>
+        </header>
+        <Show when={message()} fallback={<p class="literal-content">{content()}</p>}>
+          <Markdown content={content()} />
+        </Show>
+        <Show when={truncated()}>
+          <p class="truncation-note">{open()?.detail ? "Bounded detail remains truncated." : "Preview truncated."}</p>
+        </Show>
+        <Show when={props.item.truncated}>
+          <div class="entry-actions">
+            <button type="button" class="disclosure-link" aria-expanded={open() ? "true" : "false"} onClick={toggleDetail}>
+              {open() ? `Hide ${detailLabel()}` : `Show ${detailLabel()}`}
+            </button>
+          </div>
+        </Show>
+        <Show when={open() && props.item.truncated && !open()!.detail && !open()!.error}>
+          <span class="truncation-note">Loading bounded detail…</span>
+        </Show>
+        <Show when={open()?.error}>
+          <div>
+            <p role="alert">{open()?.error}</p>
+            <button type="button" class="disclosure-link" onClick={() => void loadDetail()}>Retry detail</button>
+          </div>
+        </Show>
+      </article>
+    </Show>
+  );
 }

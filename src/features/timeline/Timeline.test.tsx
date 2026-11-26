@@ -1,10 +1,11 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
+import { createSignal, flush, Show } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type { ConversationSummary, TimelineItem, TimelinePage } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
 import { Timeline, type TimelineViewState } from "./Timeline";
 import { TimelineEntry } from "./TimelineEntry";
-import { StrictMode } from "react";
+import { render, settle } from "../../test/render";
 
 function event(overrides: Partial<TimelineItem> & Pick<TimelineItem, "id" | "sequence">): TimelineItem {
   return {
@@ -58,6 +59,35 @@ function conversation(overrides: Partial<ConversationSummary> = {}): Conversatio
   return { contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "conversation-1", title: "Work", parentId: null, hasChildren: false, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "codex", runStatus: "running", rollupStatus: "active", capabilities: { canSend: true, canInterrupt: true, canArchive: true, canRoute: true, unavailableReason: null }, ...overrides };
 }
 
+
+type TimelineMount = { conversation: ConversationSummary; refreshVersion: number; actions: ConversationActions; viewStates?: Map<string, TimelineViewState> };
+
+/** Renders the Timeline as App does: a new one per conversation, updated in place otherwise. */
+function renderTimeline(initial: TimelineMount) {
+  const [mounted, setMounted] = createSignal(initial);
+  const view = render(() => (
+    <Show when={mounted().conversation.id} keyed>
+      {(id: string) => <Timeline conversation={{ ...mounted().conversation, id }} refreshVersion={mounted().refreshVersion} actions={mounted().actions} viewStates={mounted().viewStates} />}
+    </Show>
+  ));
+  return { ...view, rerender(next: TimelineMount) { setMounted(next); flush(); } };
+}
+
+/** Settles after a test resolves a pending request. */
+async function act(run: () => unknown) {
+  await run();
+  await settle();
+}
+
+const click = (element: Element) => {
+  fireEvent.click(element);
+  flush();
+};
+const scroll = (element: Element) => {
+  fireEvent.scroll(element);
+  flush();
+};
+
 describe("Timeline", () => {
   const compaction = { runId: "run-1", agentId: "root", provider: "codex" as const };
 
@@ -67,26 +97,26 @@ describe("Timeline", () => {
       .mockResolvedValueOnce({ ...timelinePage([event({ id: "old", sequence: "1", content: "older result" })], null), activeCompaction: null })
       .mockRejectedValueOnce(new Error("Refresh unavailable"));
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation()} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation(), refreshVersion: 0, actions: api });
     await screen.findByText("Compacting…");
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
     await screen.findByText("older result");
     expect(screen.getAllByText("Compacting…")).toHaveLength(1);
-    view.rerender(<Timeline conversation={conversation()} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation(), refreshVersion: 1, actions: api });
     await screen.findByText("Refresh unavailable");
     expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
   });
 
   it("clears on an explicit inactive snapshot and hides cached activity for terminal or changed runs", async () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue({ ...timelinePage([], null), activeCompaction: compaction }) });
-    const view = render(<Timeline conversation={conversation()} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation(), refreshVersion: 0, actions: api });
     await screen.findByText("Compacting…");
-    view.rerender(<Timeline conversation={conversation({ runStatus: "completed" })} refreshVersion={0} actions={api} />);
+    view.rerender({ conversation: conversation({ runStatus: "completed" }), refreshVersion: 0, actions: api });
     expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
-    view.rerender(<Timeline conversation={conversation({ currentRunId: "run-2" })} refreshVersion={0} actions={api} />);
+    view.rerender({ conversation: conversation({ currentRunId: "run-2" }), refreshVersion: 0, actions: api });
     expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
     vi.mocked(api.loadTimeline).mockResolvedValue(timelinePage([], null));
-    view.rerender(<Timeline conversation={conversation()} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation(), refreshVersion: 1, actions: api });
     await waitFor(() => expect(screen.queryByText("Compacting…")).not.toBeInTheDocument());
   });
 
@@ -95,33 +125,33 @@ describe("Timeline", () => {
     const loadTimeline = vi.fn().mockImplementationOnce(() => new Promise<ReturnType<typeof timelinePage>>(resolve => { resolveChild = resolve; }))
       .mockResolvedValue(timelinePage([], null));
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "child", parentId: "parent" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "child", parentId: "parent" }), refreshVersion: 0, actions: api });
     await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(1));
-    view.rerender(<Timeline conversation={conversation({ id: "parent" })} refreshVersion={0} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "parent" }), refreshVersion: 0, actions: api });
     await act(async () => resolveChild({ ...timelinePage([], null), activeCompaction: compaction }));
     await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(2));
-    await screen.findByText("No activity yet. Start with a message below.");
+    await screen.findByText("No activity yet.");
     expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
   });
 
   it("does not cache a child's compaction when navigating to its parent", async () => {
     const loadTimeline = vi.fn().mockResolvedValueOnce({ ...timelinePage([], null), activeCompaction: compaction }).mockResolvedValue(timelinePage([], null));
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "child", parentId: "parent" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "child", parentId: "parent" }), refreshVersion: 0, actions: api });
     await screen.findByText("Compacting…");
-    view.rerender(<Timeline conversation={conversation({ id: "parent" })} refreshVersion={0} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "parent" }), refreshVersion: 0, actions: api });
     expect(screen.queryByText("Compacting…")).not.toBeInTheDocument();
-    await screen.findByText("No activity yet. Start with a message below.");
+    await screen.findByText("No activity yet.");
   });
   it("shows active compaction even when its start is outside the retained page", async () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue({ ...timelinePage([], null), activeCompaction: { runId: "run-1", agentId: "root", provider: "codex" } }) });
-    render(<Timeline conversation={conversation()} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation(), refreshVersion: 0, actions: api });
     expect(await screen.findByText("Compacting…")).toHaveAttribute("role", "status");
   });
   it("explains missing recorded child history without greeting or duplicate activity cards", async () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([], null)) });
     const child: ConversationSummary = { contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null, id: "reviewer", title: "Reviewer", parentId: "conversation-1", hasChildren: true, summary: null, workspaceId: null, archived: false, projectRoot: null, routingProfile: "balanced", currentRunId: "run-1", provider: "claude", runStatus: "completed", rollupStatus: "completed", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } };
-    render(<Timeline conversation={child} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: child, refreshVersion: 0, actions: api });
     expect(await screen.findByText("No recorded activity is available.")).toBeVisible();
     expect(screen.queryByText(/captured activity may be incomplete/i)).not.toBeInTheDocument();
     expect(api.loadTimeline).toHaveBeenCalledWith({ conversationId: "reviewer", cursor: null, limit: 80 });
@@ -131,12 +161,12 @@ describe("Timeline", () => {
 
   it("keeps running and failed operations visible while counting completed loaded operations", async () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([operation("1"), operation("2"), operation("3", "running"), operation("4", "failed")], null)) });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     expect(await screen.findByText("Running")).toBeVisible();
     expect(screen.getByText("Failed")).toBeVisible();
     const completed = screen.getByRole("button", { name: /Show 2 completed operations/ });
     expect(screen.queryByText("Run check 1")).not.toBeInTheDocument();
-    fireEvent.click(completed);
+    click(completed);
     expect(screen.getByText("Run check 1")).toBeVisible();
     expect(api.loadEventDetail).not.toHaveBeenCalled();
   });
@@ -145,17 +175,17 @@ describe("Timeline", () => {
     const loadTimeline = vi.fn().mockResolvedValueOnce(timelinePage([operation("1", "running")], null)).mockResolvedValueOnce(timelinePage([operation("1", "succeeded", "2")], null));
     const loadEventDetail = vi.fn().mockImplementation(() => Promise.resolve({ id: "1", content: "Run check 1", contentBytes: "11", truncated: false, operation: { title: "Run check 1", status: "succeeded", input: "check", output: "captured output", error: null, context: null, durationMs: null, exitCode: 0, truncated: false, conflicted: false, detailRevision: loadEventDetail.mock.calls.length === 1 ? "1" : "2" } }));
     const api = actions({ loadTimeline, loadEventDetail });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     const disclosure = await screen.findByRole("button", { name: "Show details" });
     disclosure.focus();
-    fireEvent.click(disclosure);
+    click(disclosure);
     await screen.findByText("captured output");
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await screen.findByText("Succeeded");
     expect(screen.getByRole("button", { name: "Hide details" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: "Hide details" })).toHaveFocus();
     expect(await screen.findByText("captured output")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Hide details" }));
+    click(screen.getByRole("button", { name: "Hide details" }));
     expect(screen.getByText("Run check 1")).toBeVisible();
     expect(screen.getByRole("button", { name: "Show details" })).toHaveAttribute("aria-expanded", "false");
   });
@@ -164,11 +194,11 @@ describe("Timeline", () => {
     let revision = "1";
     const loadTimeline = vi.fn(({ cursor }) => Promise.resolve(timelinePage(cursor ? [operation("1", revision === "1" ? "running" : "failed", revision)] : [event({ id: "newest", sequence: "90", content: "Newest answer" })], cursor ? null : "opaque-original-window")));
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load older activity" }));
     await screen.findByText("Running");
     revision = "2";
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     expect(await screen.findByText("Failed")).toBeVisible();
     expect(loadTimeline.mock.calls.map(([request]) => request.cursor)).toEqual([null, "opaque-original-window", null, "opaque-original-window"]);
     expect(screen.getAllByText("Run check 1")).toHaveLength(1);
@@ -183,10 +213,10 @@ describe("Timeline", () => {
       return olderCalls === 1 ? new Promise<ReturnType<typeof timelinePage>>(resolve => { resolveOlder = resolve; }) : Promise.resolve(timelinePage([operation("1", "failed", "2")], null));
     });
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load older activity" }));
     await waitFor(() => expect(olderCalls).toBe(1));
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await act(async () => resolveOlder(timelinePage([operation("1", "running")], null)));
     expect(await screen.findByText("Failed")).toBeVisible();
     expect(screen.queryByText("Running")).not.toBeInTheDocument();
@@ -199,10 +229,10 @@ describe("Timeline", () => {
     const loadTimeline = vi.fn(({ cursor }) => Promise.resolve(timelinePage(cursor ? [operation("1", revision === "1" ? "running" : "failed", revision)] : [event({ id: "90", sequence: "90", content: "newest" })], cursor ? null : "opaque-window")));
     const loadEventDetail = vi.fn().mockImplementation(() => Promise.resolve({ id: "1", content: "Run check 1", contentBytes: "11", truncated: false, operation: { title: "Run check 1", status: "failed", input: "check", output: `output ${revision}`, error: null, context: null, durationMs: null, exitCode: null, truncated: false, conflicted: false, detailRevision: revision } }));
     const api = actions({ loadTimeline, loadEventDetail });
-    const mount = (id: string) => <Timeline key={id} conversation={conversation({ id })} refreshVersion={0} actions={api} viewStates={viewStates} />;
-    const view = render(mount("a"));
-    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Show details" }));
+    const mount = (id: string) => ({ conversation: conversation({ id }), refreshVersion: 0, actions: api, viewStates });
+    const view = renderTimeline(mount("a"));
+    click(await screen.findByRole("button", { name: "Load older activity" }));
+    click(await screen.findByRole("button", { name: "Show details" }));
     await screen.findByText("output 1");
     view.rerender(mount("b"));
     await screen.findByText("newest");
@@ -218,17 +248,17 @@ describe("Timeline", () => {
     let newestSequence = 90;
     const loadTimeline = vi.fn(({ cursor }) => Promise.resolve(timelinePage(cursor ? [operation("1", "running")] : [event({ id: String(newestSequence), sequence: String(newestSequence), content: `newest ${newestSequence}` })], cursor ? "oldest-fixed" : `window-${newestSequence}`)));
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load older activity" }));
     await screen.findByText("Running");
     newestSequence = 180;
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await screen.findByText("newest 180");
     await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(4));
     expect(loadTimeline.mock.calls.at(-1)?.[0].cursor).toBe("window-90");
     expect(screen.getByRole("button", { name: "Reload newest history" })).toBeVisible();
     expect(screen.getByText("Running")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
     await waitFor(() => expect(loadTimeline.mock.calls.at(-1)?.[0].cursor).toBe("oldest-fixed"));
   });
 
@@ -246,16 +276,16 @@ describe("Timeline", () => {
       return Promise.resolve(page);
     });
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load older activity" }));
     await screen.findByText("Run check 20");
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
     await screen.findByText("Run check 10");
     revision = "2";
     pause = true;
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await waitFor(() => expect(resolveRefresh).toBeTypeOf("function"));
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
     await act(async () => resolveRefresh(timelinePage([operation("20", "failed", "2")], "second")));
     await screen.findByText("Run check 1");
     await waitFor(() => expect(screen.queryAllByText("Running")).toHaveLength(0));
@@ -271,20 +301,20 @@ describe("Timeline", () => {
       return Promise.resolve(timelinePage([operation(String(90 - index), "running")], `opaque-${index + 1}`));
     });
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     await screen.findByText("Run check 90");
     for (let index = 1; index <= 5; index += 1) {
-      fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+      click(screen.getByRole("button", { name: "Load older activity" }));
       await screen.findByText(`Run check ${90 - index}`);
     }
     expect(screen.queryByText("Run check 89")).not.toBeInTheDocument();
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(11));
     expect(loadTimeline.mock.calls.slice(-5).map(([request]) => request.cursor)).toEqual([null, "opaque-2", "opaque-3", "opaque-4", "opaque-5"]);
     refresh = true;
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={2} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 2, actions: api });
     await waitFor(() => expect(finish).toBeTypeOf("function"));
-    fireEvent.click(screen.getByRole("button", { name: "Reload newest history" }));
+    click(screen.getByRole("button", { name: "Reload newest history" }));
     await act(async () => finish(timelinePage([operation("88", "failed", "2")], "opaque-3")));
     expect(screen.queryByText("Failed")).not.toBeInTheDocument();
     expect(screen.getAllByText("Running")).toHaveLength(1);
@@ -297,13 +327,13 @@ describe("Timeline", () => {
       return Promise.resolve({ ...timelinePage([event({ id: "90", sequence: "90", content: "newest" })], "retained-window"), approvals: refresh ? [{ id: "new-approval", runId: "run-1", agentId: "root", provider: "codex" as const, operation: "Run checks", scope: "One action", status: "pending" as const, responsePending: false, agentPath: ["Root"], agentPathTruncated: false }] : [] });
     });
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load older activity" }));
     await screen.findByText("Running");
     refresh = true;
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     expect(await screen.findByRole("alert")).toHaveTextContent("Older history unavailable");
-    expect(screen.getByRole("button", { name: "Review Run checks" })).toBeEnabled();
+    expect(screen.getByRole("article", { name: "Codex request: Run checks" })).toBeVisible();
     expect(screen.getByText("Running")).toBeVisible();
   });
 
@@ -315,7 +345,7 @@ describe("Timeline", () => {
     { kind: "progress", presentation: "normal", truncated: false, compact: false },
   ] as const)("classifies $kind/$presentation truncated=$truncated without losing content", ({ kind, presentation, truncated, compact }) => {
     const api = actions();
-    render(<TimelineEntry item={event({ id: "entry", sequence: "1", kind, presentation, truncated, role: null, content: "Canonical lifecycle text" })} agentPath="Root / Reviewer" actions={api} />);
+    render(() => <TimelineEntry item={event({ id: "entry", sequence: "1", kind, presentation, truncated, role: null, content: "Canonical lifecycle text" })} agentPath="Root / Reviewer" actions={api} />);
     const article = screen.getByRole("article");
     expect(article.classList.contains("compact-lifecycle")).toBe(compact);
     expect(article).toHaveTextContent("Codex · Root / Reviewer");
@@ -324,7 +354,7 @@ describe("Timeline", () => {
     expect(api.loadEventDetail).not.toHaveBeenCalled();
     if (truncated) {
       expect(screen.getByText("Preview truncated.")).toBeVisible();
-      fireEvent.click(screen.getByRole("button", { name: "Show full run lifecycle" }));
+      click(screen.getByRole("button", { name: "Show full run lifecycle" }));
       expect(api.loadEventDetail).toHaveBeenCalledWith({ eventId: "entry" });
     }
   });
@@ -343,15 +373,15 @@ describe("Timeline", () => {
     });
     const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(100);
     const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1000);
-    const mount = (id: string) => <Timeline key={id} conversation={conversation({ id })} refreshVersion={0} actions={api} viewStates={viewStates} />;
-    const view = render(mount("a"));
+    const mount = (id: string) => ({ conversation: conversation({ id }), refreshVersion: 0, actions: api, viewStates });
+    const view = renderTimeline(mount("a"));
     await screen.findByText("new reading");
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
     await screen.findByText("older reading");
-    fireEvent.click(screen.getByRole("button", { name: /Show tool activity/ }));
+    click(screen.getByRole("button", { name: /Show tool activity/ }));
     const box = screen.getByLabelText("Conversation activity");
     box.scrollTop = 225;
-    fireEvent.scroll(box);
+    scroll(box);
     view.rerender(mount("b"));
     expect(viewStates.get("a")?.anchor?.id).toBe("new");
     await screen.findByText("new reading");
@@ -368,8 +398,8 @@ describe("Timeline", () => {
   it("retains only ten recent conversation views and does not cache approvals", async () => {
     const viewStates = new Map<string, TimelineViewState>();
     const api = actions();
-    const mount = (id: string) => <Timeline key={id} conversation={conversation({ id })} refreshVersion={0} actions={api} viewStates={viewStates} />;
-    const view = render(mount("0"));
+    const mount = (id: string) => ({ conversation: conversation({ id }), refreshVersion: 0, actions: api, viewStates });
+    const view = renderTimeline(mount("0"));
     for (let index = 1; index <= 12; index += 1) {
       await screen.findByText("I found it");
       view.rerender(mount(String(index)));
@@ -391,34 +421,34 @@ describe("Timeline", () => {
       .mockResolvedValueOnce(timelinePage([], null))
       .mockReturnValueOnce(returned) });
     const height = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => screen.queryByText("fresh output") ? 2000 : 1000);
-    const mount = (id: string) => <Timeline key={id} conversation={conversation({ id })} refreshVersion={0} actions={api} viewStates={viewStates} />;
-    const view = render(mount("a"));
-    await screen.findByRole("button", { name: "Review Old approval" });
+    const mount = (id: string) => ({ conversation: conversation({ id }), refreshVersion: 0, actions: api, viewStates });
+    const view = renderTimeline(mount("a"));
+    await screen.findByRole("article", { name: "Codex request: Old approval" });
     view.rerender(mount("b"));
-    await screen.findByText("No activity yet. Start with a message below.");
+    await screen.findByText("No activity yet.");
     view.rerender(mount("a"));
     expect(screen.getByText("first output")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Review Old approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("article", { name: "Codex request: Old approval" })).not.toBeInTheDocument();
     await act(async () => resolveReturn(timelinePage([event({ id: "fresh", sequence: "2", content: "fresh output" })], null)));
     expect(screen.getByLabelText("Conversation activity").scrollTop).toBe(2000);
     expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
     height.mockRestore();
   });
 
-  it("ignores a departed mount's late read without overwriting the retained view in StrictMode", async () => {
+  it("ignores a departed mount's late read without overwriting the retained view", async () => {
     const viewStates = new Map<string, TimelineViewState>();
     let resolveLate!: (page: ReturnType<typeof timelinePage>) => void;
     const late = new Promise<ReturnType<typeof timelinePage>>((resolve) => { resolveLate = resolve; });
     let aReads = 0;
     const api = actions({ loadTimeline: vi.fn(({ conversationId }) => {
-      if (conversationId === "a" && ++aReads === 3) return late;
+      if (conversationId === "a" && ++aReads === 2) return late;
       return Promise.resolve(timelinePage([event({ id: conversationId, sequence: "1", content: `${conversationId} current` })], null));
     }) });
-    const mount = (id: string, version = 0) => <StrictMode><Timeline key={id} conversation={conversation({ id })} refreshVersion={version} actions={api} viewStates={viewStates} /></StrictMode>;
-    const view = render(mount("a"));
+    const mount = (id: string, version = 0) => ({ conversation: conversation({ id }), refreshVersion: version, actions: api, viewStates });
+    const view = renderTimeline(mount("a"));
     await screen.findByText("a current");
     view.rerender(mount("a", 1));
-    await waitFor(() => expect(aReads).toBe(3));
+    await waitFor(() => expect(aReads).toBe(2));
     view.rerender(mount("b"));
     await screen.findByText("b current");
     await act(async () => resolveLate(timelinePage([event({ id: "late", sequence: "2", content: "late output" })], null)));
@@ -435,19 +465,19 @@ describe("Timeline", () => {
       .mockResolvedValueOnce(timelinePage([], null))
       .mockResolvedValueOnce(timelinePage([event({ id: "latest", sequence: "500", content: "latest reading" })], "new-older")) });
     const height = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1000);
-    const mount = (id: string) => <Timeline key={id} conversation={conversation({ id })} refreshVersion={0} actions={api} viewStates={viewStates} />;
-    const view = render(mount("a"));
+    const mount = (id: string) => ({ conversation: conversation({ id }), refreshVersion: 0, actions: api, viewStates });
+    const view = renderTimeline(mount("a"));
     await screen.findByText("original reading");
     const box = screen.getByLabelText("Conversation activity");
     box.scrollTop = 20;
-    fireEvent.scroll(box);
+    scroll(box);
     view.rerender(mount("b"));
-    await screen.findByText("No activity yet. Start with a message below.");
+    await screen.findByText("No activity yet.");
     view.rerender(mount("a"));
     await screen.findByText("latest reading");
     expect(screen.getByText("Some history is outside this bounded view.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+    click(screen.getByRole("button", { name: "Jump to latest" }));
     expect(screen.getByLabelText("Conversation activity").scrollTop).toBe(1000);
     expect(api.loadTimeline).toHaveBeenCalledTimes(3);
     height.mockRestore();
@@ -457,12 +487,12 @@ describe("Timeline", () => {
     const api = actions({ loadTimeline: vi.fn()
       .mockResolvedValueOnce(timelinePage([event({ id: "t2", sequence: "2", kind: "tool", content: "newer tool", truncated: true })], "older"))
       .mockResolvedValueOnce(timelinePage([event({ id: "t1", sequence: "1", kind: "tool", content: "older tool" })], null)) });
-    const view = render(<Timeline conversation={conversation({ runStatus: "completed" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Show tool activity/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    const view = renderTimeline({ conversation: conversation({ runStatus: "completed" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: /Show tool activity/i }));
+    click(screen.getByRole("button", { name: "Show details" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
     expect(api.loadEventDetail).toHaveBeenCalledExactlyOnceWith({ eventId: "t2" });
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
     expect(await screen.findByText("older tool")).toBeVisible();
     expect(screen.getByText("Complete bounded tool output")).toBeVisible();
     expect(screen.getByRole("button", { name: "Hide details" })).toHaveAttribute("aria-expanded", "true");
@@ -479,7 +509,7 @@ describe("Timeline", () => {
       event({ id: "user", sequence: "1", role: "user", content: userContent }),
       event({ id: "answer", sequence: "2", content }),
     ], null)) });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     expect(await screen.findByRole("heading", { name: "Result" })).toBeVisible();
     expect(screen.getByRole("table")).toHaveTextContent("Buildgood");
     expect(screen.getByText("passes").closest("li")).not.toBeNull();
@@ -494,14 +524,14 @@ describe("Timeline", () => {
     expect(copy).toHaveAttribute("title", "Copy message");
     expect(copy.querySelector("svg")).not.toBeNull();
     expect(user.querySelector(".entry-actions")).toBeNull();
-    fireEvent.click(copy);
+    click(copy);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(userContent));
     const assistant = screen.getByRole("article", { name: "Codex assistant message" });
-    fireEvent.click(within(assistant).getByRole("button", { name: "Copy message" }));
+    click(within(assistant).getByRole("button", { name: "Copy message" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(content));
     expect(await within(assistant).findByText("Copied")).toBeVisible();
     writeText.mockRejectedValueOnce(new Error("clipboard unavailable"));
-    fireEvent.click(within(assistant).getByRole("button", { name: "Copy code" }));
+    click(within(assistant).getByRole("button", { name: "Copy code" }));
     expect(await screen.findByText("Could not copy. Try again.")).toBeVisible();
     expect(writeText).toHaveBeenLastCalledWith("let n = 1;\n");
   });
@@ -512,12 +542,12 @@ describe("Timeline", () => {
     const api = actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([
       event({ id: "preview", sequence: "1", content: "preview", truncated: true }),
     ], null)), loadEventDetail: vi.fn().mockResolvedValue({ id: "preview", content: "complete message", operation: null, contentBytes: "16", truncated: false }) });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Copy preview" }));
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Copy preview" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("preview"));
     expect(api.loadEventDetail).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Show full message" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Copy message" }));
+    click(screen.getByRole("button", { name: "Show full message" }));
+    click(await screen.findByRole("button", { name: "Copy message" }));
     await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("complete message"));
   });
 
@@ -534,15 +564,15 @@ describe("Timeline", () => {
     const api = actions({ loadTimeline: vi.fn()
       .mockResolvedValueOnce(timelinePage(activity, null))
       .mockResolvedValueOnce(timelinePage(activity.map((item) => item.id === "t2" ? { ...item, content: "updated progress" } : item), null)) });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     const groups = await screen.findAllByRole("button", { name: /Show tool activity/i });
     expect(groups).toHaveLength(5);
     expect(screen.queryByText("first output")).not.toBeInTheDocument();
-    fireEvent.click(groups[0]!);
+    click(groups[0]!);
     expect(screen.getByText("first output")).toBeVisible();
     expect(screen.getByText("progress output")).toBeVisible();
     expect(view.container.querySelector('[data-timeline-id="t2"]')).not.toBeNull();
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     expect(await screen.findByText("updated progress")).toBeVisible();
     expect(screen.getByRole("button", { name: /Hide tool activity/i })).toHaveAttribute("aria-expanded", "true");
   });
@@ -555,7 +585,7 @@ describe("Timeline", () => {
       event({ id: "telemetry", sequence: "4", kind: "diagnostic", presentation: "telemetry", content: "private protocol noise" }),
       event({ id: "tool2", sequence: "5", kind: "tool" }),
     ], null)) });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     expect(await screen.findByRole("article", { name: "Codex notice" })).not.toHaveClass("failure");
     expect(screen.getByRole("article", { name: "Codex failure" })).toHaveClass("failure");
     expect(screen.queryByText("private protocol noise")).not.toBeInTheDocument();
@@ -567,38 +597,38 @@ describe("Timeline", () => {
     const api = actions({ loadTimeline: vi.fn()
       .mockResolvedValueOnce(timelinePage([event({ id: "first", sequence: "1" })], null))
       .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })) });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     await screen.findByText("Done");
     const box = screen.getByLabelText("Conversation activity");
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 200 });
     Object.defineProperty(box, "clientHeight", { configurable: true, value: 50 });
     box.scrollTop = 150;
-    fireEvent.scroll(box);
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    scroll(box);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await waitFor(() => expect(api.loadTimeline).toHaveBeenCalledTimes(2));
     box.scrollTop = 140;
-    fireEvent.scroll(box);
+    scroll(box);
     await act(async () => finish(timelinePage([event({ id: "first", sequence: "1", content: "updated" })], null)));
     expect(box.scrollTop).toBe(140);
-    fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+    click(screen.getByRole("button", { name: "Jump to latest" }));
     expect(box.scrollTop).toBe(200);
     expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
   });
 
   it("hides Jump to latest when viewport resizing clamps the reader to the bottom", async () => {
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([event({ id: "one", sequence: "1" })], null)) })} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: actions({ loadTimeline: vi.fn().mockResolvedValue(timelinePage([event({ id: "one", sequence: "1" })], null)) }) });
     await screen.findByText("Done");
     const box = screen.getByLabelText("Conversation activity");
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 500 });
     Object.defineProperty(box, "clientHeight", { configurable: true, value: 100 });
     box.scrollTop = 400;
-    fireEvent.scroll(box);
+    scroll(box);
     box.scrollTop = 300;
-    fireEvent.scroll(box);
+    scroll(box);
     expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
     Object.defineProperty(box, "clientHeight", { configurable: true, value: 250 });
     box.scrollTop = 250;
-    fireEvent.scroll(box);
+    scroll(box);
     expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
   });
 
@@ -614,9 +644,9 @@ describe("Timeline", () => {
       });
     });
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     for (let version = 1; version <= 100; version += 1) {
-      view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={version} actions={api} />);
+      view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: version, actions: api });
     }
     await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(1));
     expect(maxInFlight).toBe(1);
@@ -629,170 +659,30 @@ describe("Timeline", () => {
     expect(loadTimeline).toHaveBeenCalledTimes(2);
   });
 
-  it("mounts only the first 30 approval summaries and loads detail on explicit review", async () => {
-    const first = Array.from({ length: 30 }, (_, index) => ({
-      id: `approval-${index}`, runId: "run-1", agentId: "root", provider: "codex" as const,
-      agentPath: ["Root"], agentPathTruncated: false,
-      operation: `Action ${index}`, scope: "One action", status: "pending" as const, responsePending: false,
-    }));
-    const second = Array.from({ length: 30 }, (_, index) => ({
-      ...first[index]!, id: `approval-${index + 30}`, operation: `Action ${index + 30}`,
-    }));
-    const api = actions({
-      loadTimeline: vi.fn().mockResolvedValue({
-        items: [], nextCursor: null, approvals: first, approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "approvals-2",
-      }),
-      loadApprovals: vi.fn().mockResolvedValue({ items: second, nextCursor: null }),
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "approval-0", status: "pending", responsePending: false, agentPath: ["Root"], agentPathTruncated: false,
-        operation: "Action 0", scope: "One action", input: null, details: null, questionCount: 0, truncated: false,
-      }),
-    });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    await screen.findByRole("heading", { name: "Needs your response" });
-    expect(view.container.querySelectorAll(".approval-card")).toHaveLength(30);
-    expect(api.loadApprovalDetail).not.toHaveBeenCalled();
-    expect(api.loadApprovalQuestions).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Review Action 0" }));
-    await screen.findByRole("button", { name: "Allow Action 0" });
-    expect(api.loadApprovalDetail).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Load more approvals" }));
-    await waitFor(() => expect(view.container.querySelectorAll(".approval-card")).toHaveLength(60));
-    expect(api.loadApprovalDetail).toHaveBeenCalledTimes(1);
-  });
-
-  it("traverses every approval through a sliding four-page window and reloads the newest page", async () => {
-    const approval = (index: number) => ({
-      id: `approval-${index}`, runId: "run-1", agentId: "root", provider: "codex" as const,
-      agentPath: ["Root"], agentPathTruncated: false,
-      operation: `Action ${index}`, scope: "One action", status: "pending" as const, responsePending: false,
-    });
-    const all = Array.from({ length: 226 }, (_, index) => approval(index));
-    const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
-      const offset = cursor === null ? 0 : Number(cursor);
-      const nextOffset = Math.min(offset + 30, all.length);
-      return Promise.resolve({
-        items: all.slice(offset, nextOffset),
-        nextCursor: nextOffset < all.length ? String(nextOffset) : null,
-      });
-    });
-    const api = actions({
-      loadTimeline: vi.fn().mockResolvedValue({
-        items: [], nextCursor: null, approvals: all.slice(0, 30),
-        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "30",
-      }),
-      loadApprovals,
-    });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-
-    for (let page = 1; page <= 7; page += 1) {
-      fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-      await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(page));
-      const lastIndex = Math.min((page + 1) * 30 - 1, 225);
-      expect(await screen.findByRole("button", { name: `Review Action ${lastIndex}` })).toBeVisible();
-      expect(view.container.querySelectorAll(".approval-card").length).toBeLessThanOrEqual(120);
-    }
-
-    expect(screen.getByRole("button", { name: "Review Action 225" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Review Action 120" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Review Action 119" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Review Action 0" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Load more approvals" })).not.toBeInTheDocument();
-    expect(loadApprovals.mock.calls.map(([request]) => request.cursor)).toEqual([
-      "30", "60", "90", "120", "150", "180", "210",
-    ]);
-    fireEvent.click(screen.getByRole("button", { name: "Reload newest approvals" }));
-    await waitFor(() => expect(loadApprovals).toHaveBeenLastCalledWith({
-      conversationId: "conversation-1", cursor: null, limit: 30, kind: "pending",
-    }));
-    expect(await screen.findByRole("button", { name: "Review Action 0" })).toBeVisible();
-    expect(view.container.querySelectorAll(".approval-card")).toHaveLength(30);
-
-    for (let page = 1; page <= 7; page += 1) {
-      fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-      await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(page + 8));
-    }
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
-    await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(18));
-    expect(loadApprovals.mock.calls.slice(-3).map(([request]) => request.cursor)).toEqual(["30", "60", "90"]);
-    expect(await screen.findByRole("button", { name: "Review Action 0" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Review Action 119" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Review Action 120" })).not.toBeInTheDocument();
-    expect(view.container.querySelectorAll(".approval-card")).toHaveLength(120);
-    fireEvent.click(screen.getByRole("button", { name: "Load more approvals" }));
-    await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(19));
-    expect(loadApprovals.mock.calls.at(-1)?.[0].cursor).toBe("120");
-    expect(await screen.findByRole("button", { name: "Review Action 149" })).toBeVisible();
-  });
 
   it("renders canonical roles, provider labels, and collapsed detail", async () => {
     const api = actions();
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
 
     expect(await screen.findByRole("article", { name: "You message" })).toHaveTextContent("Please inspect this");
     expect(screen.getByRole("article", { name: "Claude assistant message" })).toHaveTextContent("I found it");
     expect(screen.queryByText("Agent activity")).not.toBeInTheDocument();
     expect(api.loadEventDetail).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: /Show tool activity/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    click(screen.getByRole("button", { name: /Show tool activity/i }));
+    click(screen.getByRole("button", { name: "Show details" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
     expect(api.loadEventDetail).toHaveBeenCalledWith({ eventId: "tool-1" });
-    fireEvent.click(screen.getByRole("button", { name: "Hide details" }));
+    click(screen.getByRole("button", { name: "Hide details" }));
     expect(screen.queryByText("Complete bounded tool output")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    click(screen.getByRole("button", { name: "Show details" }));
     expect(await screen.findByText("Complete bounded tool output")).toBeVisible();
     expect(api.loadEventDetail).toHaveBeenCalledTimes(2);
   });
 
-  it("ignores a stale approval page that resolves after a newer refresh", async () => {
-    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
-    const stale = { ...first, id: "stale", operation: "Stale" };
-    let resolvePage!: (value: { items: typeof stale[]; nextCursor: string | null }) => void;
-    const page = new Promise<{ items: typeof stale[]; nextCursor: string | null }>((resolve) => { resolvePage = resolve; });
-    const loadTimeline = vi.fn()
-      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" })
-      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" });
-    const api = actions({ loadTimeline, loadApprovals: vi.fn(() => page) });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
-    await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(2));
-    await act(async () => resolvePage({ items: [stale], nextCursor: null }));
 
-    expect(screen.queryByRole("button", { name: "Review Stale" })).not.toBeInTheDocument();
-  });
 
-  it("preserves explicitly disclosed approval pages across newest refreshes", async () => {
-    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
-    const older = { ...first, id: "older", operation: "Older" };
-    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older" });
-    const api = actions({ loadTimeline, loadApprovals: vi.fn().mockResolvedValue({ items: [older], nextCursor: null }) });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-    expect(await screen.findByRole("button", { name: "Review Older" })).toBeVisible();
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
-
-    expect(await screen.findByRole("button", { name: "Review Older" })).toBeVisible();
-  });
-
-  it("reconciles a resolved later approval page and restores focus", async () => {
-    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
-    const older = { ...first, id: "older", operation: "Older" };
-    const loadTimeline = vi.fn().mockResolvedValue({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "older-page" });
-    const loadApprovals = vi.fn()
-      .mockResolvedValueOnce({ items: [older], nextCursor: null })
-      .mockResolvedValueOnce({ items: [], nextCursor: null });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={actions({ loadTimeline, loadApprovals })} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-    const olderReview = await screen.findByRole("button", { name: "Review Older" });
-    olderReview.focus();
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={actions({ loadTimeline, loadApprovals })} />);
-
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Review Older" })).not.toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: "Timeline" })).toHaveFocus();
-  });
 
   it("prepends cursor pages and merges a live newest-page refresh by durable ID", async () => {
     const loadTimeline = vi.fn()
@@ -815,16 +705,12 @@ describe("Timeline", () => {
         approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       });
     const api = actions({ loadTimeline });
-    const view = render(
-      <Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />,
-    );
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     await screen.findByText("second");
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
     expect(await screen.findByText("first")).toBeVisible();
 
-    view.rerender(
-      <Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />,
-    );
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     expect(await screen.findByText("second, updated")).toBeVisible();
     expect(screen.getByText("third")).toBeVisible();
     expect(screen.getAllByRole("article", { name: "Codex assistant message" })).toHaveLength(2);
@@ -841,9 +727,9 @@ describe("Timeline", () => {
         nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       }),
     });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
 
-    fireEvent.click(await screen.findByRole("button", { name: /Show progress/i }));
+    click(await screen.findByRole("button", { name: /Show progress/i }));
     expect(screen.getByRole("article", { name: "Codex progress" })).toHaveTextContent("Indexing");
     expect(screen.queryByRole("status", { name: "Codex progress" })).not.toBeInTheDocument();
     expect(screen.getByRole("article", { name: "Codex provider activity" })).toBeVisible();
@@ -865,10 +751,10 @@ describe("Timeline", () => {
       loadTimeline: vi.fn().mockResolvedValue({ items, nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null }),
       loadEventDetail,
     });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
 
     const user = await screen.findByRole("article", { name: "You message" });
-    fireEvent.click(screen.getByRole("button", { name: /Show progress/i }));
+    click(screen.getByRole("button", { name: /Show progress/i }));
     const assistant = screen.getByRole("article", { name: "Codex assistant message" });
     const progress = screen.getByRole("article", { name: "Codex progress" });
     const diagnostic = screen.getByRole("article", { name: "Codex provider activity" });
@@ -876,11 +762,11 @@ describe("Timeline", () => {
     expect(loadEventDetail).not.toHaveBeenCalled();
     expect(within(user).getByText("Preview truncated.")).toBeVisible();
 
-    fireEvent.click(within(user).getByRole("button", { name: "Show full message" }));
-    fireEvent.click(within(assistant).getByRole("button", { name: "Show full message" }));
-    fireEvent.click(within(progress).getByRole("button", { name: "Show full progress" }));
-    fireEvent.click(within(diagnostic).getByRole("button", { name: "Show full provider activity" }));
-    fireEvent.click(within(lifecycle).getByRole("button", { name: "Show full run lifecycle" }));
+    click(within(user).getByRole("button", { name: "Show full message" }));
+    click(within(assistant).getByRole("button", { name: "Show full message" }));
+    click(within(progress).getByRole("button", { name: "Show full progress" }));
+    click(within(diagnostic).getByRole("button", { name: "Show full provider activity" }));
+    click(within(lifecycle).getByRole("button", { name: "Show full run lifecycle" }));
     expect(await screen.findByText("Full user detail")).toBeVisible();
     expect(screen.getByText("Full progress detail")).toBeVisible();
     expect(screen.getByText("Full diagnostic detail")).toBeVisible();
@@ -897,16 +783,16 @@ describe("Timeline", () => {
       .mockResolvedValueOnce({ id: "stream", content: "full one", operation: null, contentBytes: "100", truncated: false })
       .mockResolvedValueOnce({ id: "stream", content: "full two", operation: null, contentBytes: "200", truncated: false });
     const api = actions({ loadTimeline, loadEventDetail });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Show full message" }));
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Show full message" }));
     expect(await screen.findByText("full one")).toBeVisible();
 
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     expect(await screen.findByText("preview two")).toBeVisible();
     expect(screen.queryByText("full one")).not.toBeInTheDocument();
     expect(loadEventDetail).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Show full message" }));
+    click(screen.getByRole("button", { name: "Show full message" }));
     expect(await screen.findByText("full two")).toBeVisible();
     expect(loadEventDetail).toHaveBeenCalledTimes(2);
   });
@@ -918,14 +804,14 @@ describe("Timeline", () => {
       .mockResolvedValueOnce(timelinePage([event({ id: "one", sequence: "1" })], null))
       .mockImplementationOnce(() => refresh);
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     await screen.findByText("Done");
     const activity = screen.getByLabelText("Conversation activity");
     Object.defineProperty(activity, "scrollHeight", { configurable: true, value: 200 });
     Object.defineProperty(activity, "clientHeight", { configurable: true, value: 50 });
     activity.scrollTop = 150;
 
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     activity.scrollTop = 20;
     await act(async () => resolveRefresh(timelinePage([event({ id: "two", sequence: "2", content: "new" })], null)));
     await screen.findByText("new");
@@ -941,11 +827,11 @@ describe("Timeline", () => {
     const loadTimeline = vi.fn()
       .mockResolvedValueOnce({ items: page(1), nextCursor: "older-1", approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null })
       .mockResolvedValueOnce({ items: page(1_001), nextCursor: "older-2", approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={actions({ loadTimeline })} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: actions({ loadTimeline }) });
     await screen.findByText("event 1000");
     expect(view.container.querySelectorAll("[data-timeline-id]").length).toBeLessThanOrEqual(80);
 
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={actions({ loadTimeline })} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: actions({ loadTimeline }) });
     await screen.findByText("event 2000");
     expect(view.container.querySelectorAll("[data-timeline-id]").length).toBeLessThanOrEqual(80);
     expect(screen.queryByText("event 1")).not.toBeInTheDocument();
@@ -972,15 +858,15 @@ describe("Timeline", () => {
       .mockImplementationOnce(() => Promise.resolve(pages[3]!))
       .mockImplementationOnce(() => Promise.resolve(pages[4]!))
       .mockImplementationOnce(() => Promise.resolve(pages[5]!));
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={actions({ loadTimeline })} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: actions({ loadTimeline }) });
     await screen.findByText("event 1000");
     for (const oldest of [841, 761, 681, 601, 521]) {
-      fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+      click(screen.getByRole("button", { name: "Load older activity" }));
       await screen.findByText(`event ${oldest}`);
     }
 
     expect(view.container.querySelectorAll("[data-timeline-id]").length).toBeLessThanOrEqual(400);
-    fireEvent.click(screen.getByRole("button", { name: "Reload newest history" }));
+    click(screen.getByRole("button", { name: "Reload newest history" }));
     expect(view.container.querySelectorAll("[data-timeline-id]").length).toBeLessThanOrEqual(80);
     expect(screen.queryByText("event 521")).not.toBeInTheDocument();
   });
@@ -1000,7 +886,7 @@ describe("Timeline", () => {
       ));
     });
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     await screen.findByText("second");
     const activity = screen.getByLabelText("Conversation activity");
     const anchor = viewRow(activity, "e2");
@@ -1012,8 +898,8 @@ describe("Timeline", () => {
     Object.defineProperty(activity, "clientHeight", { configurable: true, value: 50 });
     activity.scrollTop = 25;
 
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    click(screen.getByRole("button", { name: "Load older activity" }));
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await waitFor(() => expect(loadTimeline).toHaveBeenCalledTimes(2));
     expect(screen.queryByText("third")).not.toBeInTheDocument();
     expect(activity.scrollTop).toBe(25);
@@ -1037,13 +923,13 @@ describe("Timeline", () => {
       ], `older-${newestCalls}`));
     });
     const api = actions({ loadTimeline });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
     await screen.findByText("new 1");
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
+    view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
     await screen.findByText("new 2");
 
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
-    fireEvent.click(screen.getByRole("button", { name: "Reload newest history" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Reload newest history" }));
     await act(async () => resolveOlder(timelinePage([
       event({ id: "stale-old", sequence: "1", content: "stale older response" }),
     ], null)));
@@ -1063,7 +949,7 @@ describe("Timeline", () => {
         items: [event({ id: "old", sequence: "1", content: "older" })],
         nextCursor: null, approvals: [], approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
       });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={actions({ loadTimeline })} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: actions({ loadTimeline }) });
     await screen.findByText("newer");
     const activity = screen.getByLabelText("Conversation activity");
     const anchor = viewRow(activity, "new");
@@ -1073,7 +959,7 @@ describe("Timeline", () => {
     });
     activity.scrollTop = 25;
 
-    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    click(screen.getByRole("button", { name: "Load older activity" }));
 
     await screen.findByText("older");
     expect(activity.scrollTop).toBe(85);
@@ -1096,172 +982,16 @@ describe("Timeline", () => {
         questionCount: 0, truncated: false,
       }),
     });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
+    renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
 
     expect(await screen.findByText("Root/Reviewer")).toBeVisible();
     expect(screen.queryByText("reviewer")).not.toBeInTheDocument();
   });
 
-  it("reconciles a later-page approval by exact durable ID", async () => {
-    let laterReads = 0;
-    const loadApprovalDetail = vi.fn(({ approvalId }: { approvalId: string }) => {
-      if (approvalId === "later") laterReads += 1;
-      return Promise.resolve({
-        id: approvalId,
-        status: approvalId === "later" && laterReads > 1 ? "approved" as const : "pending" as const,
-        responsePending: false,
-        agentPath: ["Root"],
-        agentPathTruncated: false,
-        operation: approvalId === "later" ? "Later action" : "First action",
-        scope: "One action", input: null, details: null, questionCount: 0, truncated: false,
-      });
-    });
-    const api = actions({
-      loadTimeline: vi.fn().mockResolvedValue({
-        items: [], nextCursor: null,
-        approvals: [{ id: "first", runId: "run-1", agentId: "root", provider: "codex", agentPath: ["Root"], agentPathTruncated: false, operation: "First action", scope: "One action", status: "pending", responsePending: false }],
-        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "approval-page-2",
-      }),
-      loadApprovals: vi.fn().mockResolvedValue({
-        items: [{ id: "later", runId: "run-1", agentId: "root", provider: "codex", agentPath: ["Root"], agentPathTruncated: false, operation: "Later action", scope: "One action", status: "pending", responsePending: false }],
-        nextCursor: null,
-      }),
-      loadApprovalDetail,
-      respondToApproval: vi.fn().mockResolvedValue(undefined),
-    });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Review Later action" }));
-    const allowLater = await screen.findByRole("button", { name: "Allow Later action" });
-    await waitFor(() => expect(allowLater).toBeEnabled());
-    fireEvent.click(allowLater);
 
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Allow Later action" })).not.toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Review First action" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Timeline" })).toHaveFocus();
-    expect(api.loadApprovals).toHaveBeenCalledTimes(1);
-  });
 
-  it("refreshes disclosed approval pages by the new cursor chain without gaps or duplicates", async () => {
-    const approval = (index: number) => ({
-      id: `approval-${index}`, runId: "run-1", agentId: "root", provider: "codex" as const,
-      agentPath: ["Root"], agentPathTruncated: false,
-      operation: `Action ${index}`, scope: "One action", status: "pending" as const, responsePending: false,
-    });
-    const newest = (id: string) => ({ ...approval(-1), id, operation: `New ${id}` });
-    const loadTimeline = vi.fn()
-      .mockResolvedValueOnce({
-        items: [], nextCursor: null, approvals: Array.from({ length: 30 }, (_, index) => approval(index)),
-        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "old-page-2",
-      })
-      .mockResolvedValueOnce({
-        items: [], nextCursor: null,
-        approvals: [newest("new-1"), newest("new-2"), ...Array.from({ length: 28 }, (_, index) => approval(index))],
-        approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "new-page-2",
-      });
-    const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
-      if (cursor === "old-page-2") return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => approval(index + 30)), nextCursor: "old-page-3" });
-      if (cursor === "new-page-2") return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => approval(index + 28)), nextCursor: "new-page-3" });
-      if (cursor === "new-page-3") return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => approval(index + 58)), nextCursor: null });
-      return Promise.resolve({ items: [], nextCursor: null });
-    });
-    const api = actions({ loadTimeline, loadApprovals });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-    await screen.findByRole("button", { name: "Review Action 59" });
 
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
-    await waitFor(() => expect(loadApprovals.mock.calls.map(([request]) => request.cursor)).toEqual([
-      "old-page-2", "new-page-2",
-    ]));
-    expect(screen.getByRole("button", { name: "Review Action 28" })).toBeVisible();
-    expect(screen.getAllByRole("button", { name: "Review Action 30" })).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Load more approvals" }));
-    expect(await screen.findByRole("button", { name: "Review Action 87" })).toBeVisible();
-    expect(loadApprovals.mock.calls.map(([request]) => request.cursor)).toEqual([
-      "old-page-2", "new-page-2", "new-page-3",
-    ]);
-    expect(screen.getAllByRole("button", { name: "Review Action 58" })).toHaveLength(1);
-  });
-
-  it("re-enables approval paging when an overlapping timeline refresh fails", async () => {
-    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
-    const later = { ...first, id: "later", operation: "Later" };
-    let resolvePage!: (value: { items: typeof later[]; nextCursor: string | null }) => void;
-    const pendingPage = new Promise<{ items: typeof later[]; nextCursor: string | null }>((resolve) => { resolvePage = resolve; });
-    const loadTimeline = vi.fn()
-      .mockResolvedValueOnce({ items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "page-2" })
-      .mockRejectedValueOnce(new Error("Timeline refresh unavailable"));
-    const loadApprovals = vi.fn()
-      .mockReturnValueOnce(pendingPage)
-      .mockResolvedValueOnce({ items: [later], nextCursor: null });
-    const api = actions({ loadTimeline, loadApprovals });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Timeline refresh unavailable");
-    await act(async () => resolvePage({ items: [later], nextCursor: null }));
-
-    const retry = await screen.findByRole("button", { name: "Load more approvals" });
-    expect(retry).toBeEnabled();
-    fireEvent.click(retry);
-    expect(await screen.findByRole("button", { name: "Review Later" })).toBeVisible();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("re-enables approval controls when a disclosed-page refresh fails", async () => {
-    const first = { id: "first", runId: "run-1", agentId: "root", provider: "codex" as const, agentPath: ["Root"], agentPathTruncated: false, operation: "First", scope: "One", status: "pending" as const, responsePending: false };
-    const second = { ...first, id: "second", operation: "Second" };
-    const third = { ...first, id: "third", operation: "Third" };
-    let resolveThird!: (value: { items: typeof third[]; nextCursor: string | null }) => void;
-    const pendingThird = new Promise<{ items: typeof third[]; nextCursor: string | null }>((resolve) => { resolveThird = resolve; });
-    const loadTimeline = vi.fn().mockResolvedValue({
-      items: [], nextCursor: null, approvals: [first], approvalsTruncated: true, activeCompaction: null, approvalsNextCursor: "page-2",
-    });
-    const loadApprovals = vi.fn(({ cursor }: { cursor: string | null }) => {
-      if (cursor === "page-2" && loadApprovals.mock.calls.length === 1) return Promise.resolve({ items: [second], nextCursor: "page-3" });
-      if (cursor === "page-3" && loadApprovals.mock.calls.length === 2) return pendingThird;
-      if (cursor === "page-2" && loadApprovals.mock.calls.length === 3) return Promise.reject(new Error("Approval refresh unavailable"));
-      if (cursor === "page-3") return Promise.resolve({ items: [third], nextCursor: null });
-      return Promise.resolve({ items: [], nextCursor: null });
-    });
-    const api = actions({ loadTimeline, loadApprovals });
-    const view = render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more approvals" }));
-    await screen.findByRole("button", { name: "Review Second" });
-    fireEvent.click(screen.getByRole("button", { name: "Load more approvals" }));
-    view.rerender(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={1} actions={api} />);
-    await act(async () => resolveThird({ items: [third], nextCursor: null }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Approval refresh unavailable");
-
-    const retry = screen.getByRole("button", { name: "Load more approvals" });
-    expect(retry).toBeEnabled();
-    fireEvent.click(retry);
-    expect(await screen.findByRole("button", { name: "Review Third" })).toBeVisible();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("uses exact approval-detail ancestry when the requesting agent is not loaded", async () => {
-    const api = actions({
-      loadTimeline: vi.fn().mockResolvedValue({
-        items: [], nextCursor: null,
-        approvals: [{ id: "deep", runId: "run-1", agentId: "unloaded", provider: "claude", agentPath: ["Root", "Orchestrator", "Reviewer"], agentPathTruncated: false, operation: "Edit deep file", scope: "One file", status: "pending", responsePending: false }],
-        approvalsTruncated: false, activeCompaction: null, approvalsNextCursor: null,
-      }),
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "deep", status: "pending", responsePending: false,
-        agentPath: ["Root", "Orchestrator", "Reviewer"], agentPathTruncated: false,
-        operation: "Edit deep file", scope: "One file", input: null, details: null,
-        questionCount: 0, truncated: false,
-      }),
-    });
-    render(<Timeline conversation={conversation({ id: "conversation-1" })} refreshVersion={0} actions={api} />);
-
-    expect(await screen.findByText("Root/Orchestrator/Reviewer")).toBeVisible();
-    expect(screen.queryByText(/^Agent$/)).not.toBeInTheDocument();
-    expect(api.loadApprovalDetail).not.toHaveBeenCalled();
-  });
 });
 
 function timelinePage(items: TimelineItem[], nextCursor: string | null): TimelinePage {

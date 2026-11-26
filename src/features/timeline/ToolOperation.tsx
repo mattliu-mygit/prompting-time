@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { CopyButton } from "@prompting-time/ui";
 import type { EventDetailSnapshot, TimelineItem, ToolOperationStatus } from "../../bridge/types";
 import type { ConversationActions } from "../../app/store";
-import { CopyButton } from "./MessageContent";
 
 const statuses: Record<ToolOperationStatus, string> = {
   running: "Running", succeeded: "Succeeded", failed: "Failed", interrupted: "Interrupted", unknown: "Unknown",
 };
+const fields = ["input", "context", "error", "output"] as const;
 
-export function ToolOperation({ item, actions, agentPath, grouped = false, expanded: controlledExpanded, onToggle }: {
+/** One tool call: what it did, its status, and its captured input and output on request. */
+export function ToolOperation(props: {
   item: TimelineItem;
   actions: Pick<ConversationActions, "loadEventDetail">;
   agentPath?: string;
@@ -15,64 +17,99 @@ export function ToolOperation({ item, actions, agentPath, grouped = false, expan
   expanded?: boolean;
   onToggle?(): void;
 }) {
-  const [localExpanded, setLocalExpanded] = useState(false);
-  const expanded = controlledExpanded ?? localExpanded;
-  const [detail, setDetail] = useState<EventDetailSnapshot | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [retry, setRetry] = useState(0);
-  const operation = item.operation;
-  const version = operation?.detailRevision ?? `${item.contentBytes}:${item.content}`;
-  const hasDetails = operation?.hasDetails ?? item.truncated;
-  const load = useRef(actions.loadEventDetail);
-  load.current = actions.loadEventDetail;
-  useEffect(() => {
-    let current = true;
-    setDetail(null);
-    setError(null);
-    if (expanded && hasDetails) {
-      void load.current({ eventId: item.id }).then(result => {
-        if (!current) return;
-        if (operation && (!result.operation || result.operation.detailRevision !== version)) {
-          setError("Activity changed while loading. Retry detail.");
-        } else setDetail(result);
-      }, reason => {
-        if (current) setError(reason instanceof Error ? reason.message : "Could not load this activity.");
-      });
-    }
-    return () => { current = false; };
-  }, [item.id, version, expanded, hasDetails, retry, operation !== null]);
-
-  const provider = item.provider === "codex" ? "Codex" : "Claude";
-  const captured = detail?.operation;
-  const duration = operation?.durationMs;
-  const label = item.presentation === "failure" ? "failure" : item.presentation === "notice" ? "notice" : "tool activity";
-  return <article className={`tool-operation ${item.presentation} ${operation?.status ?? "legacy"}`} aria-label={`${provider} ${label}`}>
-    <div className="tool-operation-summary">
-      <span className="tool-operation-title" title={item.content}>{item.content}</span>
-      {operation ? <span className="tool-operation-status">{statuses[operation.status]}</span> : null}
-      {duration !== null && duration !== undefined ? <span className="tool-operation-meta">{Number(duration) / 1000} s</span> : null}
-      {operation?.exitCode !== null && operation?.exitCode !== undefined ? <span className="tool-operation-meta">Exit {operation.exitCode}</span> : null}
-      {!grouped ? <span className="tool-operation-attribution">{provider}{agentPath ? ` · ${agentPath}` : ""}</span> : null}
-      {hasDetails ? <button type="button" className="disclosure-link" data-operation-disclosure aria-expanded={expanded} onClick={onToggle ?? (() => setLocalExpanded(value => !value))}>{expanded ? "Hide details" : "Show details"}</button>
-        : <span className="tool-operation-meta">Details weren't captured</span>}
-    </div>
-    {operation?.conflicted ? <p className="tool-operation-notice">Conflicting outcomes were reported.</p> : null}
-    {(operation?.truncated || item.truncated) && !expanded ? <p className="truncation-note">Preview truncated.</p> : null}
-    {expanded && hasDetails ? <div className="tool-operation-detail">
-      {error ? <><p role="alert">{error}</p><button type="button" className="disclosure-link" onClick={() => setRetry(value => value + 1)}>Retry detail</button></>
-        : !detail ? <p>Loading bounded detail…</p>
-          : captured ? <>
-            {(["input", "context", "error", "output"] as const).map(field => {
-              const value = captured[field];
-              if (value === null) return field === "output" ? <p key={field}>Output wasn't captured</p> : null;
-              if (field === "output" && value === "") return <p key={field}>{captured.truncated ? "No output retained; captured detail was truncated" : "Output was empty"}</p>;
-              return <section key={field} className="tool-operation-field" aria-label={field}>
-                <div><span>{field === "input" ? "Command / input" : field[0].toUpperCase() + field.slice(1)}</span><CopyButton content={value} label={`Copy ${field}${captured.truncated ? " preview" : ""}`} /></div>
-                <pre>{value}</pre>
-              </section>;
-            })}
-            {captured.truncated ? <p className="truncation-note">Captured detail is truncated.</p> : null}
-          </> : <><pre>{detail.content}</pre><CopyButton content={detail.content} label={detail.truncated ? "Copy detail preview" : "Copy detail"} />{detail.truncated ? <p className="truncation-note">Bounded detail remains truncated.</p> : null}</>}
-    </div> : null}
-  </article>;
+  const [localExpanded, setLocalExpanded] = createSignal(false);
+  const expanded = () => props.expanded ?? localExpanded();
+  const [retry, setRetry] = createSignal(0);
+  // A loaded detail answers one request; a new revision, retry, or collapse asks again.
+  const [loaded, setLoaded] = createSignal<{ request: string; detail: EventDetailSnapshot | null; error: string | null } | null>(null);
+  const operation = () => props.item.operation;
+  const version = () => operation()?.detailRevision ?? `${props.item.contentBytes}:${props.item.content}`;
+  const hasDetails = () => operation()?.hasDetails ?? props.item.truncated;
+  // A memo, so a refreshed copy of the same item does not ask again.
+  const request = createMemo(() => (expanded() && hasDetails() ? `${props.item.id}:${version()}:${retry()}` : null));
+  createEffect(request, (current) => {
+    if (current === null) return;
+    let active = true;
+    const id = props.item.id;
+    const expected = operation() ? version() : null;
+    props.actions.loadEventDetail({ eventId: id }).then((result) => {
+      if (!active) return;
+      if (expected !== null && (!result.operation || result.operation.detailRevision !== expected)) {
+        setLoaded({ request: current, detail: null, error: "Activity changed while loading. Retry detail." });
+      } else setLoaded({ request: current, detail: result, error: null });
+    }, (reason) => {
+      if (active) setLoaded({ request: current, detail: null, error: reason instanceof Error ? reason.message : "Could not load this activity." });
+    });
+    return () => {
+      active = false;
+    };
+  });
+  const result = () => (loaded()?.request === request() ? loaded() : null);
+  const provider = () => (props.item.provider === "codex" ? "Codex" : "Claude");
+  const label = () => (props.item.presentation === "failure" ? "failure" : props.item.presentation === "notice" ? "notice" : "tool activity");
+  const fieldName = (field: (typeof fields)[number]) => (field === "input" ? "Command / input" : field[0].toUpperCase() + field.slice(1));
+  return (
+    <article class={["tool-operation", props.item.presentation, operation()?.status ?? "legacy"]} aria-label={`${provider()} ${label()}`}>
+      <div class="tool-operation-summary">
+        <span class="tool-operation-title" title={props.item.content}>{props.item.content}</span>
+        <Show when={operation()}>{(current) => <span class="tool-operation-status">{statuses[current().status]}</span>}</Show>
+        <Show when={operation()?.durationMs != null}><span class="tool-operation-meta">{Number(operation()!.durationMs) / 1000} s</span></Show>
+        <Show when={operation()?.exitCode != null}><span class="tool-operation-meta">Exit {operation()!.exitCode}</span></Show>
+        <Show when={!props.grouped}><span class="tool-operation-attribution">{provider()}{props.agentPath ? ` · ${props.agentPath}` : ""}</span></Show>
+        <Show when={hasDetails()} fallback={<span class="tool-operation-meta">Details weren't captured</span>}>
+          <button
+            type="button"
+            class="disclosure-link"
+            data-operation-disclosure
+            aria-expanded={expanded() ? "true" : "false"}
+            onClick={() => (props.onToggle ? props.onToggle() : setLocalExpanded((value) => !value))}
+          >
+            {expanded() ? "Hide details" : "Show details"}
+          </button>
+        </Show>
+      </div>
+      <Show when={operation()?.conflicted}><p class="tool-operation-notice">Conflicting outcomes were reported.</p></Show>
+      <Show when={(operation()?.truncated || props.item.truncated) && !expanded()}><p class="truncation-note">Preview truncated.</p></Show>
+      <Show when={expanded() && hasDetails()}>
+        <div class="tool-operation-detail">
+          <Show when={!result()?.error} fallback={<><p role="alert">{result()?.error}</p><button type="button" class="disclosure-link" onClick={() => setRetry((value) => value + 1)}>Retry detail</button></>}>
+            <Show when={result()?.detail} fallback={<p>Loading bounded detail…</p>}>
+              {(detail) => (
+                <Show
+                  when={detail().operation}
+                  fallback={<><pre>{detail().content}</pre><CopyButton content={detail().content} label={detail().truncated ? "Copy detail preview" : "Copy detail"} /><Show when={detail().truncated}><p class="truncation-note">Bounded detail remains truncated.</p></Show></>}
+                >
+                  {(captured) => (
+                    <>
+                      <For each={fields}>
+                        {(field) => {
+                          const value = () => captured()[field];
+                          return (
+                            <Show
+                              when={value() !== null && !(field === "output" && value() === "")}
+                              fallback={
+                                <Show when={field === "output"}>
+                                  <p>{value() === null ? "Output wasn't captured" : captured().truncated ? "No output retained; captured detail was truncated" : "Output was empty"}</p>
+                                </Show>
+                              }
+                            >
+                              <section class="tool-operation-field" aria-label={field}>
+                                <div><span>{fieldName(field)}</span><CopyButton content={value()!} label={`Copy ${field}${captured().truncated ? " preview" : ""}`} /></div>
+                                <pre>{value()}</pre>
+                              </section>
+                            </Show>
+                          );
+                        }}
+                      </For>
+                      <Show when={captured().truncated}><p class="truncation-note">Captured detail is truncated.</p></Show>
+                    </>
+                  )}
+                </Show>
+              )}
+            </Show>
+          </Show>
+        </div>
+      </Show>
+    </article>
+  );
 }

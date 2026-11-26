@@ -1,77 +1,22 @@
 /// <reference types="vite/client" />
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
+import { render } from "@solidjs/web";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import "@prompting-time/ui/styles.css";
 import { App } from "./app/App";
 import { createAppStore } from "./app/store";
 import { installAppZoom } from "./app/zoom";
-import {
-  getBootstrap,
-  createConversation,
-  archiveConversation,
-  inspectWorkspace,
-  inspectProject,
-  pickProjectDirectory,
-  interruptRun,
-  listConversations,
-  listenToAppEvents,
-  loadApprovalDetail,
-  loadApprovalQuestions,
-  loadApprovals,
-  listChildConversations,
-  loadConversationPath,
-  loadConversation,
-  loadEventDetail,
-  loadTimeline,
-  loadDiagnostics,
-  listRunAudits,
-  loadRunAudit,
-  respondToApproval,
-  steerRun,
-  submitMessage,
-  setThinkingPreference,
-  setContextBudget,
-} from "./bridge/api";
-import "./styles/tokens.css";
+import * as api from "./bridge/api";
 import "./styles/app.css";
 
-const store = createAppStore({
-  getBootstrap,
-  createConversation,
-  archiveConversation,
-  listConversations,
-  loadConversation,
-  listChildConversations,
-  loadConversationPath,
-  listenToAppEvents,
-  loadTimeline,
-  loadDiagnostics,
-  listRunAudits,
-  loadRunAudit,
-  loadEventDetail,
-  loadApprovals,
-  loadApprovalDetail,
-  loadApprovalQuestions,
-  submitMessage,
-  setThinkingPreference,
-  setContextBudget,
-  steerRun,
-  respondToApproval,
-  interruptRun,
-  inspectWorkspace,
-  inspectProject,
-  pickProjectDirectory,
-});
-
+const store = createAppStore(api);
 const disposeZoom = installAppZoom((factor) => getCurrentWebview().setZoom(factor));
+const disposeApp = render(() => <App store={store} />, document.getElementById("root")!);
 window.addEventListener("beforeunload", () => {
+  disposeApp();
   disposeZoom();
   store.dispose();
 }, { once: true });
-import.meta.hot?.dispose(disposeZoom);
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <App store={store} />
-  </StrictMode>
-);
+import.meta.hot?.dispose(() => {
+  disposeApp();
+  disposeZoom();
+});

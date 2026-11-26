@@ -1,4 +1,4 @@
-import { createContext, useContext, useSyncExternalStore } from "react";
+import { createSignal, onSettled, type Accessor } from "solid-js";
 import type {
   ConversationPath,
   RunStatus,
@@ -981,11 +981,19 @@ export function selectVisibleConversations(snapshot: AppSnapshot): ConversationS
   });
 }
 
-export const AppStoreContext = createContext<AppStore | null>(null);
-
-export function useAppStore<T>(selector: (snapshot: AppSnapshot) => T): T {
-  const store = useContext(AppStoreContext);
-  if (!store) throw new Error("useAppStore must be used within AppStoreContext.Provider.");
-  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-  return selector(snapshot);
+/**
+ * The store's latest snapshot as a Solid value, for the component that shows the store. It
+ * subscribes once the component has settled and unsubscribes when the component goes away; a
+ * snapshot published in between is read at subscription.
+ */
+export function createSnapshot(store: AppStore): Accessor<AppSnapshot> {
+  const [snapshot, setSnapshot] = createSignal(store.getSnapshot());
+  onSettled(() => {
+    setSnapshot(store.getSnapshot());
+    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
+    return () => {
+      unsubscribe();
+    };
+  });
+  return snapshot;
 }

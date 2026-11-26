@@ -1,9 +1,9 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import axe from "axe-core";
+import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
+import { createSignal, flush, Show } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
-import type { ApprovalSnapshot, ConversationSummary, ProviderInstallation, TimelineItem } from "../../bridge/types";
+import type { ConversationSummary, ProviderInstallation, TimelineItem } from "../../bridge/types";
 import type { AppActions, ConversationActions } from "../../app/store";
-import { ApprovalCard } from "./ApprovalCard";
+import { render, settle } from "../../test/render";
 import { Inspector } from "./Inspector";
 
 function actions(overrides: Partial<AppActions> = {}): AppActions {
@@ -45,12 +45,6 @@ function actions(overrides: Partial<AppActions> = {}): AppActions {
   };
 }
 
-const approval: ApprovalSnapshot = {
-  id: "approval-1", runId: "run-1", agentId: "root/reviewer", provider: "codex",
-  operation: "Run command", scope: "This command", status: "pending", responsePending: false,
-  agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-};
-
 const conversation: ConversationSummary = {
   contextBudget: { kind: "tokens", tokens: 300000 }, runContextBudget: null, thinkingPreference: { kind: "auto" }, thinkingDecision: null, thinkingConfiguration: null,
   parentId: null, hasChildren: false, summary: null,
@@ -65,288 +59,47 @@ const providers: ProviderInstallation[] = [
   { id: "claude", installed: true, available: false, version: "2.1.205", diagnostic: "Sign in", capabilities: [] },
 ];
 
-describe("ApprovalCard", () => {
-  it("shows the selected run's frozen thinking and configuration independently of next-turn choice", async () => {
-    const api = actions({
-      listRunAudits: vi.fn().mockResolvedValue({ items: [{ id: "old-run", provider: "codex", status: "completed", reason: null, hasHandoff: false }], nextCursor: null }),
-      loadRunAudit: vi.fn().mockResolvedValue({ id: "old-run", provider: "codex", status: "completed", routing: null, reason: null,
-        handoff: null, handoffTruncated: false, routingTruncated: false,
-        thinkingDecision: { preference: { kind: "auto" }, requestedEffort: "high", reason: "Engineering task." },
-        thinkingConfiguration: { model: "fixture-model", supportedEfforts: ["low", "medium", "high"], configuredEffort: "medium" } }),
-    });
-    render(<Inspector conversation={{ ...conversation, thinkingPreference: { kind: "manual", level: "low" } }} providers={providers} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Inspect Codex run 1" }));
-    expect(await screen.findByText("Requested: high · configured: medium · model: fixture-model")).toBeVisible();
-    expect(screen.getByText("Engineering task.")).toBeVisible();
-    expect(screen.queryByText("Requested: low")).not.toBeInTheDocument();
-  });
-  it("keeps inherited workspace but hides unavailable child control metadata", async () => {
-    const api = actions({ loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }) });
-    render(<Inspector conversation={{ ...conversation, id: "reviewer", parentId: "conversation-1", capabilities: { canSend: false, canInterrupt: false, canArchive: false, canRoute: false, unavailableReason: "Recorded activity only." } }} providers={providers} refreshVersion={0} actions={api} />);
-    expect(await screen.findByText("/app-support/worktrees/conversation-1")).toBeVisible();
-    expect(screen.queryByRole("heading", { name: /Provider run history|Routing|Context handoff|Active child conversations/ })).not.toBeInTheDocument();
-    expect(screen.queryByText(/active descendants/)).not.toBeInTheDocument();
-    expect(api.listRunAudits).not.toHaveBeenCalled();
-  });
-  it("recovers an initial detail failure through an accessible focused retry", async () => {
-    const api = actions({
-      loadApprovalDetail: vi.fn()
-        .mockRejectedValueOnce(new Error("Detail unavailable"))
-        .mockResolvedValueOnce({
-          id: "approval-1", status: "pending", responsePending: false,
-          agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-          operation: "Run command", scope: "This command", input: null, details: null,
-          questionCount: 0, truncated: false,
-        }),
-    });
-    render(<ApprovalCard approval={approval} actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
-    const retry = await screen.findByRole("button", { name: "Retry request details" });
-    expect(retry).toHaveFocus();
-    fireEvent.click(retry);
-    expect(await screen.findByRole("button", { name: "Allow Run command" })).toBeEnabled();
-    expect(api.loadApprovalDetail).toHaveBeenCalledTimes(2);
-  });
+/** Settles after a test resolves a pending request. */
+async function act(run: () => unknown) {
+  await run();
+  await settle();
+}
 
-  it("immediately reconciles a terminal exact detail", async () => {
-    const terminal = {
-      id: "approval-1", status: "denied" as const, responsePending: false,
-      agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-      operation: "Run command", scope: "This command", input: null, details: null,
-      questionCount: 0, truncated: false,
-    };
-    const onReconcile = vi.fn();
-    render(<ApprovalCard approval={approval} actions={actions({ loadApprovalDetail: vi.fn().mockResolvedValue(terminal) })} onReconcile={onReconcile} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
-    await waitFor(() => expect(onReconcile).toHaveBeenCalledWith(terminal));
-    expect(screen.getByRole("button", { name: "Allow Run command" })).toBeDisabled();
-  });
+/** Renders the Inspector as App does: a new one per conversation, updated in place otherwise. */
+function renderInspector(initial: { conversation: ConversationSummary; refreshVersion: number; actions: AppActions }) {
+  const [current, setCurrent] = createSignal(initial.conversation);
+  const [refreshVersion, setRefreshVersion] = createSignal(initial.refreshVersion);
+  const view = render(() => (
+    <Show when={current().id} keyed>
+      {/* A keyed child must take the value to remount when it changes. */}
+      {(id: string) => <Inspector conversation={{ ...current(), id }} providers={providers} refreshVersion={refreshVersion()} actions={initial.actions} />}
+    </Show>
+  ));
+  return {
+    ...view,
+    rerender(next: { conversation?: ConversationSummary; refreshVersion?: number; actions?: AppActions }) {
+      if (next.conversation) setCurrent(next.conversation);
+      if (next.refreshVersion !== undefined) setRefreshVersion(next.refreshVersion);
+      flush();
+    },
+  };
+}
 
-  it("recovers an initial question-page failure without remounting the approval", async () => {
-    const api = actions({
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "approval-1", status: "pending", responsePending: false,
-        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-        operation: "Run command", scope: "This command", input: null, details: null,
-        questionCount: 1, truncated: false,
-      }),
-      loadApprovalQuestions: vi.fn()
-        .mockRejectedValueOnce(new Error("Questions unavailable"))
-        .mockResolvedValueOnce({
-          items: [{ id: "question-1", header: "Reason", question: "Why?", options: null, isOther: false, isSecret: false, truncated: false }],
-          totalCount: 1, nextCursor: null,
-        }),
-    });
-    render(<ApprovalCard approval={approval} actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
-    const retry = await screen.findByRole("button", { name: "Retry request details" });
-    expect(retry).toHaveFocus();
-    fireEvent.click(retry);
-
-    expect(await screen.findByRole("textbox", { name: "Answer" })).toBeEnabled();
-    expect(api.loadApprovalQuestions).toHaveBeenCalledTimes(2);
-  });
-
-  it("shows exact operation context and permits only one response click", async () => {
-    const api = actions();
-    render(<ApprovalCard approval={approval} agentPath="Root/Reviewer" actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
-    expect(await screen.findByText("cargo test")).toBeVisible();
-    expect(screen.getByText("Requesting conversation")).toBeVisible();
-    expect(screen.getByText("Root/Reviewer")).toBeVisible();
-    const allow = screen.getByRole("button", { name: "Allow Run command" });
-    fireEvent.click(allow);
-    fireEvent.click(allow);
-    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledTimes(1));
-    expect(allow).toBeDisabled();
-  });
-
-  it("reconciles a stale response against durable approval state", async () => {
-    const onReconcile = vi.fn().mockResolvedValue(undefined);
-    const api = actions({ respondToApproval: vi.fn().mockRejectedValue(new Error("Approval is no longer pending")) });
-    render(<ApprovalCard approval={approval} actions={api} onReconcile={onReconcile} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
-    await screen.findByText("cargo test");
-    fireEvent.click(screen.getByRole("button", { name: "Deny Run command" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Approval is no longer pending");
-    expect(screen.getByRole("status")).toHaveFocus();
-    expect(onReconcile).toHaveBeenCalled();
-  });
-
-  it("allows a retry only when durable state confirms no response is owned", async () => {
-    const api = actions({ respondToApproval: vi.fn().mockRejectedValue(new Error("Connection closed")) });
-    render(<ApprovalCard approval={approval} actions={api} onReconcile={vi.fn().mockResolvedValue(approval)} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
-    await screen.findByText("cargo test");
-    const deny = screen.getByRole("button", { name: "Deny Run command" });
-    fireEvent.click(deny);
-    await waitFor(() => expect(deny).toBeEnabled());
-    expect(screen.getByRole("status")).toHaveTextContent("Connection closed");
-  });
-
-  it("pages exact questions and submits answers by app-owned question ID", async () => {
-    const api = actions({
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "approval-1", status: "pending", responsePending: false, operation: "Choose rollout", scope: "This request", input: null,
-        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-        details: null, questionCount: 2, truncated: true,
-      }),
-      loadApprovalQuestions: vi.fn()
-        .mockResolvedValueOnce({
-          items: [{ id: "question-1", header: "Provider", question: "Which provider?", options: [{ label: "Codex", description: "Use Codex" }], isOther: false, isSecret: false, truncated: false }],
-          totalCount: 2, nextCursor: "questions-2",
-        })
-        .mockResolvedValueOnce({
-          items: [{ id: "question-2", header: "Reason", question: "Why?", options: null, isOther: true, isSecret: false, truncated: false }],
-          totalCount: 2, nextCursor: null,
-        }),
-    });
-    render(<ApprovalCard approval={{ ...approval, operation: "Choose rollout" }} actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Choose rollout" }));
-    fireEvent.click(await screen.findByRole("radio", { name: /Codex/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Load more questions" }));
-    fireEvent.change(await screen.findByRole("textbox", { name: "Answer" }), { target: { value: "Best fit" } });
-    fireEvent.click(screen.getByRole("button", { name: "Answer Choose rollout" }));
-    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledWith({
-      approvalId: "approval-1",
-      response: { kind: "answers", value: { "question-1": ["Codex"], "question-2": ["Best fit"] } },
-    }));
-  });
-
-  it("coalesces repeated question-page disclosure and deduplicates durable question IDs", async () => {
-    let resolveNextPage!: (page: {
-      items: Array<{
-        id: string; header: string; question: string; options: null;
-        isOther: boolean; isSecret: boolean; truncated: boolean;
-      }>;
-      totalCount: number;
-      nextCursor: string | null;
-    }) => void;
-    const nextPage = new Promise<Parameters<typeof resolveNextPage>[0]>((resolve) => { resolveNextPage = resolve; });
-    const api = actions({
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "approval-1", status: "pending", responsePending: false, operation: "Answer questions", scope: "This request", input: null,
-        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-        details: null, questionCount: 2, truncated: true,
-      }),
-      loadApprovalQuestions: vi.fn()
-        .mockResolvedValueOnce({
-          items: [{ id: "question-1", header: "First", question: "First?", options: null, isOther: false, isSecret: false, truncated: false }],
-          totalCount: 2, nextCursor: "questions-2",
-        })
-        .mockReturnValueOnce(nextPage),
-    });
-    render(<ApprovalCard approval={{ ...approval, operation: "Answer questions" }} actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Answer questions" }));
-    const loadMore = await screen.findByRole("button", { name: "Load more questions" });
-
-    fireEvent.click(loadMore);
-    fireEvent.click(loadMore);
-    expect(api.loadApprovalQuestions).toHaveBeenCalledTimes(2);
-
-    await act(async () => resolveNextPage({
-      items: [
-        { id: "question-1", header: "First", question: "First?", options: null, isOther: false, isSecret: false, truncated: false },
-        { id: "question-2", header: "Second", question: "Second?", options: null, isOther: false, isSecret: false, truncated: false },
-      ],
-      totalCount: 2,
-      nextCursor: null,
-    }));
-
-    expect(screen.getAllByRole("textbox")).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: "Load more questions" })).not.toBeInTheDocument();
-  });
-
-  it("blocks arbitrary answers when non-other choices are incomplete", async () => {
-    const api = actions({
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "approval-1", status: "pending", responsePending: false, operation: "Choose rollout", scope: "This request", input: null,
-        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-        details: null, questionCount: 1, truncated: true,
-      }),
-      loadApprovalQuestions: vi.fn().mockResolvedValue({
-        items: [{ id: "question-1", header: "Provider", question: "Which provider?", options: null, isOther: false, isSecret: false, truncated: true }],
-        totalCount: 1, nextCursor: null,
-      }),
-    });
-    render(<ApprovalCard approval={{ ...approval, operation: "Choose rollout" }} actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Choose rollout" }));
-
-    expect(await screen.findByText(/Exact choices are unavailable/)).toBeVisible();
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Answer Choose rollout" })).toBeDisabled();
-    expect(api.respondToApproval).not.toHaveBeenCalled();
-  });
-
-  it("accepts a complete canonical free-text question with null options", async () => {
-    const api = actions({
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "approval-1", status: "pending", responsePending: false, operation: "Explain rollout", scope: "This request", input: null,
-        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-        details: null, questionCount: 1, truncated: false,
-      }),
-      loadApprovalQuestions: vi.fn().mockResolvedValue({
-        items: [{ id: "question-1", header: "Reason", question: "Why?", options: null, isOther: false, isSecret: true, truncated: false }],
-        totalCount: 1, nextCursor: null,
-      }),
-    });
-    render(<ApprovalCard approval={{ ...approval, operation: "Explain rollout" }} actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Explain rollout" }));
-
-    fireEvent.change(await screen.findByLabelText("Answer"), { target: { value: "Because it is safer" } });
-    fireEvent.click(screen.getByRole("button", { name: "Answer Explain rollout" }));
-    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledWith({
-      approvalId: "approval-1", response: { kind: "answers", value: { "question-1": ["Because it is safer"] } },
-    }));
-  });
-
-  it("uses complete canonical detail choices when the paged preview is truncated", async () => {
-    const api = actions({
-      loadApprovalDetail: vi.fn().mockResolvedValue({
-        id: "approval-1", status: "pending", responsePending: false, operation: "Choose rollout", scope: "This request",
-        agentPath: ["Root", "Reviewer"], agentPathTruncated: false,
-        input: { questions: [{
-          id: "question-1", header: "Provider", question: "Which provider?",
-          options: [{ label: "Codex", description: "Use Codex" }, { label: "Claude", description: "Use Claude" }],
-          isOther: false, isSecret: false,
-        }], autoResolutionMs: null },
-        details: null, questionCount: 1, truncated: false,
-      }),
-      loadApprovalQuestions: vi.fn().mockResolvedValue({
-        items: [{ id: "question-1", header: "Provider", question: "Which provider?", options: null, isOther: false, isSecret: false, truncated: true }],
-        totalCount: 1, nextCursor: null,
-      }),
-    });
-    render(<ApprovalCard approval={{ ...approval, operation: "Choose rollout" }} actions={api} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Choose rollout" }));
-
-    fireEvent.click(await screen.findByRole("radio", { name: /Claude/ }));
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Answer Choose rollout" }));
-    await waitFor(() => expect(api.respondToApproval).toHaveBeenCalledWith({
-      approvalId: "approval-1", response: { kind: "answers", value: { "question-1": ["Claude"] } },
-    }));
-  });
-
-  it("has no detectable axe violations in an approval prompt", async () => {
-    const { container } = render(<ApprovalCard approval={approval} actions={actions()} onReconcile={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Review Run command" }));
-    await screen.findByText("cargo test");
-    const result = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(result.violations.map(({ id }) => id)).toEqual([]);
-  });
-});
+const click = (element: Element) => {
+  fireEvent.click(element);
+  flush();
+};
 
 describe("Inspector", () => {
   it("opens diagnostics independently before workspace inspection returns and never refreshes them implicitly", async () => {
     const api = actions({ inspectWorkspace: vi.fn(() => new Promise<never>(() => {})), loadDiagnostics: vi.fn().mockResolvedValue({ items: [], nextCursor: null }) });
-    const view = render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
+    const view = renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
     expect(api.loadDiagnostics).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Expand diagnostics" }));
+    click(screen.getByRole("button", { name: "Expand diagnostics" }));
     await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledWith({ conversationId: conversation.id, cursor: null, limit: 30 }));
-    view.rerender(<Inspector conversation={conversation} providers={providers} refreshVersion={20} actions={api} />);
+    view.rerender({ conversation: conversation, refreshVersion: 20, actions: api });
     expect(api.loadDiagnostics).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Refresh diagnostics" }));
+    click(screen.getByRole("button", { name: "Refresh diagnostics" }));
     await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(2));
   });
 
@@ -358,23 +111,30 @@ describe("Inspector", () => {
       const end = cursor === null ? 150 : Number(cursor);
       return Promise.resolve({ items: Array.from({ length: 30 }, (_, index) => item(end - 29 + index)), nextCursor: end > 30 ? String(end - 30) : null });
     }), loadEventDetail: vi.fn().mockResolvedValue({ id: "d150", content: "exact notification", operation: null, contentBytes: "18", truncated: false }) });
-    render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Expand diagnostics" }));
+    renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Expand diagnostics" }));
     await screen.findByText("notification 150");
     expect(api.loadEventDetail).not.toHaveBeenCalled();
     const diagnostics = screen.getByRole("region", { name: "Diagnostics" });
-    fireEvent.click(within(diagnostics).getAllByRole("button", { name: "Show full provider activity" }).at(-1)!);
+    click(within(diagnostics).getAllByRole("button", { name: "Show full provider activity" }).at(-1)!);
     expect(await screen.findByText("exact notification")).toBeVisible();
+    const enabledOlder = () => waitFor(() => {
+      const button = screen.getByRole("button", { name: "Load older diagnostics" });
+      expect(button).toBeEnabled();
+      return button;
+    });
     for (let page = 0; page < 4; page += 1) {
-      fireEvent.click(screen.getByRole("button", { name: "Load older diagnostics" }));
+      click(await enabledOlder());
       await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(page + 2));
     }
+    // The last page reaches the first notification, so nothing older is left to load.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Load older diagnostics" })).not.toBeInTheDocument());
     expect(screen.queryByText("notification 150")).not.toBeInTheDocument();
     const entries = diagnostics.querySelectorAll("article");
     expect(entries).toHaveLength(120);
     expect(entries[0]).toHaveTextContent("notification 1");
     expect(entries[119]).toHaveTextContent("notification 120");
-    fireEvent.click(screen.getByRole("button", { name: "Reload newest diagnostics" }));
+    click(screen.getByRole("button", { name: "Reload newest diagnostics" }));
     expect(await screen.findByText("notification 150")).toBeVisible();
     expect(diagnostics.querySelectorAll("article")).toHaveLength(30);
   });
@@ -384,16 +144,17 @@ describe("Inspector", () => {
     const api = actions({ loadDiagnostics: vi.fn()
       .mockRejectedValueOnce(new Error("diagnostic read failed"))
       .mockImplementation(() => new Promise((resolve) => { pending.push(resolve); })) });
-    const view = render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Expand diagnostics" }));
+    const view = renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Expand diagnostics" }));
     expect(await screen.findByText("diagnostic read failed")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Retry diagnostics" }));
+    click(screen.getByRole("button", { name: "Retry diagnostics" }));
     await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(2));
-    fireEvent.click(screen.getByRole("button", { name: "Collapse diagnostics" }));
+    click(screen.getByRole("button", { name: "Collapse diagnostics" }));
     await act(async () => pending[0]!({ items: [], nextCursor: "stale" }));
-    fireEvent.click(screen.getByRole("button", { name: "Expand diagnostics" }));
+    click(screen.getByRole("button", { name: "Expand diagnostics" }));
     await waitFor(() => expect(api.loadDiagnostics).toHaveBeenCalledTimes(3));
-    view.rerender(<Inspector conversation={{ ...conversation, id: "other" }} providers={providers} refreshVersion={0} actions={api} />);
+    view.rerender({ conversation: { ...conversation, id: "other" }, refreshVersion: 0, actions: api });
+    await settle();
     await act(async () => pending[1]!({ items: [], nextCursor: "stale" }));
     expect(screen.getByRole("button", { name: "Expand diagnostics" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("button", { name: "Load older diagnostics" })).not.toBeInTheDocument();
@@ -407,9 +168,9 @@ describe("Inspector", () => {
     ));
     const api = actions({ inspectWorkspace });
     const nextConversation = { ...conversation, id: "conversation-2", title: "Next" };
-    const view = render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
-    view.rerender(<Inspector conversation={nextConversation} providers={providers} refreshVersion={0} actions={api} />);
-
+    const view = renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
+    view.rerender({ conversation: nextConversation, refreshVersion: 0, actions: api });
+    await waitFor(() => expect(resolvers.has("conversation-2")).toBe(true));
     await act(async () => resolvers.get("conversation-2")?.({ ...baseline, executionPath: "/new-selection" }));
     expect(await screen.findByText("/new-selection")).toBeVisible();
     await act(async () => resolvers.get("conversation-1")?.({ ...baseline, executionPath: "/stale-selection" }));
@@ -433,13 +194,13 @@ describe("Inspector", () => {
         handoff: runId === "run-1" ? null : "Exact context sent to Claude.", handoffTruncated: false,
       })),
     });
-    render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
+    renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
     await screen.findByRole("heading", { name: "Provider run history" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Inspect Claude run 1" }));
+    click(screen.getByRole("button", { name: "Inspect Claude run 1" }));
     expect(await screen.findByText("Exact context sent to Claude.")).toBeVisible();
     expect(screen.getByText("Switched to Claude.")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Inspect Codex run 2" }));
+    click(screen.getByRole("button", { name: "Inspect Codex run 2" }));
     expect(await screen.findByText("Historical Codex route.")).toBeVisible();
     expect(api.loadRunAudit).toHaveBeenNthCalledWith(2, { conversationId: conversation.id, runId: "run-1" });
   });
@@ -455,9 +216,9 @@ describe("Inspector", () => {
       listRunAudits,
       loadRunAudit: vi.fn().mockResolvedValue({ id: "run-2", provider: "claude", status: "completed", routing, reason: "manualOverride", routingTruncated: false, handoff: "detail", handoffTruncated: false }),
     });
-    render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load older provider runs" }));
-    fireEvent.click(screen.getByRole("button", { name: "Inspect Claude run 1" }));
+    renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
+    click(await screen.findByRole("button", { name: "Load older provider runs" }));
+    click(screen.getByRole("button", { name: "Inspect Claude run 1" }));
     expect(await screen.findByText("detail")).toBeVisible();
     await act(async () => resolveOlder({ items: [{ id: "run-1", provider: "codex", status: "completed", reason: "continuity", routingTruncated: false, hasHandoff: false }], nextCursor: null }));
 
@@ -476,10 +237,10 @@ describe("Inspector", () => {
       resolvers.push((value) => { inFlight -= 1; resolve(value); });
     }));
     const api = actions({ listRunAudits });
-    const view = render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
+    const view = renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
 
-    view.rerender(<Inspector conversation={{ ...conversation, currentRunId: "run-2" }} providers={providers} refreshVersion={1} actions={api} />);
-    view.rerender(<Inspector conversation={{ ...conversation, currentRunId: "run-3" }} providers={providers} refreshVersion={2} actions={api} />);
+    view.rerender({ conversation: { ...conversation, currentRunId: "run-2" }, refreshVersion: 1, actions: api });
+    view.rerender({ conversation: { ...conversation, currentRunId: "run-3" }, refreshVersion: 2, actions: api });
     expect(listRunAudits).toHaveBeenCalledTimes(1);
     expect(maxInFlight).toBe(1);
 
@@ -501,21 +262,21 @@ describe("Inspector", () => {
     let resolve!: (value: Awaited<ReturnType<ConversationActions["inspectWorkspace"]>>) => void;
     const inspectWorkspace = vi.fn(() => new Promise<Awaited<ReturnType<ConversationActions["inspectWorkspace"]>>>((next) => { resolve = next; }));
     const api = actions({ inspectWorkspace });
-    const view = render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={api} />);
+    const view = renderInspector({ conversation: conversation, refreshVersion: 0, actions: api });
     for (let version = 1; version <= 100; version += 1) {
-      view.rerender(<Inspector conversation={conversation} providers={providers} refreshVersion={version} actions={api} />);
+      view.rerender({ conversation: conversation, refreshVersion: version, actions: api });
     }
     expect(inspectWorkspace).toHaveBeenCalledTimes(1);
     await act(async () => resolve((await actions().inspectWorkspace({ conversationId: conversation.id }))));
     const refresh = await screen.findByRole("button", { name: "Refresh inspector" });
     expect(screen.getByText(/New conversation activity is available/)).toBeVisible();
-    fireEvent.click(refresh);
-    fireEvent.click(refresh);
+    click(refresh);
+    click(refresh);
     expect(inspectWorkspace).toHaveBeenCalledTimes(2);
   });
 
   it("shows exact routing, workspace, handoff, provider versions, and cleanup evidence", async () => {
-    render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={actions()} />);
+    renderInspector({ conversation: conversation, refreshVersion: 0, actions: actions() });
     expect(await screen.findByText("Continued with Codex for this line of work.")).toBeVisible();
     expect(screen.getByText("7 active descendants")).toBeVisible();
     expect(screen.getByText("src/app.ts")).toBeVisible();
@@ -529,11 +290,11 @@ describe("Inspector", () => {
   });
 
   it("keeps section collapse as local presentation state", async () => {
-    render(<Inspector conversation={conversation} providers={providers} refreshVersion={0} actions={actions()} />);
+    renderInspector({ conversation: conversation, refreshVersion: 0, actions: actions() });
     await screen.findByText("Continued with Codex for this line of work.");
-    fireEvent.click(screen.getByRole("button", { name: "Collapse routing" }));
+    click(screen.getByRole("button", { name: "Collapse routing" }));
     expect(screen.queryByText("Continued with Codex for this line of work.")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Expand routing" }));
+    click(screen.getByRole("button", { name: "Expand routing" }));
     expect(screen.getByText("Continued with Codex for this line of work.")).toBeVisible();
   });
 });

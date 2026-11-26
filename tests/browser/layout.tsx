@@ -1,4 +1,5 @@
-import { createRoot } from "react-dom/client";
+import { render } from "@solidjs/web";
+import "@prompting-time/ui/styles.css";
 import { App } from "../../src/app/App";
 import { createAppStore, type AppApi } from "../../src/app/store";
 import type { ConversationSummary } from "../../src/bridge/types";
@@ -8,7 +9,7 @@ import { listenToToolEvents, toolEventDetail, toolProvider, toolScenario, toolTi
 import { archiveSyntheticRoot, listenToTreeEvents, treeConversationPath, treeIds, treeListChildren, treeListConversations, treeLoadConversation, treeScenario, treeTimeline } from "./conversation-tree-fixture";
 import { thinkingScenario, withThinkingFixture } from "./thinking-fixture";
 import { contextBudgetScenario, withContextBudgetFixture } from "./context-budget-fixture";
-import "../../src/styles/tokens.css";
+import { workConversations, workScenario } from "./work-fixture";
 import "../../src/styles/app.css";
 
 // Invented data only. This entry point never uses the native bridge or providers.
@@ -35,6 +36,7 @@ const conversations: ConversationSummary[] = Array.from({ length: 60 }, (_, inde
   runStatus: syntheticStatus,
   rollupStatus: syntheticStatus === "failed" ? "failed" : syntheticStatus === "waiting" ? "needsAttention" : syntheticStatus === "completed" ? "completed" : "active",
 }));
+if (workScenario) conversations.splice(0, conversations.length, ...workConversations(conversations[0]!));
 
 const children: ConversationSummary[] = conversations.flatMap((root, index) => {
   const child: ConversationSummary = {
@@ -165,4 +167,5 @@ const fixtureApi = treeScenario ? {
 
 const thinkingApi = thinkingScenario ? withThinkingFixture(fixtureApi) : fixtureApi;
 const scenarioApi = contextBudgetScenario ? withContextBudgetFixture(thinkingApi) : thinkingApi;
-createRoot(document.getElementById("root")!).render(<App store={createAppStore(scenarioApi)} />);
+const store = createAppStore(scenarioApi);
+render(() => <App store={store} />, document.getElementById("root")!);
