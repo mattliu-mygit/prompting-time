@@ -32,4 +32,34 @@ describe("ListRow and StatusDot", () => {
     expect(screen.getByRole("img", { name: "Failed" })).toHaveAttribute("data-status", "error");
     expect(await axeViolations()).toEqual([]);
   });
+
+  it("draws a tree item with its own name, a trailing control, and content under the meta line", async () => {
+    render(() => (
+      <ul role="tree" aria-label="All work">
+        <ListRow
+          element="li"
+          role="treeitem"
+          aria-label="Auth refactor, Codex, Waiting"
+          aria-level={1}
+          aria-selected="true"
+          aria-expanded="true"
+          tabindex={0}
+          icon={<svg />}
+          title="Auth refactor"
+          status="attention"
+          meta="Codex · waiting for you"
+          trailing={<button type="button" tabindex={-1} aria-label="Collapse Auth refactor" />}
+        >
+          <button type="button">Load more conversations</button>
+        </ListRow>
+      </ul>
+    ));
+    const item = screen.getByRole("treeitem", { name: "Auth refactor, Codex, Waiting" });
+    expect(item.tagName).toBe("LI");
+    expect(item).not.toHaveAttribute("aria-current");
+    expect(item).not.toHaveAttribute("type");
+    expect(item).toContainElement(screen.getByRole("button", { name: "Collapse Auth refactor" }));
+    expect(item.querySelector(".pt-list-row-children")).toContainElement(screen.getByRole("button", { name: "Load more conversations" }));
+    expect(await axeViolations()).toEqual([]);
+  });
 });
