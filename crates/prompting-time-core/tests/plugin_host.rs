@@ -68,19 +68,30 @@ esac
 "#;
 
 const SUBMIT: &str = r#"#!/bin/sh
-# Answers like whooper-submit: --print shows the request's fingerprint, --expect refuses a changed
-# request with 13, and a review that mentions someone is refused with 12.
+# Answers like whooper-submit: --print saves the request in the state folder, names the file, and
+# prints its fingerprint, the file's SHA-256; --expect refuses a changed request with 13; and a review
+# that mentions someone is refused with 12. The runs "outside" and "mismatch" save the request outside
+# the state folder, or a file that does not match the fingerprint.
 run="$1"
 shift
 printf '%s\n' "$run $*" >> "$XDG_STATE_HOME/fake-agent-submit.log"
-fingerprint="$(printf 'request for %s' "$run" | shasum -a 256 | cut -d ' ' -f 1)"
+request="request for $run"
+fingerprint="$(printf '%s' "$request" | shasum -a 256 | cut -d ' ' -f 1)"
 if [ "$run" = mentions ]; then
   echo "fake-submit: nothing posted: the review @-mentions someone" >&2
   exit 12
 fi
 while [ $# -gt 0 ]; do
   case "$1" in
-    --print) echo "printed the request; nothing posted"; echo "fingerprint: $fingerprint"; exit 0 ;;
+    --print)
+      file="$XDG_STATE_HOME/fake-agent/runs/$run/submit-request.json"
+      [ "$run" = outside ] && file="$XDG_STATE_HOME/outside-request.json"
+      mkdir -p "$(dirname "$file")"
+      printf '%s' "$request" > "$file"
+      [ "$run" = mismatch ] && printf ' changed later' >> "$file"
+      echo "printed the request to $file; nothing posted"
+      echo "fingerprint: $fingerprint"
+      exit 0 ;;
     --expect) [ "$2" = "$fingerprint" ] || { echo "fake-submit: the drafts changed" >&2; exit 13; }; shift ;;
   esac
   shift
@@ -565,6 +576,11 @@ async fn actions_return_their_output_and_exit_code_and_confirm_actions_need_a_fi
     assert_eq!(preview.exit_code, Some(0));
     assert_eq!(preview.fingerprint.as_deref(), Some(expected.as_str()));
     assert_eq!(
+        preview.preview.as_deref(),
+        Some("request for run-1"),
+        "the preview is the saved request whose SHA-256 is the fingerprint"
+    );
+    assert_eq!(
         fixture.submit_log(),
         "run-1 --print\n",
         "a preview posts nothing"
@@ -627,6 +643,32 @@ async fn actions_return_their_output_and_exit_code_and_confirm_actions_need_a_fi
         .await,
         Err(PluginError::UnknownPlugin(_))
     ));
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_preview_shows_only_a_saved_request_in_the_state_folder_that_matches_its_fingerprint() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    host.install(PluginSource::Folder {
+        path: fixture.plugin(json!([])),
+    })
+    .await
+    .unwrap();
+
+    for run in ["outside", "mismatch"] {
+        assert!(
+            matches!(
+                host.run_action(action("submit", &[run], None)).await,
+                Err(PluginError::MissingPreview(name)) if name == "submit"
+            ),
+            "{run}"
+        );
+    }
+    assert!(
+        fixture.path("state/outside-request.json").exists(),
+        "the request outside the state folder was saved and named, and still not shown"
+    );
     host.shutdown().await;
 }
 

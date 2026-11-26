@@ -340,7 +340,8 @@ export type PluginActionRequest = {
 	args: string[],
 	/**
 	 *  For an action that needs confirmation: null runs it with --print, which changes nothing and
-	 *  returns the fingerprint to confirm; the confirmed fingerprint then runs it for real.
+	 *  returns the preview and fingerprint to confirm; the confirmed fingerprint then runs it for
+	 *  real.
 	 */
 	confirmedFingerprint: string | null,
 };
@@ -350,6 +351,11 @@ export type PluginActionResult = {
 	stdout: string,
 	stderr: string,
 	fingerprint: string | null,
+	/**
+	 *  What a --print run will do, for the confirmation: the text of the file it saved in the
+	 *  plugin's state folder, whose SHA-256 is the fingerprint.
+	 */
+	preview: string | null,
 };
 
 export type PluginExit = {

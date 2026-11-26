@@ -11,9 +11,10 @@
 //! - A running start command holds `<state folder>/run.lock/pid`, holding its process ID.
 //! - An action named `get-settings` prints the settings as JSON, and one named `save-settings`
 //!   saves the settings given as one JSON argument.
-//! - An action with `confirm: true` takes `--print`, which changes nothing outside this Mac and
-//!   prints `fingerprint: <hex>` on its last line, and `--expect <hex>`, which refuses a request
-//!   whose fingerprint changed since.
+//! - An action with `confirm: true` takes `--print`, which changes nothing outside this Mac, saves
+//!   the request it would run in a file in the state folder, names that file by its absolute path
+//!   in its output, and prints `fingerprint: <hex>`, the file's SHA-256, on its last line; and
+//!   `--expect <hex>`, which refuses a request whose fingerprint changed since.
 
 mod install;
 pub mod manifest;
@@ -32,6 +33,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -46,6 +48,9 @@ const CHANGE_CHANNEL_CAPACITY: usize = 64;
 /// How long PT waits for get-settings when it checks prerequisites. The first run of Whooper's
 /// scripts has uv download Python and packages, which can take a minute.
 const SETTINGS_TIMEOUT: Duration = Duration::from_secs(120);
+/// The largest request file PT reads for a confirmation. Whooper's review requests are a few
+/// kilobytes; a request past this cannot be confirmed.
+const PREVIEW_LIMIT: u64 = 1024 * 1024;
 
 pub struct PluginHostConfig {
     /// Where PT keeps installed plugins and its records of them, such as
@@ -132,8 +137,8 @@ pub struct ActionRequest {
     /// Arguments after the action's fixed ones, such as a run ID.
     pub args: Vec<String>,
     /// For an action with `confirm: true`: None runs it with `--print`, which changes nothing and
-    /// returns the request's fingerprint for the user to confirm; the confirmed fingerprint then
-    /// runs it for real with `--expect <fingerprint>`.
+    /// returns the request and its fingerprint for the user to confirm; the confirmed fingerprint
+    /// then runs it for real with `--expect <fingerprint>`.
     pub confirmed_fingerprint: Option<String>,
 }
 
@@ -145,6 +150,9 @@ pub struct ActionOutput {
     pub stderr: String,
     /// The fingerprint a `--print` run printed, for the confirmation.
     pub fingerprint: Option<String>,
+    /// What a `--print` run will do, for the confirmation: the text of the file it saved, whose
+    /// SHA-256 is the fingerprint, such as Whooper's `submit-request.json`.
+    pub preview: Option<String>,
 }
 
 /// Something about a plugin changed.
@@ -176,6 +184,10 @@ pub enum PluginError {
     UnknownAction { plugin: String, action: String },
     #[error("{0} printed no fingerprint line, so there is nothing to confirm")]
     MissingFingerprint(String),
+    #[error(
+        "{0} named no file in its state folder whose SHA-256 is its fingerprint, so there is nothing to show for confirmation"
+    )]
+    MissingPreview(String),
     #[error("Prompting Time is quitting")]
     Quitting,
     #[error("{context}: {source}")]
@@ -351,12 +363,17 @@ impl PluginHost {
             stdout: String::from_utf8_lossy(&finished.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&finished.stderr).into_owned(),
             fingerprint: None,
+            preview: None,
         };
         if preview && output.exit_code == Some(0) {
             let fingerprint = printed_fingerprint(&output.stdout)
-                .ok_or(PluginError::MissingFingerprint(action.name))?;
+                .ok_or_else(|| PluginError::MissingFingerprint(action.name.clone()))?;
+            let state_dir = self.inner.config.state_home.join(&installed.manifest.name);
+            let preview = saved_preview(&output.stdout, &state_dir, &fingerprint)
+                .ok_or(PluginError::MissingPreview(action.name))?;
             return Ok(ActionOutput {
                 fingerprint: Some(fingerprint),
+                preview: Some(preview),
                 ..output
             });
         }
@@ -765,6 +782,34 @@ fn printed_fingerprint(stdout: &str) -> Option<String> {
     let line = stdout.lines().rev().find(|line| !line.trim().is_empty())?;
     let fingerprint = line.trim().strip_prefix("fingerprint: ")?;
     is_sha256_hex(fingerprint).then(|| fingerprint.to_owned())
+}
+
+/// The text of the file a `--print` run saved its request in: a file inside the plugin's state
+/// folder that the output names by its absolute path, as Whooper's submit prints `printed the
+/// request to <path>; nothing posted`, and whose SHA-256 is the printed fingerprint. The checksum
+/// means the confirmation shows exactly the request that `--expect <fingerprint>` runs. A path is
+/// read up to the next whitespace, so a state folder whose path holds a space has no preview, and
+/// its confirm actions cannot run.
+fn saved_preview(stdout: &str, state_dir: &Path, fingerprint: &str) -> Option<String> {
+    // The state folder and the printed path can name the same place differently, such as /var
+    // and /private/var on macOS.
+    let root = state_dir.canonicalize().ok()?;
+    stdout
+        .split_whitespace()
+        .map(|word| word.trim_end_matches([';', ',', ':', '.']))
+        .filter(|word| word.starts_with('/'))
+        .find_map(|word| {
+            let file = Path::new(word).canonicalize().ok()?;
+            let metadata = fs::metadata(&file).ok()?;
+            if !file.starts_with(&root) || !metadata.is_file() || metadata.len() > PREVIEW_LIMIT {
+                return None;
+            }
+            let bytes = fs::read(&file).ok()?;
+            if format!("{:x}", Sha256::digest(&bytes)) != fingerprint {
+                return None;
+            }
+            String::from_utf8(bytes).ok()
+        })
 }
 
 #[cfg(test)]

@@ -976,6 +976,7 @@ impl From<CoreActionOutput> for PluginActionResult {
             stdout: output.stdout,
             stderr: output.stderr,
             fingerprint: output.fingerprint,
+            preview: output.preview,
         }
     }
 }
@@ -1019,6 +1020,13 @@ impl From<PluginError> for CommandError {
             PluginError::MissingFingerprint(action) => (
                 "plugin-protocol-error",
                 format!("{action} printed no fingerprint, so there is nothing to confirm."),
+                None,
+            ),
+            PluginError::MissingPreview(action) => (
+                "plugin-protocol-error",
+                format!(
+                    "{action} saved no request Prompting Time can show, so there is nothing to confirm."
+                ),
                 None,
             ),
             PluginError::Quitting => (

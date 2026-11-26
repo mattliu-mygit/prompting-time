@@ -189,8 +189,10 @@ checks, starts, and stops them; their screens are not built yet.
   did not start keeps running. The start command's output goes to
   `<Application Support>/plugins/<name>.log`.
 - **Actions.** Prompting Time runs a plugin's actions and returns their output and exit code. An
-  action marked `confirm` first runs with `--print`, which changes nothing outside this Mac and
-  prints `fingerprint: <hex>` last; it runs for real only with the fingerprint the user
+  action marked `confirm` first runs with `--print`, which changes nothing outside this Mac, saves
+  the request it would run in a file in the plugin's state folder, names that file in its output,
+  and prints `fingerprint: <hex>`, the file's SHA-256, last. Prompting Time returns that file's
+  text for the confirmation, and runs the action for real only with the fingerprint the user
   confirmed, as `--expect <hex>`. Settings are saved through the `save-settings` action, which
   checks them.
 - **State.** A plugin keeps its state in `$XDG_STATE_HOME/<name>` (default

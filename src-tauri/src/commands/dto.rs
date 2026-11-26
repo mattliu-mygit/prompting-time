@@ -978,7 +978,8 @@ pub struct PluginActionRequest {
     pub action: String,
     pub args: Vec<String>,
     /// For an action that needs confirmation: null runs it with --print, which changes nothing and
-    /// returns the fingerprint to confirm; the confirmed fingerprint then runs it for real.
+    /// returns the preview and fingerprint to confirm; the confirmed fingerprint then runs it for
+    /// real.
     pub confirmed_fingerprint: Option<String>,
 }
 
@@ -989,6 +990,9 @@ pub struct PluginActionResult {
     pub stdout: String,
     pub stderr: String,
     pub fingerprint: Option<String>,
+    /// What a --print run will do, for the confirmation: the text of the file it saved in the
+    /// plugin's state folder, whose SHA-256 is the fingerprint.
+    pub preview: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Type)]
