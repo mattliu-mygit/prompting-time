@@ -1221,6 +1221,34 @@ describe("creating and archiving", () => {
     expect(archiveConversation).not.toHaveBeenCalled();
   });
 
+  it("resizes All work by dragging its edge or with the arrow keys, within 220 to 520 pixels, and keeps the width across launches", async () => {
+    const first = renderApp(createApi());
+    const edge = await screen.findByRole("separator", { name: "Resize All work" });
+    const pane = () => screen.getByRole("complementary", { name: "All work" });
+    expect(edge).toHaveAttribute("aria-valuenow", "300");
+    expect(pane().style.getPropertyValue("--sidebar-width")).toBe("300px");
+    fireEvent.keyDown(edge, { key: "ArrowRight" });
+    flush();
+    await settle();
+    expect(edge).toHaveAttribute("aria-valuenow", "316");
+    expect(window.localStorage.getItem("prompting-time.sidebar-width")).toBe("316");
+    fireEvent.pointerDown(edge, { clientX: 100, pointerId: 1 });
+    fireEvent.pointerMove(edge, { clientX: 500, pointerId: 1 });
+    flush();
+    expect(pane().style.getPropertyValue("--sidebar-width")).toBe("520px");
+    fireEvent.pointerMove(edge, { clientX: -400, pointerId: 1 });
+    flush();
+    expect(edge).toHaveAttribute("aria-valuenow", "220");
+    fireEvent.pointerMove(edge, { clientX: 150, pointerId: 1 });
+    fireEvent.pointerUp(edge, { clientX: 150, pointerId: 1 });
+    flush();
+    expect(window.localStorage.getItem("prompting-time.sidebar-width")).toBe("366");
+
+    first.unmount();
+    renderApp(createApi());
+    expect(await screen.findByRole("separator", { name: "Resize All work" })).toHaveAttribute("aria-valuenow", "366");
+  });
+
   it("keeps Search in the header and moves New conversation there when All work is hidden", async () => {
     renderApp(createApi());
     await screen.findByRole("heading", { level: 1, name: "Auth refactor" });

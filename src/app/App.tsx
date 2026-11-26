@@ -17,6 +17,7 @@ import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
 import { AllWork, searchWork, waitingRoots, type PluginCause } from "../features/work/AllWork";
 import { NewConversationDialog } from "./NewConversationDialog";
+import { readSidebarWidth, SidebarResizer } from "./SidebarResizer";
 import { createSnapshot, effectiveConversationStatus, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
 
 const statusOptions: Array<{ value: StatusFilter; label: string }> = [
@@ -54,6 +55,7 @@ export function App(props: { store: AppStore }) {
   const snapshot = createSnapshot(store);
   const timelineViews = new Map<string, TimelineViewState>();
   const [sidebarOpen, setSidebarOpen] = createSignal(true);
+  const [sidebarWidth, setSidebarWidth] = createSignal(readSidebarWidth());
   const [inspectorOpen, setInspectorOpen] = createSignal(false);
   const [narrow, setNarrow] = createSignal(typeof window.matchMedia === "function" && window.matchMedia(NARROW_INSPECTOR).matches);
   const [paletteOpen, setPaletteOpen] = createSignal(false);
@@ -539,7 +541,7 @@ export function App(props: { store: AppStore }) {
 
         <div class="command-center" inert={lifecycleModalOpen()}>
           <Show when={sidebarOpen()}>
-            <aside id="work-pane" class="sidebar-pane" aria-label="All work" inert={overlay()}>
+            <aside id="work-pane" class="sidebar-pane" aria-label="All work" inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
               <BackgroundAgents
                 plugins={snapshot().plugins}
                 selected={pluginView()?.kind === "agent" ? selectedPlugin()?.name ?? null : null}
@@ -601,6 +603,7 @@ export function App(props: { store: AppStore }) {
                 onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
               />
               </div>
+              <SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} />
             </aside>
           </Show>
 
