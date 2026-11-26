@@ -202,7 +202,7 @@ export const fixturePatch = [
   "diff --git a/src/client.rs b/src/client.rs",
   "--- a/src/client.rs",
   "+++ b/src/client.rs",
-  "@@ -1,5 +1,5 @@",
+  "@@ -1,4 +1,5 @@",
   " fn send(body: &[u8]) {",
   "-    for _ in 0..3 { try_once(body); }",
   "+    let policy = RetryPolicy { attempts: 5 };",
