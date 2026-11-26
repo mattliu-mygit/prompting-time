@@ -2,11 +2,13 @@ import { createSignal, Show } from "solid-js";
 import type { AppApi, AppStore } from "../../src/app/store";
 import type { PluginActionRequest, PluginActionResult, PluginSnapshot } from "../../src/bridge/types";
 import { ConfirmActionDialog } from "../../src/features/agents/ConfirmActionDialog";
+import { answerReviewAction, fixtureReviewEntries, fixtureSubmitRequest, markFixtureSubmitted, reviewActions } from "./reviews-fixture";
 
 /**
  * `?agents=1`: an invented Whooper under Background agents, running with its next poll at 3:45 PM.
  * `?agents=missing` shows it stopped for a missing program; `?agents=confirm` opens the submit
  * confirmation over the app, and `?agents=mentions` opens it on a refusal for an @-mention first.
+ * `?agents=reviews` lists invented reviews, which open in the plugin page the dev server serves.
  */
 export const agentsScenario = new URLSearchParams(location.search).get("agents");
 
@@ -88,6 +90,7 @@ const plugin: PluginSnapshot = {
     { name: "get-settings", title: "Read settings", description: "Prints the settings as JSON.", confirm: false },
     { name: "save-settings", title: "Save settings", description: "Checks settings against the schema and saves them.", confirm: false },
     { name: "submit", title: "Submit review", description: "Posts the chosen comments and the approval or comment to GitHub as one review, with your gh login.", confirm: true },
+    ...(agentsScenario === "reviews" ? reviewActions : []),
   ],
   prerequisites: [
     { command: "gh", purpose: "Reads your review requests and submits your reviews.", needed: true, path: "/synthetic/bin/gh" },
@@ -117,9 +120,19 @@ let mentionsRefused = agentsScenario !== "mentions";
 const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides });
 
 async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionResult> {
+  const answered = agentsScenario === "reviews" ? answerReviewAction(sent) : null;
+  if (answered) return answered;
+  if (agentsScenario === "reviews" && sent.action === "submit") {
+    const runId = sent.args[0]!;
+    if (sent.confirmedFingerprint === null) {
+      return result({ stdout: `printed the request to /synthetic/state/whooper/runs/${runId}/submit-request.json; nothing posted\nfingerprint: ${fingerprint}\n`, fingerprint, preview: fixtureSubmitRequest(runId) });
+    }
+    markFixtureSubmitted(runId);
+    return result({ stdout: "posted the review: https://example.invalid/acme/widgets/pull/101#pullrequestreview-1\n" });
+  }
   switch (sent.action) {
     case "status":
-      return result({ stdout: JSON.stringify({ version: 1, loop: { running: true, pid: 4242 }, paused: false, next_round: nextPoll.toISOString(), round: { running: false, started_at: null, reviewing: null }, last_round: null }) });
+      return result({ stdout: JSON.stringify({ version: 1, loop: { running: true, pid: 4242 }, paused: false, next_round: nextPoll.toISOString(), round: { running: false, started_at: null, reviewing: null }, last_round: null, ...(agentsScenario === "reviews" ? { reviews: fixtureReviewEntries() } : {}) }) });
     case "get-settings":
       return result({ stdout: JSON.stringify(settings) });
     case "submit":

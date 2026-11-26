@@ -211,6 +211,28 @@ checks, starts, and stops them, and the window shows them.
   `~/.local/state/<name>`). Prompting Time passes its `XDG_STATE_HOME` to plugin commands, watches
   that folder, and sends the window a `pluginChanged` event naming the files that changed.
 
+- **Pages.** A plugin's page is the folder that holds its manifest's `page.entry`. The window loads
+  it from `pt-plugin://<name>/<path>` in an iframe sandboxed to scripts only, so the page has the
+  origin "null" and reaches neither the window nor Tauri. Prompting Time serves only files inside
+  that folder (403 for `..` or a symlink out of it), each with `Access-Control-Allow-Origin: null`,
+  for the page's module scripts and fonts, and a Content Security Policy that allows the page's own
+  files, inline styles, and data URLs, and no fetches. The window has its own policy, in
+  `tauri.conf.json`, which frames only `pt-plugin:`; the Vite server sends it too, so development
+  and the browser fixture run under it.
+- **Page messages.** The page talks to Prompting Time only through postMessage, in page protocol 1
+  (Whooper's `page/src/protocol.ts`). Prompting Time drops any message that does not fit, acts
+  only on runs the plugin's status lists, and maps each request to an action: `show-review <run>`
+  for a review, `draft <run> <change>` for a draft, `ask <run> <question> [--finding <id>]` for Ask
+  about this, and `submit <run>`, which goes through the confirmation; an action marked `confirm`
+  always does. Each result goes back to the page, which also hears of a new status and of changes
+  to the shown run's files.
+- **Reviews.** A plugin's status may list `reviews`, as `whooper-status --json` does: the runs of the
+  last 30 days. Those that need you sit first under "Needs you" in All work, and Command-J steps
+  through them with the conversations. A plugin with past reviews gets a "Past reviews" row under
+  its own, which lists them, newest first, with how each ended or what you submitted. Opening a
+  review shows it in the plugin's page; a past one shows its diff, its findings, its drafts as
+  submitted, and what was submitted.
+
 ## Develop and verify
 
 ```sh
