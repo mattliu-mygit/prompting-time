@@ -3,9 +3,11 @@
 export { Button, IconButton, type ButtonProps, type IconButtonProps } from "./Button";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog";
+export { Diff, type DiffProps } from "./Diff";
 export { NumberField, TextField, type FieldProps, type NumberFieldProps, type TextFieldProps } from "./Field";
 export { ListRow, type ListRowProps } from "./ListRow";
 export { Menu, type MenuItem, type MenuProps } from "./Menu";
 export { Select, type SelectOption, type SelectProps } from "./Select";
 export { StatusDot, type Status, type StatusDotProps } from "./StatusDot";
 export { tokens } from "./theme/tokens";
+export type { DiffLineAnnotation, FileContents } from "@pierre/diffs";

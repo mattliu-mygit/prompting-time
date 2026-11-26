@@ -386,3 +386,25 @@
   justify-content: flex-end;
   gap: var(--s-space-8);
 }
+
+/* Diff: Pierre reads these custom properties inside its Shadow DOM. */
+.pt-diff diffs-container {
+  --diffs-font-family: var(--s-code-font-family);
+  --diffs-header-font-family: var(--s-font-body);
+  --diffs-font-size: var(--s-code-font-size);
+  --diffs-line-height: var(--s-code-line-height);
+  --diffs-tab-size: var(--s-code-tab-size);
+  --diffs-addition-color-override: var(--s-success);
+  --diffs-deletion-color-override: var(--s-error);
+  /* Pierre mixes these into the code background rather than using them as they are. */
+  --diffs-bg-addition-override: var(--s-success-muted);
+  --diffs-bg-deletion-override: var(--s-error-muted);
+  border: var(--s-code-border);
+  border-radius: var(--s-code-border-radius);
+}
+
+.pt-diff-thread-error {
+  margin: var(--s-space-8);
+  color: var(--s-error);
+  font-size: var(--s-size-sm);
+}
