@@ -52,6 +52,23 @@ while toggling the sidebar. Menu cancellation restores the trigger, and menu-to-
 dialog or palette transitions restore focus only to controls that remain mounted.
 Shared dropdown primitives and icons avoid separate custom menu machinery.
 
+An open review keeps its surroundings quiet. All work folds to a rail labeled "All
+work · N need you" on its side, with a dot for each agent and each item that needs
+you; a click or Command-\ opens the whole list beside the rail, over the review, and
+the same, Escape, or a click elsewhere closes it. The review's controls join the one
+header row, with its versions, Rerun review, Skip, and Remove behind ⋯. Nothing opens
+on hover, anywhere: menus, rails, notices, and the decision open on a click or a key.
+
+A review whose plugin printed an overview opens on Prompting Time's walkthrough, its
+navigator open on the left and its column centered beside it: the verdict banner, then
+"Changes since you last looked" folded to one line, What this PR does, Places to look
+(one name everywhere, stepped with j and k), Calls before and after, What Whooper
+checked and didn't, and the change layer by layer, each with a read check that folds
+it. Its decision waits as Decide… until clicked or the end is reached. Diff shows the
+plugin's page under the same banner and notice, and a review without an overview opens
+on the page. The Views menu beside Walkthrough | Diff, and the palette, turn each view
+on or off for every review; a view's summary shows only when the review has data for it.
+
 The inspector starts closed, leaving the conversation primary. Explicitly opening
 or closing it retains that choice while switching conversations. At smaller widths,
 it overlays the workspace instead of squeezing the reading column; its background
@@ -84,12 +101,19 @@ menu bar extra, and always sits beside the words that say it, never alone:
 
 - Red (`--s-error`): blocked or failed, so you must act. "Can't review · Docker isn't
   running", "Blocks every review", "Review failed", "Poll failed", "Exited with code 1",
-  "Missing gh", "Can't read its settings", a chat that failed, and a diff's removed lines.
+  "Missing gh", "Can't read its settings", a chat that failed, a diff's removed lines,
+  a call only the old code made in Calls before and after, and a failed or blocked
+  review's banner.
 - Orange (`--s-warning`): waiting on you. A chat "waiting for you", a review that needs a
   look ("look first", or why one that says approve once CI passes isn't safe to approve),
-  and a confirmation that asks again.
+  its banner, a place to look's number and its marks in the code, and a confirmation that
+  asks again.
 - Green (`--s-success`): ready to approve ("approve once CI passes" on a review the plugin
-  judges safe, or, when it doesn't say, the verdict alone), and a diff's added lines.
+  judges safe, or, when it doesn't say, the verdict alone), its banner, a diff's added
+  lines, a read layer's check, and a new call in Calls before and after.
+
+A verdict banner is tinted 12% with its color, so its words keep their full contrast: 16.7:1
+and more for the verdict and reason on every tint, 6.7:1 and more for the line under them.
 
 Work under way, such as "Reviewing…", "Polling now", or a working or queued chat, has a
 dot with no color; every other status, such as "Running · next poll 3:45 PM", Paused,

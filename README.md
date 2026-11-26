@@ -276,15 +276,39 @@ checks, starts, and stops them, and the window shows them.
   section, the section scrolls just far enough to show it. The window's header names the review's
   state, and for one that says approve once CI passes but that the plugin judges not safe to
   approve it says why, from the kinds of its findings (`show-review`): "approve once CI passes · has
-  a question", or "didn't read the whole change" for a review that skipped it. A review's header
-  also shows "Review N · <short sha> · <time>" with the pull request's other versions
-  (an earlier one is read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run>
-  [--undo]`), Remove, and a banner when the pull request has commits after the reviewed one.
+  a question", or "didn't read the whole change" for a review that skipped it. The review's
+  controls join that one header row: a ⋯ menu with the pull request's versions as "Review N ·
+  <short sha> · <time>" (an earlier one is read-only), Rerun review (`retry <run>`), Skip
+  (`skip <run>`, with Undo beside it, `--undo`), and Remove; Retry review after a failure; and,
+  for a review with an overview, Walkthrough | Diff and Views. A review without one has a banner
+  when the pull request has commits after the reviewed one. While a review is open, All work
+  folds to a rail labeled "All work · 6 need you" on its side, with a dot for each agent and each
+  item that needs you; a click or Command-\ opens the list beside it, and the same, Escape, or a
+  click elsewhere closes it. Nothing opens on hover.
+- **Walkthrough.** When `show-review` prints an `overview`, a finished review opens on Prompting
+  Time's walkthrough instead of the page, with a navigator on the left that folds to a rail. First
+  comes the verdict as a banner tinted green (safe to approve), orange (needs a look), or red
+  (failed or blocked), with the plugin's reason; then "Changes since you last looked", one folded
+  line when `commits_since_review` lists commits, with Rerun review and ×, which hides it for this
+  review and pull request head. The line opens the commits and the version you last opened, which
+  Prompting Time remembers per pull request on this device. Then What this PR does, with its
+  before and after; Places to look, each numbered in orange, with its reason and evidence (j and k
+  step through them, open each reason under its lines, and dim the rest until the mouse moves);
+  Calls before and after (`overview.flow`), old and new calls overlaid, a removed one struck
+  through; What Whooper checked and didn't; and the change layer by layer, each layer's lines
+  drawn by `@prompting-time/ui`'s Diff as excerpts with the places as numbered marks in the gutter,
+  the plugin's draft comments under their lines, and a read check that folds the layer. The
+  decision waits as Decide… until clicked or the end is reached, then sets Comment or Approve with
+  `draft <run>` and submits through the confirmation. Diff shows the page under the same banner
+  and notice. Views, beside them and in Command-K, turns each view with data in the format on or
+  off for every review: Changes since you last looked, Calls before and after, and Files that
+  usually change with these (`co_change`); a view's summary shows only when the review has data
+  for it. Three more views keep their names until the format carries their data.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a
   line saying it recorded none), and earlier questions with their answers (`asks`); a review waiting
-  on a blocking cause links to that cause's screen. Retry review in the header runs `retry <run>`,
+  on a blocking cause links to that cause's screen, under a red banner. Retry review in the header runs `retry <run>`,
   which queues the pull request for the plugin's next round, shows what it printed, and then offers
   Run now, which runs `round`. Ask why runs `ask <run> <question>` and adds the answer. A failure shows the plugin's own words. The screen runs only actions that need no
   confirmation.
