@@ -285,3 +285,104 @@
   color: var(--s-text-subtle);
   font-size: var(--s-size-xs);
 }
+
+/* Menu */
+.pt-menu-positioner {
+  z-index: var(--s-overlay-z-index);
+}
+
+.pt-menu {
+  margin: 0;
+  padding: var(--s-space-4);
+  border: var(--s-overlay-border);
+  border-radius: var(--s-radius-popover);
+  background: var(--s-overlay-surface);
+  box-shadow: var(--s-shadow-dropdown);
+  font-size: var(--s-size-sm);
+  list-style: none;
+}
+
+/* The highlighted item shows where the keyboard is; the list itself needs no ring. */
+.pt-menu:focus-visible {
+  outline: none;
+}
+
+.pt-menu-item {
+  display: flex;
+  align-items: center;
+  min-block-size: var(--s-control-height-sm);
+  padding: 0 var(--s-space-8);
+  border-radius: var(--s-radius-sm);
+  color: var(--s-text);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pt-menu-item[data-highlighted] {
+  background: var(--s-secondary-hover);
+}
+
+.pt-menu-item[data-disabled] {
+  color: var(--s-text-disabled);
+  cursor: not-allowed;
+}
+
+/* ConfirmDialog */
+.pt-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--s-overlay-z-index);
+  background: var(--s-overlay-bg);
+}
+
+.pt-dialog-positioner {
+  position: fixed;
+  inset: 0;
+  z-index: var(--s-overlay-z-index);
+  display: grid;
+  place-items: center;
+  padding: var(--s-page-margin);
+}
+
+.pt-dialog-positioner:has(> .pt-dialog[hidden]) {
+  display: none;
+}
+
+.pt-dialog {
+  display: grid;
+  gap: var(--s-space-16);
+  inline-size: min(100%, var(--s-content-max-narrow));
+  padding: var(--s-modal-padding);
+  border: var(--s-overlay-border);
+  border-radius: var(--s-radius-modal);
+  background: var(--s-overlay-surface);
+  box-shadow: var(--s-shadow-modal);
+  color: var(--s-text);
+}
+
+.pt-dialog[hidden] {
+  display: none;
+}
+
+.pt-dialog-title {
+  margin: 0;
+  font-family: var(--s-heading-family);
+  font-size: var(--s-size-lg);
+  font-weight: var(--s-heading-weight);
+  letter-spacing: var(--s-heading-tracking);
+}
+
+.pt-dialog-description {
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-sm);
+}
+
+.pt-dialog-description > * {
+  margin-block: 0 var(--s-space-8);
+}
+
+.pt-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-space-8);
+}
