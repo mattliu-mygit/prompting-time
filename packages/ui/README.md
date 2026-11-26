@@ -10,11 +10,13 @@ Whooper's.
 - **Fonts:** the Katagami WOFF2 files and their license are in `fonts/`, so pages work offline.
 - **Components:** Solid 2.0 components that read the theme's `--s-*` variables and nothing else:
   `Button`, `IconButton`, `CopyButton`, `Checkbox`, `TextField`, `NumberField`, `Textarea`, `Select`,
-  `StatusDot`, `ListRow`, `ConfirmDialog`, `Menu`, `CommandPalette`, `Markdown`, and `Diff`, plus
+  `StatusDot`, `ListRow`, `ConfirmDialog`, `Menu`, `Tabs`, `CommandPalette`, `Markdown`, and `Diff`, plus
   the icons in `src/icons.tsx` (Lucide's paths; license in `src/icons.LICENSE`). The dialogs and the
   menu get their focus and keyboard behavior from Zag.js state machines, run through Zag's
   framework-free `VanillaMachine` in `src/zag.ts`, because Zag's Solid adapter targets Solid 1. A
-  menu item can be a radio or checkbox choice, which shows a check mark while it is on.
+  menu item can be a radio or checkbox choice, which shows a check mark while it is on, and a menu
+  opens from an icon button or from a text button with a chevron. `Tabs` follows WAI-ARIA's tabs
+  pattern without Zag: the caller owns the selection and draws the selected panel.
   `Diff` wraps `@pierre/diffs` and draws comment threads from its own Solid tree, one keyed portal
   per thread. It draws a file from its old and new contents, or one file of a unified diff parsed
   with the exported `parsePatchFiles`; its Shiki theme is exported as `diffTheme`. `Markdown` parses with `unified` (remark and GitHub's extensions) and highlights code

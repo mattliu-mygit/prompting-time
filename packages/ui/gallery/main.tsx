@@ -13,6 +13,7 @@ import {
   NumberField,
   Select,
   StatusDot,
+  Tabs,
   TextField,
   type DiffLineAnnotation,
   type Status,
@@ -176,6 +177,8 @@ function Gallery() {
           </div>
         </section>
 
+        <GalleryTabs />
+
         <section class="gallery-section" aria-labelledby="status-heading">
           <h2 id="status-heading">Status dots</h2>
           <ul class="gallery-statuses">
@@ -230,3 +233,31 @@ function Gallery() {
 }
 
 render(() => <Gallery />, document.getElementById("root")!);
+
+/** Tabs over one panel, and a menu that opens from a text button, as a review's versions do. */
+function GalleryTabs() {
+  const [tab, setTab] = createSignal("runs");
+  const [version, setVersion] = createSignal("2");
+  return (
+    <section class="gallery-section" aria-labelledby="tabs-heading">
+      <h2 id="tabs-heading">Tabs and a text menu</h2>
+      <Tabs
+        label="Whooper"
+        tabs={[{ value: "runs", label: "Runs" }, { value: "logs", label: "Logs" }, { value: "settings", label: "Settings" }]}
+        value={tab()}
+        onChange={setTab}
+      >
+        <p class="gallery-note">The {tab()} panel.</p>
+      </Tabs>
+      <Menu
+        label="Reviews of this pull request"
+        text={`Review ${version()} · ${version() === "2" ? "dc0c0bf · 3:12 PM" : "a1b2c3d · Nov 24"}`}
+        items={[
+          { value: "2", label: "Review 2 · dc0c0bf · 3:12 PM", type: "radio", checked: version() === "2" },
+          { value: "1", label: "Review 1 · a1b2c3d · Nov 24", type: "radio", checked: version() === "1" },
+        ]}
+        onSelect={setVersion}
+      />
+    </section>
+  );
+}

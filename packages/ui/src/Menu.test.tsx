@@ -80,4 +80,24 @@ describe("Menu", () => {
     expect(await screen.findByRole("menuitemradio", { name: "Failed" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("menuitemradio", { name: "All statuses" })).toHaveAttribute("aria-checked", "false");
   });
+
+  it("shows text with a chevron instead of an icon, named by the text, with radio choices", async () => {
+    const onSelect = vi.fn();
+    render(() => (
+      <Menu
+        label="Reviews of this pull request"
+        text="Review 2 · abc1234"
+        items={[{ value: "2", label: "Review 2 · abc1234", type: "radio", checked: true }, { value: "1", label: "Review 1 · 0f1e2d3", type: "radio", checked: false }]}
+        onSelect={onSelect}
+      />
+    ));
+    const trigger = screen.getByRole("button", { name: "Review 2 · abc1234" });
+    expect(trigger).toHaveAttribute("title", "Reviews of this pull request");
+    fireEvent.click(trigger);
+    await screen.findByRole("menu", { name: "Review 2 · abc1234" });
+    expect(screen.getByRole("menuitemradio", { name: "Review 2 · abc1234" })).toHaveAttribute("aria-checked", "true");
+    expect(await axeViolations()).toEqual([]);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Review 1 · 0f1e2d3" }));
+    await waitFor(() => expect(onSelect).toHaveBeenCalledExactlyOnceWith("1"));
+  });
 });

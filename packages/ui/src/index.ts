@@ -14,6 +14,7 @@ export { Markdown, type MarkdownProps } from "./Markdown";
 export { Menu, type MenuItem, type MenuProps } from "./Menu";
 export { Select, type SelectOption, type SelectProps } from "./Select";
 export { StatusDot, type Status, type StatusDotProps } from "./StatusDot";
+export { Tabs, type Tab, type TabsProps } from "./Tabs";
 export { Textarea, type TextareaProps } from "./Textarea";
 export { tokens } from "./theme/tokens";
 export { parsePatchFiles, type DiffLineAnnotation, type FileContents, type FileDiffMetadata } from "@pierre/diffs";

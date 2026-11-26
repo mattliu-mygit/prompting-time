@@ -386,6 +386,55 @@
   cursor: not-allowed;
 }
 
+/* A text trigger: the text, cut short if it must be, then the chevron. */
+.pt-menu-text-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+  max-inline-size: 100%;
+}
+
+.pt-menu-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pt-menu-text-trigger svg {
+  flex: none;
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+}
+
+/* Tabs: quiet text with a line under the selected one. */
+.pt-tablist {
+  display: flex;
+  gap: var(--s-space-16);
+  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.pt-tab {
+  margin-block-end: calc(var(--s-border-thin) * -1);
+  padding: var(--s-space-8) 0;
+  border: 0;
+  border-block-end: var(--s-border-thin) var(--s-border-style) transparent;
+  background: transparent;
+  color: var(--s-text-muted);
+  font: inherit;
+  font-size: var(--s-size-sm);
+  cursor: pointer;
+}
+
+.pt-tab:hover {
+  color: var(--s-text);
+}
+
+.pt-tab[aria-selected="true"] {
+  border-block-end-color: var(--s-text);
+  color: var(--s-text);
+  font-weight: var(--s-weight-medium);
+}
+
 /* ConfirmDialog */
 .pt-dialog-backdrop {
   position: fixed;
