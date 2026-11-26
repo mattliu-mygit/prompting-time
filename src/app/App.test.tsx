@@ -241,6 +241,36 @@ describe("plugin pages", () => {
     expect(screen.queryByRole("alertdialog", { name: "Submit review" })).not.toBeInTheDocument();
   });
 
+  it("searches PRs and chats from the sidebar: Enter opens the first result, and Escape clears", async () => {
+    const { api } = pagesApi();
+    renderApp(api);
+    await screen.findByRole("treeitem", { name: /^separate cache configuration/ });
+    const search = screen.getByRole("searchbox", { name: "Search PRs and chats" });
+
+    fireEvent.input(search, { target: { value: "#55" } });
+    flush();
+    const results = screen.getByRole("region", { name: "Search results" });
+    expect(within(results).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual(["move the projection, gadgets#55 · review failed"]);
+    expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(search, { key: "Enter" });
+    flush();
+    await settle();
+    expect(screen.getByRole("heading", { level: 1, name: "move the projection" })).toBeInTheDocument();
+
+    fireEvent.input(search, { target: { value: "auth" } });
+    flush();
+    fireEvent.keyDown(search, { key: "Enter" });
+    flush();
+    await settle();
+    expect(screen.getByRole("heading", { level: 1, name: "Auth refactor" })).toBeInTheDocument();
+
+    fireEvent.keyDown(search, { key: "Escape" });
+    flush();
+    expect(search).toHaveValue("");
+    expect(screen.queryByRole("region", { name: "Search results" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Needs you/ })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("opens a failed review on Prompting Time's own screen instead of the page, and a finished one in the page", async () => {
     const { api, pluginRequest } = pagesApi();
     renderApp(api);
@@ -1090,11 +1120,14 @@ describe("creating and archiving", () => {
     expect(archiveConversation).not.toHaveBeenCalled();
   });
 
-  it("moves New conversation and Search into the header when All work is hidden", async () => {
+  it("keeps Search in the header and moves New conversation there when All work is hidden", async () => {
     renderApp(createApi());
     await screen.findByRole("heading", { level: 1, name: "Auth refactor" });
     expect(screen.getAllByRole("button", { name: "New conversation" })).toHaveLength(1);
+    expect(screen.getByRole("complementary", { name: "All work" })).toContainElement(screen.getByRole("button", { name: "New conversation" }));
+    expect(screen.getByRole("banner")).toContainElement(screen.getByRole("button", { name: "Search (⌘K)" }));
     click(screen.getByRole("button", { name: "Hide All work" }));
+    expect(screen.getAllByRole("button", { name: "Search (⌘K)" })).toHaveLength(1);
     const create = screen.getByRole("button", { name: "New conversation" });
     expect(screen.getByRole("banner")).toContainElement(create);
     click(create);

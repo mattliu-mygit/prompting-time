@@ -76,22 +76,42 @@ body {
   flex-direction: column;
   gap: var(--s-space-4);
   min-block-size: 0;
-  padding: var(--s-space-12) var(--s-space-8);
+  padding: 0 var(--s-space-8) var(--s-space-16);
   overflow-y: auto;
 }
 
-.sidebar-toolbar {
+/* The search, New chat, and the status filter, above the scrolling list. */
+.sidebar-find {
   display: flex;
   align-items: center;
   gap: var(--s-space-4);
-  padding-inline-start: var(--s-space-4);
+  padding: var(--s-space-8) var(--s-space-8) var(--s-space-4);
 }
 
-.sidebar-toolbar h2 {
+.sidebar-search {
+  position: relative;
+  display: flex;
   flex: 1;
-  margin: 0;
-  font-size: var(--s-size-sm);
-  font-weight: var(--s-weight-semibold);
+  align-items: center;
+  min-inline-size: 0;
+}
+
+.sidebar-search > svg {
+  position: absolute;
+  inset-inline-start: var(--s-space-8);
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+  color: var(--s-text-subtle);
+  pointer-events: none;
+}
+
+/* Room for the search icon inside the field. */
+.sidebar-search .pt-input {
+  padding-inline-start: calc(var(--s-space-16) + var(--s-space-16));
+}
+
+.queue-count {
+  padding-inline: var(--s-space-12);
 }
 
 .queue-count,
@@ -382,6 +402,18 @@ body {
 
 .work-review .pt-list-row-meta {
   align-items: flex-start;
+}
+
+/* A removed review, which only search finds, is muted and tagged. */
+.work-review[data-removed] .pt-list-row-title {
+  color: var(--s-text-muted);
+}
+
+.work-review[data-removed] .pt-list-row-count {
+  padding: 0 var(--s-space-4);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
+  color: var(--s-text-muted);
+  line-height: 1.4;
 }
 
 .work-review .pt-list-row-meta .pt-status-dot {

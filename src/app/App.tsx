@@ -15,7 +15,7 @@ import { ConversationNavigation } from "../features/conversations/ConversationNa
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
-import { AllWork, waitingRoots, type PluginCause } from "../features/work/AllWork";
+import { AllWork, searchWork, waitingRoots, type PluginCause } from "../features/work/AllWork";
 import { NewConversationDialog } from "./NewConversationDialog";
 import { createSnapshot, effectiveConversationStatus, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
 
@@ -65,6 +65,9 @@ export function App(props: { store: AppStore }) {
   const [agentPending, setAgentPending] = createSignal<Readonly<Record<string, AgentAction>>>({});
   const [agentError, setAgentError] = createSignal<{ plugin: string; text: string } | null>(null);
   const [stopTarget, setStopTarget] = createSignal<string | null>(null);
+  // What the sidebar's search holds; its results replace the sections while it has words.
+  const [query, setQuery] = createSignal("");
+  let workScroll: HTMLDivElement | undefined;
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
@@ -121,6 +124,8 @@ export function App(props: { store: AppStore }) {
     ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []))
       .map(({ id }) => ({ key: id, open: () => selectConversation(id) })),
   ];
+  /** The reviews the sidebar lists under the status filter: every one for all statuses, those under Needs you for waiting, none for the rest. */
+  const sidebarReviews = () => (snapshot().statusFilter === "all" ? newestReviews() : snapshot().statusFilter === "waiting" ? needsYouReviews() : []);
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
 
   function selectConversation(id: string) {
@@ -311,16 +316,31 @@ export function App(props: { store: AppStore }) {
     </Show>
   );
 
-  const conversationActions = () => (
-    <>
-      <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
-        <SearchIcon />
-      </IconButton>
-      <IconButton ref={newConversationTrigger} label="New conversation" onClick={openNewConversation}>
-        <PlusIcon />
-      </IconButton>
-    </>
+  const newConversationButton = () => (
+    <IconButton ref={newConversationTrigger} label="New conversation" onClick={openNewConversation}>
+      <PlusIcon />
+    </IconButton>
   );
+
+  /** A new search, or clearing it, shows the list from its top. */
+  function search(text: string) {
+    setQuery(text);
+    if (workScroll) workScroll.scrollTop = 0;
+  }
+
+  /** Escape clears the search; Enter opens its first result, a review before a chat. */
+  function onSearchKeyDown(event: KeyboardEvent) {
+    if (event.key === "Escape" && query() !== "") {
+      event.preventDefault();
+      search("");
+    } else if (event.key === "Enter" && query().trim() !== "") {
+      event.preventDefault();
+      const { groups, chats } = searchWork(sidebarReviews(), selectVisibleConversations(snapshot()), query());
+      const first = groups[0]?.reviews[0];
+      if (first) openReview(first.plugin, first.review.run_id);
+      else if (chats[0]) selectConversation(chats[0].id);
+    }
+  }
 
   return (
     <Show when={snapshot().phase === "ready"} fallback={<StartupState store={store} snapshot={snapshot()} />}>
@@ -380,7 +400,10 @@ export function App(props: { store: AppStore }) {
             )}
           </Show>
           <div class="toolbar-actions">
-            <Show when={!sidebarOpen()}>{conversationActions()}</Show>
+            <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
+              <SearchIcon />
+            </IconButton>
+            <Show when={!sidebarOpen()}>{newConversationButton()}</Show>
             <IconButton
               ref={inspectorTrigger}
               label={inspectorOpen() ? "Hide inspector" : "Show inspector"}
@@ -417,22 +440,37 @@ export function App(props: { store: AppStore }) {
                 onAction={(name, action) => void runAgentAction(name, action)}
                 onInstall={(kind) => void startInstall(kind)}
               />
-              <div class="sidebar-scroll">
-              <div class="sidebar-toolbar">
-                <h2>All work</h2>
-                <div class="toolbar-actions">
-                  {conversationActions()}
-                  <Menu
-                    label={filterLabel()}
-                    icon={<FilterIcon />}
-                    items={statusOptions.map((option) => ({ ...option, type: "radio" as const, checked: option.value === snapshot().statusFilter }))}
-                    onSelect={(value) => store.setStatusFilter(value as StatusFilter)}
+              <div class="sidebar-find">
+                <label class="sidebar-search">
+                  <SearchIcon />
+                  <input
+                    type="search"
+                    class="pt-input"
+                    placeholder="Search PRs and chats"
+                    aria-label="Search PRs and chats"
+                    value={query()}
+                    onInput={(event) => search(event.currentTarget.value)}
+                    onKeyDown={onSearchKeyDown}
                   />
-                </div>
+                </label>
+                {newConversationButton()}
+                <Menu
+                  label={filterLabel()}
+                  icon={<FilterIcon />}
+                  items={statusOptions.map((option) => ({ ...option, type: "radio" as const, checked: option.value === snapshot().statusFilter }))}
+                  onSelect={(value) => store.setStatusFilter(value as StatusFilter)}
+                />
               </div>
               <Show when={snapshot().queuedCount > 0}><p class="queue-count">{snapshot().queuedCount} queued</p></Show>
+              <div
+                class="sidebar-scroll"
+                ref={(element: HTMLDivElement) => {
+                  workScroll = element;
+                }}
+              >
               <AllWork
-                reviews={snapshot().statusFilter === "all" ? newestReviews() : snapshot().statusFilter === "waiting" ? needsYouReviews() : []}
+                query={query()}
+                reviews={sidebarReviews()}
                 causes={snapshot().statusFilter === "all" ? causes() : []}
                 selectedReview={pluginView()?.kind === "review" || pluginView()?.kind === "cause" ? currentKey() : null}
                 onOpenReview={openReview}

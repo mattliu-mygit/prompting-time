@@ -4,7 +4,7 @@ import { AlertIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, ListRow, PullRe
 import type { ConversationSummary, ProviderId } from "../../bridge/types";
 import { effectiveConversationStatus, type ChildPageSnapshot, type EffectiveStatus, type SelectedPath } from "../../app/store";
 import { readPreference, savePreference } from "../../app/preferences";
-import { causeKey, needsYou, reviewCategory, reviewKey, reviewRowMeta, reviewState, reviewTime, reviewTitle, shortDate, waitingText, type BlockingCause, type PluginReview } from "../agents/reviews";
+import { causeKey, needsYou, reviewCategory, reviewKey, reviewMatches, reviewRowMeta, reviewState, reviewTime, reviewTitle, searchTokens, shortDate, waitingText, type BlockingCause, type PluginReview, type ReviewCategory } from "../agents/reviews";
 
 type Props = {
   /** Active roots in list order, already filtered by status. */
@@ -20,6 +20,8 @@ type Props = {
   causes: readonly PluginCause[];
   /** The key (reviewKey or causeKey) of the review or cause the workspace shows, if any. */
   selectedReview: string | null;
+  /** What the sidebar's search holds; while it has words, searchWork's results replace the sections. */
+  query: string;
   onSelect(id: string): void;
   onOpenReview(plugin: string, runId: string): void;
   onOpenCause(plugin: string, cause: string): void;
@@ -29,7 +31,8 @@ type Props = {
 export type WorkGroup = { key: string; label: string; path: string | null; conversations: ConversationSummary[] };
 /** A cause that blocks every review, and the plugin that reports it. */
 export type PluginCause = { plugin: string; cause: BlockingCause };
-type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number };
+/** A conversation; a search result shows its folder and no children (`found`). */
+type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number; found?: boolean };
 type ReviewRow = { kind: "review"; key: string; item: PluginReview; depth: 0 };
 type CauseRow = { kind: "cause"; key: string; item: PluginCause; depth: 0 };
 type Row = ConversationRow | ReviewRow | CauseRow;
@@ -53,6 +56,36 @@ const statusDots: Record<EffectiveStatus, Status> = {
   idle: "idle", queued: "running", running: "running", waiting: "attention",
   completed: "idle", interrupted: "idle", failed: "error",
 };
+
+/** The groups search results show reviews in, in this order, by where each review lists. */
+const RESULT_GROUPS: ReadonlyArray<[label: string, categories: readonly ReviewCategory[]]> = [
+  ["Needs you", ["ready", "look", "failed"]],
+  ["Reviewing", ["reviewing"]],
+  ["Waiting", ["waiting"]],
+  ["Done", ["done"]],
+  ["Removed", ["removed"]],
+];
+
+const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+
+/**
+ * What the sidebar's search finds: the reviews every word of `query` finds (reviewMatches), in
+ * every state, grouped by where each lists and newest first in each group, then the roots whose
+ * title or folder holds every word ("no folder" for one without).
+ */
+export function searchWork(reviews: readonly PluginReview[], conversations: readonly ConversationSummary[], query: string) {
+  const tokens = searchTokens(query);
+  const found = reviews.filter(({ review }) => reviewMatches(review, tokens))
+    .sort((left, right) => reviewTime(right.review).localeCompare(reviewTime(left.review)));
+  return {
+    groups: RESULT_GROUPS.map(([label, categories]) => ({ label, reviews: found.filter(({ review }) => categories.includes(reviewCategory(review))) }))
+      .filter((group) => group.reviews.length > 0),
+    chats: conversations.filter((conversation) => {
+      const words = `${conversation.title} ${conversation.projectRoot ? folderName(conversation.projectRoot) : "no folder"}`.toLowerCase();
+      return !conversation.archived && tokens.every((token) => words.includes(token.replace(/^[#@]/, "")));
+    }),
+  };
+}
 
 function readOpenSections(): Record<string, boolean> {
   try {
@@ -131,6 +164,20 @@ export function AllWork(props: Props) {
     ];
   });
 
+  const searching = () => searchTokens(props.query).length > 0;
+  /** While searching, the results as parts: one per group of reviews, then the chats. */
+  const results = createMemo((): Part[] => {
+    if (!searching()) return [];
+    const { groups, chats } = searchWork(props.reviews, props.conversations, props.query);
+    return [
+      ...groups.map((group): Part => ({
+        key: `found:${group.label}`, label: group.label, limited: false,
+        entries: group.reviews.map((item) => [{ kind: "review", key: reviewKey(item.plugin, item.review.run_id), item, depth: 0 }]),
+      })),
+      ...(chats.length > 0 ? [{ key: "found:chats", label: "Chats", limited: false, entries: chats.map((conversation): Entry => [{ kind: "conversation", key: conversation.id, conversation, depth: 0, found: true }]) }] : []),
+    ];
+  });
+
   /** The entries a part shows: all of them once asked, or while the selected row is past the limit; else the first five. */
   const shownEntries = (part: Part): Entry[] => {
     if (!part.limited || part.entries.length <= PART_LIMIT || shownParts().has(part.key)) return part.entries;
@@ -138,7 +185,9 @@ export function AllWork(props: Props) {
     const past = part.entries.slice(PART_LIMIT).some((entry) => entry.some((row) => selected.includes(row.key)));
     return past ? part.entries : part.entries.slice(0, PART_LIMIT);
   };
-  const rows = createMemo(() => sections().flatMap((section) => (isOpen(section.key) ? section.parts.flatMap((part) => shownEntries(part).flat()) : [])));
+  const rows = createMemo(() => (searching()
+    ? results().flatMap((part) => part.entries.flat())
+    : sections().flatMap((section) => (isOpen(section.key) ? section.parts.flatMap((part) => shownEntries(part).flat()) : []))));
   const tabStop = () => (rows().some((row) => row.key === focusedId()) ? focusedId() : rows()[0]?.key);
 
   function focus(id: string | null | undefined) {
@@ -227,17 +276,21 @@ export function AllWork(props: Props) {
       // A review's key holds its plugin and run, so neither changes.
       const item = () => (row() as ReviewRow).item;
       const meta = () => reviewRowMeta(item().review);
+      // Only search finds a removed review, which it tags.
+      const removed = () => item().review.removed_by_user;
       return (
         <ListRow
           {...treeItem(first.key, row)}
-          aria-label={`${reviewTitle(item().review)}, ${meta()}`}
+          aria-label={`${reviewTitle(item().review)}, ${removed() ? "removed, " : ""}${meta()}`}
           aria-level={1}
           aria-selected={props.selectedReview === first.key ? "true" : "false"}
           class="work-row work-review"
+          data-removed={removed() ? "" : undefined}
           style={{ "--work-depth": "0" }}
           icon={<PullRequestIcon />}
           title={reviewTitle(item().review)}
-          status={reviewState(item().review).status}
+          count={removed() ? "removed" : undefined}
+          status={removed() ? "idle" : reviewState(item().review).status}
           meta={meta()}
           onClick={() => props.onOpenReview(item().plugin, item().review.run_id)}
         />
@@ -248,13 +301,15 @@ export function AllWork(props: Props) {
     const conversation = () => (row() as ConversationRow).conversation;
     const status = () => effectiveConversationStatus(conversation());
     const provider = () => (conversation().provider ? providerNames[conversation().provider!] : "No provider");
-    const expanded = () => props.expandedById[id] === true;
+    const found = first.kind === "conversation" && first.found === true;
+    const expanded = () => !found && props.expandedById[id] === true;
     const page = () => props.childPagesById[id];
-    const expandable = () => conversation().hasChildren || page() !== undefined;
+    const expandable = () => !found && (conversation().hasChildren || page() !== undefined);
+    const meta = () => `${found ? `${conversation().projectRoot ? folderName(conversation().projectRoot!) : "no folder"} · ` : ""}${provider()} · ${statusText[status()]}`;
     return (
       <ListRow
         {...treeItem(id, row)}
-        aria-label={`${conversation().title}, ${provider()}, ${statusText[status()]}`}
+        aria-label={`${conversation().title}, ${meta().replaceAll(" · ", ", ")}`}
         aria-level={row().depth + 1}
         aria-selected={props.selectedId === id ? "true" : "false"}
         aria-expanded={expandable() ? (expanded() ? "true" : "false") : undefined}
@@ -263,7 +318,7 @@ export function AllWork(props: Props) {
         icon={<ChatIcon />}
         title={conversation().title}
         status={statusDots[status()]}
-        meta={`${provider()} · ${statusText[status()]}`}
+        meta={meta()}
         trailing={
           <Show when={expandable()}>
             <button
@@ -306,9 +361,29 @@ export function AllWork(props: Props) {
     );
   }
 
+  const resultCount = () => results().reduce((sum, part) => sum + part.entries.length, 0);
+
   return (
     <div class="all-work">
-      <For each={sections()} keyed={(section) => section.key}>
+      <Show when={searching()}>
+        <section class="work-results" aria-label="Search results">
+          <p class="work-empty" role="status">{resultCount() === 0 ? "No PRs or chats match" : `${resultCount()} ${resultCount() === 1 ? "result" : "results"}`} · Esc clears</p>
+          <For each={results()} keyed={(part) => part.key}>
+            {(part) => {
+              const partId = createUniqueId();
+              return (
+                <div class="work-part">
+                  <h3 class="work-part-heading"><span id={partId}>{part().label}</span> · {part().entries.length}</h3>
+                  <ul role="tree" aria-labelledby={partId} class="work-rows">
+                    <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
+                  </ul>
+                </div>
+              );
+            }}
+          </For>
+        </section>
+      </Show>
+      <For each={searching() ? [] : sections()} keyed={(section) => section.key}>
         {(section) => {
           const labelId = createUniqueId();
           return (

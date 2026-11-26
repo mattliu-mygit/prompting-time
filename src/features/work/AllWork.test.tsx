@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/dom";
+import { fireEvent, screen, within } from "@testing-library/dom";
 import { createSignal, flush } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type { ChildPageSnapshot, SelectedPath } from "../../app/store";
@@ -46,6 +46,7 @@ function renderWork(options: Options = {}) {
   const [selectedId, setSelected] = createSignal(options.selectedId === undefined ? "root" : options.selectedId);
   const [selectedPath, setSelectedPath] = createSignal(options.selectedPath ?? null);
   const [childPagesById, setChildPages] = createSignal(options.childPagesById ?? { root: page(["child"]), child: page(["grandchild"]) });
+  const [query, setQuery] = createSignal("");
   const onSelect = vi.fn((id: string) => setSelected(id));
   const onToggle = vi.fn((id: string) => setExpanded((current) => ({ ...current, [id]: !current[id] })));
   const onLoadChildPage = vi.fn();
@@ -56,6 +57,7 @@ function renderWork(options: Options = {}) {
       reviews={options.reviews ?? []}
       causes={options.causes ?? []}
       selectedReview={options.selectedReview ?? null}
+      query={query()}
       onOpenReview={onOpenReview}
       onOpenCause={onOpenCause}
       conversations={conversations()}
@@ -69,7 +71,12 @@ function renderWork(options: Options = {}) {
       onLoadChildPage={onLoadChildPage}
     />
   ));
-  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages };
+  /** Types into the sidebar's search, as App passes what it holds. */
+  const search = (text: string) => {
+    setQuery(text);
+    flush();
+  };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenReview, onOpenCause, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -155,6 +162,46 @@ describe("AllWork", () => {
     renderWork({ conversations: [], reviews: many, selectedReview: "review:whooper:run-6" });
     expect(screen.getByRole("treeitem", { name: /^ready 6,/ })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByRole("button", { name: /more$/ })).not.toBeInTheDocument();
+  });
+
+  it("finds a pull request by number, title words, author, or repo in every state, tags removed ones, and finds chats by title or folder", async () => {
+    const view = renderWork({ conversations: [root, sibling], reviews: pluginEntries(), causes: causes(), open: {} });
+    const results = () => screen.getByRole("region", { name: "Search results" });
+    const found = () => screen.getAllByRole("tree").map((tree) => `${document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent}: ${names(tree).join(" | ")}`);
+
+    view.search("#101");
+    expect(found()).toEqual(["Needs you: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
+    expect(within(results()).getByRole("status")).toHaveTextContent("1 result · Esc clears");
+    view.search("101");
+    expect(found()).toEqual(["Needs you: separate cache configuration, widgets#101 · @sam-fixture · 2 findings"]);
+    view.search("sprocket shim");
+    expect(found()).toEqual(["Done: drop the sprocket shim, sprockets#9 · skipped"]);
+    view.search("@sam-fixture");
+    expect(found()).toEqual([
+      "Needs you: separate cache configuration, widgets#101 · @sam-fixture · 2 findings",
+      "Removed: keep focus in the date picker, removed, widgets#8 · @sam-fixture · 2 findings",
+    ]);
+    const removed = screen.getByRole("treeitem", { name: /^keep focus in the date picker, removed/ });
+    expect(removed).toHaveTextContent("removed");
+    expect(removed).toHaveAttribute("data-removed");
+    view.search("acme/gadgets");
+    expect(found()).toEqual([
+      "Needs you: move the projection, gadgets#55 · review failed",
+      "Waiting: speed up the gadget index, gadgets#60 · waiting · Docker isn't running",
+      expect.stringMatching(/^Done: add the tags package, gadgets#77 · commented /),
+    ]);
+    view.search("alpha");
+    expect(found()).toEqual(["Chats: Auth refactor, alpha, Codex, working"]);
+    expect(screen.queryByRole("button", { name: /^Collapse/ })).not.toBeInTheDocument();
+    view.search("release no folder");
+    expect(found()).toEqual(["Chats: Release notes, no folder, Claude, queued"]);
+    view.search("nothing like this");
+    expect(within(results()).getByRole("status")).toHaveTextContent("No PRs or chats match · Esc clears");
+    expect(await axeViolations()).toEqual([]);
+
+    view.search("");
+    expect(screen.queryByRole("region", { name: "Search results" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Needs you 3" })).toBeVisible();
   });
 
   it("moves between review and conversation rows with the arrow keys, past folded sections, and opens a review with Enter", () => {

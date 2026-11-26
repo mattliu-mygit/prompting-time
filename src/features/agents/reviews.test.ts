@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fixtureReviews } from "../../test/plugins";
-import { blockingCauses, needsYou, readReviews, reviewCategory, reviewRowMeta, type ReviewEntry } from "./reviews";
+import { blockingCauses, needsYou, readReviews, reviewCategory, reviewMatches, reviewRowMeta, searchTokens, type ReviewEntry } from "./reviews";
 
 const docker = { id: "docker", summary: "Docker isn't running", scope: "all" as const };
 const agentExit = { id: "agent_no_findings", summary: "The agent exited without findings", scope: "pr" as const };
@@ -60,5 +60,13 @@ describe("reviews", () => {
     expect(reviewRowMeta(review({ skipped_by_user: true }), now)).toBe("widgets#101 · @sam-fixture · skipped");
     expect(reviewRowMeta(review({ submitted: { event: "COMMENT", at: "2026-11-24T15:30:00Z" } }), now)).toBe("widgets#101 · @sam-fixture · commented Nov 24");
     expect(reviewRowMeta(review({ removed_by_user: true }), now)).toBe("widgets#101 · @sam-fixture · 2 findings");
+  });
+
+  it("finds a review by its number with or without #, the words of its title, its author, and its repo", () => {
+    const entry = review({ pr: 4502, title: "Separate the cache configuration" });
+    const finds = (query: string) => reviewMatches(entry, searchTokens(query));
+    expect(["#4502", "4502", "450", "cache separate", "CACHE", "@sam-fixture", "sam", "acme/widgets", "widgets#4502", "widgets 4502"].filter((query) => !finds(query))).toEqual([]);
+    expect(["#4503", "502", "@someone", "acme/gadgets", "cache gadgets"].filter(finds)).toEqual([]);
+    expect(searchTokens("  #4502   Cache ")).toEqual(["#4502", "cache"]);
   });
 });

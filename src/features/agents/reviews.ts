@@ -250,10 +250,32 @@ function standing(review: ReviewEntry, now: Date): string {
     case "waiting": return review.cause ? `waiting · ${review.cause.summary}` : "waiting for the next round";
     case "failed": return review.cause?.summary ?? "review failed";
     case "reviewed":
-      if (!review.needs_you) return "not submitted";
+      // Whooper stops needing the user for a review they removed, which still has its findings.
+      if (!review.needs_you && !review.removed_by_user) return "not submitted";
       if (review.skipped) return "skipped, look first";
       return review.findings > 0 ? plural(review.findings, "finding") : "no findings";
   }
+}
+
+/** The words of a search, lowercase, as reviewMatches takes them. */
+export function searchTokens(query: string): string[] {
+  return query.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+/**
+ * Whether every word of a search finds the review: a number, with or without "#", starts its pull
+ * request's number (or is in its title), so "#4502", "4502", and "450" find #4502; any other word,
+ * with or without "@", is in its title, its author's login, its repo, or its short name such as
+ * widgets#101.
+ */
+export function reviewMatches(review: ReviewEntry, tokens: readonly string[]): boolean {
+  const title = (review.title ?? "").toLowerCase();
+  const words = `${title} ${review.author ?? ""} ${review.repo} ${shortPullRequest(review)}`.toLowerCase();
+  return tokens.every((token) => {
+    const number = token.replace(/^#/, "");
+    if (/^\d+$/.test(number)) return String(review.pr).startsWith(number) || title.includes(number);
+    return words.includes(token.replace(/^@/, ""));
+  });
 }
 
 /** The verdict in words, such as "approve once CI passes". */
