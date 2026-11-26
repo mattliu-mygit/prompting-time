@@ -72,41 +72,13 @@ describe("confirming a plugin action", () => {
     expect(pluginRequest.mock.calls.map(([sent]) => sent)).toEqual([call(null), call(first), call(null), call(second)]);
   });
 
-  it.each([
-    [10, "the pull request has new commits since the review"],
-    [11, "does not count this run as safe to approve"],
-    [12, "the review @-mentions someone"],
-    [1, "Submit review stopped with exit code 1"],
-  ])("says what exit %i means and shows the plugin's own words", async (exitCode, message) => {
-    renderConfirmation(actionResult({ exitCode, stderr: "whooper-submit: nothing posted: fixture reason" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  it.each([10, 11, 12, 1])("names exit %i and shows the plugin's own words, with no way to send", async (exitCode) => {
+    const { pluginRequest, onClose } = renderConfirmation(actionResult({ exitCode, stderr: "whooper-submit: nothing posted: fixture reason" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(`Submit review stopped with exit code ${exitCode}. Whooper said:`);
     expect(screen.getByLabelText("What Whooper said")).toHaveTextContent("fixture reason");
-  });
-
-  it("offers no way to send after new commits, and Close reports that nothing ran", async () => {
-    const { pluginRequest, onClose } = renderConfirmation(actionResult({ exitCode: 10, stderr: "new commits" }));
-    await screen.findByRole("alert");
     expect(screen.getByRole("button", { name: "Submit review" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() => expect(onClose).toHaveBeenCalledExactlyOnceWith(null));
     expect(pluginRequest).toHaveBeenCalledTimes(1);
-  });
-
-  it("previews again with the mentions allowed, and sends them only after a second confirmation", async () => {
-    const mentions = actionResult({ exitCode: 12, stderr: "  @fixture-user in the comment on src/lib.rs:12 (finding 1)\n" });
-    const posted = actionResult({ stdout: "posted the review\n" });
-    const { pluginRequest, onClose } = renderConfirmation(mentions, preview(first), posted);
-    const allow = await screen.findByRole("button", { name: "Send with the mentions" });
-    expect(screen.getByLabelText("What Whooper said")).toHaveTextContent("@fixture-user");
-    fireEvent.click(allow);
-
-    const confirm = await screen.findByRole("button", { name: "Submit review" });
-    await waitFor(() => expect(confirm).toBeEnabled());
-    expect(onClose).not.toHaveBeenCalled();
-    fireEvent.click(confirm);
-
-    await waitFor(() => expect(onClose).toHaveBeenCalledExactlyOnceWith(posted));
-    const allowed = ["run-1", "--allow-mentions"];
-    expect(pluginRequest.mock.calls.map(([sent]) => sent)).toEqual([call(null), call(null, allowed), call(first, allowed)]);
   });
 });

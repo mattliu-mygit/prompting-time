@@ -5,7 +5,7 @@ import type { PluginActions } from "../../app/store";
 
 type Props = {
   plugin: PluginSnapshot;
-  /** The name of an action the manifest marks `confirm: true`, such as Whooper's submit. */
+  /** The name of an action the manifest marks `confirm: true`, such as a submit that posts a review. */
   action: string;
   /** The arguments after the action's own, such as a review's run ID. */
   args: readonly string[];
@@ -14,27 +14,11 @@ type Props = {
   onClose(result: PluginActionResult | null): void;
 };
 
-type Override = { flag: string; label: string };
 type Step =
   | { kind: "previewing"; note: string | null }
   | { kind: "ready" | "running"; fingerprint: string; preview: string; note: string | null }
-  | { kind: "stopped"; message: string; detail: string; override: Override | null };
+  | { kind: "stopped"; message: string; detail: string };
 
-/**
- * How a confirm action refuses, by exit code, as whooper-submit defines them. Each refusal sends
- * nothing; 11 and 12 can be overridden with the flag after the user has read why.
- */
-const REFUSALS: Record<number, (title: string) => { message: string; override?: Override }> = {
-  10: (title) => ({ message: `Nothing was sent: the pull request has new commits since the review. ${title} reviews them in its next round.` }),
-  11: (title) => ({
-    message: `Nothing was sent: the review approves, and ${title} does not count this run as safe to approve. Approve anyway only if what it lists is fine with you.`,
-    override: { flag: "--approve-anyway", label: "Approve anyway" },
-  }),
-  12: () => ({
-    message: "Nothing was sent: the review @-mentions someone, and sending it would notify them.",
-    override: { flag: "--allow-mentions", label: "Send with the mentions" },
-  }),
-};
 /** The exit code of a run for real whose request changed after the preview showed it. */
 const CHANGED = 13;
 
@@ -42,7 +26,8 @@ const CHANGED = 13;
  * The confirmation every action marked `confirm` waits for. It runs the action's preview, which
  * changes nothing outside this Mac, shows exactly what the action will send, and runs it for real
  * only when the user confirms, with the fingerprint of the request shown. A request that changed
- * since (exit 13) is shown again for a new confirmation; other refusals say what happened.
+ * since (exit 13) is shown again for a new confirmation; any other refusal shows the exit code and
+ * the plugin's own words.
  */
 export function ConfirmActionDialog(props: Props) {
   const plugin = untrack(() => props.plugin);
@@ -50,20 +35,19 @@ export function ConfirmActionDialog(props: Props) {
   const action = plugin.actions.find((item) => item.name === name);
   const title = action?.title ?? name;
   const [step, setStep] = createSignal<Step>({ kind: "previewing", note: null });
-  let flags: string[] = [];
   let lastRun: PluginActionResult | null = null;
   let active = true;
 
   function request(confirmedFingerprint: string | null) {
-    return props.actions.pluginRequest({ plugin: plugin.name, action: name, args: [...untrack(() => props.args), ...flags], confirmedFingerprint });
+    return props.actions.pluginRequest({ plugin: plugin.name, action: name, args: [...untrack(() => props.args)], confirmedFingerprint });
   }
 
   function stop(result: PluginActionResult) {
-    const detail = result.stderr.trim() || result.stdout.trim();
-    const refusal = result.exitCode === null ? undefined : REFUSALS[result.exitCode]?.(plugin.title);
-    setStep(refusal
-      ? { kind: "stopped", message: refusal.message, detail, override: refusal.override && !flags.includes(refusal.override.flag) ? refusal.override : null }
-      : { kind: "stopped", message: `${title} stopped ${result.exitCode === null ? "on a signal" : `with exit code ${result.exitCode}`}. ${plugin.title} said:`, detail, override: null });
+    setStep({
+      kind: "stopped",
+      message: `${title} stopped ${result.exitCode === null ? "on a signal" : `with exit code ${result.exitCode}`}. ${plugin.title} said:`,
+      detail: result.stderr.trim() || result.stdout.trim(),
+    });
   }
 
   async function preview(note: string | null) {
@@ -77,23 +61,18 @@ export function ConfirmActionDialog(props: Props) {
         stop(result);
       }
     } catch (reason) {
-      if (active) setStep({ kind: "stopped", message: messageFor(reason), detail: "", override: null });
+      if (active) setStep({ kind: "stopped", message: messageFor(reason), detail: "" });
     }
   }
 
   async function confirm() {
     const current = step();
-    if (current.kind === "stopped" && current.override) {
-      flags = [...flags, current.override.flag];
-      void preview(null);
-      return;
-    }
     if (current.kind !== "ready") return;
     setStep({ ...current, kind: "running" });
     try {
       lastRun = await request(current.fingerprint);
     } catch (reason) {
-      if (active) setStep({ kind: "stopped", message: messageFor(reason), detail: "", override: null });
+      if (active) setStep({ kind: "stopped", message: messageFor(reason), detail: "" });
       return;
     }
     if (!active) return;
@@ -126,9 +105,9 @@ export function ConfirmActionDialog(props: Props) {
       open
       title={title}
       cancelLabel={stopped() ? "Close" : "Cancel"}
-      confirmLabel={stopped()?.override?.label ?? title}
+      confirmLabel={title}
       busy={step().kind === "running"}
-      confirmDisabled={step().kind === "previewing" || (stopped() !== null && !stopped()!.override)}
+      confirmDisabled={step().kind === "previewing" || stopped() !== null}
       onConfirm={() => void confirm()}
       onCancel={() => {
         active = false;
