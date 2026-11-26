@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
-import { Button, Menu, StatusDot } from "@prompting-time/ui";
+import { Portal, type JSX } from "@solidjs/web";
+import { Button, EllipsisIcon, Menu, StatusDot, type MenuItem } from "@prompting-time/ui";
 import type { AgentControls, PluginActions, PluginFilesChange, PluginStatusRead } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
 import { PluginFrame } from "../plugins/PluginFrame";
@@ -8,6 +9,11 @@ import { FailedReview } from "./FailedReview";
 import { RunNow } from "./RunNow";
 import { blockingCauses, notSafeToApprove, readFindingKinds, readReviews, reviewState, shortDate, shortPullRequest, shortSha, unsafeVerdict, versionsOf, type ReviewEntry } from "./reviews";
 import { readAgentStatus, readBlocked } from "./status";
+import { rememberLook, type LastLook } from "../review/memory";
+import { ReviewTop } from "../review/ReviewTop";
+import { readShownReview, type Overview, type ShownReview } from "../review/shown";
+import { REVIEW_VIEWS, viewHasData, type ReviewViews } from "../review/views";
+import { Walkthrough } from "../review/Walkthrough";
 
 type Props = {
   plugin: PluginSnapshot;
@@ -21,8 +27,14 @@ type Props = {
   onOpenCause(cause: string): void;
   /** Skip, Remove, and Restore run here, so that after Skip or Remove the next item opens; each throws the plugin's refusal. */
   triage: ReviewTriage;
-  /** The plugin posted the user's review of this run from its page. */
+  /** The plugin posted the user's review of this run, from its page or the walkthrough. */
   onSubmitted(runId: string): void;
+  /** The views of a review the user turned on, for every review. */
+  views: ReviewViews;
+  /** The window's header row, where the review's controls go; without one they get a row of their own. */
+  headerSlot?: HTMLElement | null;
+  /** Says what an action did at the bottom of the window, with Undo. */
+  onNotice(text: string, undo: () => void): void;
 };
 
 /** What a review's header asks of the app for its run: skip it, take it out of the lists, or put it back. */
@@ -71,13 +83,19 @@ export function versionLabel(review: ReviewEntry, number: number): string {
   return [`Review ${number}`, shortSha(review.head_sha), shortDate(review.ended_at ?? review.started_at)].filter(Boolean).join(" · ");
 }
 
+/** What show-review printed for the open run, or why it couldn't be read. */
+type ShownRead = { runId: string; shown: ShownReview | null; error: string | null };
+
 /**
- * One review of a pull request: a header with its version and the commit it reviewed, a menu of the
- * pull request's other versions (an earlier one opens read-only, since only the newest can be
- * submitted), Rerun review (Retry review after a failure), Skip with Undo, and a banner when the
- * pull request has commits after the reviewed one. Below it, the plugin's page for a finished
- * review, which stays loaded while the user moves between finished reviews, or Prompting Time's
- * own screen for a review that runs, waits, or failed.
+ * One review of a pull request. Its controls sit in the window's header row: a ⋯ menu with the pull
+ * request's versions (an earlier one opens read-only, since only the newest can be submitted), Rerun
+ * review, Skip, and Remove; Retry review after a failure; and, for a review the plugin wrote an
+ * overview of, Walkthrough | Diff and the Views menu. Below, banners say when the review is removed
+ * or an earlier version. A finished review with an overview opens on Prompting Time's walkthrough,
+ * headed by the verdict banner and the since notice, which head its Diff too; its Diff, and a
+ * finished review without an overview, is the plugin's page, which stays loaded while the user
+ * moves between finished reviews. A review that runs, waits, or failed gets Prompting Time's own
+ * screen.
  */
 export function ReviewScreen(props: Props) {
   const reviews = createMemo(() => readReviews(props.status?.value));
@@ -86,6 +104,54 @@ export function ReviewScreen(props: Props) {
     const outcome = entry()?.outcome;
     return outcome === "running" ? "running" : outcome === "failed" || outcome === "waiting" ? "problem" : "page";
   });
+  const [read, setRead] = createSignal<ShownRead | null>(null);
+  // Whether each run shows its walkthrough or its diff; a review opens on its walkthrough.
+  const [modes, setModes] = createSignal<Readonly<Record<string, "walkthrough" | "diff">>>({});
+  // What the user opened of each run's pull request before, read once as the run opens.
+  const looks = new Map<string, LastLook | null>();
+  const finished = () => (body() === "page" ? props.runId : null);
+  // Set once the screen is gone, so a late answer reads none of its props.
+  let disposed = false;
+  onSettled(() => () => {
+    disposed = true;
+  });
+
+  async function load(runId: string) {
+    let read: ShownRead;
+    try {
+      const plugin = untrack(() => props.plugin);
+      read = { runId, shown: readShownReview(await runPluginAction(untrack(() => props.actions), plugin, ACTIONS.showReview, [runId]), runId), error: null };
+    } catch (reason) {
+      read = { runId, shown: null, error: messageOf(reason) };
+    }
+    if (disposed || untrack(finished) !== runId) return;
+    // A failed read again keeps what an earlier read of the same run showed.
+    setRead((now) => (read.shown === null && now?.runId === runId && now.shown ? now : read));
+  }
+  createEffect(finished, (runId) => {
+    if (runId) void load(runId);
+  });
+  onSettled(() => props.onPluginFilesChange((change) => {
+    const runId = untrack(finished);
+    if (runId && change.plugin === untrack(() => props.plugin.name) && (change.files === null || change.files.some((file) => file.includes(runId)))) void load(runId);
+  }));
+
+  const shownFor = (runId: string) => {
+    const now = read();
+    return now?.runId === runId ? now : null;
+  };
+  /** The run's overview when the plugin wrote one, with what show-review printed. */
+  const withOverview = (runId: string) => {
+    const shown = shownFor(runId)?.shown;
+    return shown?.overview ? (shown as ShownReview & { overview: Overview }) : null;
+  };
+  const mode = (runId: string) => modes()[runId] ?? "walkthrough";
+  const setMode = (runId: string, next: "walkthrough" | "diff") => setModes((now) => ({ ...now, [runId]: next }));
+  /** The page shows once show-review answered: for a review without an overview, or in its Diff. */
+  const pageShown = () => {
+    const runId = finished();
+    return runId !== null && shownFor(runId) !== null && (!withOverview(runId) || mode(runId) === "diff");
+  };
   const sameCause = (review: ReviewEntry) => {
     const cause = review.cause;
     if (!cause || cause.scope !== "all") return null;
@@ -94,34 +160,52 @@ export function ReviewScreen(props: Props) {
   };
   return (
     <div class="review-screen">
-      {/* One header per run, so what Rerun or Skip printed stays with the run it ran for. */}
+      {/* One part per run, so what Rerun or Skip printed stays with the run it ran for. */}
       <Show when={entry()?.run_id} keyed>
-        {(runId: string) => (
-          <ReviewHeader
-            plugin={props.plugin}
-            review={entry() ?? reviews().find((review) => review.run_id === runId)!}
-            versions={versionsOf(reviews(), entry()!)}
-            actions={props.actions}
-            refresh={() => props.controls.refreshPlugins()}
-            onOpenReview={props.onOpenReview}
-            triage={props.triage}
-          />
-        )}
+        {(runId: string) => {
+          const review = () => entry() ?? reviews().find((item) => item.run_id === runId)!;
+          if (!looks.has(runId)) looks.set(runId, rememberLook(untrack(review)));
+          return (
+            <ReviewRun
+              plugin={props.plugin}
+              review={review()}
+              versions={versionsOf(reviews(), review())}
+              actions={props.actions}
+              refresh={() => props.controls.refreshPlugins()}
+              onOpenReview={props.onOpenReview}
+              triage={props.triage}
+              headerSlot={props.headerSlot}
+              views={props.views}
+              shown={withOverview(runId)}
+              look={looks.get(runId) ?? null}
+              mode={mode(runId)}
+              onMode={(next) => setMode(runId, next)}
+              pageShown={pageShown()}
+              onNotice={props.onNotice}
+              onSubmitted={props.onSubmitted}
+            />
+          );
+        }}
       </Show>
       <div class="review-body">
         <Switch>
           <Match when={body() === "page"}>
-            <PluginFrame
-              plugin={props.plugin}
-              status={props.status}
-              runId={props.runId}
-              actions={props.actions}
-              onPluginFilesChange={props.onPluginFilesChange}
-              onShowReview={(runId) => {
-                if (runId !== props.runId) props.onOpenReview(runId);
-              }}
-              onSubmitted={props.onSubmitted}
-            />
+            <Show when={finished() && !shownFor(finished()!)}>
+              <p role="status" class="plugin-note review-reading">Reading the review…</p>
+            </Show>
+            <div class="review-page" hidden={!pageShown()}>
+              <PluginFrame
+                plugin={props.plugin}
+                status={props.status}
+                runId={props.runId}
+                actions={props.actions}
+                onPluginFilesChange={props.onPluginFilesChange}
+                onShowReview={(runId) => {
+                  if (runId !== props.runId) props.onOpenReview(runId);
+                }}
+                onSubmitted={props.onSubmitted}
+              />
+            </div>
           </Match>
           <Match when={body() === "problem"}>
             <Show when={entry()} keyed>
@@ -146,7 +230,7 @@ export function ReviewScreen(props: Props) {
   );
 }
 
-type HeaderProps = {
+type RunProps = {
   plugin: PluginSnapshot;
   review: ReviewEntry;
   /** Every run of the review's pull request, oldest first. */
@@ -155,10 +239,21 @@ type HeaderProps = {
   refresh(): Promise<void>;
   onOpenReview(runId: string): void;
   triage: ReviewTriage;
+  headerSlot?: HTMLElement | null;
+  views: ReviewViews;
+  /** What show-review printed, when the plugin wrote an overview of the run. */
+  shown: (ShownReview & { overview: Overview }) | null;
+  look: LastLook | null;
+  mode: "walkthrough" | "diff";
+  onMode(mode: "walkthrough" | "diff"): void;
+  /** Whether the plugin's page shows under this run's part. */
+  pageShown: boolean;
+  onNotice(text: string, undo: () => void): void;
+  onSubmitted(runId: string): void;
 };
 
-/** The review's header: its version and the others, Rerun review, Skip with Undo, Remove or Restore, and its banners. */
-function ReviewHeader(props: HeaderProps) {
+/** One run's controls in the header row, its banners, and its walkthrough, or its top above the page in Diff. */
+function ReviewRun(props: RunProps) {
   const [busy, setBusy] = createSignal(false);
   const [queued, setQueued] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
@@ -175,11 +270,10 @@ function ReviewHeader(props: HeaderProps) {
   const canRerun = () => !earlier() && !running() && hasAction(props.plugin, ACTIONS.retry);
   const removed = () => !earlier() && props.review.removed_by_user;
   const canSkip = () => !earlier() && !running() && !removed() && props.review.submitted === null && hasAction(props.plugin, ACTIONS.skip);
-  const canRemove = () => !earlier() && !removed() && hasAction(props.plugin, ACTIONS.remove);
+  const canRemove = () => !earlier() && hasAction(props.plugin, ACTIONS.remove);
   const newCommits = () => !earlier() && !running() && props.review.head_sha !== null && props.review.pr_head_sha !== null && props.review.head_sha !== props.review.pr_head_sha;
-  const label = () => `${versionLabel(props.review, number())}${earlier() ? " · read-only" : ""}`;
 
-  /** Runs one task at a time and shows its refusal; `done` runs after it unless the header is gone. */
+  /** Runs one task at a time and shows its refusal; `done` runs after it unless the run's part is gone. */
   async function run<T>(task: () => Promise<T>, done: (result: T) => void) {
     setBusy(true);
     setError(null);
@@ -207,39 +301,83 @@ function ReviewHeader(props: HeaderProps) {
     disposed = true;
   });
 
+  /** The ⋯ menu: the pull request's versions, then Rerun review, Skip, and Remove or Restore. */
+  const moreItems = (): MenuItem[] => [
+    ...(props.versions.length > 1
+      ? [...props.versions].reverse().map((review) => ({ value: `version:${review.run_id}`, label: versionLabel(review, props.versions.indexOf(review) + 1), type: "radio" as const, checked: review.run_id === props.review.run_id }))
+      : []),
+    ...(canRerun() && !problem() ? [{ value: "rerun", label: "Rerun review", disabled: busy() }] : []),
+    ...(canSkip() && !skipped() ? [{ value: "skip", label: "Skip", disabled: busy() }] : []),
+    ...(canRemove() ? [removed() ? { value: "restore", label: "Restore", disabled: busy() } : { value: "remove", label: "Remove", disabled: busy() }] : []),
+  ];
+  function choose(value: string) {
+    if (value.startsWith("version:")) {
+      const runId = value.slice("version:".length);
+      if (runId !== props.review.run_id) props.onOpenReview(runId);
+    } else if (value === "rerun") void rerun();
+    else if (value === "skip") void skip();
+    else if (value === "remove") void run(() => props.triage.remove(props.review.run_id), () => {});
+    else if (value === "restore") void run(() => props.triage.restore(props.review.run_id), () => {});
+  }
+  const viewItems = (): MenuItem[] => REVIEW_VIEWS.filter((view) => view.ready).map((view) => ({
+    value: view.id,
+    label: view.name,
+    description: props.shown && !viewHasData(view.id, props.shown) ? `${view.description} Nothing for this review.` : view.description,
+    type: "checkbox" as const,
+    checked: props.views.isOn(view.id),
+  }));
+
+  const controls = (
+    <div class="review-controls">
+      <Show when={skipped() && canSkip()}>
+        <span class="plugin-note">Skipped</span>
+        <Button disabled={busy()} onClick={() => void unskip()}>Undo</Button>
+      </Show>
+      <Show when={problem() && canRerun()}>
+        <Button variant="primary" disabled={busy()} onClick={() => void rerun()}>Retry review</Button>
+      </Show>
+      <Show when={moreItems().length > 0}>
+        <Menu label="More review actions" icon={<EllipsisIcon />} items={moreItems()} onSelect={choose} />
+      </Show>
+      <Show when={props.shown}>
+        <div class="review-modes" role="group" aria-label="Show the review as">
+          <button type="button" class="pt-button" aria-pressed={props.mode === "walkthrough" ? "true" : "false"} onClick={() => props.onMode("walkthrough")}>Walkthrough</button>
+          <button type="button" class="pt-button" aria-pressed={props.mode === "diff" ? "true" : "false"} onClick={() => props.onMode("diff")}>Diff</button>
+        </div>
+        <Menu
+          label="Views in reviews"
+          text={props.views.offCount() > 0 ? `Views · ${props.views.offCount()} off` : "Views"}
+          items={viewItems()}
+          closeOnSelect={false}
+          onSelect={(id) => {
+            const view = REVIEW_VIEWS.find((item) => item.id === id);
+            if (view) props.views.setOn(view.id, !props.views.isOn(view.id));
+          }}
+        />
+      </Show>
+    </div>
+  );
+
+  const top = (shown: ShownReview & { overview: Overview }): JSX.Element => (
+    <ReviewTop
+      review={props.review}
+      number={number()}
+      versions={props.versions}
+      shown={shown}
+      views={props.views}
+      look={props.look}
+      canRerun={canRerun()}
+      busy={busy()}
+      onRerun={() => void rerun()}
+      onNotice={props.onNotice}
+    />
+  );
+
   return (
-    <header class="review-header">
-      <div class="review-header-bar">
-        <Show when={props.versions.length > 1} fallback={<span class="review-version">{label()}</span>}>
-          <Menu
-            label="Versions of this review"
-            text={label()}
-            items={[...props.versions].reverse().map((review) => {
-              const position = props.versions.indexOf(review) + 1;
-              return { value: review.run_id, label: versionLabel(review, position), type: "radio" as const, checked: review.run_id === props.review.run_id };
-            })}
-            onSelect={(runId) => {
-              if (runId !== props.review.run_id) props.onOpenReview(runId);
-            }}
-          />
-        </Show>
-        <span class="review-header-spacer" />
-        <Show when={running() && !earlier()}>
-          <span class="plugin-note">Reviewing… started {shortDate(props.review.started_at)}</span>
-        </Show>
-        <Show when={canSkip()}>
-          <Show when={skipped()} fallback={<Button disabled={busy()} onClick={() => void skip()}>Skip</Button>}>
-            <span class="plugin-note">Skipped</span>
-            <Button disabled={busy()} onClick={() => void unskip()}>Undo</Button>
-          </Show>
-        </Show>
-        <Show when={canRemove()}>
-          <Button disabled={busy()} onClick={() => void run(() => props.triage.remove(props.review.run_id), () => {})}>Remove</Button>
-        </Show>
-        <Show when={canRerun()}>
-          <Button variant={problem() || newCommits() ? "primary" : "plain"} disabled={busy()} onClick={() => void rerun()}>{problem() ? "Retry review" : "Rerun review"}</Button>
-        </Show>
-      </div>
+    <>
+      <Show when={props.headerSlot} fallback={<div class="review-header-bar">{controls}</div>}>
+        {(slot) => <Portal mount={slot()}>{controls}</Portal>}
+      </Show>
       <Show when={removed()}>
         <div class="review-banner" role="note">
           <span><strong>Removed from your lists</strong> · its files stay on disk, and search still finds it.</span>
@@ -254,7 +392,8 @@ function ReviewHeader(props: HeaderProps) {
           <Button onClick={() => props.onOpenReview(newest().run_id)}>Open review {props.versions.length}</Button>
         </div>
       </Show>
-      <Show when={newCommits()}>
+      {/* A review with an overview says this in its since notice instead. */}
+      <Show when={newCommits() && !props.shown}>
         <div class="review-banner" role="note">
           <span><strong>New commits since this review</strong> · it reviewed {shortSha(props.review.head_sha)}; the pull request is at {shortSha(props.review.pr_head_sha)}.</span>
           <Show when={canRerun()}>
@@ -264,6 +403,24 @@ function ReviewHeader(props: HeaderProps) {
       </Show>
       <Show when={queued()}>{(text) => <RunNow plugin={props.plugin} actions={props.actions} queued={text()} />}</Show>
       <Show when={error()}>{(text) => <p role="alert" class="inline-error plugin-refusal">{text()}</p>}</Show>
-    </header>
+      <Show when={props.shown}>
+        {(shown) => (
+          <Show when={props.mode === "walkthrough"} fallback={<Show when={props.pageShown}><div class="review-page-top">{top(shown())}</div></Show>}>
+            <Walkthrough
+              plugin={props.plugin}
+              review={props.review}
+              shown={shown()}
+              views={props.views}
+              actions={props.actions}
+              top={top(shown())}
+              active={props.mode === "walkthrough"}
+              canDecide={!earlier() && props.review.submitted === null && !removed()}
+              onShowDiff={() => props.onMode("diff")}
+              onSubmitted={props.onSubmitted}
+            />
+          </Show>
+        )}
+      </Show>
+    </>
   );
 }

@@ -105,6 +105,22 @@ export const ChevronRightIcon = () => (
     <path d="m9 18 6-6-6-6" />
   </Icon>
 );
+
+/** Opens a collapsed rail or panel, such as the PR list's rail. */
+export const ChevronsRightIcon = () => (
+  <Icon>
+    <path d="m6 17 5-5-5-5" />
+    <path d="m13 17 5-5-5-5" />
+  </Icon>
+);
+
+/** Collapses a panel to its rail. */
+export const ChevronsLeftIcon = () => (
+  <Icon>
+    <path d="m11 17-5-5 5-5" />
+    <path d="m18 17-5-5 5-5" />
+  </Icon>
+);
 export const ChevronDownIcon = () => (
   <Icon>
     <path d="m6 9 6 6 6-6" />

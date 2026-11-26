@@ -49,6 +49,14 @@ afterEach(() => {
   Reflect.deleteProperty(Element.prototype, "scrollIntoView");
 });
 
+
+/** Chooses an item of the open review's ⋯ menu in the window's header row. */
+async function chooseFromMore(name: string) {
+  fireEvent.click(within(document.querySelector<HTMLElement>(".app-toolbar")!).getByRole("button", { name: "More review actions" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name }));
+  flush();
+}
+
 describe("conversation hierarchy", () => {
   function hierarchyApi() {
     const root = createdConversation({ id: "compiler", title: "Compiler", hasChildren: true,
@@ -325,7 +333,8 @@ describe("plugin pages", () => {
     const failed = screen.getByRole("main", { name: "Review" });
     expect(within(failed).getByRole("heading", { name: "Review failed" })).toBeInTheDocument();
     expect(within(failed).getByLabelText("Why it failed")).toHaveTextContent("the review run exited 1 without findings; see runs/20261124T090000Z-55/stderr.log");
-    expect(within(failed).getByRole("button", { name: "Retry review" })).toBeInTheDocument();
+    // Retry review sits with the review's other controls in the window's header row.
+    expect(within(document.querySelector<HTMLElement>(".app-toolbar")!).getByRole("button", { name: "Retry review" })).toBeInTheDocument();
     expect(within(failed).getByRole("button", { name: "Ask why" })).toBeInTheDocument();
     expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "show-review", args: [FAILED], confirmedFingerprint: null });
     expect(screen.queryByText(/has no findings to show/)).not.toBeInTheDocument();
@@ -735,7 +744,7 @@ describe("triage", () => {
     await settle();
     const reveal = vi.mocked(Element.prototype.scrollIntoView);
     reveal.mockClear();
-    click(screen.getByRole("button", { name: "Skip" }));
+    await chooseFromMore("Skip");
     await waitFor(() => expect(notice()).toHaveTextContent("Skipped widgets#101 · now showing widgets#103"));
     expect(calls(pluginRequest, "skip")).toEqual([["20261126T150000Z-101"]]);
     expect(screen.getByRole("heading", { level: 1, name: "cap the upload retry delay" })).toBeInTheDocument();
@@ -760,10 +769,35 @@ describe("triage", () => {
 
     click(screen.getByRole("treeitem", { name: /^separate cache configuration/ }));
     await settle();
-    click(screen.getByRole("button", { name: "Remove" }));
+    await chooseFromMore("Remove");
     await waitFor(() => expect(notice()).toHaveTextContent("Removed widgets#101 · now showing widgets#103"));
     expect(calls(pluginRequest, "remove").at(-1)).toEqual(["20261126T150000Z-101"]);
     expect(screen.getByRole("heading", { level: 1, name: "cap the upload retry delay" })).toBeInTheDocument();
+  });
+
+  it("shrinks All work to a labeled rail that ⌘\\ or a click opens and Escape closes, and puts the review's views in the palette", async () => {
+    const { api } = triageApi();
+    renderApp(api);
+    click(await screen.findByRole("treeitem", { name: /^separate cache configuration/ }));
+    await settle();
+    const rail = screen.getByRole("button", { name: /^All work · \d+ need/ });
+    expect(rail).toHaveAttribute("aria-expanded", "false");
+    expect(document.querySelector("#work-pane")).toHaveClass("railed");
+    fireEvent.keyDown(window, { key: "\\", metaKey: true });
+    flush();
+    expect(rail).toHaveAttribute("aria-expanded", "true");
+    expect(document.querySelector("#work-pane")).toHaveClass("list-open");
+    fireEvent.keyDown(window, { key: "Escape" });
+    flush();
+    expect(rail).toHaveAttribute("aria-expanded", "false");
+    click(rail);
+    expect(rail).toHaveAttribute("aria-expanded", "true");
+    click(rail);
+    expect(rail).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
+    flush();
+    expect(await screen.findByRole("option", { name: /Turn off Calls before and after/ })).toBeInTheDocument();
   });
 
   it("restores a removed review, which search finds, from its page", async () => {

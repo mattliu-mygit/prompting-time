@@ -1654,26 +1654,73 @@ body {
   min-block-size: 0;
 }
 
-.review-header {
-  display: grid;
-  gap: var(--s-space-8);
-  padding: var(--s-space-8) var(--s-space-16);
-  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+/* A review's controls in the window's header row (or a row of their own where there is none). */
+.toolbar-review:empty {
+  display: none;
 }
 
-.review-header-bar {
+.toolbar-review,
+.review-controls {
   display: flex;
   align-items: center;
   gap: var(--s-space-8);
   min-inline-size: 0;
 }
 
-.review-version {
-  font-size: var(--s-size-sm);
+.review-header-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--s-space-8) var(--s-space-16);
+  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
 }
 
-.review-header-spacer {
+/* Walkthrough | Diff: two buttons as one control; the pressed one is the brighter. */
+.review-modes {
+  display: inline-flex;
+}
+
+.review-modes .pt-button + .pt-button {
+  margin-inline-start: calc(var(--s-border-thin) * -1);
+}
+
+.review-modes .pt-button[aria-pressed="true"] {
+  border-color: var(--s-border-strong);
+  background: var(--s-surface-elevated);
+  color: var(--s-text);
+}
+
+.review-modes .pt-button[aria-pressed="false"] {
+  color: var(--s-text-muted);
+}
+
+.review-screen > .review-banner,
+.review-screen > .run-now,
+.review-screen > .plugin-refusal {
+  margin: var(--s-space-8) var(--s-space-16) 0;
+}
+
+.review-reading {
+  padding: var(--s-space-16);
+}
+
+.review-page {
+  display: flex;
   flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.review-page[hidden] {
+  display: none;
+}
+
+.review-page-top {
+  padding: var(--s-space-12) var(--s-space-16) 0;
+}
+
+.review-page-top .review-top {
+  max-inline-size: 72rem;
+  margin-inline: auto;
 }
 
 .review-banner {
@@ -1926,4 +1973,900 @@ body {
   display: block;
   color: var(--s-text-muted);
   font-size: var(--s-size-xs);
+}
+
+/* The verdict banner, first in a review: tinted 12% with its color, so the words stay at full
+   contrast (16.7:1 and more on the tints; the secondary lines 6.7:1 and more). */
+.review-top {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.verdict-banner {
+  --verdict-tone: var(--s-success);
+  display: grid;
+  gap: var(--s-space-4);
+  padding: var(--s-space-12) var(--s-space-16);
+  border: var(--s-border-thin) var(--s-border-style) color-mix(in srgb, var(--verdict-tone) 40%, var(--s-background));
+  background: color-mix(in srgb, var(--verdict-tone) 12%, var(--s-background));
+}
+
+.verdict-banner[data-tone="attention"] {
+  --verdict-tone: var(--s-warning);
+}
+
+.verdict-banner[data-tone="error"] {
+  --verdict-tone: var(--s-error);
+}
+
+.verdict-banner p {
+  margin: 0;
+}
+
+.verdict-banner-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-space-4) var(--s-space-8);
+}
+
+.verdict-banner-words {
+  font-size: var(--s-size-lg);
+  font-weight: var(--s-weight-semibold);
+}
+
+.verdict-banner-meta {
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-xs);
+}
+
+.verdict-banner-reason {
+  font-size: var(--s-size-sm);
+}
+
+/* Changes since you last looked: one line, folded until you open it. */
+.since-notice {
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  font-size: var(--s-size-sm);
+}
+
+.since-notice-line {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  padding-inline-end: var(--s-space-4);
+}
+
+.since-notice-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--s-space-8);
+  min-block-size: var(--s-control-height-sm);
+  padding: 0 var(--s-space-8);
+  border: 0;
+  background: none;
+  color: var(--s-text-secondary);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.since-notice-toggle:hover {
+  color: var(--s-text);
+}
+
+.since-notice-toggle svg {
+  flex: none;
+  inline-size: var(--s-space-12);
+  block-size: var(--s-space-12);
+}
+
+.since-notice-detail {
+  display: grid;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12) var(--s-space-12);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border-muted);
+}
+
+.since-notice-detail p {
+  margin: 0;
+}
+
+.since-commits {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.since-commits li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--s-space-12);
+  align-items: baseline;
+}
+
+.since-commit-meta {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+/* The walkthrough: its navigator on the left, and its column centered in the space beside it, the
+   prose at one width and the code wider, on one axis. */
+.walkthrough {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 16rem minmax(0, 1fr);
+  min-block-size: 0;
+}
+
+.walkthrough[data-rail] {
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+}
+
+.walk-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-space-4);
+  min-block-size: 0;
+  padding: var(--s-space-12) var(--s-space-8);
+  overflow-y: auto;
+  border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  font-size: var(--s-size-sm);
+}
+
+.walkthrough[data-rail] .walk-nav {
+  padding: 0;
+}
+
+.walk-nav ul,
+.walk-nav ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.walk-nav-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  margin: var(--s-space-12) 0 var(--s-space-4);
+  padding-inline-start: var(--s-space-8);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+  letter-spacing: var(--s-tracking-wider);
+  text-transform: uppercase;
+}
+
+.walk-nav-heading:first-child {
+  margin-block-start: 0;
+}
+
+.walk-nav-collapse {
+  margin-inline-start: auto;
+}
+
+.walk-nav button:not(.pt-icon-button) {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  inline-size: 100%;
+  min-block-size: var(--s-control-height-sm);
+  padding: var(--s-space-4) var(--s-space-8);
+  border: 0;
+  background: none;
+  color: var(--s-text-secondary);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.walk-nav button:not(.pt-icon-button):hover,
+.walk-nav button[aria-current="true"] {
+  background: var(--s-surface-elevated);
+  color: var(--s-text);
+}
+
+.walk-nav-parts button > span:first-child,
+.walk-nav-layer > span:first-child {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.walk-nav-layers li {
+  display: flex;
+  align-items: center;
+}
+
+.walk-nav-layer {
+  flex-direction: column;
+  align-items: stretch !important;
+  gap: 0 !important;
+}
+
+.walk-nav .walk-check {
+  flex: none;
+  justify-content: center;
+  inline-size: var(--s-control-height-sm) !important;
+  padding: 0 !important;
+  color: transparent !important;
+}
+
+.walk-check svg {
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+  padding: 1px;
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
+}
+
+.walk-check[aria-pressed="true"] svg {
+  border-color: var(--s-success);
+  color: var(--s-success);
+}
+
+.walk-nav-place-text {
+  display: grid;
+  min-inline-size: 0;
+}
+
+.walk-count,
+.walk-muted {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-normal);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.walk-keys {
+  display: inline-flex;
+  gap: 2px;
+  margin-inline-start: auto;
+}
+
+.walk-keys kbd {
+  padding: 0 var(--s-space-4);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  font-family: var(--s-code-font-family);
+  font-size: var(--s-size-xs);
+  text-transform: none;
+}
+
+/* The navigator folded to a rail: one button, an arrow over "Walkthrough" on its side, over a tick per layer (green once read) and per place (orange). */
+.walk-rail {
+  flex-direction: column;
+  flex: 1;
+  justify-content: flex-start !important;
+  padding: var(--s-space-12) 0 !important;
+}
+
+.walk-rail > svg,
+.work-rail-open > svg {
+  flex: none;
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+}
+
+.walk-rail-label,
+.work-rail-label {
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+  white-space: nowrap;
+  writing-mode: vertical-rl;
+}
+
+.walk-ticks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-block-start: var(--s-space-8);
+}
+
+.walk-tick {
+  display: block;
+  inline-size: 0.625rem;
+  block-size: 2px;
+  background: var(--s-border-strong);
+}
+
+.walk-tick[data-read] {
+  background: var(--s-success);
+}
+
+.walk-tick[data-kind="place"] {
+  background: color-mix(in oklch, var(--s-warning) 55%, transparent);
+}
+
+.walk-tick[data-current] {
+  inline-size: 0.875rem;
+  background: var(--s-warning);
+}
+
+.walk-ticks-gap {
+  block-size: var(--s-space-8);
+}
+
+.walk-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 0;
+}
+
+.walk-scroll {
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.walk-column {
+  display: grid;
+  gap: var(--s-space-24);
+  inline-size: min(100%, 72rem);
+  margin-inline: auto;
+  padding: var(--s-space-16) var(--s-space-24) 6rem;
+}
+
+.walk-prose {
+  inline-size: 100%;
+  max-inline-size: 58rem;
+  margin-inline: auto;
+}
+
+.walk-section {
+  display: grid;
+  gap: var(--s-space-12);
+}
+
+.walk-section h3,
+.walk-layer-head h3 {
+  margin: 0;
+  font-size: var(--s-size-base);
+  font-weight: var(--s-weight-semibold);
+}
+
+.walk-section h4 {
+  margin: 0 0 var(--s-space-4);
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-medium);
+}
+
+.walk-section p,
+.walk-layer-head p {
+  margin: 0;
+}
+
+.walk-code {
+  font-family: var(--s-code-font-family);
+  font-size: var(--s-code-font-size);
+}
+
+.walk-before-after {
+  inline-size: 100%;
+  border-collapse: collapse;
+  font-size: var(--s-size-sm);
+}
+
+.walk-before-after th,
+.walk-before-after td {
+  padding: var(--s-space-8);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border-muted);
+  text-align: start;
+  vertical-align: top;
+}
+
+.walk-before-after thead th {
+  border: 0;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+}
+
+.walk-before-after tbody th {
+  inline-size: 22%;
+  color: var(--s-text-secondary);
+  font-weight: var(--s-weight-normal);
+}
+
+/* Places to look: one name everywhere, each numbered in orange as its mark in the code is. */
+.walk-places {
+  display: grid;
+  gap: var(--s-space-12);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.walk-places li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--s-space-12);
+  align-items: start;
+}
+
+.place-number {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  min-inline-size: 1.25rem;
+  block-size: 1.25rem;
+  padding-inline: 2px;
+  border: var(--s-border-thin) var(--s-border-style) var(--s-warning);
+  color: var(--s-warning);
+  font-size: var(--s-size-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--s-weight-semibold);
+}
+
+.walk-places li[data-current] .place-number,
+.walk-nav button[aria-current="true"] .place-number {
+  background: var(--s-warning);
+  color: var(--s-background);
+}
+
+.place-title {
+  font-weight: var(--s-weight-medium);
+}
+
+.place-reason {
+  font-size: var(--s-size-sm);
+}
+
+.place-evidence {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.walk-link,
+.decide-edit {
+  min-block-size: var(--s-control-height-sm);
+  padding: 0 var(--s-space-4);
+  border: 0;
+  background: none;
+  color: var(--s-text-secondary);
+  font-family: var(--s-code-font-family);
+  font-size: var(--s-size-xs);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.decide-edit {
+  font-family: inherit;
+}
+
+.walk-link:hover,
+.decide-edit:hover {
+  color: var(--s-text);
+}
+
+/* A place's reason, or a draft comment, under its lines in the code. */
+.place-card,
+.draft-card {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: var(--s-space-4) var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  border-inline-start: 2px solid var(--s-warning);
+  background: var(--s-surface);
+  font-family: var(--s-font-body);
+  font-size: var(--s-size-sm);
+  white-space: normal;
+}
+
+.draft-card {
+  border-inline-start-color: var(--s-border-strong);
+}
+
+.place-card p,
+.draft-card p {
+  margin: 0;
+}
+
+.place-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.place-card-head .place-title {
+  flex: 1;
+}
+
+.draft-card-head {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.draft-card:not([data-included]) .pt-markdown {
+  color: var(--s-text-muted);
+}
+
+/* Calls before and after: green new, red struck removed, changed shows was → now; each with its word. */
+.flow {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.flow p {
+  margin: 0;
+}
+
+.flow-input-label {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.flow-canvas {
+  overflow-x: auto;
+  padding-block-end: var(--s-space-4);
+}
+
+.flow-diagram {
+  display: block;
+  font-family: var(--s-code-font-family);
+  font-size: 12px;
+}
+
+.flow-actor line {
+  stroke: var(--s-border-strong);
+  stroke-dasharray: 3 4;
+}
+
+.flow-actor rect {
+  fill: var(--s-surface);
+  stroke: var(--s-border-strong);
+}
+
+.flow-actor text {
+  fill: var(--s-text);
+}
+
+.flow-call line,
+.flow-call path {
+  stroke: var(--s-text-secondary);
+  stroke-width: 1.25;
+}
+
+.flow-call text {
+  fill: var(--s-text);
+}
+
+.flow-hit {
+  fill: transparent;
+}
+
+.flow-call[role="button"] {
+  cursor: pointer;
+}
+
+.flow-call[role="button"]:hover .flow-hit,
+.flow-call:focus-visible .flow-hit {
+  fill: var(--s-surface-elevated);
+}
+
+.flow-call:focus-visible {
+  outline: none;
+}
+
+.flow-call[data-status="added"] :is(line, path) {
+  stroke: var(--s-success);
+}
+
+.flow-call[data-status="added"] .flow-label,
+.flow-call[data-status="added"] .flow-tag,
+.flow-call[data-status="changed"] .flow-label {
+  fill: var(--s-success);
+}
+
+.flow-call[data-status="removed"] :is(line, path) {
+  stroke: var(--s-error);
+  stroke-dasharray: 5 4;
+}
+
+.flow-call[data-status="removed"] text,
+.flow-old {
+  fill: var(--s-error);
+  text-decoration: line-through;
+}
+
+.flow-tag {
+  font-family: var(--s-font-body);
+}
+
+.flow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-space-4) var(--s-space-16);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.flow-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.flow-legend i {
+  inline-size: 1.25rem;
+  block-size: 0;
+  border-block-start: 2px solid var(--s-text-secondary);
+}
+
+.flow-legend i[data-status="added"],
+.flow-legend i[data-status="changed"] {
+  border-color: var(--s-success);
+}
+
+.flow-legend i[data-status="removed"] {
+  border-block-start-style: dashed;
+  border-color: var(--s-error);
+}
+
+.walk-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--s-space-16);
+}
+
+.walk-checks ul,
+.walk-view-summary ul {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+  padding: 0;
+  font-size: var(--s-size-sm);
+  list-style: none;
+}
+
+.walk-checks li {
+  display: flex;
+  gap: var(--s-space-8);
+}
+
+.walk-checks li svg {
+  flex: none;
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+  margin-block-start: 0.15em;
+  color: var(--s-success);
+}
+
+.walk-checks [data-kind="not"] li > span:first-child {
+  color: var(--s-text-muted);
+}
+
+.walk-view-summary {
+  display: grid;
+  gap: var(--s-space-8);
+  padding: var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  font-size: var(--s-size-sm);
+}
+
+.walk-view-summary h4 {
+  margin: 0;
+}
+
+.walk-divider {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-space-12);
+  margin: var(--s-space-8) 0 0;
+  padding-block-start: var(--s-space-12);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
+  font-weight: var(--s-weight-medium);
+}
+
+.walk-layer {
+  display: grid;
+  gap: var(--s-space-12);
+}
+
+.walk-layer-head {
+  display: grid;
+  gap: var(--s-space-4);
+}
+
+.walk-eyebrow {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.walk-note {
+  margin: 0;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+}
+
+.walk-layer-end {
+  display: flex;
+}
+
+/* A layer you read, or one to skip, folds to one line; a click opens it again. */
+.walk-folded {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  inline-size: 100%;
+  min-block-size: var(--s-control-height-sm);
+  padding: var(--s-space-4) 0;
+  border: 0;
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border-muted);
+  background: none;
+  color: var(--s-text-muted);
+  font: inherit;
+  font-size: var(--s-size-sm);
+  text-align: start;
+  cursor: pointer;
+}
+
+.walk-folded-title {
+  min-inline-size: 0;
+  overflow: hidden;
+  color: var(--s-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.walk-folded:hover .walk-folded-title {
+  color: var(--s-text);
+  text-decoration: underline;
+}
+
+.walk-folded-check {
+  display: grid;
+  place-items: center;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  border: var(--s-border-thin) var(--s-border-style) var(--s-success);
+  color: var(--s-success);
+}
+
+.walk-folded-check svg {
+  inline-size: var(--s-space-12);
+  block-size: var(--s-space-12);
+}
+
+/* While j and k step, all but the place you stepped to dims at once; moving the mouse brings it back in 150 ms. */
+.walkthrough :is(.walk-nav, .walk-column > *, .walk-file, .walk-layer-head, .walk-layer-end, .walk-folded, .decide-corner, .decide-bar),
+body :is(.app-toolbar, .sidebar-pane) {
+  transition: opacity var(--s-duration-fast) var(--s-ease-out);
+}
+
+.walkthrough[data-dim] :is(.walk-nav, .walk-column > :not(.walk-layer), .walk-file:not([data-target]), .walk-layer-head, .walk-layer-end, .walk-folded, .decide-corner, .decide-bar),
+body.review-dimming :is(.app-toolbar, .sidebar-pane) {
+  opacity: 0.3;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .walkthrough :is(.walk-nav, .walk-column > *, .walk-file, .walk-layer-head, .walk-layer-end, .walk-folded, .decide-corner, .decide-bar),
+  body :is(.app-toolbar, .sidebar-pane) {
+    transition: none;
+  }
+}
+
+/* The decision waits as one button in the corner, then opens as the bar under the walkthrough. */
+.decide-corner {
+  position: absolute;
+  inset-block-end: var(--s-space-16);
+  inset-inline-end: var(--s-space-24);
+}
+
+.decide-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-8) var(--s-space-16);
+  padding: var(--s-space-8) var(--s-space-16);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  font-size: var(--s-size-sm);
+}
+
+.decide-count {
+  font-weight: var(--s-weight-medium);
+}
+
+.decide-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+  min-block-size: var(--s-control-height-sm);
+  cursor: pointer;
+}
+
+.decide-spacer {
+  flex: 1;
+}
+
+/* All work as a rail while a review is open; the whole list opens beside it, over the review. */
+.sidebar-pane.railed {
+  flex-basis: 2.75rem;
+}
+
+.sidebar-full {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.sidebar-pane.railed .sidebar-full {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: calc(100% + var(--s-border-thin));
+  z-index: 3;
+  inline-size: var(--sidebar-width, var(--s-sidebar-width));
+  border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border-strong);
+  background: var(--s-background);
+  box-shadow: var(--s-shadow-dropdown);
+  visibility: hidden;
+}
+
+.sidebar-pane.railed.list-open .sidebar-full {
+  visibility: visible;
+}
+
+.work-rail {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-space-8);
+  min-block-size: 0;
+  padding-block: var(--s-space-8);
+}
+
+.work-rail-open {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-space-8);
+  inline-size: 2.25rem;
+  padding: var(--s-space-8) 0;
+  border: var(--s-border-thin) var(--s-border-style) transparent;
+  background: none;
+  color: var(--s-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.work-rail-open:hover,
+.work-rail-open[aria-expanded="true"] {
+  border-color: var(--s-border);
+  background: var(--s-surface);
+}
+
+.work-rail-dots {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-block-size: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.work-rail-dot {
+  display: grid;
+  place-items: center;
+  inline-size: var(--s-control-height-sm);
+  block-size: var(--s-space-24);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.work-rail-dot:hover {
+  background: var(--s-surface);
 }

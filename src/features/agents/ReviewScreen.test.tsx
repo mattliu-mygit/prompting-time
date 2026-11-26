@@ -1,9 +1,10 @@
-import { fireEvent, screen, waitFor } from "@testing-library/dom";
+import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { flush } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type { PluginActionRequest } from "../../bridge/types";
 import { actionResult, fixturePlugin, fixtureReviews, fixtureStatus, pageActions } from "../../test/plugins";
 import { axeViolations, render, settle } from "../../test/render";
+import { createReviewViews } from "../review/views";
 import { ReviewScreen } from "./ReviewScreen";
 
 const plugin = fixturePlugin({ actions: [...pageActions, { name: "skip", title: "Skip a review", description: "Marks a review done without submitting it.", confirm: false }] });
@@ -31,6 +32,8 @@ function renderReview(runId: string, reviews: object[] = runs) {
     remove: vi.fn(async () => {}),
     restore: vi.fn(async () => {}),
   };
+  // One store of views for the render: a prop written as a call would make a new one on every read.
+  const views = createReviewViews();
   render(() => (
     <ReviewScreen
       plugin={plugin}
@@ -43,6 +46,8 @@ function renderReview(runId: string, reviews: object[] = runs) {
       onOpenCause={vi.fn()}
       triage={triage}
       onSubmitted={vi.fn()}
+      views={views}
+      onNotice={vi.fn()}
     />
   ));
   return { pluginRequest, onOpenReview, refreshPlugins, triage };
@@ -53,32 +58,38 @@ const click = (name: string) => {
   flush();
 };
 
+/** Opens the header's ⋯ menu and returns its items. */
+async function moreMenu() {
+  fireEvent.click(screen.getByRole("button", { name: "More review actions" }));
+  return within(await screen.findByRole("menu", { name: "More review actions" }));
+}
+
 describe("a review's header", () => {
-  it("shows the newest version with the commit it reviewed, and opens an earlier one from its menu", async () => {
+  it("lists the versions with the commit each reviewed in its ⋯ menu, and opens an earlier one", async () => {
     const { onOpenReview } = renderReview("r2");
-    const menu = screen.getByRole("button", { name: /^Review 2 · 2222222 · Nov 24$/ });
-    fireEvent.click(menu);
-    const versions = await screen.findAllByRole("menuitemradio");
+    const menu = await moreMenu();
+    const versions = menu.getAllByRole("menuitemradio");
     expect(versions.map((item) => [item.textContent, item.getAttribute("aria-checked")])).toEqual([["Review 2 · 2222222 · Nov 24", "true"], ["Review 1 · 1111111 · Nov 23", "false"]]);
     fireEvent.click(versions[1]!);
     await waitFor(() => expect(onOpenReview).toHaveBeenCalledWith("r1"));
   });
 
-  it("opens an earlier version read-only, without Rerun or Skip, and goes back to the newest", () => {
+  it("opens an earlier version read-only, without Rerun or Skip, and goes back to the newest", async () => {
     const { onOpenReview } = renderReview("r1");
-    expect(screen.getByRole("button", { name: /^Review 1 · 1111111 · Nov 23 · read-only$/ })).toBeInTheDocument();
     expect(screen.getByRole("note")).toHaveTextContent("Review 1 of 2, read-only: only the newest review can be submitted.");
-    expect(screen.queryByRole("button", { name: "Rerun review" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Skip" })).not.toBeInTheDocument();
+    const menu = await moreMenu();
+    expect(menu.queryByRole("menuitem", { name: "Rerun review" })).not.toBeInTheDocument();
+    expect(menu.queryByRole("menuitem", { name: "Skip" })).not.toBeInTheDocument();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     click("Open review 2");
     expect(onOpenReview).toHaveBeenCalledWith("r2");
   });
 
   it("says when the pull request has commits after the reviewed one, and reruns it with retry, then offers Run now", async () => {
     const { pluginRequest, refreshPlugins } = renderReview("r2");
-    const banner = screen.getByRole("note");
+    const banner = await screen.findByRole("note");
     expect(banner).toHaveTextContent("New commits since this review · it reviewed 2222222; the pull request is at 3333333.");
-    fireEvent.click(screen.getAllByRole("button", { name: "Rerun review" })[1]!);
+    click("Rerun review");
     expect(await screen.findByText("queued acme/widgets#101 for the next round")).toBeInTheDocument();
     expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "retry", args: ["r2"], confirmedFingerprint: null });
     expect(refreshPlugins).toHaveBeenCalled();
@@ -87,15 +98,16 @@ describe("a review's header", () => {
     expect(pluginRequest).toHaveBeenLastCalledWith({ plugin: "whooper", action: "round", args: [], confirmedFingerprint: null });
   });
 
-  it("skips the review with the skip action, and Undo runs it with --undo", async () => {
+  it("skips the review from its ⋯ menu with the skip action, and Undo runs it with --undo", async () => {
     const { pluginRequest } = renderReview("r2", [{ ...runs[0], pr_head_sha: runs[0]!.head_sha }, runs[1]]);
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
-    click("Skip");
+    fireEvent.click((await moreMenu()).getByRole("menuitem", { name: "Skip" }));
     expect(await screen.findByText("Skipped")).toBeInTheDocument();
     expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "skip", args: ["r2"], confirmedFingerprint: null });
     click("Undo");
     await waitFor(() => expect(pluginRequest).toHaveBeenLastCalledWith({ plugin: "whooper", action: "skip", args: ["r2", "--undo"], confirmedFingerprint: null }));
-    expect(await screen.findByRole("button", { name: "Skip" })).toBeInTheDocument();
+    expect(await moreMenu()).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Skip" })).toBeInTheDocument();
   });
 
   it("offers Retry review for a failed review", async () => {

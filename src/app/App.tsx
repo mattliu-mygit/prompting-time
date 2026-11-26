@@ -1,5 +1,5 @@
-import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
-import { Button, CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon, StatusDot, type Status } from "@prompting-time/ui";
+import { createEffect, createMemo, createSignal, For, Match, onSettled, Show, Switch, untrack } from "solid-js";
+import { Button, ChevronsLeftIcon, ChevronsRightIcon, CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon, StatusDot, type Status } from "@prompting-time/ui";
 import type { MenuBarCommand, PluginSource, ProviderId } from "../bridge/types";
 import { ACTIONS, hasAction, messageOf, runPluginAction } from "../features/agents/actions";
 import { AgentScreen } from "../features/agents/AgentScreen";
@@ -13,6 +13,7 @@ import { blockingCauses, causeKey, needsYou, newestRuns, pluginReviews, reviewKe
 import { ReviewScreen, ReviewStateWords } from "../features/agents/ReviewScreen";
 import { describeAgent, readAgentStatus, readBlocked } from "../features/agents/status";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
+import { createReviewViews, runViewCommand, viewCommands } from "../features/review/views";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
@@ -79,6 +80,12 @@ export function App(props: { store: AppStore }) {
   const [query, setQuery] = createSignal("");
   // Whether the background agents show in the macOS menu bar, which the palette turns off and on.
   const [menuBarEnabled, setMenuBarEnabled] = createSignal(readMenuBarEnabled());
+  // The views of a review the user turned on, for every review; the Views menu and the palette change them.
+  const reviewViews = createReviewViews();
+  // The header row's place for the open review's controls, and whether All work is open beside its rail.
+  const [reviewSlot, setReviewSlot] = createSignal<HTMLElement | null>(null);
+  const [listOpen, setListOpen] = createSignal(false);
+  let railButton: HTMLButtonElement | undefined;
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
@@ -131,6 +138,8 @@ export function App(props: { store: AppStore }) {
     return parentId ? snapshot().conversationsById[parentId] : undefined;
   };
   const overlay = () => narrow() && inspectorOpen();
+  /** While a review is open, All work shrinks to its rail, and opens beside it on a click or ⌘\. */
+  const railed = () => sidebarOpen() && pluginView()?.kind === "review";
   const lifecycleModalOpen = () => creating() || archiveTarget() !== null || installTarget() !== null;
   const paletteAvailable = () => snapshot().phase === "ready" && !overlay() && !lifecycleModalOpen() && !composerModalOpen();
   const workspaceLabel = () => {
@@ -149,12 +158,14 @@ export function App(props: { store: AppStore }) {
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
 
   function selectConversation(id: string) {
+    setListOpen(false);
     setPluginView(null);
     void store.selectConversation(id);
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
 
   function showPlugin(view: PluginView) {
+    setListOpen(false);
     setPluginView(view);
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
@@ -318,6 +329,18 @@ export function App(props: { store: AppStore }) {
     openPlugin(installed.name);
   }
 
+  /**
+   * Opens All work beside its rail, with the focus on the selected row or the search, or closes it
+   * and gives the focus back to the rail's button when the list had it.
+   */
+  function toggleList(open = !listOpen()) {
+    if (open === listOpen()) return;
+    const pane = document.getElementById("work-list");
+    if (!open && pane?.contains(document.activeElement)) railButton?.focus();
+    setListOpen(open);
+    if (open) requestAnimationFrame(() => (pane?.querySelector<HTMLElement>('[role="treeitem"][aria-selected="true"]') ?? pane?.querySelector<HTMLElement>('input[type="search"]'))?.focus());
+  }
+
   /** ⌘J: the next item waiting on you after the selected one, in list order, wrapping around. */
   function jumpToNextWaiting() {
     const items = waiting();
@@ -366,9 +389,17 @@ export function App(props: { store: AppStore }) {
     // ⌘K (or Ctrl+K) toggles the palette and ⌘J (or Ctrl+J) jumps to the next item waiting on you,
     // also while typing. Composition input and held keys do nothing.
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && listOpen() && !event.defaultPrevented && !paletteOpen()) {
+        event.preventDefault();
+        toggleList(false);
+        return;
+      }
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.isComposing || event.keyCode === 229 || event.repeat) return;
       const key = event.key.toLowerCase();
-      if (key === "k" && (paletteOpen() || paletteAvailable())) {
+      if (key === "\\" && railed() && !paletteOpen()) {
+        event.preventDefault();
+        toggleList();
+      } else if (key === "k" && (paletteOpen() || paletteAvailable())) {
         event.preventDefault();
         setPaletteOpen((open) => !open);
       } else if (key === "j" && snapshot().phase === "ready" && !paletteOpen() && !overlay()) {
@@ -377,11 +408,17 @@ export function App(props: { store: AppStore }) {
       }
     };
     window.addEventListener("keydown", onKeyDown);
+    // All work, open beside its rail, closes on a click anywhere else.
+    const onPointerDown = (event: PointerEvent) => {
+      if (listOpen() && !(event.target as Element | null)?.closest?.("#work-pane, .pt-menu-positioner")) toggleList(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
     const stopMenuBar = store.onMenuBarCommand(runMenuBarCommand);
     return () => {
       clearTimeout(noticeTimer);
       query?.removeEventListener("change", updateNarrow);
       window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown);
       stopMenuBar();
     };
   });
@@ -528,6 +565,8 @@ export function App(props: { store: AppStore }) {
               </Show>
             )}
           </Show>
+          {/* The open review's controls: its ⋯ menu, Walkthrough | Diff, and Views (ReviewScreen). */}
+          <div class="toolbar-review" ref={(element: HTMLDivElement) => setReviewSlot(element)} />
           <div class="toolbar-actions">
             <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
               <SearchIcon />
@@ -558,7 +597,24 @@ export function App(props: { store: AppStore }) {
 
         <div class="command-center" inert={lifecycleModalOpen()}>
           <Show when={sidebarOpen()}>
-            <aside id="work-pane" class="sidebar-pane" aria-label="All work" inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
+            <aside id="work-pane" class={["sidebar-pane", { railed: railed(), "list-open": railed() && listOpen() }]} aria-label="All work" inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
+              <Show when={railed()}>
+                <WorkRail
+                  open={listOpen()}
+                  count={waiting().length}
+                  ref={(element) => { railButton = element; }}
+                  onToggle={() => toggleList()}
+                  dots={[
+                    ...snapshot().plugins.items.map((plugin) => {
+                      const state = describeAgent(plugin, snapshot().plugins.statuses[plugin.name]);
+                      return { key: `agent:${plugin.name}`, status: state.status, label: `${plugin.title} · ${state.meta}`, open: () => (state.cause ? showPlugin({ kind: "cause", plugin: plugin.name, cause: state.cause }) : openPlugin(plugin.name)) };
+                    }),
+                    ...needsYouReviews().map(({ plugin, review }) => ({ key: reviewKey(plugin, review.run_id), status: reviewState(review).status, label: `${reviewTitle(review)} · ${reviewState(review).words}`, open: () => openReview(plugin, review.run_id) })),
+                    ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? [])).map((conversation) => ({ key: conversation.id, status: "attention" as Status, label: `${conversation.title} · waiting for you`, open: () => selectConversation(conversation.id) })),
+                  ]}
+                />
+              </Show>
+              <div id="work-list" class="sidebar-full">
               <BackgroundAgents
                 plugins={snapshot().plugins}
                 selected={pluginView()?.kind === "agent" ? selectedPlugin()?.name ?? null : null}
@@ -613,7 +669,8 @@ export function App(props: { store: AppStore }) {
                 onToggle={(id) => store.toggleConversation(id)}
                 onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
               />
-              <SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} />
+              </div>
+              <Show when={!railed()}><SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} /></Show>
             </aside>
           </Show>
 
@@ -636,6 +693,9 @@ export function App(props: { store: AppStore }) {
                             onOpenCause={(cause) => showPlugin({ kind: "cause", plugin: name, cause })}
                             triage={triage(name)}
                             onSubmitted={(runId) => submitted(name, runId)}
+                            views={reviewViews}
+                            headerSlot={reviewSlot()}
+                            onNotice={(text, undo) => notify({ text, action: { label: "Undo", run: undo } })}
                           />
                         )}
                       </Match>
@@ -827,6 +887,7 @@ export function App(props: { store: AppStore }) {
                 current: currentKey() === reviewKey(plugin, review.run_id),
               })),
             },
+            ...viewCommands(reviewViews),
             {
               heading: "Commands",
               items: [
@@ -847,6 +908,7 @@ export function App(props: { store: AppStore }) {
           ]}
           onClose={() => setPaletteOpen(false)}
           onSelect={(id) => {
+            if (runViewCommand(reviewViews, id)) return;
             if (id.startsWith("review:")) {
               const [, plugin = "", ...run] = id.split(":");
               openReview(plugin, run.join(":"));
@@ -889,6 +951,44 @@ function SelectedTimeline(props: { store: AppStore; snapshot: () => AppSnapshot;
         />
       )}
     </Show>
+  );
+}
+
+type RailDot = { key: string; status: Status; label: string; open(): void };
+
+/**
+ * All work as a rail while a review is open: one button, an arrow over "All work · 3 need you" turned
+ * on its side, that opens the whole list beside the rail or closes it, with the arrow turned back;
+ * under it a dot for each background agent and each item that needs you, which opens it. Pointing
+ * opens nothing.
+ */
+function WorkRail(props: { open: boolean; count: number; dots: readonly RailDot[]; ref(element: HTMLButtonElement): void; onToggle(): void }) {
+  return (
+    <nav class="work-rail" aria-label="All work, as a rail">
+      <button
+        ref={props.ref}
+        type="button"
+        class="work-rail-open"
+        aria-expanded={props.open ? "true" : "false"}
+        aria-controls="work-list"
+        title={props.open ? "Close All work (⌘\\)" : "Open All work (⌘\\)"}
+        onClick={() => props.onToggle()}
+      >
+        {props.open ? <ChevronsLeftIcon /> : <ChevronsRightIcon />}
+        <span class="work-rail-label">All work{props.count > 0 ? ` · ${props.count} need${props.count === 1 ? "s" : ""} you` : ""}</span>
+      </button>
+      <ul class="work-rail-dots">
+        <For each={props.dots} keyed={(dot) => dot.key}>
+          {(dot) => (
+            <li>
+              <button type="button" class="work-rail-dot" aria-label={dot().label} title={dot().label} onClick={() => dot().open()}>
+                <StatusDot status={dot().status === "idle" ? "running" : dot().status} />
+              </button>
+            </li>
+          )}
+        </For>
+      </ul>
+    </nav>
   );
 }
 

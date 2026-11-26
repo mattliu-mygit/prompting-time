@@ -183,3 +183,75 @@ export function fixtureShown(runId: string, overrides: Record<string, unknown> =
     ...overrides,
   };
 }
+
+/** An invented two-file patch: a new retry policy in src/retry.rs and the client that starts using it. */
+export const fixturePatch = [
+  "diff --git a/src/retry.rs b/src/retry.rs",
+  "new file mode 100644",
+  "--- /dev/null",
+  "+++ b/src/retry.rs",
+  "@@ -0,0 +1,8 @@",
+  "+pub struct RetryPolicy {",
+  "+    pub attempts: u32,",
+  "+}",
+  "+",
+  "+impl RetryPolicy {",
+  "+    pub fn delay(&self, n: u32) -> u64 {",
+  "+        250 * 2u64.pow(n)",
+  "+    }",
+  "diff --git a/src/client.rs b/src/client.rs",
+  "--- a/src/client.rs",
+  "+++ b/src/client.rs",
+  "@@ -1,5 +1,5 @@",
+  " fn send(body: &[u8]) {",
+  "-    for _ in 0..3 { try_once(body); }",
+  "+    let policy = RetryPolicy { attempts: 5 };",
+  "+    retry(&policy, body);",
+  " }",
+  " ",
+  "",
+].join("\n");
+
+/**
+ * What show-review prints for a run Whooper wrote an overview of: two layers (the policy, then the
+ * client, to skim), two places to look, the calls before and after, two commits after the reviewed
+ * one, and a file that usually changes with the client. `overrides` replace its top-level fields.
+ */
+export function fixtureWalkthrough(runId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ...fixtureShown(runId),
+    findings: { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Small and tested." }, findings: [{ id: "1", path: "src/retry.rs", line: 7, side: "RIGHT", title: "The delay overflows", draft: "**nit:** `2u64.pow` overflows after 64 attempts.", kind: "nit" }] },
+    drafts: { event: "APPROVE", message: "", findings: { "1": { included: true } } },
+    diff: fixturePatch,
+    overview: {
+      summary: "Uploads retry with a `RetryPolicy` instead of a fixed loop.",
+      verdict_reason: "The policy is small and its tests pass.",
+      before_after: [{ label: "A failed upload", before: "tries 3 times at once", after: "tries 5 times, waiting longer each time" }],
+      places: [
+        { id: "p1", title: "The delay doubles without a cap", reason: "After 20 attempts the delay is hours.", evidence: { kind: "read", detail: "read `delay`" }, path: "src/retry.rs", start_line: 6, end_line: 8 },
+        { id: "p2", title: "Five attempts, not three", reason: "Uploads now try twice more.", evidence: { kind: "ran", detail: "ran the client tests" }, path: "src/client.rs", start_line: 2, end_line: 3 },
+      ],
+      layers: [
+        { id: "l1", title: "The retry policy", intent: "A new type that says how often to retry.", read_hint: "read", ranges: [{ path: "src/retry.rs", start_line: 1, end_line: 8 }] },
+        { id: "l2", title: "The client uses it", intent: "The loop gives way to the policy.", read_hint: "skim", ranges: [{ path: "src/client.rs", start_line: 1, end_line: 4 }] },
+      ],
+      flow: {
+        title: "A failed upload",
+        input: "send(b\"x\") while the server answers 503",
+        calls: [
+          { from: "client", to: "server", label: "try_once", status: "removed", old_label: null, path: null, line: null },
+          { from: "client", to: "policy", label: "retry", status: "added", old_label: null, path: "src/client.rs", line: 3 },
+          { from: "policy", to: "policy", label: "delay(n)", status: "changed", old_label: "sleep(0)", path: "src/retry.rs", line: 7 },
+        ],
+      },
+      checked: ["Ran the client tests at head and base"],
+      not_checked: ["Didn't run the upload integration suite"],
+    },
+    commits_since_review: [
+      { sha: "aaaa1111bbbb", title: "client: log each retry", author: "sam-fixture", at: "2026-11-26T16:00:00Z", files: ["src/client.rs"] },
+      { sha: "cccc2222dddd", title: "docs: retries", author: "sam-fixture", at: "2026-11-26T17:00:00Z", files: ["README.md"] },
+    ],
+    co_change: [{ path: "src/server.rs", partner: "src/client.rs", ratio: 0.8, commits: 10 }],
+    ...overrides,
+  };
+}
