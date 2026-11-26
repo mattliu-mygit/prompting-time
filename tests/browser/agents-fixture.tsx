@@ -3,12 +3,14 @@ import type { AppApi, AppStore } from "../../src/app/store";
 import type { PluginActionRequest, PluginActionResult, PluginSnapshot } from "../../src/bridge/types";
 import { ConfirmActionDialog } from "../../src/features/agents/ConfirmActionDialog";
 import { answerReviewAction, dockerCause, fixtureReviewEntries, fixtureRounds, fixtureSubmitRequest, markFixtureSubmitted, reviewActions } from "./reviews-fixture";
+import { answerV2Action, V2_PLUGIN, v2Plugin } from "./status-v2-fixture";
 
 /**
  * `?agents=1`: an invented Whooper under Background agents, running with its next poll at 3:45 PM.
  * `?agents=missing` shows it stopped for a missing program; `?agents=confirm` opens the submit
  * confirmation over the app, and `?agents=mentions` opens it on a refusal for an @-mention first.
  * `?agents=reviews` lists invented reviews, which open in the plugin page the dev server serves.
+ * `?agents=v2` adds an invented plugin that prints status format 2 (status-v2-fixture.ts).
  */
 export const agentsScenario = new URLSearchParams(location.search).get("agents");
 
@@ -103,6 +105,7 @@ const plugin: PluginSnapshot = {
   ],
   settingsError: null,
   process: agentsScenario === "missing" ? { kind: "notRunning", exit: null } : { kind: "started", pid: 4242 },
+  status: null,
 };
 
 const nextPoll = new Date();
@@ -126,6 +129,7 @@ const logLines = Array.from({ length: 40 }, (_, index) => `15:${String(index).pa
 const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides });
 
 async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionResult> {
+  if (sent.plugin === V2_PLUGIN) return answerV2Action(sent);
   const answered = agentsScenario === "reviews" ? answerReviewAction(sent) : null;
   if (answered) return answered;
   if (agentsScenario === "reviews" && sent.action === "submit") {
@@ -173,7 +177,10 @@ async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionRes
 export function withAgentsFixture(base: AppApi): AppApi {
   return {
     ...base,
-    listPlugins: async () => [{ ...plugin, process: running ? plugin.process : { kind: "notRunning" as const, exit: null } }],
+    listPlugins: async () => [
+      { ...plugin, process: running ? plugin.process : { kind: "notRunning" as const, exit: null } },
+      ...(agentsScenario === "v2" ? [v2Plugin] : []),
+    ],
     stopPlugin: async () => {
       running = false;
       return { ...plugin, process: { kind: "notRunning" as const, exit: null } };

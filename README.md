@@ -282,6 +282,20 @@ checks, starts, and stops them, and the window shows them.
   also shows "Review N · <short sha> · <time>" with the pull request's other versions
   (an earlier one is read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run>
   [--undo]`), Remove, and a banner when the pull request has commits after the reviewed one.
+- **Status format 2.** A plugin whose manifest has a `status` key, `{"format": 2, "groups": [{"id",
+  "title", "needs_you", "order", "folded"?}], "item_actions": [...]}`, prints the format in
+  [`docs/plugin-status-v2.schema.json`](docs/plugin-status-v2.schema.json) from its `status` action:
+  its row's words and dot (`agent`), problems that stop every job (`blockers`), and at most 50
+  `items`, each in one of the declared groups. Group IDs are unique and lowercase-kebab, and
+  `item_actions` name declared actions. The pinned row and the menu bar show the plugin's words and
+  dot, and a blocker puts the dot on the menu bar's icon. All work lists the blockers first under
+  Needs you, then the items of each group marked `needs_you` after the reviews, and each other group
+  in a section of its own, open unless `folded`, ordered by `order` with each group's items newest
+  first; Command-J and the menu bar's count include them. A row's ⋯ menu, opened by a click, lists
+  the item's `actions` and runs the chosen one as `<command> --item <id>`, through the confirmation
+  for an action marked `confirm`; a blocker's `action` runs with no extra arguments. An item or
+  blocker that does not fit is left out, as are row actions the manifest does not allow. Opening an
+  item shows the plugin's screen until page protocol 2 can open its `route`.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a

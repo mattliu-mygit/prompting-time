@@ -80,6 +80,16 @@ missing program. `?agents=confirm` opens the submit confirmation over the app wi
 invented request, and `?agents=mentions` opens it on Whooper's refusal for an @-mention
 first. The fixture answers in browser memory and runs no plugin.
 
+## Status format 2
+
+Use `?agents=v2` (with `?work=1` for chats too) for an invented "Fixture runs" plugin beside
+Whooper that prints status format 2. Its pinned row reads "Running 1 evaluation". Needs you starts
+with the red blocker "Codex is signed out", then Run failed (two runs) and Review needed (one);
+Running starts open and Done, folded in the stack, holds six nightly runs. Command-J steps through
+the blocker and those three items. Each row's ⋯ menu opens on a click: Rerun moves a run to Running,
+Delete run opens the confirmation with the invented request and deletes the run after Confirm, and
+the blocker's Check providers clears it. Everything answers in browser memory.
+
 ## Plugin pages
 
 Use `?agents=reviews` for invented Whooper reviews. Whooper's pinned row reads "Can't review ·
