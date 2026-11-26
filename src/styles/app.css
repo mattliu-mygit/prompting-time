@@ -938,6 +938,11 @@ body {
   line-height: var(--s-code-line-height);
 }
 
+/* Long lines scroll inside the box instead of widening the dialog around it. */
+.plugin-preview {
+  contain: inline-size;
+}
+
 .plugin-log,
 .plugin-preview-text {
   white-space: pre-wrap;
@@ -1048,6 +1053,10 @@ body {
 .plugin-refusal {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.plugin-confirm-note {
+  color: var(--s-warning);
 }
 
 .install-path code {
