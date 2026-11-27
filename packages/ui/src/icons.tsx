@@ -37,12 +37,6 @@ export const ExternalIcon = () => (
     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
   </Icon>
 );
-export const PanelLeftIcon = () => (
-  <Icon>
-    <rect width="18" height="18" x="3" y="3" rx="2" />
-    <path d="M9 3v18" />
-  </Icon>
-);
 export const PanelRightIcon = () => (
   <Icon>
     <rect width="18" height="18" x="3" y="3" rx="2" />

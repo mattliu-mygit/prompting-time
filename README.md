@@ -79,11 +79,13 @@ high. Text is Katagami Text and code Katagami Mono. The new-window default is
 supported, with the inspector opening as an overlay when it would crowd the chat.
 
 A single compact header holds the conversation title, provider, current status,
-and pane controls. **More → Archive conversation** keeps archival out of the main
-reading area. The sidebar, **All work**, starts with **Search work and chats**, **New chat**, and the
+and the inspector's toggle. **More → Archive conversation** keeps archival out of the main
+reading area. The sidebar, **All work**, starts with **«** (**Fold All work**), **Search work and chats**, **New chat**, and the
 status filter; then **Needs you**, shown only while something needs you; then the chats;
-and at its bottom a small **Plugins** section with **Add plugin…**. New chat moves into
-the header when the sidebar is hidden or folded to its rail, and the palette's **Search**
+and at its bottom a small **Plugins** section with **Add plugin…**. **«** folds the sidebar to a narrow
+rail, "» All work" in words turned 90 degrees, and a click on the rail unfolds it; a fold you
+choose stays while you move between chats. New chat moves into
+the header while the sidebar is folded, and the palette's **Search**
 stays in the header. The list's sections work like VS Code's sidebar panes: every
 section's heading, with its count, stays on screen, the folded sections stack at the
 bottom, and the open ones share the space above them, each scrolling on its own. Drag the sidebar's right edge, or focus it and use
@@ -141,7 +143,7 @@ it is not saved across app restarts.
 
 Press **⌘K** (or **Ctrl+K**) or use **Search** to find active conversations by title
 or project and run common commands. The same palette can create a conversation,
-toggle either side pane, or focus the message input. Arrow keys select, Enter opens
+fold or unfold All work, toggle the inspector, or focus the message input. Arrow keys select, Enter opens
 or runs the selection, and Escape returns to where you were. Search covers
 conversation names/projects and loaded child conversations, not message contents.
 Composition input and held Enter keys do not accidentally submit messages.
@@ -193,7 +195,8 @@ checks, starts, and stops them, and the window shows them.
   (`round`), Pause or Resume (`pause`, `resume`; Resume while the status says `paused`), Stop or
   Start, Settings, and Logs. While a plugin shows, the All work sidebar folds to a narrow rail, "»
   All work · N waiting on you" in words turned 90 degrees (without the count when no chat waits);
-  a click on the rail unfolds it and leaves the plugin in place until a chat is chosen. The
+  a click on the rail unfolds it and leaves the plugin in place until a chat is chosen, and **«**
+  at the sidebar's top folds it again. The
   window's header then shows the plugin's name, its status words, and a ⋯ menu with the same
   controls; Settings and Logs open in the main view as the tabs Logs (the end of its log, with
   search and copy) and Settings (where it came from, who runs it, the programs it needs, and its

@@ -367,11 +367,11 @@ conversation name. The header remains one row and tree controls stay reachable.
 Navigate to the child and back through its ancestor path using Enter; the parent
 draft, preview, and reading position must survive the child visit.
 
-Exercise Filter by keyboard, select Completed, hide/show the sidebar, and verify
-the radio selection persists. Search (the palette) stays in the header, and New chat
-must appear only once, moving to the header while the sidebar is hidden. Open More → Archive and cancel: focus returns
+Exercise Filter by keyboard, select Completed, fold the sidebar with « and unfold it from its
+rail, and verify the radio selection persists. Search (the palette) stays in the header, and New chat
+must appear only once, moving to the header while the sidebar is folded. Open More → Archive and cancel: focus returns
 to More. Open Command-K from More and cancel: no stale menu item receives focus.
-From Search, use the palette to hide the sidebar, then reopen it from header
+From Search, use the palette to fold the sidebar, then reopen it from header
 Search; focus should return to the moved trigger. Repeat creation cancellation
 and successful synthetic creation from both placements.
 

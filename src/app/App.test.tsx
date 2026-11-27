@@ -19,7 +19,7 @@ const press = (key: string, init: KeyboardEventInit = {}) => {
 const narrowQuery = (query: string) => query === "(max-width: 72rem)";
 /** The aria-label of the sidebar row shown as selected, read while the sidebar is folded to its rail too. */
 const selectedRow = () => document.querySelector('.all-work [role=treeitem][aria-selected="true"]')?.getAttribute("aria-label");
-/** The rail the sidebar folds to while a plugin shows; a click unfolds the sidebar. */
+/** The rail the sidebar folds to, as while a plugin shows; a click unfolds the sidebar. */
 const rail = () => document.querySelector<HTMLButtonElement>(".sidebar-rail");
 let stores: AppStore[] = [];
 
@@ -390,11 +390,19 @@ describe("the Plugins section", () => {
     click(await screen.findByRole("menuitem", { name: "Open page" }));
     expect(await screen.findByTitle("Whooper's page")).toBeInTheDocument();
 
-    // The rail unfolds the sidebar; the plugin stays until a chat is chosen.
+    // The rail unfolds the sidebar; the plugin stays until a chat is chosen. « at the sidebar's top
+    // folds it again, and focus follows to whichever control is on screen.
     click(screen.getByRole("button", { name: "All work" }));
     expect(screen.getByRole("complementary", { name: "All work" })).toBeVisible();
     expect(rail()).toBeNull();
     expect(screen.getByTitle("Whooper's page")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Fold All work" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Fold All work" })).toHaveTextContent("«");
+    click(screen.getByRole("button", { name: "Fold All work" }));
+    expect(screen.queryByRole("complementary", { name: "All work" })).not.toBeInTheDocument();
+    await waitFor(() => expect(rail()).toHaveFocus());
+    expect(screen.getByTitle("Whooper's page")).toBeInTheDocument();
+    click(rail()!);
     expect(screen.getByRole("treeitem", { name: /Auth refactor/ })).toHaveAttribute("aria-selected", "false");
     click(screen.getByRole("treeitem", { name: /Auth refactor/ }));
     await waitFor(() => expect(screen.queryByTitle("Whooper's page")).not.toBeInTheDocument());
@@ -1033,6 +1041,28 @@ describe("command palette", () => {
     expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeVisible();
   });
 
+  it("keeps All work folded while choosing another chat, until « or ⌘K unfolds it", async () => {
+    const { store } = await openWorkspace();
+    click(screen.getByRole("button", { name: "Fold All work" }));
+    press("k");
+    let input = await combobox();
+    fireEvent.input(input, { target: { value: "Beta" } });
+    flush();
+    fireEvent.keyDown(input, { key: "Enter" });
+    flush();
+    await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("b"));
+    expect(screen.queryByRole("complementary", { name: "All work" })).not.toBeInTheDocument();
+    expect(rail()).toBeVisible();
+    press("k");
+    input = await combobox();
+    fireEvent.input(input, { target: { value: "unfold all work" } });
+    flush();
+    fireEvent.keyDown(input, { key: "Enter" });
+    flush();
+    expect(await screen.findByRole("complementary", { name: "All work" })).toBeVisible();
+    expect(rail()).toBeNull();
+  });
+
   it("does not open while the workspace is loading", async () => {
     let finish!: (value: { items: ConversationSummary[]; nextCursor: null }) => void;
     renderApp(createApi({ listConversations: vi.fn(() => new Promise<{ items: ConversationSummary[]; nextCursor: null }>((resolve) => { finish = resolve; })) }));
@@ -1068,7 +1098,7 @@ describe("App", () => {
     expect(api.listConversations).toHaveBeenCalledOnce();
   });
 
-  it("filters by status and hides and shows All work", async () => {
+  it("filters by status and folds All work to its rail and back", async () => {
     renderApp(createApi());
     await screen.findByRole("treeitem", { name: /Auth refactor/ });
     const filter = screen.getByRole("button", { name: "Filter conversations: All statuses" });
@@ -1082,10 +1112,10 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByRole("treeitem", { name: /Auth refactor/ })).not.toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Filter conversations: Completed" })).toBeVisible();
-    click(screen.getByRole("button", { name: "Hide All work" }));
-    expect(screen.getByRole("button", { name: "Show All work" })).toHaveAttribute("aria-expanded", "false");
+    click(screen.getByRole("button", { name: "Fold All work" }));
+    expect(screen.getByRole("button", { name: "All work" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("complementary", { name: "All work" })).not.toBeInTheDocument();
-    click(screen.getByRole("button", { name: "Show All work" }));
+    click(screen.getByRole("button", { name: "All work" }));
     click(screen.getByRole("button", { name: "Filter conversations: Completed" }));
     expect(await screen.findByRole("menuitemradio", { name: "Completed" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("menuitemradio", { name: "All statuses" })).toHaveAttribute("aria-checked", "false");
@@ -1601,13 +1631,13 @@ describe("creating and archiving", () => {
     expect(await screen.findByRole("separator", { name: "Resize All work" })).toHaveAttribute("aria-valuenow", "366");
   });
 
-  it("keeps Search in the header and moves New chat there when All work is hidden", async () => {
+  it("keeps Search in the header and moves New chat there when All work is folded", async () => {
     renderApp(createApi());
     await screen.findByRole("heading", { level: 1, name: "Auth refactor" });
     expect(screen.getAllByRole("button", { name: "New chat" })).toHaveLength(1);
     expect(screen.getByRole("complementary", { name: "All work" })).toContainElement(screen.getByRole("button", { name: "New chat" }));
     expect(screen.getByRole("banner")).toContainElement(screen.getByRole("button", { name: "Search (⌘K)" }));
-    click(screen.getByRole("button", { name: "Hide All work" }));
+    click(screen.getByRole("button", { name: "Fold All work" }));
     expect(screen.getAllByRole("button", { name: "Search (⌘K)" })).toHaveLength(1);
     const create = screen.getByRole("button", { name: "New chat" });
     expect(screen.getByRole("banner")).toContainElement(create);

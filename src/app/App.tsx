@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack } from "solid-js";
-import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelLeftIcon, PanelRightIcon, PlusIcon, SearchIcon, StatusDot, type Status } from "@prompting-time/ui";
+import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, IconButton, Menu, PanelRightIcon, PlusIcon, SearchIcon, StatusDot, type Status } from "@prompting-time/ui";
 import type { MenuBarCommand, PluginSource, ProviderId } from "../bridge/types";
 import { ACTIONS, messageOf, runPluginAction } from "../features/agents/actions";
 import { AgentScreen } from "../features/agents/AgentScreen";
@@ -62,9 +62,11 @@ export function App(props: { store: AppStore }) {
   const store = untrack(() => props.store);
   const snapshot = createSnapshot(store);
   const timelineViews = new Map<string, TimelineViewState>();
+  // The sidebar folds to its rail in two ways: the user folds it, which lasts until they unfold it,
+  // or a plugin shows, which lasts until the user unfolds it or chooses a chat.
   const [sidebarOpen, setSidebarOpen] = createSignal(true);
-  // Whether the open sidebar shows only its rail, as while a plugin shows; a click on the rail or choosing a chat unfolds it.
   const [railed, setRailed] = createSignal(false);
+  const folded = () => !sidebarOpen() || railed();
   const [sidebarWidth, setSidebarWidth] = createSignal(readSidebarWidth());
   const [inspectorOpen, setInspectorOpen] = createSignal(false);
   const [narrow, setNarrow] = createSignal(typeof window.matchMedia === "function" && window.matchMedia(NARROW_INSPECTOR).matches);
@@ -94,6 +96,8 @@ export function App(props: { store: AppStore }) {
   let inspectorTrigger: HTMLButtonElement | undefined;
   let newConversationTrigger: HTMLButtonElement | undefined;
   let inspectorClose: HTMLButtonElement | undefined;
+  let rail: HTMLButtonElement | undefined;
+  let foldTrigger: HTMLButtonElement | undefined;
 
   const selected = createMemo(() => {
     const id = snapshot().selectedConversationId;
@@ -165,6 +169,14 @@ export function App(props: { store: AppStore }) {
     return count > 0 ? `All work · ${count} waiting on you` : "All work";
   };
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
+
+  /** « and ⌘K fold the sidebar to its rail: while a plugin shows, until a chat is chosen, as opening the plugin did; otherwise until the user unfolds it. */
+  const fold = () => (pluginView() ? setRailed(true) : setSidebarOpen(false));
+  /** The rail and ⌘K unfold the sidebar. */
+  function unfold() {
+    setRailed(false);
+    setSidebarOpen(true);
+  }
 
   function selectConversation(id: string) {
     setPluginView(null);
@@ -477,14 +489,6 @@ export function App(props: { store: AppStore }) {
     <Show when={snapshot().phase === "ready"} fallback={<StartupState store={store} snapshot={snapshot()} />}>
       <div class="app-shell" inert={composerModalOpen()}>
         <header class="app-toolbar" inert={overlay() || lifecycleModalOpen()}>
-          <IconButton
-            label={sidebarOpen() ? "Hide All work" : "Show All work"}
-            aria-expanded={sidebarOpen() ? "true" : "false"}
-            aria-controls="work-pane"
-            onClick={() => setSidebarOpen((open) => !open)}
-          >
-            <PanelLeftIcon />
-          </IconButton>
           <Show
             when={selectedPlugin()}
             fallback={
@@ -512,7 +516,7 @@ export function App(props: { store: AppStore }) {
             <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
               <SearchIcon />
             </IconButton>
-            <Show when={!sidebarOpen() || railed()}>{newConversationButton()}</Show>
+            <Show when={folded()}>{newConversationButton()}</Show>
             <IconButton
               ref={inspectorTrigger}
               label={inspectorOpen() ? "Hide inspector" : "Show inspector"}
@@ -550,71 +554,93 @@ export function App(props: { store: AppStore }) {
         </header>
 
         <div class="command-center" inert={lifecycleModalOpen()}>
-          <Show when={sidebarOpen()}>
-            {/* While a plugin shows, the sidebar folds to this rail; the sidebar stays mounted, hidden, so it unfolds as it was. */}
-            <Show when={railed()}>
-              <button type="button" class="sidebar-rail" aria-controls="work-pane" aria-expanded="false" inert={overlay()} onClick={() => setRailed(false)}>
-                <span aria-hidden="true">»</span>
-                <span class="sidebar-rail-label">{railLabel()}</span>
-              </button>
-            </Show>
-            <aside id="work-pane" class="sidebar-pane" aria-label="All work" hidden={railed()} inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
-              <div class="sidebar-find">
-                <label class="sidebar-search">
-                  <SearchIcon />
-                  <input
-                    type="search"
-                    class="pt-input"
-                    placeholder="Search work and chats"
-                    aria-label="Search work and chats"
-                    value={query()}
-                    onInput={(event) => setQuery(event.currentTarget.value)}
-                    onKeyDown={onSearchKeyDown}
-                  />
-                </label>
-                {newConversationButton()}
-                <Menu
-                  label={filterLabel()}
-                  icon={<FilterIcon />}
-                  items={statusOptions.map((option) => ({ ...option, type: "radio" as const, checked: option.value === snapshot().statusFilter }))}
-                  onSelect={(value) => store.setStatusFilter(value as StatusFilter)}
-                />
-              </div>
-              <Show when={snapshot().queuedCount > 0}><p class="queue-count">{snapshot().queuedCount} queued</p></Show>
-              <AllWork
-                query={query()}
-                selectedEntry={pluginView() ? currentKey() : null}
-                pluginWork={sidebarPluginWork()}
-                actionTitle={(plugin, action) => pluginNamed(plugin)?.actions.find((item) => item.name === action)?.title ?? action}
-                onOpenEntry={openEntry}
-                onEntryAction={(plugin, action, args, label) => void runEntryAction(plugin, action, args, label)}
-                hidden={hidden()}
-                onHide={hide}
-                onShowAgain={showAgain}
-                filter={filter()}
-                onFilter={chooseFilter}
-                pluginTitle={(plugin) => pluginNamed(plugin)?.title ?? plugin}
-                conversations={selectVisibleConversations(snapshot())}
-                conversationsById={snapshot().conversationsById}
-                childPagesById={snapshot().childPagesById}
-                expandedById={snapshot().expandedById}
-                selectedId={selectedPlugin() ? null : selectedId()}
-                selectedPath={snapshot().selectedPath}
-                onSelect={selectConversation}
-                onToggle={(id) => store.toggleConversation(id)}
-                onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
-              />
-              <PluginsSection
-                plugins={snapshot().plugins}
-                selected={currentKey() === null ? selectedPlugin()?.name ?? null : null}
-                pending={agentPending()}
-                onSelect={openHome}
-                onAction={(name, action) => void runAgentAction(name, action)}
-                onInstall={(kind) => void startInstall(kind)}
-              />
-              <SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} />
-            </aside>
+          {/* The sidebar folds to this rail; it stays mounted, hidden, so it unfolds as it was. */}
+          <Show when={folded()}>
+            <button
+              type="button"
+              ref={rail}
+              class="sidebar-rail"
+              aria-controls="work-pane"
+              aria-expanded="false"
+              inert={overlay()}
+              onClick={() => {
+                unfold();
+                queueMicrotask(() => foldTrigger?.focus());
+              }}
+            >
+              <span aria-hidden="true">»</span>
+              <span class="sidebar-rail-label">{railLabel()}</span>
+            </button>
           </Show>
+          <aside id="work-pane" class="sidebar-pane" aria-label="All work" hidden={folded()} inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
+            <div class="sidebar-find">
+              <IconButton
+                ref={foldTrigger}
+                class="sidebar-fold"
+                label="Fold All work"
+                aria-controls="work-pane"
+                aria-expanded="true"
+                onClick={() => {
+                  fold();
+                  queueMicrotask(() => rail?.focus());
+                }}
+              >
+                <span aria-hidden="true">«</span>
+              </IconButton>
+              <label class="sidebar-search">
+                <SearchIcon />
+                <input
+                  type="search"
+                  class="pt-input"
+                  placeholder="Search work and chats"
+                  aria-label="Search work and chats"
+                  value={query()}
+                  onInput={(event) => setQuery(event.currentTarget.value)}
+                  onKeyDown={onSearchKeyDown}
+                />
+              </label>
+              {newConversationButton()}
+              <Menu
+                label={filterLabel()}
+                icon={<FilterIcon />}
+                items={statusOptions.map((option) => ({ ...option, type: "radio" as const, checked: option.value === snapshot().statusFilter }))}
+                onSelect={(value) => store.setStatusFilter(value as StatusFilter)}
+              />
+            </div>
+            <Show when={snapshot().queuedCount > 0}><p class="queue-count">{snapshot().queuedCount} queued</p></Show>
+            <AllWork
+              query={query()}
+              selectedEntry={pluginView() ? currentKey() : null}
+              pluginWork={sidebarPluginWork()}
+              actionTitle={(plugin, action) => pluginNamed(plugin)?.actions.find((item) => item.name === action)?.title ?? action}
+              onOpenEntry={openEntry}
+              onEntryAction={(plugin, action, args, label) => void runEntryAction(plugin, action, args, label)}
+              hidden={hidden()}
+              onHide={hide}
+              onShowAgain={showAgain}
+              filter={filter()}
+              onFilter={chooseFilter}
+              pluginTitle={(plugin) => pluginNamed(plugin)?.title ?? plugin}
+              conversations={selectVisibleConversations(snapshot())}
+              conversationsById={snapshot().conversationsById}
+              childPagesById={snapshot().childPagesById}
+              expandedById={snapshot().expandedById}
+              selectedId={selectedPlugin() ? null : selectedId()}
+              selectedPath={snapshot().selectedPath}
+              onSelect={selectConversation}
+              onToggle={(id) => store.toggleConversation(id)}
+              onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
+            />
+            <PluginsSection
+              plugins={snapshot().plugins}
+              selected={currentKey() === null ? selectedPlugin()?.name ?? null : null}
+              pending={agentPending()}
+              onSelect={openHome}
+              onAction={(name, action) => void runAgentAction(name, action)}
+              onInstall={(kind) => void startInstall(kind)}
+            />
+            <SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} />
+          </aside>
 
           <main class="workspace-pane" aria-label={workspaceLabel()} inert={overlay()}>
             <Show when={selectedPlugin()?.name} keyed fallback={conversationWorkspace()}>
@@ -817,7 +843,7 @@ export function App(props: { store: AppStore }) {
                 { id: "command:new", label: "New chat" },
                 { id: "command:next-waiting", label: "Next item waiting on you (⌘J)", disabled: waiting().length === 0 },
                 { id: "command:parent", label: "Go to parent conversation", disabled: !parent() },
-                { id: "command:sidebar", label: sidebarOpen() ? "Hide All work" : "Show All work" },
+                { id: "command:sidebar", label: folded() ? "Unfold All work" : "Fold All work" },
                 ...INSTALL_ITEMS.map((item) => ({ id: `command:install-${item.value}`, label: `Add plugin: ${item.label}` })),
                 { id: "command:menu-bar", label: menuBarEnabled() ? "Hide plugins from the menu bar" : "Show plugins in the menu bar" },
                 { id: "command:inspector", label: inspectorOpen() ? "Hide inspector" : "Show inspector" },
@@ -843,7 +869,7 @@ export function App(props: { store: AppStore }) {
             else if (id === "command:parent") {
               const target = parent();
               if (target) selectConversation(target.id);
-            } else if (id === "command:sidebar") setSidebarOpen((open) => !open);
+            } else if (id === "command:sidebar") (folded() ? unfold : fold)();
             else if (id === "command:inspector") setInspectorOpen((open) => !open);
             else if (id === "command:menu-bar") {
               // Solid applies the write on its next flush, so read the new value first.
