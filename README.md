@@ -301,9 +301,22 @@ checks, starts, and stops them, and the window shows them.
   decision waits as Decide… until clicked or the end is reached, then sets Comment or Approve with
   `draft <run>` and submits through the confirmation. Diff shows the page under the same banner
   and notice. Views, beside them and in Command-K, turns each view with data in the format on or
-  off for every review: Changes since you last looked, Calls before and after, and Files that
-  usually change with these (`co_change`); a view's summary shows only when the review has data
-  for it. Three more views keep their names until the format carries their data.
+  off for every review: Changes since you last looked, Calls before and after, Files that
+  usually change with these (`co_change`), and How the changed code connects (`connections`); a
+  view's summary shows only when the review has data for it. Two more views keep their names until
+  the format carries their data.
+- **How the changed code connects.** When `show-review` prints `connections`, the changed
+  functions and types and the code that calls or uses them, as gopls found them or a search for
+  the name did, the walkthrough sums them up where the layers start: how many change and how, the
+  unchanged callers by name, and how many links only name search found. Open the map shows the
+  map in the walkthrough's place, callers on the left: a circle's size is its lines changed, added
+  is green and removed red with the word under each name, changed is plain, and unchanged callers
+  are small and gray. A link found by name search is dashed, and the legend and links say "found
+  by name search", since it may match a different function with the same name. A click, Enter, or
+  j and k through the changed nodes selects one; its panel says what changed, opens the file's diff
+  at its line (the old file's line for a removed function), and lists its links. Under the map is
+  what Whooper says it may miss (`limits`). Escape clears the selection, then goes back. Without
+  `connections`, the view is hidden, also from Views.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a

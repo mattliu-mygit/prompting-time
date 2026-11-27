@@ -68,6 +68,9 @@ it. Its decision waits as Decide… until clicked or the end is reached. Diff sh
 plugin's page under the same banner and notice, and a review without an overview opens
 on the page. The Views menu beside Walkthrough | Diff, and the palette, turn each view
 on or off for every review; a view's summary shows only when the review has data for it.
+How the changed code connects sums up its map where the layers start, and its Open the
+map shows the map in the walkthrough's place, which stays as it was to come back to;
+Escape or Back returns. The Views menu lists that view only for a review that has it.
 
 The inspector starts closed, leaving the conversation primary. Explicitly opening
 or closing it retains that choice while switching conversations. At smaller widths,
@@ -102,15 +105,17 @@ menu bar extra, and always sits beside the words that say it, never alone:
 - Red (`--s-error`): blocked or failed, so you must act. "Can't review · Docker isn't
   running", "Blocks every review", "Review failed", "Poll failed", "Exited with code 1",
   "Missing gh", "Can't read its settings", a chat that failed, a diff's removed lines,
-  a call only the old code made in Calls before and after, and a failed or blocked
-  review's banner.
+  a call only the old code made in Calls before and after, a removed function or type in
+  How the changed code connects, and a failed or blocked review's banner.
 - Orange (`--s-warning`): waiting on you. A chat "waiting for you", a review that needs a
   look ("look first", or why one that says approve once CI passes isn't safe to approve),
   its banner, a place to look's number and its marks in the code, and a confirmation that
   asks again.
 - Green (`--s-success`): ready to approve ("approve once CI passes" on a review the plugin
   judges safe, or, when it doesn't say, the verdict alone), its banner, a diff's added
-  lines, a read layer's check, and a new call in Calls before and after.
+  lines, a read layer's check, a new call in Calls before and after, and an added function
+  or type in How the changed code connects. A changed one is plain, and an unchanged caller
+  gray, each with its word too.
 
 A verdict banner is tinted 12% with its color, so its words keep their full contrast: 16.7:1
 and more for the verdict and reason on every tint, 6.7:1 and more for the line under them.
