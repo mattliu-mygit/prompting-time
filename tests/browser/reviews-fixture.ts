@@ -340,6 +340,69 @@ const connections: Record<string, object> = {
     ],
   },
 };
+/**
+ * Which changed lines each run's tests ran, as show-review prints it. gadgets#68's tests run only
+ * ValidateName, and only with names it refuses, so no test ran Create's new lines or ValidateName's
+ * `return nil`. widgets#103 changes Rust, which Whooper doesn't measure.
+ */
+const testGaps: Record<string, object> = {
+  "fixture-run-68": {
+    measured: true,
+    reason: null,
+    tool: "go test -coverprofile ./internal/projects/...",
+    lines: [
+      { path: "internal/projects/create.go", line: 19, status: "not_run" },
+      { path: "internal/projects/create.go", line: 20, status: "not_run" },
+      { path: "internal/projects/create.go", line: 21, status: "not_run" },
+      { path: "internal/projects/create.go", line: 22, status: "not_run" },
+      { path: "internal/projects/name.go", line: 16, status: "not_run" },
+    ],
+    summary: { changed_lines: 21, run: 4, not_run: 5 },
+    limits: [
+      "Coverage says a line ran, not that a test checked what it did.",
+      "Only the tests in internal/projects ran; tests of code that calls Create, such as internal/api, didn't.",
+      "name_test.go is a test, so its lines aren't counted.",
+    ],
+  },
+  "fixture-run-103": {
+    measured: false,
+    reason: "Whooper measures Go files only so far, and this pull request changes Rust.",
+    tool: "go test -coverprofile",
+    lines: [],
+    summary: { changed_lines: 0, run: 0, not_run: 0 },
+    limits: [],
+  },
+};
+
+const nameError = (name: string) => `error: project name "${name}": use 3 to 63 lowercase letters, digits, and dashes`;
+const project = (name: string, bucket: string) => `&Project{Name: "${name}", Bucket: "${bucket}"}`;
+/**
+ * The example inputs each run ran through the old and new code, as show-review prints them:
+ * gadgets#68's Create at base and head, with an in-memory store, and ValidateName, new in the pull
+ * request, at its head only.
+ */
+const examples: Record<string, object> = {
+  "fixture-run-68": {
+    functions: [
+      { name: "projects.Create", path: "internal/projects/create.go", line: 18 },
+      { name: "projects.ValidateName", path: "internal/projects/name.go", line: 12 },
+    ],
+    rows: [
+      { function: "projects.Create", input: "\"reports-2026\"", before: project("reports-2026", "reports-2026"), after: project("reports-2026", "reports-2026"), status: "same", label: "ran_base_and_head", note: null },
+      { function: "projects.Create", input: "\"Q3 Report\"", before: project("Q3 Report", "q3-report"), after: nameError("Q3 Report"), status: "different", label: "ran_base_and_head", note: null },
+      { function: "projects.Create", input: "\"a b\"", before: project("a b", "a-b"), after: nameError("a b"), status: "different", label: "ran_base_and_head", note: "\"a-b\" gets the same bucket at base" },
+      { function: "projects.Create", input: "\"a-b\"", before: project("a-b", "a-b"), after: project("a-b", "a-b"), status: "same", label: "ran_base_and_head", note: null },
+      { function: "projects.Create", input: "\"ab\"", before: project("ab", "ab"), after: nameError("ab"), status: "different", label: "ran_base_and_head", note: null },
+      { function: "projects.ValidateName", input: "\"a--b\"", before: null, after: "nil", status: "different", label: "ran_head_only", note: "new in this PR" },
+      { function: "projects.ValidateName", input: "\"Q3 Report\"", before: null, after: nameError("Q3 Report"), status: "different", label: "ran_head_only", note: "new in this PR" },
+    ],
+    limits: [
+      "Create ran with an in-memory storage.Client, not a real bucket store.",
+      "Each input ran twice at the base; an input whose two runs differed would say so.",
+    ],
+  },
+};
+
 /** The commits after each run's head, as show-review lists them: #101 moved on after its review 2. */
 const sinceReview: Record<string, Array<{ sha: string; title: string; author: string; at: string; files: string[] }>> = {
   "fixture-run-101": [
@@ -417,6 +480,8 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
         head_sha: entry.head_sha, cause: entry.cause, skipped_by_user: entry.skipped_by_user,
         overview: found ? overviews[runId] ?? null : null, commits_since_review: sinceReview[runId] ?? (found ? [] : null), co_change: coChange[runId] ?? [],
         connections: found ? connections[runId] ?? null : null,
+        test_gaps: found ? testGaps[runId] ?? null : null,
+        examples: found ? examples[runId] ?? null : null,
       }) });
     }
     case "draft": {
