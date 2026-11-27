@@ -52,22 +52,41 @@ describe("readShownReview", () => {
 });
 
 describe("changes no test would catch", () => {
-  it("reads the lines no test ran with their counts, keeps a status this version doesn't know, and leaves out a repeated line", () => {
-    expect(readShownReview(JSON.stringify(fixtureConnectionsWalkthrough(RUN)), RUN).testGaps).toEqual(fixtureTestGaps());
+  it("reads the lines no test ran, the changes no test noticed or tests caught, and their counts, and keeps a status this version doesn't know", () => {
+    const shown = readShownReview(JSON.stringify(fixtureConnectionsWalkthrough(RUN)), RUN).testGaps!;
+    expect(shown.lines).toEqual(fixtureTestGaps().lines.map((line) => ({ change: null, test: null, ...line })));
+    expect(shown.summary).toEqual({ changed_lines: 15, run: 2, not_run: 3, survived: 1, caught: 1 });
     const read = readTestGaps({
       ...fixtureTestGaps(),
       lines: [
         { path: "a.go", line: 3, status: "not_run" },
-        { path: "a.go", line: 3, status: "survived" },
-        { path: "a.go", line: 4, status: "survived" },
+        // A repeated line is left out.
+        { path: "a.go", line: 3, status: "survived", change: "`<` to `<=`" },
+        { path: "a.go", line: 4, status: "survived", change: "`<` to `<=`", test: 3 },
+        { path: "a.go", line: 5, status: "caught", change: "`+` to `-`", test: "TestAdd" },
+        { path: "a.go", line: 6, status: "caught", change: "`+` to `-`", test: "" },
+        // A change made on purpose without its change in words is left out: only the change says what the tests missed.
+        { path: "a.go", line: 7, status: "survived" },
+        { path: "a.go", line: 8, status: "caught", change: "", test: "TestAdd" },
+        { path: "a.go", line: 9, status: "timed_out", change: "`*` to `/`" },
         { path: "a.go", line: 0, status: "not_run" },
-        { path: "a.go", line: 5 },
-        "a.go:6",
+        { path: "a.go", line: 10 },
+        "a.go:11",
       ],
       limits: ["One limit", 3],
     })!;
-    expect(read.lines).toEqual([{ path: "a.go", line: 3, status: "not_run" }, { path: "a.go", line: 4, status: "survived" }]);
+    expect(read.lines).toEqual([
+      { path: "a.go", line: 3, status: "not_run", change: null, test: null },
+      { path: "a.go", line: 4, status: "survived", change: "`<` to `<=`", test: null },
+      { path: "a.go", line: 5, status: "caught", change: "`+` to `-`", test: "TestAdd" },
+      { path: "a.go", line: 6, status: "caught", change: "`+` to `-`", test: null },
+      { path: "a.go", line: 9, status: "timed_out", change: "`*` to `/`", test: null },
+    ]);
     expect(read.limits).toEqual(["One limit"]);
+    // Counts of changes are each a count or null; a run from before Whooper changed lines on purpose has none.
+    expect(readTestGaps({ ...fixtureTestGaps(), summary: { changed_lines: 15, run: 2, not_run: 3, survived: -1, caught: "2" } })!.summary)
+      .toEqual({ changed_lines: 15, run: 2, not_run: 3, survived: null, caught: null });
+    expect(readTestGaps({ ...fixtureTestGaps(), summary: { changed_lines: 15, run: 2, not_run: 3 } })!.summary).toMatchObject({ survived: null, caught: null });
     // A run the plugin couldn't make still reads, with why.
     expect(readTestGaps({ measured: false, reason: "go isn't on the PATH", tool: "go test -coverprofile", lines: [], summary: { changed_lines: 0, run: 0, not_run: 0 }, limits: [] }))
       .toMatchObject({ measured: false, reason: "go isn't on the PATH" });
@@ -78,11 +97,17 @@ describe("changes no test would catch", () => {
   });
 
   it("names lines in order, a run of three or more as a range, and says the counts in words", () => {
+    const counts = (changed_lines: number, run: number, not_run: number, survived: number | null = null, caught: number | null = null) => ({ changed_lines, run, not_run, survived, caught });
     expect(lineList([40, 39])).toBe("39, 40");
     expect(lineList([50, 39, 40, 41, 42, 39])).toBe("39–42, 50");
-    expect(countsText({ changed_lines: 21, run: 3, not_run: 4 })).toBe("Tests ran 3 of 21 changed lines, and no test ran 4. The run counted the other 14 as neither, such as comments.");
-    expect(countsText({ changed_lines: 14, run: 14, not_run: 0 })).toBe("Tests ran 14 of 14 changed lines.");
-    expect(countsText({ changed_lines: 1, run: 0, not_run: 1 })).toBe("Tests ran 0 of 1 changed line, and no test ran 1.");
+    expect(countsText(counts(21, 3, 4))).toBe("Tests ran 3 of 21 changed lines, and no test ran 4. The run counted the other 14 as neither, such as comments.");
+    expect(countsText(counts(14, 14, 0))).toBe("Tests ran 14 of 14 changed lines.");
+    expect(countsText(counts(1, 0, 1))).toBe("Tests ran 0 of 1 changed line, and no test ran 1.");
+    expect(countsText(counts(21, 4, 5, 2, 5))).toBe("Tests ran 4 of 21 changed lines, and no test ran 5. The run counted the other 12 as neither, such as comments. Tests caught 5 of 7 changes Whooper made on purpose.");
+    expect(countsText(counts(3, 3, 0, 0, 1))).toBe("Tests ran 3 of 3 changed lines. Tests caught 1 of 1 change Whooper made on purpose.");
+    // No change made, or only one of the two counts, says nothing of changes.
+    expect(countsText(counts(3, 3, 0, 0, 0))).toBe("Tests ran 3 of 3 changed lines.");
+    expect(countsText(counts(3, 3, 0, 2, null))).toBe("Tests ran 3 of 3 changed lines.");
   });
 });
 

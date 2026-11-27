@@ -39,7 +39,20 @@ function renderReview(shown: object = fixtureConnectionsWalkthrough(RUN)) {
 
 const walkthrough = () => screen.findByRole("navigation", { name: "Walkthrough" });
 const block = () => screen.queryByRole("region", { name: NAME });
-const place = () => document.querySelector<HTMLElement>(".walk-places li")!;
+/** The first place to look, create.go's lines 11 to 13, or place `number` counting from 1; the second is name.go's line 6. */
+const place = (number = 1) => document.querySelectorAll<HTMLElement>(".walk-places li")[number - 1]!;
+/** test_gaps as Whooper printed it before it changed lines on purpose: only the lines no test ran, and no counts of changes. */
+const notRunOnly = () => ({
+  ...fixtureTestGaps(),
+  lines: [
+    { path: "internal/projects/create.go", line: 11, status: "not_run" },
+    { path: "internal/projects/create.go", line: 12, status: "not_run" },
+    { path: "internal/projects/create.go", line: 14, status: "not_run" },
+    { path: "internal/projects/name.go", line: 10, status: "not_run" },
+  ],
+  summary: { changed_lines: 15, run: 2, not_run: 4 },
+});
+const codeIn = (element: Element) => [...element.querySelectorAll("code")].map((code) => code.textContent);
 const press = (key: string) => {
   fireEvent.keyDown(document.body, { key });
   flush();
@@ -70,7 +83,7 @@ describe("changes no test would catch", () => {
   });
 
   it("names a place's changed lines no test ran under it, labeled as measured, and the lines elsewhere after the places", async () => {
-    renderReview();
+    renderReview(fixtureConnectionsWalkthrough(RUN, { test_gaps: notRunOnly() }));
     await walkthrough();
     expect(place()).toHaveTextContent("No test ran 2 changed lines here: 11, 12");
     expect(place()).toHaveTextContent("Measured: no test ran these lines · go test -coverprofile");
@@ -108,8 +121,91 @@ describe("changes no test would catch", () => {
     expect(within(block()!).queryByRole("listitem")).not.toBeInTheDocument();
   });
 
+  it("names each change no test noticed at its place after the place's lines no test ran, labeled as measured, and opens both with j", async () => {
+    const lines = [
+      { path: "internal/projects/create.go", line: 12, status: "not_run" },
+      { path: "internal/projects/create.go", line: 11, status: "survived", change: "`err != nil` to `err == nil`" },
+      { path: "internal/projects/create.go", line: 14, status: "not_run" },
+      { path: "internal/projects/name.go", line: 6, status: "survived", change: "`{1,61}` to `{1,62}`" },
+    ];
+    renderReview(fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), lines, summary: { changed_lines: 15, run: 3, not_run: 2, survived: 2, caught: 0 } } }));
+    await walkthrough();
+    const [notRun, unnoticed] = [...place().querySelectorAll(".place-gaps > div")];
+    expect(notRun).toHaveTextContent("No test ran 1 changed line here: 12Measured: no test ran this line · go test -coverprofile");
+    expect(unnoticed).toHaveTextContent("Tests ran line 11 but none noticed when Whooper changed err != nil to err == nilMeasured: no test noticed this change");
+    // The change keeps Whooper's code in code type.
+    expect(codeIn(unnoticed!)).toEqual(["err != nil", "err == nil"]);
+    expect(place(2)).toHaveTextContent("Tests ran line 6 but none noticed when Whooper changed {1,61} to {1,62}Measured: no test noticed this change");
+    expect(place(2)).not.toHaveTextContent("No test ran");
+    // Both places are inside the lines, so nothing is left for after the places but the counts.
+    expect(block()).toHaveTextContent("Tests caught 0 of 2 changes Whooper made on purpose.");
+    expect(within(block()!).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["internal/projects/create.go 14"]);
+
+    // Each place's reason under its lines says the same.
+    press("j");
+    await waitFor(() => expect(document.querySelector(".place-card")).toHaveTextContent("Tests ran line 11 but none noticed when Whooper changed err != nil to err == nil"), { timeout: 10_000 });
+    expect(document.querySelector(".place-card")).toHaveTextContent("No test ran 1 changed line here: 12");
+    press("j");
+    await waitFor(() => expect(document.querySelector(".place-card")).toHaveTextContent("Tests ran line 6 but none noticed when Whooper changed {1,61} to {1,62}"), { timeout: 10_000 });
+    expect(document.querySelector(".place-card")).toHaveTextContent("Measured: no test noticed this change");
+  });
+
+  it("counts the changes tests caught after the places, without listing any of them, at a place or after", async () => {
+    const lines = [
+      ...notRunOnly().lines.slice(0, 3),
+      { path: "internal/projects/name.go", line: 6, status: "caught", change: "`{1,61}` to `{0,61}`", test: "TestValidateName" },
+      { path: "internal/projects/name.go", line: 10, status: "caught", change: "`namePattern.MatchString(name)` to `!namePattern.MatchString(name)`", test: "TestValidateName" },
+    ];
+    renderReview(fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), lines, summary: { changed_lines: 15, run: 2, not_run: 3, survived: 0, caught: 2 } } }));
+    await walkthrough();
+    expect(block()).toHaveTextContent("Tests ran 2 of 15 changed lines, and no test ran 3. The run counted the other 10 as neither, such as comments. Tests caught 2 of 2 changes Whooper made on purpose.");
+    // Line 6 is the second place's line and line 10 is after the places: neither place nor the block names either, its change, or its test.
+    expect(place(2).querySelector(".place-gaps")).toBeNull();
+    const said = [...document.querySelectorAll(".place-gaps"), block()!].map((element) => element.textContent).join(" ");
+    for (const word of ["line 6", "line 10", "{0,61}", "!namePattern", "TestValidateName", "caught by"]) expect(said).not.toContain(word);
+    expect(within(block()!).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["internal/projects/create.go 14"]);
+    expect(block()).toHaveTextContent("Measured: no test ran this line · go test -coverprofile");
+  });
+
+  it("says nothing of changes when the run doesn't count them, and lists the changes no test noticed outside the places", async () => {
+    const lines = [
+      { path: "internal/projects/create.go", line: 14, status: "survived", change: "`newProject(name, name)` to `newProject(name, \"\")`" },
+      { path: "internal/projects/name.go", line: 10, status: "survived", change: "`namePattern.MatchString(name)` to `true`" },
+      { path: "internal/projects/name.go", line: 8, status: "caught", change: "`a` to `b`", test: "TestValidateName" },
+    ];
+    renderReview(fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), lines, summary: { changed_lines: 15, run: 5, not_run: 0 } } }));
+    await walkthrough();
+    expect(block()).toHaveTextContent("Tests ran 5 of 15 changed lines. The run counted the other 10 as neither, such as comments.");
+    expect(block()).not.toHaveTextContent("Tests caught");
+    expect(block()).toHaveTextContent("Outside the places to look, tests ran 2 changed lines but none noticed when Whooper changed them:");
+    expect(within(block()!).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "internal/projects/create.go 14: newProject(name, name) to newProject(name, \"\")",
+      "internal/projects/name.go 10: namePattern.MatchString(name) to true",
+    ]);
+    expect(block()).toHaveTextContent("Measured: no test noticed these changes");
+    expect(block()).not.toHaveTextContent("Measured · go test");
+    expect(block()).not.toHaveTextContent("TestValidateName");
+  });
+
+  it("names each run of the tests in code type when the plugin measured with several", async () => {
+    const tool = "go test -coverprofile ./internal/projects/...; npx vitest run --coverage src/projects";
+    const runs = ["go test -coverprofile ./internal/projects/...", "npx vitest run --coverage src/projects"];
+    const view = await openAllLines(fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), tool } }));
+    const measured = view.querySelector(".gaps-counts")!;
+    expect(measured).toHaveTextContent(`Measured with ${runs[0]} and ${runs[1]}. Tests ran 2 of 15 changed lines`);
+    expect(codeIn(measured)).toEqual(runs);
+    const create = within(view).getByRole("region", { name: "internal/projects/create.go" });
+    expect(create).toHaveTextContent(`Measured: no test ran these lines · ${runs[0]} and ${runs[1]}`);
+
+    press("Escape");
+    expect(document.querySelector(".walkthrough")).not.toHaveAttribute("hidden");
+    const label = place().querySelector(".place-evidence:last-child")!;
+    expect(label).toHaveTextContent(`Measured: no test ran these lines · ${runs[0]} and ${runs[1]}`);
+    expect(codeIn(label)).toEqual(runs);
+  });
+
   it("says why in one quiet line when the run couldn't measure, with nothing at the places and nothing to open", async () => {
-    // Lines the run lists anyway are not measured, so nothing says no test ran them.
+    // Lines the run lists anyway are not measured, so nothing says no test ran or noticed them.
     renderReview(fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), measured: false, reason: "go isn't on the PATH" } }));
     await walkthrough();
     const line = screen.getByText("Not measured: go isn't on the PATH");
@@ -117,11 +213,12 @@ describe("changes no test would catch", () => {
     expect(line).toHaveTextContent(`${NAME}Not measured: go isn't on the PATH`);
     expect(block()).not.toBeInTheDocument();
     expect(place()).not.toHaveTextContent("No test ran");
+    expect(place(2)).not.toHaveTextContent("noticed");
     expect(screen.queryByRole("button", { name: "Open all lines" })).not.toBeInTheDocument();
   });
 
   it("opens every line by file in the walkthrough's place: the counts in words, each file's lines with how that is known and its diff, and what the measure may miss", async () => {
-    const view = await openAllLines();
+    const view = await openAllLines(fixtureConnectionsWalkthrough(RUN, { test_gaps: notRunOnly() }));
     expect(document.querySelector(".walkthrough")).toHaveAttribute("hidden");
     expect(document.activeElement).toBe(screen.getByRole("heading", { name: NAME }));
     expect(view).toHaveTextContent("Measured with go test -coverprofile. Tests ran 2 of 15 changed lines, and no test ran 4.");
@@ -136,21 +233,66 @@ describe("changes no test would catch", () => {
     expect(within(limits).getAllByRole("listitem").map((item) => item.textContent)).toEqual(fixtureTestGaps().limits);
   });
 
-  it("shows a line with a status this version doesn't know in the plugin's word, without counting it as not run", async () => {
-    const lines = [...fixtureTestGaps().lines, { path: "internal/projects/create.go", line: 13, status: "survived" }, { path: "internal/projects/types.go", line: 4, status: "caught" }];
-    const shown = fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), lines } });
-    renderReview(shown);
+  it("groups each file's lines in full: no test ran, then no test noticed, then caught with the test that caught it", async () => {
+    // Listed out of order, as a plugin may: the view groups them by what the runs found.
+    const lines = [
+      { path: "internal/projects/create.go", line: 14, status: "caught", change: "`newProject(name, name)` to `nil, nil`", test: "TestCreate" },
+      { path: "internal/projects/create.go", line: 12, status: "not_run" },
+      { path: "internal/projects/create.go", line: 11, status: "survived", change: "`err != nil` to `err == nil`" },
+      { path: "internal/projects/name.go", line: 10, status: "caught", change: "`namePattern.MatchString(name)` to `!namePattern.MatchString(name)`" },
+      { path: "internal/projects/name.go", line: 6, status: "survived", change: "`{1,61}` to `{1,62}`" },
+    ];
+    const view = await openAllLines(fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), lines, summary: { changed_lines: 15, run: 4, not_run: 1, survived: 2, caught: 2 } } }));
+    expect(view.querySelector(".gaps-counts")).toHaveTextContent("Measured with go test -coverprofile. Tests ran 4 of 15 changed lines, and no test ran 1. The run counted the other 10 as neither, such as comments. Tests caught 2 of 4 changes Whooper made on purpose.");
+
+    const create = within(view).getByRole("region", { name: "internal/projects/create.go" });
+    const groups = [...create.querySelectorAll(".gaps-group")];
+    expect(groups.map((group) => group.textContent)).toEqual([
+      "No test ran 1 changed line: 12Measured: no test ran this line · go test -coverprofile",
+      "Tests ran line 11 but none noticed when Whooper changed err != nil to err == nilMeasured: no test noticed this change",
+      "Tests caught this change Whooper made on purpose:Line 14: newProject(name, name) to nil, nil, caught by TestCreate",
+    ]);
+    expect(codeIn(groups[2]!)).toEqual(["newProject(name, name)", "nil, nil", "TestCreate"]);
+    // The diff comes after the words that name its lines.
+    expect(follows(groups[2]!, create.querySelector(".pt-diff")!)).toBe(true);
+
+    // A file with no line no test ran; a caught change whose test the plugin doesn't name says only the change.
+    const name = within(view).getByRole("region", { name: "internal/projects/name.go" });
+    expect([...name.querySelectorAll(".gaps-group")].map((group) => group.textContent)).toEqual([
+      "Tests ran line 6 but none noticed when Whooper changed {1,61} to {1,62}Measured: no test noticed this change",
+      "Tests caught this change Whooper made on purpose:Line 10: namePattern.MatchString(name) to !namePattern.MatchString(name)",
+    ]);
+    expect(name).not.toHaveTextContent("No test ran");
+    expect(name).not.toHaveTextContent("caught by");
+    // This version knows each of these statuses, so none is a status it can't explain.
+    expect(view).not.toHaveTextContent("can't explain");
+  });
+
+  it("shows a line with a status this version doesn't know in the plugin's word, without counting it as not run, not noticed, or caught", async () => {
+    const lines = [
+      ...fixtureTestGaps().lines,
+      { path: "internal/projects/create.go", line: 13, status: "timed_out", change: "`}` to `return nil, nil }`" },
+      { path: "internal/projects/types.go", line: 4, status: "not_viable" },
+    ];
+    renderReview(fixtureConnectionsWalkthrough(RUN, { test_gaps: { ...fixtureTestGaps(), lines } }));
     await walkthrough();
-    // Line 13 is in the place's lines, but only lines no test ran count there.
+    // Line 13 is in the place's lines, but only lines no test ran and changes no test noticed count there.
     expect(place()).toHaveTextContent("No test ran 2 changed lines here: 11, 12");
-    expect(block()).toHaveTextContent("Outside the places to look, no test ran 2 changed lines:");
+    expect(place()).not.toHaveTextContent("line 13");
+    expect(block()).toHaveTextContent("Outside the places to look, no test ran 1 changed line:");
+    expect(block()).toHaveTextContent("Tests caught 1 of 2 changes Whooper made on purpose.");
+    expect(within(block()!).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["internal/projects/create.go 14"]);
     fireEvent.click(within(block()!).getByRole("button", { name: "Open all lines" }));
     flush();
     const view = screen.getByRole("region", { name: NAME });
-    expect(within(view).getByRole("region", { name: "internal/projects/create.go" })).toHaveTextContent("The run also marked line 13 (survived), which this version of Prompting Time can't explain.");
+    const create = within(view).getByRole("region", { name: "internal/projects/create.go" });
+    expect(create).toHaveTextContent("No test ran 3 changed lines: 11, 12, 14");
+    expect(create).toHaveTextContent("The run also marked line 13 (timed_out), which this version of Prompting Time can't explain.");
+    expect(create).not.toHaveTextContent("noticed");
     const other = within(view).getByRole("region", { name: "internal/projects/types.go" });
-    expect(other).toHaveTextContent("The run also marked line 4 (caught), which this version of Prompting Time can't explain.");
+    expect(other).toHaveTextContent("The run also marked line 4 (not_viable), which this version of Prompting Time can't explain.");
     expect(other).not.toHaveTextContent("No test ran");
+    expect(other).not.toHaveTextContent("Tests caught");
     expect(other).toHaveTextContent("internal/projects/types.go isn't in the review's diff.");
   });
 
@@ -159,6 +301,8 @@ describe("changes no test would catch", () => {
     const view = screen.getByRole("region", { name: NAME });
     expect(view).toHaveTextContent("Not measured: the tests didn't build");
     expect(view).not.toHaveTextContent("No test ran");
+    // The view's head says what it shows; below it, nothing claims a change no test noticed.
+    expect(view.querySelector(".full-view-column")).not.toHaveTextContent("noticed");
     expect(view.querySelector(".gaps-file")).toBeNull();
     press("j");
     expect(view.querySelector("[data-current]")).toBeNull();
@@ -192,6 +336,7 @@ describe("changes no test would catch", () => {
     await waitFor(() => expect(document.querySelector(".walkthrough")).not.toHaveAttribute("hidden"));
     expect(block()).not.toBeInTheDocument();
     expect(place()).not.toHaveTextContent("No test ran");
+    expect(place(2)).not.toHaveTextContent("noticed");
     expect(screen.getByRole("button", { name: /^Views · 1 off/ })).toBeInTheDocument();
   });
 });

@@ -14,7 +14,7 @@ export type ReviewView = { id: ViewId; name: string; description: string; onlyWi
 export const REVIEW_VIEWS: readonly ReviewView[] = [
   { id: "since", name: "Changes since you last looked", description: "New commits since the review, and what you last read." },
   { id: "inputs", name: "Example inputs, before and after", description: "What the old and new code give for the same inputs, from running both.", onlyWithData: true },
-  { id: "test-gaps", name: "Changes no test would catch", description: "Changed lines no test ran, from a run of the tests.", onlyWithData: true },
+  { id: "test-gaps", name: "Changes no test would catch", description: "Changed lines no test ran, and changes made on purpose that no test noticed.", onlyWithData: true },
   { id: "calls", name: "Calls before and after", description: "Old and new calls for one input, overlaid." },
   { id: "co-change", name: "Files that usually change with these", description: "Files that change with these in history, left alone here." },
   { id: "connections", name: "How the changed code connects", description: "Changed functions and types, and their callers.", onlyWithData: true },

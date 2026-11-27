@@ -320,7 +320,9 @@ export function fixtureConnections() {
 
 /**
  * Which changed lines of fixtureGoPatch the tests ran, as show-review prints it: no test ran lines
- * 11 and 12 of create.go, in the place to look, nor line 14 after it or line 10 of name.go.
+ * 11 and 12 of create.go, in the first place to look, nor line 14 after it. TestValidateName ran
+ * name.go's lines 6 and 10: it caught the change Whooper made to line 10 on purpose, but no test
+ * noticed the one to line 6, the second place to look.
  */
 export function fixtureTestGaps() {
   return {
@@ -331,10 +333,11 @@ export function fixtureTestGaps() {
       { path: "internal/projects/create.go", line: 11, status: "not_run" },
       { path: "internal/projects/create.go", line: 12, status: "not_run" },
       { path: "internal/projects/create.go", line: 14, status: "not_run" },
-      { path: "internal/projects/name.go", line: 10, status: "not_run" },
+      { path: "internal/projects/name.go", line: 6, status: "survived", change: "`{1,61}` to `{1,62}`" },
+      { path: "internal/projects/name.go", line: 10, status: "caught", change: "`namePattern.MatchString(name)` to `!namePattern.MatchString(name)`", test: "TestValidateName" },
     ],
-    summary: { changed_lines: 15, run: 2, not_run: 4 },
-    limits: ["Coverage says a line ran, not that a test checked what it did.", "Tests of other packages that call Create didn't run."],
+    summary: { changed_lines: 15, run: 2, not_run: 3, survived: 1, caught: 1 },
+    limits: ["Whooper changed only lines a test ran, one change on each.", "Tests of other packages that call Create didn't run."],
   };
 }
 
@@ -369,7 +372,10 @@ export function fixtureConnectionsWalkthrough(runId: string, overrides: Record<s
       summary: "Projects check their names before they get a bucket, instead of `slugify` turning any name into one.",
       verdict_reason: "Small and tested.",
       before_after: [{ label: "A name with a space", before: "gets a bucket with a dash", after: "fails with a message" }],
-      places: [{ id: "p1", title: "Names with spaces now fail", reason: "`slugify` used to fix them.", evidence: { kind: "read", detail: "read `Create`" }, path: "internal/projects/create.go", start_line: 11, end_line: 13 }],
+      places: [
+        { id: "p1", title: "Names with spaces now fail", reason: "`slugify` used to fix them.", evidence: { kind: "read", detail: "read `Create`" }, path: "internal/projects/create.go", start_line: 11, end_line: 13 },
+        { id: "p2", title: "Two dashes pass", reason: "`namePattern` lets `a--b` through.", evidence: { kind: "ran", detail: "ran `TestValidateName`" }, path: "internal/projects/name.go", start_line: 6, end_line: 6 },
+      ],
       layers: [
         { id: "rule", title: "The name rule", intent: "What a bucket name allows.", read_hint: "read", ranges: [{ path: "internal/projects/name.go", start_line: 1, end_line: 11 }] },
         { id: "create", title: "Create checks names", intent: "The check replaces slugify.", read_hint: "read", ranges: [{ path: "internal/projects/create.go", start_line: 10, end_line: 15 }] },

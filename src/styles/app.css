@@ -3271,16 +3271,43 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   font-size: inherit;
 }
 
-/* At a place to look: its changed lines no test ran, under its reason and evidence. */
+/* At a place to look, under its reason and evidence: its changed lines no test ran, then its
+   changes no test noticed, each kind with how it is known on the line under it. */
 .place-gaps {
   display: grid;
-  gap: 2px;
+  gap: var(--s-space-8);
   margin-block-start: var(--s-space-4);
   font-size: var(--s-size-sm);
 }
 
+.place-gaps > div {
+  display: grid;
+  gap: 2px;
+}
+
 .place-gaps p {
   margin: 0;
+}
+
+/* One kind of line in Changes no test would catch, after the places or in a file in full: the
+   words that name the lines, then how that is known. */
+.walk-view-group,
+.gaps-group {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.gaps-group ul {
+  display: grid;
+  gap: var(--s-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The changes tests caught need nothing from you, so they read quieter than the lines to look at. */
+.gaps-caught {
+  color: var(--s-text-secondary);
 }
 
 /* Example inputs, before and after, under What this PR does: one line, and Open all inputs. */
@@ -3339,8 +3366,8 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   padding-inline: 0;
 }
 
-/* Changes no test would catch, by file: the file's lines no test ran, how that is known, and its
-   diff cut to them. j and k mark the current file with a line on its left, at once. */
+/* Changes no test would catch, by file: the file's lines by what the runs found, how each kind is
+   known, and its diff cut to them. j and k mark the current file with a line on its left, at once. */
 .gaps-file {
   display: grid;
   gap: var(--s-space-8);

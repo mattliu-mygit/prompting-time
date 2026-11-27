@@ -4,8 +4,9 @@ import { readShown } from "../agents/reviews";
  * What a review's walkthrough reads from the show-review action, beyond what the page reads: the
  * plugin's overview of the change, the commits after the one the review read, the files that
  * usually change with the changed ones, how the changed code connects, the changed lines no test
- * ran, and example inputs run through the old and new code. Each part that does not fit the format
- * reads as missing, so a plugin that prints none of it gets the page as before.
+ * ran and the changes made on purpose that no test noticed, and example inputs run through the old
+ * and new code. Each part that does not fit the format reads as missing, so a plugin that prints
+ * none of it gets the page as before.
  */
 
 /** How the plugin knows a place to look matters: it ran something, read the code, or searched the repo. */
@@ -69,16 +70,24 @@ export type ConnectionEdge = { from: string; to: string; kind: "calls" | "uses";
 export type Connections = { nodes: ConnectionNode[]; edges: ConnectionEdge[]; limits: string[] };
 
 /**
- * A changed line and what the plugin's run of the tests found for it: "not_run" when no test ran it.
- * A later format may add other statuses, which keep their own words here.
+ * A changed line and what the plugin's runs of the tests found for it: "not_run" when no test ran
+ * it; "survived" when tests ran it but none failed when the plugin changed it on purpose, and
+ * "caught" when one did, each with that change in words (`change`, such as "`>` to `>=`") and, for
+ * "caught", the test that failed when the plugin names it (`test`). A later format may add other
+ * statuses, which keep their own words here.
  */
-export type TestGapLine = { path: string; line: number; status: string };
-
-/** How many changed lines the run counted, how many of them some test ran, and how many none did. */
-export type TestGapCounts = { changed_lines: number; run: number; not_run: number };
+export type TestGapLine = { path: string; line: number; status: string; change: string | null; test: string | null };
 
 /**
- * Which changed lines the tests ran, as the plugin measured them by running the tests with `tool`,
+ * How many changed lines the run counted, how many of them some test ran, and how many none did;
+ * and, when the plugin also changed lines on purpose and ran the tests again, how many of those
+ * changes no test noticed (`survived`) and how many a test caught, each null when it doesn't say.
+ */
+export type TestGapCounts = { changed_lines: number; run: number; not_run: number; survived: number | null; caught: number | null };
+
+/**
+ * Which changed lines the tests ran, and which changes made on purpose they noticed, as the plugin
+ * measured them by running the tests with `tool`, which may name several runs, joined by "; ";
  * or, when `measured` is false, why it couldn't; and what the measure may miss.
  */
 export type TestGaps = { measured: boolean; reason: string | null; tool: string; lines: TestGapLine[]; summary: TestGapCounts; limits: string[] };
@@ -214,24 +223,32 @@ export function readConnections(value: unknown): Connections | null {
 }
 
 /**
- * The plugin's run of the tests over the changed lines, or null when it printed none or one without
- * `measured`, `tool`, or its counts. A line whose path and number an earlier line has is left out;
- * a line with a status this version doesn't know stays, with that status.
+ * The plugin's runs of the tests over the changed lines, or null when it printed none or one without
+ * `measured`, `tool`, or its counts. A line whose path and number an earlier line has is left out,
+ * and so is a "survived" or "caught" line without its change, which is what says what the tests
+ * missed or caught; a line with a status this version doesn't know stays, with that status.
  */
 export function readTestGaps(value: unknown): TestGaps | null {
   if (!isRecord(value) || typeof value.measured !== "boolean" || !isString(value.tool)) return null;
   const summary = value.summary;
   if (!isRecord(summary) || !isCount(summary.changed_lines) || !isCount(summary.run) || !isCount(summary.not_run)) return null;
   const seen = new Set<string>();
-  const lines = listOf(value.lines, (line): TestGapLine | null => (
-    isRecord(line) && isString(line.path) && isLine(line.line) && isString(line.status) && line.status !== "" ? { path: line.path, line: line.line, status: line.status } : null
-  )).filter((line) => !seen.has(`${line.path}:${line.line}`) && seen.add(`${line.path}:${line.line}`));
+  const lines = listOf(value.lines, (line): TestGapLine | null => {
+    if (!isRecord(line) || !isString(line.path) || !isLine(line.line) || !isString(line.status) || line.status === "") return null;
+    const change = isString(line.change) && line.change !== "" ? line.change : null;
+    if ((line.status === "survived" || line.status === "caught") && change === null) return null;
+    return { path: line.path, line: line.line, status: line.status, change, test: isString(line.test) && line.test !== "" ? line.test : null };
+  }).filter((line) => !seen.has(`${line.path}:${line.line}`) && seen.add(`${line.path}:${line.line}`));
   return {
     measured: value.measured,
     reason: isString(value.reason) ? value.reason : null,
     tool: value.tool,
     lines,
-    summary: { changed_lines: summary.changed_lines, run: summary.run, not_run: summary.not_run },
+    summary: {
+      changed_lines: summary.changed_lines, run: summary.run, not_run: summary.not_run,
+      survived: isCount(summary.survived) ? summary.survived : null,
+      caught: isCount(summary.caught) ? summary.caught : null,
+    },
     limits: strings(value.limits),
   };
 }

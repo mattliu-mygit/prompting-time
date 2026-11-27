@@ -17,6 +17,11 @@ export function Series(props: { items: ReadonlyArray<{ text: string; code: boole
   ]);
   return <For each={parts()}>{(part) => (part.code ? <code class="walk-code">{part.text}</code> : part.text)}</For>;
 }
+/** Text with `code` spans, as the plugin writes identifiers in its prose. */
+export function Inline(props: { text: string }) {
+  const parts = () => props.text.split("`").map((text, index) => ({ text, code: index % 2 === 1 }));
+  return <For each={parts()}>{(part) => (part.code ? <code class="walk-code">{part.text}</code> : part.text)}</For>;
+}
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 /** "at 3:12 PM" today, "on Nov 24" before. */
 export const whenText = (iso: string) => `${shortDate(iso).includes(":") ? "at" : "on"} ${shortDate(iso)}`;
