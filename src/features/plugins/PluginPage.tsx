@@ -8,7 +8,7 @@ type Props = {
   plugin: PluginSnapshot;
   /**
    * The route the user opened, from an item's or blocker's row, Command-J, or the plugin's name
-   * (`/`). Each new object
+   * (`/`), or the next item Prompting Time opened when the last one left Needs you. Each new object
    * sends `open` again, so opening the same row twice shows it again after the page moved on.
    */
   target: { route: string } | null;

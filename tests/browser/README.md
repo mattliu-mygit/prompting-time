@@ -100,8 +100,9 @@ a run, `/providers` for the blocker), and reads the status with `call`. Opening 
 its route to the same page without reloading it. Delete this run opens the confirmation and, after
 Confirm, the page shows "deleted <id>" and "Changed: runs/<id>/run.json", since the fixture sends a
 pluginChanged event for each action that changes something. Call an undeclared action shows
-Prompting Time's refusal, "Fixture runs declares no rm-everything action." Clicking "Fixture runs"
-in the pinned row opens the page at `/`.
+Prompting Time's refusal, "Fixture runs declares no rm-everything action." Rerun this run on a
+failed run moves it to Running, so it leaves Needs you, and Prompting Time opens the next item
+there in the same page. Clicking "Fixture runs" in the pinned row opens the page at `/`.
 
 ## Whooper's reviews
 

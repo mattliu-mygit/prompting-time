@@ -271,7 +271,11 @@ checks, starts, and stops them, and the window shows them.
   arguments. An item or blocker that does not fit is left out, as are row actions the manifest
   does not allow. A click on an item or blocker, Command-J landing on one, or choosing one in the
   palette opens the plugin's page at its `route`, keeping the page loaded from one row to the
-  next. Whooper's page draws a review's diff and header and a failed review itself.
+  next. When the item or blocker the page shows leaves Needs you, because the plugin's status
+  moves it to another group or drops it, as after the user acts on it in the page, Prompting Time
+  opens the next thing under Needs you in Command-J's order, or stays when nothing is left; an
+  item opened from another group stays, as does any while its plugin's status can't be read.
+  Whooper's page draws a review's diff and header and a failed review itself.
 
 ## Develop and verify
 

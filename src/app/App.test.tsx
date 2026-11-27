@@ -551,10 +551,13 @@ describe("menu bar", () => {
 describe("status format 2", () => {
   const fingerprint = "d".repeat(64);
   const failedTitle = "Review this stack of PRs · acme/widgets#60";
-  /** The invented format-2 plugin: Rerun succeeds, and Delete previews, then deletes with the fingerprint. */
-  function v2Api() {
+  /**
+   * The invented format-2 plugin: Rerun succeeds, and Delete previews, then deletes with the
+   * fingerprint. `status` answers its status action; `overrides` replace other bridge calls.
+   */
+  function v2Api(status: () => ReturnType<typeof actionResult> = () => actionResult({ stdout: JSON.stringify(fixtureV2Status()) }), overrides: Partial<AppApi> = {}) {
     const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
-      if (sent.action === "status") return actionResult({ stdout: JSON.stringify(fixtureV2Status()) });
+      if (sent.action === "status") return status();
       if (sent.action === "delete") {
         return sent.confirmedFingerprint === null
           ? actionResult({ stdout: `printed the request; nothing deleted\nfingerprint: ${fingerprint}\n`, fingerprint, preview: "delete run-74c91b1d" })
@@ -575,6 +578,7 @@ describe("status format 2", () => {
         appEvents = listener;
         return () => {};
       }),
+      ...overrides,
     });
     const choose = (command: MenuBarCommand) => {
       handler(command);
@@ -669,6 +673,88 @@ describe("status format 2", () => {
     await settle();
     expect(page.posted).toHaveBeenCalledTimes(3);
     expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/runs/run-review-2" }, "*");
+  });
+
+  describe("when the open item leaves Needs you", () => {
+    const [failed, review, running] = fixtureV2Status().items as Array<Record<string, unknown>>;
+    type State = { items: unknown[]; blockers?: unknown[]; broken?: boolean };
+    /** v2Api whose status prints the state's items and blockers, or fails while it is broken. */
+    function changingApi(state: State, overrides: Partial<AppApi> = {}) {
+      return v2Api(() => (state.broken
+        ? actionResult({ exitCode: 1, stderr: "status file is being written" })
+        : actionResult({ stdout: JSON.stringify(fixtureV2Status({ items: state.items, ...(state.blockers ? { blockers: state.blockers } : {}) })) })), overrides);
+    }
+    /** The routes Prompting Time has opened in the page, in order. */
+    const opened = (page: ReturnType<typeof pageFrame>) => page.posted.mock.calls.flatMap(([message]) => {
+      const sent = message as { type: string; route?: string };
+      return sent.type === "open" ? [sent.route] : [];
+    });
+    async function openPage(name: RegExp) {
+      fireEvent.click(await screen.findByRole("treeitem", { name }));
+      await settle();
+      const page = pageFrame();
+      await fromPage(page.window, { version: 2, type: "ready" });
+      return page;
+    }
+    const changed = async (emit: (event: AppEvent) => void, sequence: string) => {
+      emit({ kind: "pluginChanged", sequence, plugin: "fixture-runs", files: ["runs/run.json"] });
+      await settle();
+      await settle();
+    };
+
+    it("opens the next Needs you item in the same page, in Command-J's order", async () => {
+      const state = { items: [failed, review, running] };
+      const { api, emit } = changingApi(state);
+      renderApp(api);
+      const page = await openPage(/^Review this stack of PRs/);
+      expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/runs/run-74c91b1d" }, "*");
+
+      // The plugin moves the failed run to Done, as after the user reran it from its page.
+      state.items = [{ ...failed, group: "done" }, review, running];
+      await changed(emit, "1");
+      await waitFor(() => expect(selected()).toMatch(/^Tighten upload retries/));
+      expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
+      expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/runs/run-review-2" }, "*");
+
+      // The plugin drops the last item; next after it, wrapping around, is the blocker.
+      state.items = [{ ...failed, group: "done" }, running];
+      await changed(emit, "2");
+      await waitFor(() => expect(selected()).toMatch(/^Codex is signed out/));
+      expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/providers" }, "*");
+    });
+
+    it("stays for an item opened from another group, and when nothing is left in Needs you", async () => {
+      const state: State = { items: [failed, review, running] };
+      const { api, emit } = changingApi(state);
+      renderApp(api);
+      const page = await openPage(/^Score yesterday's sessions/);
+      state.items = [failed, review, { ...running, group: "done" }];
+      await changed(emit, "1");
+      expect(opened(page)).toEqual(["/runs/run-running-3"]);
+
+      fireEvent.click(screen.getByRole("treeitem", { name: /^Tighten upload retries/ }));
+      await settle();
+      state.blockers = [];
+      state.items = [];
+      await changed(emit, "2");
+      await waitFor(() => expect(screen.queryByRole("treeitem", { name: /^Tighten upload retries/ })).not.toBeInTheDocument());
+      expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
+      expect(opened(page)).toEqual(["/runs/run-running-3", "/runs/run-review-2"]);
+    });
+
+    it("stays while the plugin's status can't be read, though a chat waits on you", async () => {
+      const state: State = { items: [failed, review, running] };
+      const chat = createdConversation({ id: "first", title: "Evaluation rows", provider: "codex", runStatus: "waiting", rollupStatus: "needsAttention", currentRunId: "run-first" });
+      const { api, emit } = changingApi(state, { listConversations: vi.fn().mockResolvedValue({ items: [chat], nextCursor: null }) });
+      renderApp(api);
+      const page = await openPage(/^Tighten upload retries/);
+      state.broken = true;
+      await changed(emit, "1");
+      await waitFor(() => expect(screen.queryByRole("treeitem", { name: /^Tighten upload retries/ })).not.toBeInTheDocument());
+      expect(screen.getByRole("treeitem", { name: /^Evaluation rows/ })).toHaveAttribute("aria-selected", "false");
+      expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
+      expect(opened(page)).toEqual(["/runs/run-review-2"]);
+    });
   });
 
   it("runs the page's calls to declared actions only, a confirm action only after the confirmation, and tells the page what changed", async () => {

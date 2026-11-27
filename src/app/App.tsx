@@ -9,7 +9,7 @@ import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { menuBarRequest, readMenuBarEnabled, saveMenuBarEnabled } from "../features/agents/menuBar";
 import { PluginInspector } from "../features/agents/PluginSettings";
 import { describeAgent } from "../features/agents/status";
-import { blockerKey, itemKey, NO_STATUS_V2_WORK, statusV2Work, type StatusV2Work } from "../features/agents/statusV2";
+import { blockerKey, itemKey, NO_STATUS_V2_WORK, readStatusV2, statusV2Work, type StatusV2Work } from "../features/agents/statusV2";
 import { ConfirmActionDialog } from "../features/agents/ConfirmActionDialog";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { PluginPage } from "../features/plugins/PluginPage";
@@ -162,6 +162,20 @@ export function App(props: { store: AppStore }) {
   const openEntry = (plugin: string, key: string, route: string) => showPlugin({ kind: "page", plugin, entry: key, target: { route } });
   /** The plugin's name, on its pinned row or in the menu bar: its page at its home route. */
   const openHome = (plugin: string) => showPlugin({ kind: "page", plugin, entry: null, target: { route: "/" } });
+
+  // When the item or blocker the page shows leaves Needs you, as after the user acts on it there,
+  // open the next thing waiting on you: the first after it in Command-J's order that is still
+  // there, else the first there is. With nothing left, stay. A plugin whose status can't be read
+  // lists nothing for the moment, which doesn't count as leaving.
+  createEffect(waiting, (now, before) => untrack(() => {
+    const view = pluginView();
+    if (view?.kind !== "page" || view.entry === null || !before || now.some(({ key }) => key === view.entry)) return;
+    const index = before.findIndex(({ key }) => key === view.entry);
+    const plugin = pluginNamed(view.plugin);
+    if (index === -1 || !plugin || !readStatusV2(plugin, snapshot().plugins.statuses[plugin.name])) return;
+    const nextKey = [...before.slice(index + 1), ...before.slice(0, index)].find(({ key }) => now.some((entry) => entry.key === key))?.key;
+    (now.find(({ key }) => key === nextKey) ?? now[0])?.open();
+  }));
 
   /**
    * Runs one of an agent's controls from its row menu or its screen: Poll now, Pause, and Resume
