@@ -36,23 +36,26 @@ export function agentControls(plugin: PluginSnapshot, read: PluginStatusRead | u
 }
 
 /**
- * The buttons on the agent's sidebar row, which the menu bar extra repeats: Pause or Resume, or
- * Start, which takes Pause's place while the agent is stopped, then Poll now. Either is null when
+ * The buttons the menu bar extra shows for the agent: Pause or Resume, or Start, which takes
+ * Pause's place while the agent is stopped, then Poll now. Either is null when
  * the plugin has no action for it.
  */
-export function rowButtons(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null): [Control | null, Control | null] {
+export function menuBarButtons(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null): [Control | null, Control | null] {
   const { poll, pause, power } = agentControls(plugin, read, pending);
   return [power.action === "start" ? power : pause, poll];
 }
 
-/** Menu items for the agent's controls that `include` names, in this order, followed by Settings and the log under `logsLabel`. */
-export function agentMenuItems(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null, include: { poll: boolean; pause: boolean; power: boolean; logsLabel: string }): MenuItem[] {
+/**
+ * The ⋯ menu of a plugin, on its sidebar row and in the header while its page or screen shows:
+ * Poll now, Pause or Resume, Stop or Start, each when the plugin has it, then Settings and Logs.
+ */
+export function agentMenuItems(plugin: PluginSnapshot, read: PluginStatusRead | undefined, pending: AgentAction | null): MenuItem[] {
   const { poll, pause, power } = agentControls(plugin, read, pending);
-  const controls = [include.poll ? poll : null, include.pause ? pause : null, include.power ? power : null].filter((control): control is Control => control !== null);
+  const controls = [poll, pause, power].filter((control): control is Control => control !== null);
   return [
     ...controls.map((control) => ({ value: control.action, label: control.label, disabled: control.disabled })),
     { value: "settings", label: "Settings" },
-    { value: "logs", label: include.logsLabel },
+    { value: "logs", label: "Logs" },
   ];
 }
 

@@ -95,22 +95,25 @@ describe("AllWork", () => {
   const headings = (place: ".work-open" | ".work-folded") => [...document.querySelectorAll<HTMLButtonElement>(`${place} .work-group-toggle`)].map((button) => button.textContent);
   const waitingRoot = { ...root, id: "waiting", title: "Waiting conversation", projectRoot: null, rollupStatus: "needsAttention" as const };
 
-  it("puts the items of the groups marked needs_you under Needs you, each group as a part, and the other groups in sections of their own", async () => {
+  it("lists one Needs you in Command-J's order, each item with why it needs you and its plugin, and leaves the other groups to the plugin's page", async () => {
     const view = renderWork({ conversations: [waitingRoot, sibling], conversationsById: { waiting: waitingRoot, sibling }, pluginWork: whooperWork(), open: null });
 
-    // Reviewing starts open, as its group isn't folded; Done is folded, as the manifest says; chats start folded.
-    expect(toggles()).toEqual(["Needs you 4 true", "Reviewing 1 true", "Done 1 false", "Chats · no folder 1 false"]);
-    expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-      .toEqual(["Ready to approve", "Needs a look", "Review failed", "Chats waiting on you", "Reviewing"]);
-    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toEqual([expect.stringMatching(/^separate cache configuration, widgets#101 · @sam-fixture · 2 findings · /)]);
-    expect(names(screen.getByRole("tree", { name: "Review failed" }))).toEqual([expect.stringMatching(/^move the projection, gadgets#55 · The review agent left no usable findings · /)]);
+    // Chats start folded; Reviewing and Done live in Whooper's page, not here.
+    expect(toggles()).toEqual(["Needs you 4 true", "Chats · no folder 1 false"]);
+    expect(names(screen.getByRole("tree", { name: "Needs you" }))).toEqual([
+      "separate cache configuration, Ready to approve · Whooper",
+      "add the tags package, Needs a look · Whooper",
+      "move the projection, Review failed · Whooper",
+      "Waiting conversation, Codex, waiting for you",
+    ]);
+    expect(screen.queryByRole("treeitem", { name: /stream uploads in chunks|rename the queue settings/ })).not.toBeInTheDocument();
     const ready = screen.getByRole("treeitem", { name: /^separate cache configuration/ });
     expect(ready).toHaveClass("work-entry");
-    // An item keeps the dot its plugin gives it; "Chats waiting on you" says its rows' status, so they draw none.
+    // Each row keeps its own dot beside the words that say it, a waiting chat's included.
     expect(ready.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
     expect(screen.getByRole("treeitem", { name: /^add the tags package/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
     expect(screen.getByRole("treeitem", { name: /^move the projection/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-    expect(screen.getByRole("treeitem", { name: /^Waiting conversation/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(screen.getByRole("treeitem", { name: /^Waiting conversation/ }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
 
     fireEvent.click(ready);
     expect(view.onOpenEntry).toHaveBeenCalledWith("whooper", "item:whooper:run-101", "/reviews/run-101");
@@ -121,97 +124,94 @@ describe("AllWork", () => {
   it("opens a folded section and keeps which are open across launches", () => {
     const view = renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: {} });
     fireEvent.click(screen.getByRole("button", { name: "Needs you 3" }));
-    fireEvent.click(screen.getByRole("button", { name: "Done 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chats · no folder 1" }));
     flush();
-    expect(names(screen.getByRole("tree", { name: "Done" }))).toEqual([expect.stringMatching(/^rename the queue settings, gadgets#88 · approved Nov 25 · /)]);
-    expect(JSON.parse(window.localStorage.getItem(SECTIONS)!)).toEqual({ "needs-you": false, "group:whooper:done": true });
+    expect(names(screen.getByRole("tree", { name: "Chats · no folder" }))).toEqual(["Release notes, Claude, queued"]);
+    expect(JSON.parse(window.localStorage.getItem(SECTIONS)!)).toEqual({ "needs-you": false, "chats:no-folder": true });
 
     view.unmount();
     renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: null });
     // The open sections come back above the stack, and the folded ones in it, each in list order.
-    expect(headings(".work-open")).toEqual(["Reviewing 1", "Done 1"]);
-    expect(headings(".work-folded")).toEqual(["Needs you 3", "Chats · no folder 1"]);
+    expect(headings(".work-open")).toEqual(["Chats · no folder 1"]);
+    expect(headings(".work-folded")).toEqual(["Needs you 3"]);
   });
 
   it("stacks the folded sections' headings below the open ones, outside their scrolling rows, and lists every item of a long Needs you", async () => {
     const many = Array.from({ length: 12 }, (_, index) => ({ ...fixtureWhooperItems()[0]!, id: `run-${200 + index}`, title: `ready ${index}`, updated_at: todayAt(20 - index) }));
-    renderWork({ conversations: [sibling], pluginWork: whooperWork([...many, ...fixtureWhooperItems()]), open: { "group:whooper:reviewing": false } });
+    renderWork({ conversations: [sibling], pluginWork: whooperWork([...many, ...fixtureWhooperItems()]), open: {} });
 
-    expect(screen.getByRole("heading", { name: "Ready to approve · 13" })).toBeVisible();
-    expect(names(screen.getByRole("tree", { name: "Ready to approve" }))).toHaveLength(13);
+    expect(names(screen.getByRole("tree", { name: "Needs you" }))).toHaveLength(15);
     expect(headings(".work-open")).toEqual(["Needs you 15"]);
-    expect(headings(".work-folded")).toEqual(["Reviewing 1", "Done 1", "Chats · no folder 1"]);
+    expect(headings(".work-folded")).toEqual(["Chats · no folder 1"]);
     // The rows scroll inside Needs you's body; the stack follows the open sections, outside it.
     const stack = document.querySelector(".work-folded")!;
-    expect(screen.getByRole("tree", { name: "Ready to approve" }).closest(".work-section-body")).not.toBeNull();
+    expect(screen.getByRole("tree", { name: "Needs you" }).closest(".work-section-body")).not.toBeNull();
     expect(stack.closest(".work-section-body")).toBeNull();
     expect(document.querySelector(".work-open")!.compareDocumentPosition(stack) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(await axeViolations()).toEqual([]);
   });
 
   it("splits the space above the stack between the open sections, each with its own rows, and moves across them with the arrow keys", () => {
-    renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: { "group:whooper:done": true }, selectedId: null });
-    expect(headings(".work-open")).toEqual(["Needs you 3", "Reviewing 1", "Done 1"]);
-    expect(headings(".work-folded")).toEqual(["Chats · no folder 1"]);
+    renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: { "chats:no-folder": true }, selectedId: null });
+    expect(headings(".work-open")).toEqual(["Needs you 3", "Chats · no folder 1"]);
+    expect(document.querySelector(".work-folded")).toBeNull();
     const bodies = [...document.querySelectorAll(".work-open > .work-section > .work-section-body")];
-    expect(bodies.map((body) => body.querySelectorAll("[role=treeitem]").length)).toEqual([3, 1, 1]);
+    expect(bodies.map((body) => body.querySelectorAll("[role=treeitem]").length)).toEqual([3, 1]);
 
     const last = screen.getByRole("treeitem", { name: /^move the projection/ });
     last.focus();
     press(last, "ArrowDown");
-    expect(document.activeElement).toHaveAttribute("aria-label", expect.stringContaining("widgets#102 · reviewing since"));
+    expect(document.activeElement).toHaveAttribute("aria-label", expect.stringContaining("Release notes"));
     expect(bodies[1]!.contains(document.activeElement)).toBe(true);
   });
 
   it("opens a section from the stack and folds it back with its heading, which keeps the focus as it moves", async () => {
-    renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: null });
-    const folded = screen.getByRole("button", { name: "Done 1" });
+    renderWork({ conversations: [sibling], pluginWork: whooperWork(), open: {} });
+    const folded = screen.getByRole("button", { name: "Chats · no folder 1" });
     expect(folded).toHaveAttribute("aria-expanded", "false");
     // Enter or Space on the focused heading, which is a button, clicks it.
     folded.focus();
     fireEvent.click(folded);
     flush();
     await settle();
-    const opened = screen.getByRole("button", { name: "Done 1" });
+    const opened = screen.getByRole("button", { name: "Chats · no folder 1" });
     expect(opened).toHaveAttribute("aria-expanded", "true");
     expect(opened.closest(".work-open")).not.toBeNull();
     expect(opened).toHaveFocus();
-    expect(headings(".work-open")).toEqual(["Needs you 3", "Reviewing 1", "Done 1"]);
+    expect(headings(".work-open")).toEqual(["Needs you 3", "Chats · no folder 1"]);
 
     fireEvent.click(opened);
     flush();
     await settle();
-    const again = screen.getByRole("button", { name: "Done 1" });
+    const again = screen.getByRole("button", { name: "Chats · no folder 1" });
     expect(again).toHaveAttribute("aria-expanded", "false");
     expect(again.closest(".work-folded")).not.toBeNull();
     expect(again).toHaveFocus();
-    expect(screen.queryByRole("tree", { name: "Done" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tree", { name: "Chats · no folder" })).not.toBeInTheDocument();
   });
 
-  it("finds blockers by title, items in every group by title, detail, or project folder, and chats by title or folder", async () => {
+  it("finds blockers by title, Needs you items by title, detail, or project folder, and chats by title or folder", async () => {
     const blocker = { id: "docker", title: "Docker isn't running", dot: "error", route: "/causes/docker", action: "round" };
-    const inProject = { ...fixtureWhooperItems()[3]!, id: "run-60", title: "speed up the gadget index", detail: "gadgets#60 · waiting", group: "waiting", project: "/work/gadgets" };
+    const inProject = { ...fixtureWhooperItems()[1]!, id: "run-60", title: "speed up the index", detail: "widgets#60", updated_at: "2026-11-26T14:00:00Z", project: "/work/gadgets" };
     const view = renderWork({ conversations: [root, sibling], pluginWork: whooperWork([...fixtureWhooperItems(), inProject], { blockers: [blocker] }), open: {} });
     const results = () => screen.getByRole("region", { name: "Search results" });
-    const found = () => screen.getAllByRole("tree").map((tree) => `${document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent}: ${names(tree).map((name) => name?.split(" · ").slice(0, 2).join(" · ")).join(" | ")}`);
+    const found = () => screen.getAllByRole("tree").map((tree) => `${document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent}: ${names(tree).join(" | ")}`);
 
     view.search("#101");
-    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture"]);
+    expect(found()).toEqual(["Needs you: separate cache configuration, Ready to approve · Whooper"]);
     // Rows in results keep their own dots.
     expect(within(results()).getByRole("treeitem").querySelector(".pt-status-dot")).toHaveAttribute("data-status", "success");
     expect(within(results()).getByRole("status")).toHaveTextContent("1 result · Esc clears");
-    view.search("queue settings");
-    expect(found()).toEqual(["Done: rename the queue settings, gadgets#88 · approved Nov 25"]);
     view.search("@sam-fixture");
-    expect(found()).toEqual(["Ready to approve: separate cache configuration, widgets#101 · @sam-fixture"]);
+    expect(found()).toEqual(["Needs you: separate cache configuration, Ready to approve · Whooper"]);
+    // Done and Reviewing live in Whooper's page, so the sidebar's search leaves them out.
+    view.search("queue settings");
+    expect(within(results()).getByRole("status")).toHaveTextContent("Nothing matches · Esc clears");
     view.search("docker");
-    expect(found()).toEqual(["Blocks every job: Docker isn't running, Whooper · blocks every job"]);
+    expect(found()).toEqual(["Needs you: Docker isn't running, blocks every job · Whooper"]);
     view.search("gadgets");
     expect(found()).toEqual([
-      "Needs a look: add the tags package, gadgets#77 · @lin-fixture",
-      "Review failed: move the projection, gadgets#55 · The review agent left no usable findings",
-      expect.stringMatching(/^Waiting: speed up the gadget index, gadgets#60 · waiting/),
-      "Done: rename the queue settings, gadgets#88 · approved Nov 25",
+      "Needs you: add the tags package, Needs a look · Whooper | speed up the index, Needs a look · Whooper | move the projection, Review failed · Whooper",
     ]);
     // The results scroll on their own, and a new search shows them from the top.
     results().scrollTop = 40;
@@ -229,7 +229,7 @@ describe("AllWork", () => {
 
     view.search("");
     expect(screen.queryByRole("region", { name: "Search results" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Needs you 4" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Needs you 5" })).toBeVisible();
   });
 
   describe("a plugin that prints status format 2", () => {
@@ -238,23 +238,23 @@ describe("AllWork", () => {
     });
     const failedTitle = "Review this stack of PRs · acme/widgets#60";
 
-    it("draws its blockers first under Needs you, its Needs you groups after them, and its other groups as sections, folded as the manifest says", async () => {
+    it("draws its blockers first under Needs you, then its Needs you items, and leaves its other groups to its page", async () => {
       const view = renderWork({ conversations: [], pluginWork: work(), selectedEntry: "item:fixture-runs:run-review-2", open: {} });
 
-      expect(toggles()).toEqual(["Needs you 3 true", "Running 1 true", "Done 1 false"]);
-      expect(screen.getAllByRole("tree").map((tree) => document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-        .toEqual(["Needs you", "Run failed", "Review needed", "Running"]);
-      const blocker = screen.getByRole("treeitem", { name: "Codex is signed out, Fixture runs · blocks every job" });
+      expect(toggles()).toEqual(["Needs you 3 true"]);
+      expect(names(screen.getByRole("tree", { name: "Needs you" }))).toEqual([
+        "Codex is signed out, blocks every job · Fixture runs",
+        `${failedTitle}, Run failed · Fixture runs`,
+        "Tighten upload retries, Review needed · Fixture runs",
+      ]);
+      const blocker = screen.getByRole("treeitem", { name: "Codex is signed out, blocks every job · Fixture runs" });
       expect(blocker.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-      const failed = screen.getByRole("treeitem", { name: (name) => name.startsWith(`${failedTitle}, Verification Discipline: the model could not run · `) });
+      const failed = screen.getByRole("treeitem", { name: `${failedTitle}, Run failed · Fixture runs` });
       expect(failed.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-      const review = screen.getByRole("treeitem", { name: /^Tighten upload retries, 2 rubrics below threshold · alpha · / });
+      const review = screen.getByRole("treeitem", { name: "Tighten upload retries, Review needed · Fixture runs" });
       expect(review).toHaveAttribute("aria-selected", "true");
       expect(review.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "attention");
-      expect(screen.getByRole("treeitem", { name: /^Score yesterday's sessions, / }).querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
-      expect(screen.queryByRole("treeitem", { name: /Compare judge panels/ })).not.toBeInTheDocument();
-      // An item with no actions has no menu.
-      expect(screen.queryByRole("button", { name: "Actions for Score yesterday's sessions" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("treeitem", { name: /Score yesterday's sessions|Compare judge panels/ })).not.toBeInTheDocument();
 
       fireEvent.click(failed);
       expect(view.onOpenEntry).toHaveBeenCalledExactlyOnceWith("fixture-runs", "item:fixture-runs:run-74c91b1d", "/runs/run-74c91b1d");
@@ -278,10 +278,10 @@ describe("AllWork", () => {
       expect(view.onOpenEntry).not.toHaveBeenCalled();
     });
 
-    it("draws nothing of its own when its status lists nothing", () => {
-      renderWork({ conversations: [], pluginWork: work({ ...fixtureV2Status(), blockers: [], items: [] }), open: {} });
-      expect(toggles()).toEqual(["Needs you 0 true"]);
-      expect(screen.getByText("Nothing needs you right now.")).toBeInTheDocument();
+    it("shows no Needs you when nothing needs you", () => {
+      renderWork({ conversations: [], pluginWork: work({ ...fixtureV2Status(), blockers: [], items: [fixtureV2Status().items[2]] }), open: {} });
+      expect(toggles()).toEqual([]);
+      expect(screen.queryByRole("tree")).not.toBeInTheDocument();
     });
   });
 
@@ -321,18 +321,18 @@ describe("AllWork", () => {
     const blocked = node("blocked", "Tag names", null, { projectRoot: "/work/beta", rollupStatus: "needsAttention", runStatus: "running" });
     renderWork({ conversations: [root, waiting, sibling, blocked], conversationsById: { root, child, grandchild, sibling, waiting, blocked } });
     expect(screen.getAllByRole("tree").map((tree) => tree.getAttribute("aria-labelledby") && document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-      .toEqual(["Chats waiting on you", "Chats · alpha", "Chats · no folder"]);
-    const needsYou = screen.getByRole("tree", { name: "Chats waiting on you" });
+      .toEqual(["Needs you", "Chats · alpha", "Chats · no folder"]);
+    const needsYou = screen.getByRole("tree", { name: "Needs you" });
     expect([...needsYou.querySelectorAll("[role=treeitem]")].map((row) => row.getAttribute("aria-label"))).toEqual([
       "Evaluation rows, Codex, waiting for you", "Tag names, Codex, waiting for you",
     ]);
-    // "Chats waiting on you" says it, so these rows draw no orange dot; elsewhere a waiting chat has one.
-    expect([...needsYou.querySelectorAll(".pt-status-dot")].map((dot) => dot.getAttribute("data-status"))).toEqual(["idle", "idle"]);
+    // Beside "waiting for you", each row draws its orange dot.
+    expect([...needsYou.querySelectorAll(".pt-status-dot")].map((dot) => dot.getAttribute("data-status"))).toEqual(["attention", "attention"]);
     expect(screen.queryByRole("tree", { name: "Chats · beta" })).not.toBeInTheDocument();
     expect(groupWork([sibling, root]).map(({ label }) => label)).toEqual(["alpha", "no folder"]);
   });
 
-  it("groups chats by project, takes the caller's filtered roots, and says when nothing needs you", () => {
+  it("groups chats by project, takes the caller's filtered roots, and shows no Needs you while nothing needs you", () => {
     const view = renderWork();
     expect(screen.getByRole("tree", { name: "Chats · alpha" })).toBeVisible();
     expect(screen.getByRole("tree", { name: "Chats · no folder" })).toBeVisible();
@@ -342,7 +342,7 @@ describe("AllWork", () => {
     expect(screen.getAllByRole("treeitem")).toHaveLength(1);
     view.setConversations([]);
     flush();
-    expect(screen.getByText("Nothing needs you right now.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("tree")).not.toBeInTheDocument();
   });
 

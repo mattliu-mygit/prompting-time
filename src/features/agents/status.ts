@@ -9,8 +9,8 @@ export function missingPrograms(plugin: PluginSnapshot): string[] {
 }
 
 /**
- * The status words and the dot of a background agent's pinned row, which its screen, the window's
- * header, and the menu bar extra repeat. What stops the plugin from running comes first, in red,
+ * The status words and the dot of a plugin's row in the sidebar, which the window's header and
+ * the menu bar extra repeat. What stops the plugin from running comes first, in red,
  * such as "Missing gh"; then the words and dot its status format 2 gives (`agent`), such as
  * "Running · next poll 3:45 PM"; and "Running" with no dot for a plugin that prints no status
  * Prompting Time reads.

@@ -17,6 +17,10 @@ const press = (key: string, init: KeyboardEventInit = {}) => {
   flush();
 };
 const narrowQuery = (query: string) => query === "(max-width: 72rem)";
+/** The aria-label of the sidebar row shown as selected, read while the sidebar is folded to its rail too. */
+const selectedRow = () => document.querySelector('.all-work [role=treeitem][aria-selected="true"]')?.getAttribute("aria-label");
+/** The rail the sidebar folds to while a plugin shows; a click unfolds the sidebar. */
+const rail = () => document.querySelector<HTMLButtonElement>(".sidebar-rail");
 let stores: AppStore[] = [];
 
 function mediaQueries(matches: (query: string) => boolean = () => false) {
@@ -143,17 +147,17 @@ describe("All work and ⌘J", () => {
 
   it("lists roots waiting on you first under Needs you, then by project", async () => {
     renderApp(waitingApi());
-    const needsYou = await screen.findByRole("tree", { name: "Chats waiting on you" });
+    const needsYou = await screen.findByRole("tree", { name: "Needs you" });
     expect(within(needsYou).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual([
       "Evaluation rows, Codex, waiting for you", "Tag names, Codex, waiting for you",
     ]);
     expect(screen.getAllByRole("tree").map((tree) => tree.getAttribute("aria-labelledby") && document.getElementById(tree.getAttribute("aria-labelledby")!)?.textContent))
-      .toEqual(["Chats waiting on you", "Chats · synthetic-project"]);
+      .toEqual(["Needs you", "Chats · synthetic-project"]);
   });
 
   it("jumps to the next root waiting on you with ⌘J or Ctrl+J, wrapping around", async () => {
     const { store } = renderApp(waitingApi());
-    await screen.findByRole("tree", { name: "Chats waiting on you" });
+    await screen.findByRole("tree", { name: "Needs you" });
     expect(store.getSnapshot().selectedConversationId).toBe("working");
     press("j");
     await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("first"));
@@ -169,7 +173,7 @@ describe("All work and ⌘J", () => {
 
   it("scrolls the row ⌘J selects into view when it is outside the visible part of its section", async () => {
     const { store } = renderApp(waitingApi());
-    await screen.findByRole("tree", { name: "Chats waiting on you" });
+    await screen.findByRole("tree", { name: "Needs you" });
     const reveal = vi.mocked(Element.prototype.scrollIntoView);
     reveal.mockClear();
     press("j");
@@ -206,14 +210,15 @@ describe("Whooper's reviews as status format 2 items", () => {
     fireEvent.input(search, { target: { value: "#55" } });
     flush();
     const results = screen.getByRole("region", { name: "Search results" });
-    expect(within(results).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual([expect.stringMatching(/^move the projection, gadgets#55 · /)]);
+    expect(within(results).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual(["move the projection, Review failed · Whooper"]);
     expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     fireEvent.keyDown(search, { key: "Enter" });
     flush();
     await settle();
     expect(document.querySelector("iframe.plugin-frame")).toHaveAttribute("src", "pt-plugin://whooper/index.html");
     expect(screen.getByRole("heading", { level: 1, name: "Whooper" })).toBeInTheDocument();
-    expect(screen.getByRole("treeitem", { name: /^move the projection/ })).toHaveAttribute("aria-selected", "true");
+    expect(selectedRow()).toBe("move the projection, Review failed · Whooper");
+    click(screen.getByRole("button", { name: "Chats" }));
 
     fireEvent.input(search, { target: { value: "auth" } });
     flush();
@@ -241,11 +246,11 @@ describe("Whooper's reviews as status format 2 items", () => {
     flush();
     await settle();
     expect(document.querySelector("iframe.plugin-frame")).not.toBeNull();
-    expect(screen.getByRole("treeitem", { name: /^add the tags package/ })).toHaveAttribute("aria-selected", "true");
+    expect(selectedRow()).toBe("add the tags package, Needs a look · Whooper");
   });
 });
 
-describe("background agents", () => {
+describe("the Plugins section", () => {
   const nextPoll = () => {
     const next = new Date();
     next.setHours(23, 45, 0, 0);
@@ -269,23 +274,26 @@ describe("background agents", () => {
     return { api, emit: (event: AppEvent) => handler?.(event) };
   }
 
-  it("pins each agent above the list, outside it, with its status in words", async () => {
+  it("lists each plugin at the bottom of the sidebar, below the list, with its status in words", async () => {
     renderApp(agentsApi().api);
-    const agents = await screen.findByRole("region", { name: "Background agents" });
-    expect(await within(agents).findByText(`Running · next poll ${shortTime(nextPoll())}`)).toBeVisible();
-    expect(within(agents).getByRole("button", { name: "Whooper" })).toHaveAccessibleDescription(`Running · next poll ${shortTime(nextPoll())}`);
+    const plugins = await screen.findByRole("region", { name: "Plugins" });
+    expect(await within(plugins).findByText(`Running · next poll ${shortTime(nextPoll())}`)).toBeVisible();
+    expect(within(plugins).getByRole("button", { name: "Whooper" })).toHaveAccessibleDescription(`Running · next poll ${shortTime(nextPoll())}`);
     // All is well, so no dot: red, orange, and green each mean something else.
-    expect(agents.querySelector(".agent-pin-status .pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(plugins.querySelector(".plugin-row-status .pt-status-dot")).toHaveAttribute("data-status", "idle");
+    expect(within(plugins).getByRole("button", { name: "Add plugin…" })).toBeVisible();
     const list = screen.getByRole("treeitem", { name: /Auth refactor/ });
-    expect(agents.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // The rows scroll inside their section; the agents and the search stay above every section.
+    expect(list.compareDocumentPosition(plugins) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The rows scroll inside their section; the search stays above every section and the plugins below them.
     expect(list.closest(".work-section-body")).not.toBeNull();
-    expect(agents.closest(".all-work")).toBeNull();
+    expect(plugins.closest(".all-work")).toBeNull();
     expect(screen.getByRole("searchbox", { name: "Search work and chats" }).closest(".all-work")).toBeNull();
+    // Nothing needs you, so there is no Needs you.
+    expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     expect(await axeViolations()).toEqual([]);
   });
 
-  it("reads the agent again when a pluginChanged event arrives", async () => {
+  it("reads the plugin again when a pluginChanged event arrives", async () => {
     let reviewing: string | null = null;
     const fake = agentsApi(fixturePlugin(), () => fixtureStatus(`Running · next poll ${shortTime(nextPoll())}`,
       reviewing ? { agent: { words: `Reviewing ${reviewing}`, dot: "running" } } : {}));
@@ -295,10 +303,10 @@ describe("background agents", () => {
     fake.emit({ kind: "pluginChanged", sequence: "1", plugin: "whooper", files: ["round.lock/round.json"] });
 
     const words = await screen.findByText("Reviewing acme/widgets#101");
-    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
+    expect(words.closest(".plugin-row-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "running");
   });
 
-  it("shows what is missing on an agent that cannot start", async () => {
+  it("shows what is missing on a plugin that cannot start", async () => {
     const stopped = fixturePlugin({
       process: { kind: "notRunning", exit: null },
       prerequisites: [{ command: "slackdump", purpose: "Reads the review asks.", needed: true, path: null }],
@@ -306,15 +314,16 @@ describe("background agents", () => {
     const { api } = agentsApi(stopped);
     renderApp(api);
     const words = await screen.findByText("Missing slackdump");
-    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
-    expect(within(screen.getByRole("region", { name: "Background agents" })).getByRole("button", { name: "Start" })).toBeDisabled();
+    expect(words.closest(".plugin-row-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    click(screen.getByRole("button", { name: "Whooper actions" }));
+    expect(await screen.findByRole("menuitem", { name: "Start" })).toHaveAttribute("aria-disabled", "true");
     expect(api.pluginRequest).not.toHaveBeenCalled();
   });
 
-  it("opens an agent's page at its home route from its name, its screen from the row's menu, and goes back to a conversation from All work", async () => {
+  it("opens a plugin's page from its row with the sidebar folded to a rail, its Logs and Settings from the header's menu, and a chat from the unfolded sidebar", async () => {
     renderApp(agentsApi().api);
-    const agents = await screen.findByRole("region", { name: "Background agents" });
-    const name = within(agents).getByRole("button", { name: "Whooper" });
+    const plugins = await screen.findByRole("region", { name: "Plugins" });
+    const name = within(plugins).getByRole("button", { name: "Whooper" });
     click(name);
 
     expect(await screen.findByRole("heading", { name: "Whooper", level: 1 })).toBeInTheDocument();
@@ -325,24 +334,48 @@ describe("background agents", () => {
     expect(posted).toHaveBeenCalledExactlyOnceWith({ version: 2, type: "open", route: "/" }, "*");
     expect(name).toHaveAttribute("aria-current", "true");
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    // The sidebar folds to its rail, so the header's menu is the plugin's only one on screen.
+    expect(screen.queryByRole("complementary", { name: "All work" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Chats" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "Whooper actions" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("banner")).getByText(`Running · next poll ${shortTime(nextPoll())}`)).toBeInTheDocument();
 
-    click(within(agents).getByRole("button", { name: "Whooper actions" }));
-    click(await screen.findByRole("menuitem", { name: "Open logs" }));
+    click(within(screen.getByRole("banner")).getByRole("button", { name: "More" }));
+    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Stop", "Settings", "Logs"]);
+    click(screen.getByRole("menuitem", { name: "Logs" }));
     expect(await screen.findByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByTitle("Whooper's page")).not.toBeInTheDocument();
     click(screen.getByRole("tab", { name: "Settings" }));
     expect(await screen.findByRole("spinbutton", { name: "Poll every" })).toHaveValue(15);
-    expect(name).toHaveAttribute("aria-current", "true");
-    expect(screen.getByRole("treeitem", { name: /Auth refactor/ })).toHaveAttribute("aria-selected", "false");
     click(screen.getByRole("button", { name: "Show inspector" }));
     expect(within(screen.getByRole("complementary", { name: "Inspector" })).getByText("Asks you first")).toBeInTheDocument();
+    click(within(screen.getByRole("banner")).getByRole("button", { name: "More" }));
+    click(await screen.findByRole("menuitem", { name: "Open page" }));
+    expect(await screen.findByTitle("Whooper's page")).toBeInTheDocument();
 
+    // The rail unfolds the sidebar; the plugin stays until a chat is chosen.
+    click(screen.getByRole("button", { name: "Chats" }));
+    expect(screen.getByRole("complementary", { name: "All work" })).toBeVisible();
+    expect(rail()).toBeNull();
+    expect(screen.getByTitle("Whooper's page")).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: /Auth refactor/ })).toHaveAttribute("aria-selected", "false");
     click(screen.getByRole("treeitem", { name: /Auth refactor/ }));
-    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Poll every" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByTitle("Whooper's page")).not.toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "Auth refactor", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "All work" })).toBeVisible();
   });
 
-  it("installs from a release archive only with its SHA-256, then opens the new agent", async () => {
+  it("names how many chats wait on you on the rail", async () => {
+    const waiting = createdConversation({ id: "first", title: "Evaluation rows", provider: "codex", runStatus: "waiting", rollupStatus: "needsAttention", currentRunId: "run-first" });
+    const { api } = agentsApi();
+    api.listConversations = vi.fn().mockResolvedValue({ items: [waiting], nextCursor: null });
+    renderApp(api);
+    click(within(await screen.findByRole("region", { name: "Plugins" })).getByRole("button", { name: "Whooper" }));
+    expect(screen.getByRole("button", { name: "Chats · 1 waiting on you" })).toBeInTheDocument();
+    expect(rail()?.firstElementChild).toHaveTextContent("»");
+  });
+
+  it("installs from a release archive only with its SHA-256, then opens the new plugin", async () => {
     const { api } = agentsApi();
     const installed = fixturePlugin({ source: { kind: "archive", path: "/synthetic/release/whooper-0.1.0.tar.gz", sha256: "c".repeat(64) } });
     api.listPlugins = vi.fn().mockResolvedValue([]);
@@ -352,8 +385,9 @@ describe("background agents", () => {
       return installed;
     });
     renderApp(api);
-    expect(await screen.findByText("No background agents")).toBeInTheDocument();
-    click(screen.getByRole("button", { name: "Add background agent" }));
+    const plugins = await screen.findByRole("region", { name: "Plugins" });
+    expect(within(plugins).queryByRole("listitem")).not.toBeInTheDocument();
+    click(within(plugins).getByRole("button", { name: "Add plugin…" }));
     click(await screen.findByRole("menuitem", { name: "Install from a release archive…" }));
 
     const dialog = await screen.findByRole("alertdialog", { name: "Install from a release archive" });
@@ -369,13 +403,13 @@ describe("background agents", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
-  it("runs a plugin folder in place from the palette once an agent is installed, and keeps a refused install in its dialog", async () => {
+  it("keeps Add plugin once a plugin is installed, runs a plugin folder in place from the palette, and keeps a refused install in its dialog", async () => {
     const { api } = agentsApi();
     api.pickPluginFolder = vi.fn().mockResolvedValue("/synthetic/whooper");
     api.installPlugin = vi.fn().mockRejectedValue(new BridgeError("plugin-manifest-invalid", "The plugin's manifest is invalid: fixture reason", null));
     renderApp(api);
-    await screen.findByRole("region", { name: "Background agents" });
-    expect(screen.queryByRole("button", { name: "Add background agent" })).not.toBeInTheDocument();
+    const plugins = await screen.findByRole("region", { name: "Plugins" });
+    expect(within(plugins).getByRole("button", { name: "Add plugin…" })).toBeVisible();
     press("k");
     const search = await screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
     fireEvent.input(search, { target: { value: "Run a plugin folder in place" } });
@@ -422,22 +456,29 @@ describe("agent controls", () => {
     return { api, pluginRequest, plugin };
   }
 
-  it("runs Pause and Poll now from the agent's pinned row, and asks before Stop with the items in progress it ends", async () => {
+  it("runs Pause and Poll now from the plugin's row menu, and asks before Stop with the items in progress it ends", async () => {
     const { api, pluginRequest } = controlsApi();
     renderApp(api);
-    const agents = await screen.findByRole("region", { name: "Background agents" });
-    const words = await within(agents).findByText("Can't review · Docker isn't running");
-    expect(words.closest(".agent-pin-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    const plugins = await screen.findByRole("region", { name: "Plugins" });
+    const words = await within(plugins).findByText("Can't review · Docker isn't running");
+    expect(words.closest(".plugin-row-status")?.querySelector(".pt-status-dot")).toHaveAttribute("data-status", "error");
+    const menu = async () => {
+      click(within(plugins).getByRole("button", { name: "Whooper actions" }));
+      return screen.findAllByRole("menuitem");
+    };
 
-    click(within(agents).getByRole("button", { name: "Pause" }));
+    expect((await menu()).map((item) => item.textContent)).toEqual(["Poll now", "Pause", "Stop", "Settings", "Logs"]);
+    click(screen.getByRole("menuitem", { name: "Pause" }));
     await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "pause", args: [], confirmedFingerprint: null }));
-    await waitFor(() => expect(within(agents).getByRole("button", { name: "Poll now" })).toBeEnabled());
-    click(within(agents).getByRole("button", { name: "Poll now" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    await menu();
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Poll now" })).not.toHaveAttribute("aria-disabled", "true"));
+    click(screen.getByRole("menuitem", { name: "Poll now" }));
     await waitFor(() => expect(pluginRequest).toHaveBeenCalledWith({ plugin: "whooper", action: "round", args: [], confirmedFingerprint: null }));
 
-    await waitFor(() => expect(within(agents).getByRole("button", { name: "Poll now" })).toBeEnabled());
-    click(screen.getByRole("button", { name: "Whooper actions" }));
-    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Stop", "Settings", "Open logs"]);
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    await menu();
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Stop" })).not.toHaveAttribute("aria-disabled", "true"));
     click(screen.getByRole("menuitem", { name: "Stop" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Stop Whooper?" });
     // The item whose dot says it runs now.
@@ -448,24 +489,24 @@ describe("agent controls", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
-  it("offers Start in place of Pause once stopped", async () => {
+  it("offers Start in place of Stop once stopped", async () => {
     const { api, plugin } = controlsApi();
     const stopped = { ...plugin, process: { kind: "notRunning" as const, exit: null } };
     api.startPlugin = vi.fn(async () => stopped);
     renderApp(api);
-    const agents = await screen.findByRole("region", { name: "Background agents" });
-    await within(agents).findByText("Can't review · Docker isn't running");
+    const plugins = await screen.findByRole("region", { name: "Plugins" });
+    await within(plugins).findByText("Can't review · Docker isn't running");
 
     api.listPlugins = vi.fn(async () => [stopped]);
     await stores[0]!.refreshPlugins();
     await settle();
-    expect(within(agents).getByText("Stopped")).toBeVisible();
-    expect(within(agents).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    expect(within(agents).getByRole("button", { name: "Poll now" })).toBeDisabled();
-    click(within(agents).getByRole("button", { name: "Start" }));
+    expect(within(plugins).getByText("Stopped")).toBeVisible();
+    click(within(plugins).getByRole("button", { name: "Whooper actions" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(["Poll now", "Pause", "Start", "Settings", "Logs"]);
+    expect(items.slice(0, 2).map((item) => item.getAttribute("aria-disabled"))).toEqual(["true", "true"]);
+    click(screen.getByRole("menuitem", { name: "Start" }));
     await waitFor(() => expect(api.startPlugin).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper" }));
-    click(screen.getByRole("button", { name: "Whooper actions" }));
-    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Settings", "Open logs"]);
   });
 });
 
@@ -497,7 +538,7 @@ describe("menu bar", () => {
     return { api, pluginRequest, lastRequest, choose };
   }
 
-  it("shows the pinned agent's words and buttons and how many items need you, and runs its choices as the sidebar does", async () => {
+  it("shows each plugin's words and buttons and how many items need you, and runs its choices as the sidebar does", async () => {
     const { api, pluginRequest, lastRequest, choose } = menuBarApi();
     renderApp(api);
     await screen.findByText("Can't review · Docker isn't running");
@@ -519,12 +560,13 @@ describe("menu bar", () => {
 
     choose({ kind: "openNeedsYou" });
     expect(document.querySelector("iframe.plugin-frame")).not.toBeNull();
-    expect(screen.getByRole("treeitem", { name: /^separate cache configuration/ })).toHaveAttribute("aria-selected", "true");
+    expect(selectedRow()).toMatch(/^separate cache configuration/);
+    expect(rail()).not.toBeNull();
     choose({ kind: "openAgent", plugin: "whooper" });
-    expect(screen.getByRole("main", { name: "Background agent" })).toBeInTheDocument();
-    // The agent's name opens its page at its home route, as on its pinned row, and no row stays selected.
+    expect(screen.getByRole("main", { name: "Plugin" })).toBeInTheDocument();
+    // The plugin's name opens its page at its home route, as its row in the sidebar does, and no row stays selected.
     expect(document.querySelector("iframe.plugin-frame")).not.toBeNull();
-    expect(screen.getByRole("treeitem", { name: /^separate cache configuration/ })).toHaveAttribute("aria-selected", "false");
+    expect(selectedRow()).toBeUndefined();
   });
 
   it("turns the menu bar extra off and on from the palette, and remembers the choice", async () => {
@@ -539,10 +581,10 @@ describe("menu bar", () => {
       fireEvent.keyDown(input, { key: "Enter" });
       flush();
     };
-    await runCommand("Hide background agents from the menu bar");
+    await runCommand("Hide plugins from the menu bar");
     await waitFor(() => expect(lastRequest()?.visible).toBe(false));
     expect(window.localStorage.getItem("prompting-time.menu-bar")).toBe("off");
-    await runCommand("Show background agents in the menu bar");
+    await runCommand("Show plugins in the menu bar");
     await waitFor(() => expect(lastRequest()?.visible).toBe(true));
     expect(window.localStorage.getItem("prompting-time.menu-bar")).toBe("on");
   });
@@ -587,7 +629,7 @@ describe("status format 2", () => {
     };
     return { api, pluginRequest, choose, emit: (event: AppEvent) => appEvents?.(event), lastRequest: () => vi.mocked(api.updateMenuBar).mock.lastCall?.[0] };
   }
-  const selected = () => document.querySelector('.all-work [role=treeitem][aria-selected="true"]')?.getAttribute("aria-label");
+  const selected = selectedRow;
   /** The plugin's page frame, with a spy on what Prompting Time posts to it. */
   function pageFrame() {
     const element = document.querySelector<HTMLIFrameElement>("iframe.plugin-frame");
@@ -611,7 +653,7 @@ describe("status format 2", () => {
 
     press("j");
     expect(selected()).toMatch(/^Codex is signed out/);
-    expect(screen.getByRole("main", { name: "Background agent" })).toBeInTheDocument();
+    expect(screen.getByRole("main", { name: "Plugin" })).toBeInTheDocument();
     expect(screen.getByTitle("Fixture runs's page")).toHaveAttribute("src", "pt-plugin://fixture-runs/index.html");
     press("j");
     expect(selected()).toMatch(new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`));
@@ -670,6 +712,7 @@ describe("status format 2", () => {
     expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/runs/run-review-2" }, "*");
 
     // Opening the same row again shows it again, after the page may have moved on.
+    click(rail()!);
     fireEvent.click(screen.getByRole("treeitem", { name: /^Tighten upload retries/ }));
     await settle();
     expect(page.posted).toHaveBeenCalledTimes(3);
@@ -728,17 +771,28 @@ describe("status format 2", () => {
       const state: State = { items: [failed, review, running] };
       const { api, emit } = changingApi(state);
       renderApp(api);
-      const page = await openPage(/^Score yesterday's sessions/);
+      // Running lives in the plugin's page, so the palette's Work group opens it.
+      await screen.findByRole("treeitem", { name: /^Tighten upload retries/ });
+      press("k");
+      const input = await screen.findByRole("combobox", { name: "Search conversations, work, and commands" });
+      fireEvent.input(input, { target: { value: "Score yesterday's sessions" } });
+      flush();
+      fireEvent.keyDown(input, { key: "Enter" });
+      flush();
+      await settle();
+      const page = pageFrame();
+      await fromPage(page.window, { version: 2, type: "ready" });
       state.items = [failed, review, { ...running, group: "done" }];
       await changed(emit, "1");
       expect(opened(page)).toEqual(["/runs/run-running-3"]);
 
+      click(rail()!);
       fireEvent.click(screen.getByRole("treeitem", { name: /^Tighten upload retries/ }));
       await settle();
       state.blockers = [];
       state.items = [];
       await changed(emit, "2");
-      await waitFor(() => expect(screen.queryByRole("treeitem", { name: /^Tighten upload retries/ })).not.toBeInTheDocument());
+      await waitFor(() => expect(document.querySelector('.all-work [role=treeitem][aria-label^="Tighten upload retries"]')).toBeNull());
       expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
       expect(opened(page)).toEqual(["/runs/run-running-3", "/runs/run-review-2"]);
     });
@@ -751,8 +805,8 @@ describe("status format 2", () => {
       const page = await openPage(/^Tighten upload retries/);
       state.broken = true;
       await changed(emit, "1");
-      await waitFor(() => expect(screen.queryByRole("treeitem", { name: /^Tighten upload retries/ })).not.toBeInTheDocument());
-      expect(screen.getByRole("treeitem", { name: /^Evaluation rows/ })).toHaveAttribute("aria-selected", "false");
+      await waitFor(() => expect(document.querySelectorAll(".all-work [role=treeitem]")).toHaveLength(1));
+      expect(selectedRow()).toBeUndefined();
       expect(document.querySelector("iframe.plugin-frame")).toBe(page.element);
       expect(opened(page)).toEqual(["/runs/run-review-2"]);
     });
@@ -910,7 +964,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByRole("menuitemradio", { name: "Completed" })).toHaveAttribute("data-highlighted"));
     fireEvent.keyDown(menu, { key: "Enter" });
     await waitFor(() => expect(screen.queryByRole("treeitem", { name: /Auth refactor/ })).not.toBeInTheDocument());
-    expect(screen.getByText("Nothing needs you right now.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Filter conversations: Completed" })).toBeVisible();
     click(screen.getByRole("button", { name: "Hide All work" }));
     expect(screen.getByRole("button", { name: "Show All work" })).toHaveAttribute("aria-expanded", "false");

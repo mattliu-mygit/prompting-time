@@ -48,7 +48,8 @@ layout check on the original synthetic conversations.
 Use `?work=1` for invented root conversations across three projects and in every
 status. All work shows the roots waiting on you first, under "Needs you", then one
 folded "Chats · <project>" section per project and "Chats · no folder"; open a section
-by its heading, and it stays open after a reload. Combine it with a chat scenario, such as
+by its heading, and it stays open after a reload. Needs you shows only while something
+needs you: without `?work=1`, no chat waits, so the sidebar has no Needs you. Combine it with a chat scenario, such as
 `?work=1&chat=reading`, for timeline content. Command-J (Control-J) moves to the next
 root waiting on you; Command-K (Control-K) opens the palette.
 
@@ -62,34 +63,48 @@ playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/c
 ```
 
 The check throws unless every heading is on screen, the stack of folded ones reaches the
-bottom, and each open section with more rows than room scrolls on its own. Open Done from
-the stack and repeat: it takes only the space its rows need, and Needs you keeps the rest.
-Resize to 1440 × 640 and repeat: Needs you and Done share the space evenly, and each scrolls.
+bottom, and each open section with more rows than room scrolls on its own. Open a Chats
+section from the stack and repeat: it takes only the space its rows need, and Needs you keeps
+the rest. Resize to 1440 × 640 and repeat: the open sections share the space evenly, and each
+scrolls.
 Tab reaches every heading, and Enter or Space on one opens or folds its section with the
 focus staying on it.
 
-## Background agents
+## Plugins
 
-Use `?agents=1` for an invented Whooper pinned at the top of the sidebar, running with its
-next poll at 3:45 PM, whose status prints status format 2 as `whooper-status --json` does; combine
-it with `?work=1` for a full All work list. Select Whooper to open its page at `/` (see
-Whooper's reviews for the build it needs), or Settings in its row's ⋯ menu to open its screen and
-change a value and Save, or set "Stop a poll after"
-below 5 to see Whooper's refusal. Pause, Resume, Stop, and Start change the invented Whooper in
-browser memory; Pause turns the row to "Paused" with Resume, and Stop asks first. The palette's "Add background agent" commands offer a synthetic
-archive, whose install is refused to show the message, and a synthetic folder. `?agents=missing` shows Whooper stopped for a
-missing program. `?agents=confirm` opens the submit confirmation over the app with an
-invented request, and `?agents=mentions` opens it on Whooper's refusal for an @-mention
-first, which shows the exit code and Whooper's own words with no way to send. The fixture answers in browser memory and runs no plugin.
+The sidebar ends with a small Plugins section: one row per installed plugin, with its name, its
+status words, and a ⋯ menu (Poll now, Pause or Resume, Stop or Start, Settings, Logs), then
+"Add plugin…", which opens the install menu. Use `?agents=none` for no plugin installed: the
+sidebar shows no Needs you, and the Plugins section shows only its heading and Add plugin, whose
+release archive choice opens the install dialog on a synthetic archive (its install is refused to
+show the message) and whose folder choice a synthetic folder. The palette's "Add plugin" commands
+do the same.
+
+Use `?agents=1` for an invented Whooper in the Plugins section, running with its next poll at
+3:45 PM, whose status prints status format 2 as `whooper-status --json` does; combine it with
+`?work=1` for a full All work list. Clicking Whooper's name opens its page at `/` (see Whooper's
+reviews for the build it needs) and folds the sidebar to a rail on the left: "»" and "Chats", or
+"Chats · N waiting on you" with `?work=1`, turned 90 degrees. The header shows Whooper's name, its
+status words, and a ⋯ menu (More) with its controls, Settings, and Logs; Settings and Logs open in
+the main view, and Open page in the same menu goes back to the page. Clicking the rail unfolds the
+sidebar and leaves Whooper's page in place; choosing a chat shows the chat. In Settings, change a
+value and Save, or set "Stop a poll after" below 5 to see Whooper's refusal. Pause, Resume, Stop,
+and Start change the invented Whooper in browser memory; Pause turns the row to "Paused" with
+Resume, and Stop asks first. `?agents=missing` shows Whooper stopped for a missing program.
+`?agents=confirm` opens the submit confirmation over the app with an invented request, and
+`?agents=mentions` opens it on Whooper's refusal for an @-mention first, which shows the exit code
+and Whooper's own words with no way to send. The fixture answers in browser memory and runs no
+plugin.
 
 ## Status format 2
 
 Use `?agents=v2` (with `?work=1` for chats too) for an invented "Fixture runs" plugin beside
-Whooper; both print status format 2, so each group's label starts with its plugin's title. Its
-pinned row reads "Running 1 evaluation". Needs you starts with the red blocker "Codex is signed
-out", then Fixture runs · Run failed (two runs) and · Review needed (one); · Running starts open and
-· Done, folded in the stack, holds six nightly runs. Command-J steps through
-the blocker and those three items. Each row's ⋯ menu opens on a click: Rerun moves a run to Running,
+Whooper; both print status format 2. Its row in the Plugins section reads "Running 1 evaluation".
+Needs you is one list: the red blocker "Codex is signed out" ("blocks every job · Fixture runs"),
+then two runs whose line reads "Run failed · Fixture runs" and one "Review needed · Fixture runs",
+then, with `?work=1`, the chats waiting on you. Its Running run and six Done runs stay out of the
+sidebar; they are the plugin's page's to show (the palette's Work group still finds them).
+Command-J steps through the blocker, those three items, and the waiting chats. Each row's ⋯ menu opens on a click: Rerun moves a run to Running,
 Delete run opens the confirmation with the invented request and deletes the run after Confirm, and
 the blocker's Check providers clears it. Everything answers in browser memory.
 
@@ -102,18 +117,20 @@ Confirm, the page shows "deleted <id>" and "Changed: runs/<id>/run.json", since 
 pluginChanged event for each action that changes something. Call an undeclared action shows
 Prompting Time's refusal, "Fixture runs declares no rm-everything action." Rerun this run on a
 failed run moves it to Running, so it leaves Needs you, and Prompting Time opens the next item
-there in the same page. Clicking "Fixture runs" in the pinned row opens the page at `/`.
+there in the same page. Opening a row, or Command-J landing on one, folds the sidebar to its rail.
+Clicking "Fixture runs" in the Plugins section opens the page at `/`.
 
 ## Whooper's reviews
 
 Use `?agents=reviews` for invented Whooper reviews, which its status lists as format 2 items in
-Whooper's groups, beside the reviews its page reads. Whooper's pinned row reads "Can't review ·
-Docker isn't running" in red, and Needs you starts with the blocker "Docker isn't running", whose
-⋯ menu runs Poll now. "Needs you" then lists six reviews ready to approve, three that need a look,
-and two failed ones, and scrolls on its own; acme/widgets#106 says approve once CI passes, but its
-one finding is a question, so it needs a look. Reviewing and Waiting start open, and Done and the
-chats folded at the bottom. "Search work and chats" finds a review by its title, its number
-("#101"), its author ("@lin-w"), or its repo's short name. Each review's ⋯ menu runs Retry, Skip,
+Whooper's groups, beside the reviews its page reads. Whooper's row reads "Can't review · Docker
+isn't running" in red, and Needs you starts with the blocker "Docker isn't running", whose ⋯ menu
+runs Poll now. "Needs you" then lists six reviews ready to approve, three that need a look, and two
+failed ones, each with that reason and "Whooper" on its gray line, and scrolls on its own;
+acme/widgets#106 says approve once CI passes, but its one finding is a question, so it needs a
+look. Reviewing, Waiting, and Done stay in Whooper's page; the chats are folded at the bottom.
+"Search work and chats" finds a review under Needs you by its title, its number ("#101"), its
+author ("@lin-w"), or its repo's short name. Each review's ⋯ menu runs Retry, Skip,
 or Remove with `--item <run>`; a notice names what ran. Drag the sidebar's right edge to resize
 it; the width stays after a reload.
 

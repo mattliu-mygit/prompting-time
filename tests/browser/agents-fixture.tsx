@@ -6,14 +6,15 @@ import { answerReviewAction, dockerCause, fixtureReviewEntries, fixtureRounds, f
 import { answerV2Action, V2_PLUGIN, v2Plugin } from "./status-v2-fixture";
 
 /**
- * `?agents=1`: an invented Whooper under Background agents, running with its next poll at 3:45 PM,
+ * `?agents=1`: an invented Whooper in the sidebar's Plugins section, running with its next poll at 3:45 PM,
  * whose status prints status format 2 as whooper-status --json does. `?agents=missing` shows it
  * stopped for a missing program; `?agents=confirm` opens the submit confirmation over the app, and
  * `?agents=mentions` opens it on Whooper's refusal for an @-mention first, which shows Whooper's own
  * words. `?agents=reviews` lists invented reviews as items in Whooper's groups, which open in the
  * plugin page the dev server serves.
  * `?agents=v2` adds an invented plugin that prints status format 2 (status-v2-fixture.ts), whose
- * actions send pluginChanged events.
+ * actions send pluginChanged events. `?agents=none` installs no plugin, but its pickers answer, so
+ * Add plugin reaches the install dialog.
  */
 export const agentsScenario = new URLSearchParams(location.search).get("agents");
 
@@ -205,10 +206,10 @@ async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionRes
 export function withAgentsFixture(base: AppApi): AppApi {
   return {
     ...base,
-    listPlugins: async () => [
+    listPlugins: async () => (agentsScenario === "none" ? [] : [
       { ...plugin, process: running ? plugin.process : { kind: "notRunning" as const, exit: null } },
       ...(agentsScenario === "v2" ? [v2Plugin] : []),
-    ],
+    ]),
     stopPlugin: async () => {
       running = false;
       return { ...plugin, process: { kind: "notRunning" as const, exit: null } };

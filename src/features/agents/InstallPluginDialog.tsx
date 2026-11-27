@@ -1,7 +1,7 @@
 import { createSignal, Show, untrack } from "solid-js";
 import { ConfirmDialog, TextField } from "@prompting-time/ui";
 import type { PluginSource } from "../../bridge/types";
-import type { InstallKind } from "./BackgroundAgents";
+import type { InstallKind } from "./PluginsSection";
 
 type Props = {
   kind: InstallKind;

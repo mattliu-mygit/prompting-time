@@ -4,7 +4,7 @@ import { AlertIcon, BotIcon, ChatIcon, ChevronDownIcon, ChevronRightIcon, Ellips
 import type { ConversationSummary, ProviderId } from "../../bridge/types";
 import { effectiveConversationStatus, type ChildPageSnapshot, type EffectiveStatus, type SelectedPath } from "../../app/store";
 import { readPreference, savePreference } from "../../app/preferences";
-import { blockerKey, groupKey, itemKey, type PluginBlocker, type PluginGroup, type StatusV2Blocker, type StatusV2Item, type StatusV2Work } from "../agents/statusV2";
+import { blockerKey, itemKey, type PluginBlocker, type PluginGroup, type StatusV2Blocker, type StatusV2Item, type StatusV2Work } from "../agents/statusV2";
 
 type Props = {
   /** Active roots in list order, already filtered by status. */
@@ -20,8 +20,8 @@ type Props = {
   query: string;
   onSelect(id: string): void;
   /**
-   * What plugins that print status format 2 add: their blockers, first under Needs you; the items
-   * of their Needs you groups, as parts of it; and their other groups, as sections of their own.
+   * What plugins that print status format 2 add: their blockers and the items of their Needs you
+   * groups, under Needs you. Their other groups live in their pages, so the sidebar leaves them out.
    */
   pluginWork: StatusV2Work;
   /** The title the plugin's manifest gives an action, for a row's ⋯ menu. */
@@ -36,16 +36,16 @@ type Props = {
 export type WorkGroup = { key: string; label: string; path: string | null; conversations: ConversationSummary[] };
 /** A conversation; a search result shows its folder and no children (`found`). */
 type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number; found?: boolean };
-/** An item or a blocker of a plugin that prints status format 2. */
-type EntryRow = { kind: "entry"; key: string; plugin: string; pluginTitle: string; entry: { item: StatusV2Item } | { blocker: StatusV2Blocker }; depth: 0 };
+/**
+ * An item or a blocker of a plugin that prints status format 2. `reason` is why it needs you: its
+ * Needs you group's title, such as "Run failed", or "blocks every job" for a blocker.
+ */
+type EntryRow = { kind: "entry"; key: string; plugin: string; pluginTitle: string; reason: string; entry: { item: StatusV2Item } | { blocker: StatusV2Blocker }; depth: 0 };
 type Row = ConversationRow | EntryRow;
 /** One item of a part: a plugin's item or blocker, or a root with its loaded children. */
 type Entry = Row[];
-/**
- * A labeled part of a section, or its only, unlabeled part. `named` is the status its heading
- * already says, such as "attention" under Chats waiting on you: its rows show no dot for that status.
- */
-type Part = { key: string; label: string | null; hint?: string; named?: Status; entries: Entry[] };
+/** A labeled part of the search results, or a section's only, unlabeled part. */
+type Part = { key: string; label: string | null; entries: Entry[] };
 type Section = { key: string; label: string; title?: string; count: number; parts: Part[] };
 
 /** The sections the user opened or folded, by key, which this device keeps across launches; the rest start folded except Needs you. */
@@ -78,14 +78,6 @@ export function searchTokens(query: string): string[] {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
 
-/** A date as a row shows it: "3:12 PM" today, "Nov 24" this year, "Nov 24, 2025" before. */
-export function shortDate(iso: string, now = new Date()): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return date.toLocaleDateString([], { month: "short", day: "numeric", ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }) });
-}
-
 /** Whether every word, without a leading "#" or "@", is in `text`, such as "#101" in "widgets#101 · @sam". */
 const matches = (text: string, tokens: readonly string[]) => {
   const words = text.toLowerCase();
@@ -94,15 +86,15 @@ const matches = (text: string, tokens: readonly string[]) => {
 
 /**
  * What the sidebar's search finds: the blockers whose title holds every word of `query`, the items
- * whose title, detail, or project folder holds every word, in the groups their plugin declares and
- * in All work's order, then the roots whose title or folder holds every word ("no folder" for one
- * without). Each word may start with "#" or "@", which it ignores.
+ * of the Needs you groups whose title, detail, or project folder holds every word, in Needs you's
+ * order, then the roots whose title or folder holds every word ("no folder" for one without). Each
+ * word may start with "#" or "@", which it ignores.
  */
 export function searchWork(work: StatusV2Work, conversations: readonly ConversationSummary[], query: string) {
   const tokens = searchTokens(query);
   return {
     blockers: work.blockers.filter(({ blocker }) => matches(blocker.title, tokens)),
-    groups: [...work.needsYou, ...work.groups]
+    groups: work.needsYou
       .map((group) => ({ ...group, items: group.items.filter((item) => matches(`${item.title} ${item.detail ?? ""} ${item.project ? folderName(item.project) : ""}`, tokens)) }))
       .filter((group) => group.items.length > 0),
     chats: conversations.filter((conversation) => !conversation.archived
@@ -110,8 +102,8 @@ export function searchWork(work: StatusV2Work, conversations: readonly Conversat
   };
 }
 
-const blockerEntries = (blockers: readonly PluginBlocker[]): Entry[] => blockers.map(({ plugin, pluginTitle, blocker }) => [{ kind: "entry", key: blockerKey(plugin, blocker.id), plugin, pluginTitle, entry: { blocker }, depth: 0 }]);
-const groupEntries = ({ plugin, pluginTitle, items }: PluginGroup): Entry[] => items.map((item) => [{ kind: "entry", key: itemKey(plugin, item.id), plugin, pluginTitle, entry: { item }, depth: 0 }]);
+const blockerEntries = (blockers: readonly PluginBlocker[]): Entry[] => blockers.map(({ plugin, pluginTitle, blocker }) => [{ kind: "entry", key: blockerKey(plugin, blocker.id), plugin, pluginTitle, reason: "blocks every job", entry: { blocker }, depth: 0 }]);
+const groupEntries = ({ plugin, pluginTitle, group, items }: PluginGroup): Entry[] => items.map((item) => [{ kind: "entry", key: itemKey(plugin, item.id), plugin, pluginTitle, reason: group.title, entry: { item }, depth: 0 }]);
 
 function readOpenSections(): Record<string, boolean> {
   try {
@@ -128,11 +120,12 @@ function readOpenSections(): Record<string, boolean> {
  * The All work list, in sections that work like VS Code's sidebar panes: every section's heading,
  * with its name and count, stays on screen. The open sections share the space above the folded
  * ones, each scrolling on its own, and the folded ones stack at the bottom; a heading opens its
- * section into that space or folds it back into the stack. "Needs you" holds the blockers of the
- * plugins that print status format 2, the items of their groups marked `needs_you`, and the roots
- * waiting on you. Then each other declared group in a section of its own, open unless its manifest
- * says `folded`, and the chats of each project and those without a folder, each root followed by
- * its loaded children, folded until opened. Each item or blocker row has a ⋯ menu of its actions.
+ * section into that space or folds it back into the stack. "Needs you", shown only while something
+ * needs you, is one list in Command-J's order: the blockers of the plugins that print status format
+ * 2, the items of their groups marked `needs_you`, each saying why it needs you and its plugin's
+ * name, and the roots waiting on you. Then the chats of each project and those without a folder,
+ * each root followed by its loaded children, folded until opened. Each item or blocker row has a ⋯
+ * menu of its actions.
  * The sections the user opens or folds stay so across launches. The rows are a tree for keyboard
  * users: arrow keys move and open rows across the open sections, Home and End jump, and Enter or
  * Space opens a conversation, an item, or a blocker.
@@ -144,9 +137,7 @@ export function AllWork(props: Props) {
   let opened = readOpenSections();
   const [openSections, setOpenSections] = createSignal(opened);
   const items = new Map<string, HTMLElement>();
-  // A format-2 group's section starts open unless its manifest says `folded`.
-  const openByDefault = createMemo(() => new Set(props.pluginWork.groups.filter(({ group }) => !group.folded).map(({ plugin, group }) => groupKey(plugin, group.id))));
-  const openIn = (sections: Record<string, boolean>, key: string) => sections[key] ?? (key === "needs-you" || openByDefault().has(key));
+  const openIn = (sections: Record<string, boolean>, key: string) => sections[key] ?? key === "needs-you";
   const isOpen = (key: string) => openIn(openSections(), key);
   // The section whose heading had the focus when it opened or folded. Its heading moves between the
   // open sections and the stack, which draws a new one, so the new heading takes the focus back.
@@ -184,18 +175,10 @@ export function AllWork(props: Props) {
     const groups = groupWork(props.conversations);
     const waitingChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
     const work = props.pluginWork;
-    const needsParts: Part[] = ([
-      { key: "blockers", label: null, entries: blockerEntries(work.blockers) },
-      ...work.needsYou.map((group): Part => ({ key: groupKey(group.plugin, group.group.id), label: group.label, hint: group.pluginTitle, entries: groupEntries(group) })),
-      { key: "chats", label: "Chats waiting on you", hint: "An agent asked you something or waits for your approval.", named: "attention", entries: chatEntries(waitingChats) },
-    ] satisfies Part[]).filter((part) => part.entries.length > 0);
-    const single = (key: string, entries: Entry[], named?: Status): Part[] => [{ key, label: null, named, entries }];
+    const needsYou = [...blockerEntries(work.blockers), ...work.needsYou.flatMap(groupEntries), ...chatEntries(waitingChats)];
+    const single = (key: string, entries: Entry[]): Part[] => [{ key, label: null, entries }];
     return [
-      { key: "needs-you", label: "Needs you", count: needsParts.reduce((sum, part) => sum + part.entries.length, 0), parts: needsParts },
-      ...work.groups.map((group): Section => {
-        const key = groupKey(group.plugin, group.group.id);
-        return { key, label: group.label, title: group.pluginTitle, count: group.items.length, parts: single(key, groupEntries(group)) };
-      }),
+      ...(needsYou.length > 0 ? [{ key: "needs-you", label: "Needs you", count: needsYou.length, parts: single("needs-you", needsYou) }] : []),
       ...groups.filter((group) => group.key !== "needs-you").map((group): Section => {
         const key = `chats:${group.path ?? "no-folder"}`;
         return { key, label: `Chats · ${group.label}`, title: group.path ?? undefined, count: group.conversations.length, parts: single(key, chatEntries(group.conversations)) };
@@ -204,13 +187,13 @@ export function AllWork(props: Props) {
   });
 
   const searching = () => searchTokens(props.query).length > 0;
-  /** While searching, the results as parts: the blockers, one per group of items, then the chats. */
+  /** While searching, the results as parts: the blockers and items under Needs you, then the chats. */
   const results = createMemo((): Part[] => {
     if (!searching()) return [];
     const { blockers, groups, chats } = searchWork(props.pluginWork, props.conversations, props.query);
+    const work = [...blockerEntries(blockers), ...groups.flatMap(groupEntries)];
     return [
-      ...(blockers.length > 0 ? [{ key: "found:blockers", label: "Blocks every job", entries: blockerEntries(blockers) }] : []),
-      ...groups.map((group): Part => ({ key: `found:${groupKey(group.plugin, group.group.id)}`, label: group.label, hint: group.pluginTitle, entries: groupEntries(group) })),
+      ...(work.length > 0 ? [{ key: "found:needs-you", label: "Needs you", entries: work }] : []),
       ...(chats.length > 0 ? [{ key: "found:chats", label: "Chats", entries: chats.map((conversation): Entry => [{ kind: "conversation", key: conversation.id, conversation, depth: 0, found: true }]) }] : []),
     ];
   });
@@ -282,13 +265,9 @@ export function AllWork(props: Props) {
     },
   });
 
-  /**
-   * One row; `named` is the status its part's heading says, which replaces the row's dot. Rows keep
-   * the place of a dot they don't draw, so the gray lines of a list start in one column.
-   */
-  function renderRow(row: () => Row, named: () => Status | undefined): JSX.Element {
+  /** One row. Rows keep the place of a dot they don't draw, so the gray lines of a list start in one column. */
+  function renderRow(row: () => Row): JSX.Element {
     const first = untrack(row);
-    const dot = (status: Status): Status => (status === named() ? "idle" : status);
     if (first.kind === "entry") {
       // An entry's key holds its plugin and ID, so neither changes; nor does whether it is a blocker.
       const current = () => row() as EntryRow;
@@ -301,12 +280,8 @@ export function AllWork(props: Props) {
         return "blocker" in entry ? entry.blocker : null;
       };
       const title = () => item()?.title ?? blocker()?.title ?? "";
-      // An item says its detail, project, and when it changed; a blocker that it blocks every job.
-      const meta = () => {
-        const shown = item();
-        if (!shown) return `${current().pluginTitle} · blocks every job`;
-        return [shown.detail, shown.project ? folderName(shown.project) : null, shortDate(shown.updated_at)].filter(Boolean).join(" · ");
-      };
+      // Why it needs you, beside its dot, then its plugin's name.
+      const meta = () => `${current().reason} · ${current().pluginTitle}`;
       const menuItems = () => {
         const names = item()?.actions ?? (blocker()?.action ? [blocker()!.action!] : []);
         return names.map((name) => ({ value: name, label: props.actionTitle(current().plugin, name) }));
@@ -322,7 +297,7 @@ export function AllWork(props: Props) {
           style={{ "--work-depth": "0" }}
           icon={isBlocker ? <AlertIcon /> : <BotIcon />}
           title={title()}
-          status={dot(item()?.dot ?? blocker()?.dot ?? "idle")}
+          status={item()?.dot ?? blocker()?.dot ?? "idle"}
           meta={meta()}
           trailing={
             <Show when={menuItems().length > 0}>
@@ -365,7 +340,7 @@ export function AllWork(props: Props) {
         style={{ "--work-depth": String(Math.min(row().depth, 8)) }}
         icon={<ChatIcon />}
         title={conversation().title}
-        status={dot(state().status)}
+        status={state().status}
         meta={meta()}
         trailing={
           <Show when={expandable()}>
@@ -452,9 +427,9 @@ export function AllWork(props: Props) {
               const partId = createUniqueId();
               return (
                 <div class="work-part">
-                  <h3 class="work-part-heading" title={part().hint}><span id={partId}>{part().label}</span> · {part().entries.length}</h3>
+                  <h3 class="work-part-heading"><span id={partId}>{part().label}</span> · {part().entries.length}</h3>
                   <ul role="tree" aria-labelledby={partId} class="work-rows">
-                    <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row, () => part().named)}</For>
+                    <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
                   </ul>
                 </div>
               );
@@ -471,17 +446,16 @@ export function AllWork(props: Props) {
                 <section class="work-section">
                   {heading(section, labelId, true)}
                   <div class="work-section-body">
-                    <Show when={section().count === 0}><p class="work-empty">Nothing needs you right now.</p></Show>
                     <For each={section().parts} keyed={(part) => part.key}>
                       {(part) => {
                         const partId = createUniqueId();
                         return (
                           <div class="work-part">
                             <Show when={part().label}>
-                              {(label) => <h3 class="work-part-heading" title={part().hint}><span id={partId}>{label()}</span> · {part().entries.length}</h3>}
+                              {(label) => <h3 class="work-part-heading"><span id={partId}>{label()}</span> · {part().entries.length}</h3>}
                             </Show>
                             <ul role="tree" aria-labelledby={part().label ? partId : labelId} class="work-rows">
-                              <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row, () => part().named)}</For>
+                              <For each={part().entries.flat()} keyed={(row) => row.key}>{(row) => renderRow(row)}</For>
                             </ul>
                           </div>
                         );

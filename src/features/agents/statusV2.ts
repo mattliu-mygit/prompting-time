@@ -11,7 +11,7 @@ export type StatusV2 = {
   format: 2;
   /** The plugin's row: a few status words and a dot; null when the output's `agent` does not fit. */
   agent: { words: string; dot: Status } | null;
-  /** Problems that stop every job, drawn above Needs you and in the menu bar badge. */
+  /** Problems that stop every job, drawn first under Needs you and in the menu bar badge. */
   blockers: StatusV2Blocker[];
   /** At most 50, each in a group the manifest declares. */
   items: StatusV2Item[];
@@ -111,12 +111,12 @@ export function readStatusV2(plugin: PluginSnapshot, read: PluginStatusRead | un
 export type PluginBlocker = { plugin: string; pluginTitle: string; blocker: StatusV2Blocker };
 /** One of a plugin's declared groups with its items, newest first. `label` adds the plugin's title when more than one plugin prints format 2. */
 export type PluginGroup = { plugin: string; pluginTitle: string; group: PluginStatusGroup; label: string; items: StatusV2Item[] };
-/** What the plugins that print status format 2 add to All work. */
+/** What the plugins that print status format 2 add to Needs you and the palette. */
 export type StatusV2Work = {
   blockers: PluginBlocker[];
-  /** The groups whose items wait on the user, each with items, by `order`: parts of Needs you. */
+  /** The groups whose items wait on the user, each with items, by `order`: Needs you lists their items. */
   needsYou: PluginGroup[];
-  /** The other groups with items, by `order`: sections of their own. */
+  /** The other groups with items, by `order`, which the plugin's page shows and the palette's Work group finds. */
   groups: PluginGroup[];
 };
 

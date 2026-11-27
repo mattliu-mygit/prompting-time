@@ -66,7 +66,7 @@ body {
   min-block-size: 0;
 }
 
-/* All work: background agents and the search pinned on top, then the list's sections. */
+/* All work: the search on top, then the list's sections, then the Plugins section at the bottom. */
 .sidebar-pane {
   position: relative;
   display: flex;
@@ -245,21 +245,22 @@ body {
   margin: 0;
 }
 
-/* Background agents, pinned on top: one compact box per agent. */
-.agents-pinned {
+/* The Plugins section, at the bottom of the sidebar below the list: one quiet row per plugin and Add plugin. */
+.sidebar-plugins {
   display: grid;
+  flex: none;
   gap: var(--s-space-4);
-  padding: var(--s-space-8) var(--s-space-8) 0;
+  max-block-size: 40%;
+  padding: var(--s-space-8) var(--s-space-8) var(--s-space-8);
+  overflow-y: auto;
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
 }
 
-.agents-empty {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-space-4);
+.sidebar-plugins-heading {
+  padding-inline: var(--s-space-4);
 }
 
-.agents-list {
+.plugin-rows {
   display: grid;
   gap: var(--s-space-4);
   margin: 0;
@@ -267,97 +268,108 @@ body {
   list-style: none;
 }
 
-.agent-pin {
+/* The name and the ⋯ menu on one line, the status words under them. */
+.plugin-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--s-space-4);
-  padding: var(--s-space-8) var(--s-space-8) var(--s-space-8) var(--s-space-12);
-  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
-  border-inline-start: var(--s-border-thick) var(--s-border-style) var(--s-border-strong);
-  background: var(--s-surface);
-}
-
-.agent-pin[data-blocked] {
-  border-inline-start-color: var(--s-error);
-}
-
-/* In a narrow sidebar the buttons move under the agent's name instead of hiding it. */
-.agent-pin-top {
-  display: flex;
-  flex-wrap: wrap;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--s-space-4);
+  column-gap: var(--s-space-4);
+  padding-inline-start: var(--s-space-4);
 }
 
-.agent-pin-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--s-space-4);
-}
-
-.agent-pin-name {
+.plugin-row-name {
   display: inline-flex;
-  flex: 1 0 auto;
   align-items: center;
   gap: var(--s-space-8);
   min-inline-size: 0;
+  min-block-size: var(--s-control-height-sm);
   padding: 0;
   border: 0;
   background: none;
   color: var(--s-text);
   font-size: var(--s-size-sm);
-  font-weight: var(--s-weight-semibold);
+  font-weight: var(--s-weight-medium);
   text-align: start;
   cursor: pointer;
 }
 
-.agent-pin-name svg {
+.plugin-row-name svg {
   flex: none;
   inline-size: var(--s-space-16);
   block-size: var(--s-space-16);
   color: var(--s-text-muted);
 }
 
-.agent-pin-name span {
+.plugin-row-name span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.agent-pin-name:hover span,
-.agent-pin-name[aria-current="true"] span {
+.plugin-row-name:hover span,
+.plugin-row-name[aria-current="true"] span {
   text-decoration: underline;
   text-underline-offset: 0.2em;
 }
 
-.agent-pin .pt-button {
-  min-block-size: 1.625rem;
-  padding: 0 var(--s-space-8);
-  font-size: var(--s-size-xs);
-}
-
-.agent-pin .pt-icon-button {
-  inline-size: 1.625rem;
-  block-size: 1.625rem;
-}
-
-.agent-pin-status {
+.plugin-row-status {
   display: flex;
+  grid-column: 1 / -1;
   align-items: flex-start;
   gap: var(--s-space-8);
   margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
+  padding-inline-start: var(--s-space-24);
   color: var(--s-text-muted);
   font-size: var(--s-size-xs);
   line-height: 1.4;
-  text-align: start;
 }
 
-.agent-pin-status .pt-status-dot {
+.plugin-row-status .pt-status-dot {
   flex: none;
   margin-block-start: 0.35em;
+}
+
+/* Add plugin reads as a quiet line of text, not a bordered button, at a control's full size. */
+.plugin-add .pt-menu-text-trigger {
+  padding: 0 var(--s-space-4);
+  border-color: transparent;
+  background: none;
+  color: var(--s-text-muted);
+}
+
+.plugin-add .pt-menu-text-trigger:hover {
+  color: var(--s-text);
+}
+
+/* While a plugin shows, the sidebar folds to this rail: an arrow and its words turned 90 degrees. */
+.sidebar-rail {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-space-8);
+  inline-size: var(--s-space-32);
+  padding: var(--s-space-12) 0;
+  border: 0;
+  border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  background: none;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  cursor: pointer;
+}
+
+.sidebar-rail:hover {
+  color: var(--s-text);
+}
+
+.sidebar-rail-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  white-space: nowrap;
+}
+
+.sidebar-pane[hidden] {
+  display: none;
 }
 
 /* Each section folds to its heading, a toggle with the section's name and count. */
@@ -1320,7 +1332,7 @@ body {
   color: var(--s-warning);
 }
 
-/* A background agent's screen: its header, then tabs whose panel fills the rest. */
+/* A plugin's Logs and Settings: tabs whose panel fills the rest, under the window's header. */
 .agent-screen {
   display: flex;
   flex: 1;
@@ -1330,57 +1342,6 @@ body {
   min-block-size: 0;
   margin-inline: auto;
   padding: var(--s-space-24) var(--s-space-16) 0;
-}
-
-.agent-header {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--s-space-12);
-}
-
-.agent-icon {
-  display: grid;
-  place-items: center;
-  inline-size: var(--s-space-32);
-  block-size: var(--s-space-32);
-  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
-  color: var(--s-text-muted);
-}
-
-.agent-icon svg {
-  inline-size: var(--s-space-16);
-  block-size: var(--s-space-16);
-}
-
-.agent-heading {
-  display: grid;
-  flex: 1;
-  gap: var(--s-space-4);
-  min-inline-size: 0;
-}
-
-.agent-heading h2 {
-  margin: 0;
-  font-size: var(--s-size-xl);
-  font-weight: var(--s-heading-weight);
-}
-
-.agent-heading p {
-  margin: 0;
-}
-
-.agent-status {
-  display: flex;
-  align-items: center;
-  gap: var(--s-space-8);
-  color: var(--s-text-muted);
-  font-size: var(--s-size-sm);
-}
-
-.agent-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--s-space-8);
 }
 
 .agent-tabs {

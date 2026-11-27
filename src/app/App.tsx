@@ -3,8 +3,8 @@ import { CloseIcon, CommandPalette, ConfirmDialog, EllipsisIcon, FilterIcon, Ico
 import type { MenuBarCommand, PluginSource, ProviderId } from "../bridge/types";
 import { ACTIONS, messageOf, runPluginAction } from "../features/agents/actions";
 import { AgentScreen } from "../features/agents/AgentScreen";
-import { itemsInProgress, type AgentAction, type AgentTab } from "../features/agents/agentMenu";
-import { BackgroundAgents, INSTALL_ITEMS, type InstallKind } from "../features/agents/BackgroundAgents";
+import { agentMenuItems, itemsInProgress, type AgentAction, type AgentTab } from "../features/agents/agentMenu";
+import { INSTALL_ITEMS, PluginsSection, type InstallKind } from "../features/agents/PluginsSection";
 import { InstallPluginDialog } from "../features/agents/InstallPluginDialog";
 import { menuBarRequest, readMenuBarEnabled, saveMenuBarEnabled } from "../features/agents/menuBar";
 import { PluginInspector } from "../features/agents/PluginSettings";
@@ -50,9 +50,10 @@ type PluginView =
 type EntryConfirmation = { plugin: string; action: string; args: string[] };
 
 /**
- * The command center: the All work list with its background agents and their items, the selected
- * conversation's timeline and composer, or an agent's screen or page, and the inspector, with the
- * dialogs that create and archive conversations, install agents, and stop an agent.
+ * The command center: the All work sidebar (Needs you, the chats, and the Plugins section), the
+ * selected conversation's timeline and composer, or a plugin's page or screen with the sidebar
+ * folded to a rail, and the inspector, with the dialogs that create and archive conversations,
+ * install plugins, and stop one.
  */
 export function App(props: { store: AppStore }) {
   // One store for the app's lifetime. Read once: a prop written as a call, such as
@@ -61,6 +62,8 @@ export function App(props: { store: AppStore }) {
   const snapshot = createSnapshot(store);
   const timelineViews = new Map<string, TimelineViewState>();
   const [sidebarOpen, setSidebarOpen] = createSignal(true);
+  // Whether the open sidebar shows only its rail, as while a plugin shows; a click on the rail or choosing a chat unfolds it.
+  const [railed, setRailed] = createSignal(false);
   const [sidebarWidth, setSidebarWidth] = createSignal(readSidebarWidth());
   const [inspectorOpen, setInspectorOpen] = createSignal(false);
   const [narrow, setNarrow] = createSignal(typeof window.matchMedia === "function" && window.matchMedia(NARROW_INSPECTOR).matches);
@@ -106,7 +109,7 @@ export function App(props: { store: AppStore }) {
   const pluginWork = createMemo(() => statusV2Work(snapshot().plugins));
   /** The items of format-2 Needs you groups, in list order, each with what a notice names it. */
   const needsYouItems = () => pluginWork().needsYou.flatMap(({ plugin, items }) => items.map((item) => ({ key: itemKey(plugin, item.id), label: item.title, open: () => openEntry(plugin, itemKey(plugin, item.id), item.route) })));
-  // The menu bar extra shows what the pinned agents and Needs you show, and changes with them.
+  // The menu bar extra shows what the Plugins section and Needs you show, and changes with them.
   createEffect(() => menuBarRequest(snapshot().plugins, agentPending(), needsYouItems().length, menuBarEnabled()), (request) => store.updateMenuBar(request));
   /** The key of what the list shows as selected: the item or blocker the page shows, or the conversation when no plugin shows. */
   const currentKey = () => {
@@ -123,7 +126,7 @@ export function App(props: { store: AppStore }) {
   const overlay = () => narrow() && inspectorOpen();
   const lifecycleModalOpen = () => creating() || archiveTarget() !== null || installTarget() !== null || entryConfirmation() !== null;
   const paletteAvailable = () => snapshot().phase === "ready" && !overlay() && !lifecycleModalOpen() && !composerModalOpen();
-  const workspaceLabel = () => (pluginView() && selectedPlugin() ? "Background agent" : "Conversation workspace");
+  const workspaceLabel = () => (pluginView() && selectedPlugin() ? "Plugin" : "Conversation workspace");
   /** Everything under "Needs you", in list order: format-2 blockers and items, then the conversations waiting on you. */
   const waiting = () => [
     ...pluginWork().blockers.map(({ plugin, blocker }) => ({ key: blockerKey(plugin, blocker.id), label: blocker.title, open: () => openEntry(plugin, blockerKey(plugin, blocker.id), blocker.route) })),
@@ -142,25 +145,33 @@ export function App(props: { store: AppStore }) {
       open: () => openEntry(plugin, itemKey(plugin, item.id), item.route),
     }))),
   ];
-  /** The format-2 work the sidebar lists under the status filter: all of it for all statuses, what is under Needs you for waiting, none for the rest. */
-  const sidebarPluginWork = (): StatusV2Work => (snapshot().statusFilter === "all" ? pluginWork() : snapshot().statusFilter === "waiting" ? { ...pluginWork(), groups: [] } : NO_STATUS_V2_WORK);
+  /** The format-2 work the sidebar lists under Needs you: for all statuses and for waiting, none for the rest. */
+  const sidebarPluginWork = (): StatusV2Work => (snapshot().statusFilter === "all" || snapshot().statusFilter === "waiting" ? pluginWork() : NO_STATUS_V2_WORK);
+  /** The rail's words: "Chats", and how many chats wait on you when any do. */
+  const railLabel = () => {
+    const count = waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? [])).length;
+    return count > 0 ? `Chats · ${count} waiting on you` : "Chats";
+  };
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
 
   function selectConversation(id: string) {
     setPluginView(null);
+    setRailed(false);
     void store.selectConversation(id);
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
 
+  /** Shows a plugin in the workspace and folds the sidebar to its rail. */
   function showPlugin(view: PluginView) {
     setPluginView(view);
+    setRailed(true);
     if (window.matchMedia?.("(max-width: 46rem)").matches) setSidebarOpen(false);
   }
 
   const openPlugin = (name: string, tab: AgentTab = "logs") => showPlugin({ kind: "agent", plugin: name, tab });
   /** A format-2 item or blocker: its plugin's page, which shows its route. */
   const openEntry = (plugin: string, key: string, route: string) => showPlugin({ kind: "page", plugin, entry: key, target: { route } });
-  /** The plugin's name, on its pinned row or in the menu bar: its page at its home route. */
+  /** The plugin's row in the sidebar, its name in the menu bar, or Open page in the header's ⋯ menu: its page at its home route. */
   const openHome = (plugin: string) => showPlugin({ kind: "page", plugin, entry: null, target: { route: "/" } });
 
   // When the item or blocker the page shows leaves Needs you, as after the user acts on it there,
@@ -178,7 +189,7 @@ export function App(props: { store: AppStore }) {
   }));
 
   /**
-   * Runs one of an agent's controls from its row menu or its screen: Poll now, Pause, and Resume
+   * Runs one of a plugin's controls from its row's ⋯ menu, the header's, or the menu bar: Poll now, Pause, and Resume
    * run its round, pause, and resume actions; Stop asks first; Start and a confirmed Stop go to
    * the plugin host. A failure shows the plugin's own words.
    */
@@ -443,7 +454,7 @@ export function App(props: { store: AppStore }) {
             {(plugin) => (
               <div class="shell-title">
                 <h1>{plugin().title}</h1>
-                <span class="shell-meta">Background agent · <Show when={selectedAgentState()}>{(state) => <StatusWords words={state().meta} status={state().status} />}</Show></span>
+                <span class="shell-meta"><Show when={selectedAgentState()}>{(state) => <StatusWords words={state().meta} status={state().status} />}</Show></span>
               </div>
             )}
           </Show>
@@ -451,7 +462,7 @@ export function App(props: { store: AppStore }) {
             <IconButton label="Search (⌘K)" disabled={!paletteAvailable()} onClick={() => setPaletteOpen(true)}>
               <SearchIcon />
             </IconButton>
-            <Show when={!sidebarOpen()}>{newConversationButton()}</Show>
+            <Show when={!sidebarOpen() || railed()}>{newConversationButton()}</Show>
             <IconButton
               ref={inspectorTrigger}
               label={inspectorOpen() ? "Hide inspector" : "Show inspector"}
@@ -461,6 +472,19 @@ export function App(props: { store: AppStore }) {
             >
               <PanelRightIcon />
             </IconButton>
+            <Show when={selectedPlugin()}>
+              {(plugin) => (
+                <Menu
+                  label="More"
+                  icon={<EllipsisIcon />}
+                  items={[
+                    ...(pluginView()?.kind === "agent" ? [{ value: "page", label: "Open page" }] : []),
+                    ...agentMenuItems(plugin(), snapshot().plugins.statuses[plugin().name], agentPending()[plugin().name] ?? null),
+                  ]}
+                  onSelect={(value) => (value === "page" ? openHome(plugin().name) : void runAgentAction(plugin().name, value as AgentAction))}
+                />
+              )}
+            </Show>
             <Show when={!selectedPlugin() && selected()?.capabilities.canArchive}>
               <Menu
                 label="More"
@@ -477,15 +501,14 @@ export function App(props: { store: AppStore }) {
 
         <div class="command-center" inert={lifecycleModalOpen()}>
           <Show when={sidebarOpen()}>
-            <aside id="work-pane" class="sidebar-pane" aria-label="All work" inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
-              <BackgroundAgents
-                plugins={snapshot().plugins}
-                selected={currentKey() === null ? selectedPlugin()?.name ?? null : null}
-                pending={agentPending()}
-                onSelect={openHome}
-                onAction={(name, action) => void runAgentAction(name, action)}
-                onInstall={(kind) => void startInstall(kind)}
-              />
+            {/* While a plugin shows, the sidebar folds to this rail; the sidebar stays mounted, hidden, so it unfolds as it was. */}
+            <Show when={railed()}>
+              <button type="button" class="sidebar-rail" aria-controls="work-pane" aria-expanded="false" inert={overlay()} onClick={() => setRailed(false)}>
+                <span aria-hidden="true">»</span>
+                <span class="sidebar-rail-label">{railLabel()}</span>
+              </button>
+            </Show>
+            <aside id="work-pane" class="sidebar-pane" aria-label="All work" hidden={railed()} inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
               <div class="sidebar-find">
                 <label class="sidebar-search">
                   <SearchIcon />
@@ -525,6 +548,14 @@ export function App(props: { store: AppStore }) {
                 onToggle={(id) => store.toggleConversation(id)}
                 onLoadChildPage={(id, restart) => void store.loadChildPage(id, restart)}
               />
+              <PluginsSection
+                plugins={snapshot().plugins}
+                selected={currentKey() === null ? selectedPlugin()?.name ?? null : null}
+                pending={agentPending()}
+                onSelect={openHome}
+                onAction={(name, action) => void runAgentAction(name, action)}
+                onInstall={(kind) => void startInstall(kind)}
+              />
               <SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} />
             </aside>
           </Show>
@@ -552,9 +583,7 @@ export function App(props: { store: AppStore }) {
                             status={snapshot().plugins.statuses[name]}
                             tab={tab()}
                             onTab={(next) => setPluginView({ kind: "agent", plugin: name, tab: next })}
-                            pending={agentPending()[name] ?? null}
                             error={agentError()?.plugin === name ? agentError()!.text : null}
-                            onAction={(action) => void runAgentAction(name, action)}
                             actions={store.pluginActions}
                             controls={store}
                             onPluginFilesChange={(listener) => store.onPluginFilesChange(listener)}
@@ -676,6 +705,9 @@ export function App(props: { store: AppStore }) {
             onCreate={(request) => store.createConversation(request)}
             onCreated={() => {
               setCreating(false);
+              // The new chat shows in place of a plugin, with the sidebar unfolded.
+              setPluginView(null);
+              setRailed(false);
               focusCreatedComposer();
             }}
           />
@@ -722,8 +754,8 @@ export function App(props: { store: AppStore }) {
                 { id: "command:next-waiting", label: "Next item waiting on you (⌘J)", disabled: waiting().length === 0 },
                 { id: "command:parent", label: "Go to parent conversation", disabled: !parent() },
                 { id: "command:sidebar", label: sidebarOpen() ? "Hide All work" : "Show All work" },
-                ...INSTALL_ITEMS.map((item) => ({ id: `command:install-${item.value}`, label: `Add background agent: ${item.label}` })),
-                { id: "command:menu-bar", label: menuBarEnabled() ? "Hide background agents from the menu bar" : "Show background agents in the menu bar" },
+                ...INSTALL_ITEMS.map((item) => ({ id: `command:install-${item.value}`, label: `Add plugin: ${item.label}` })),
+                { id: "command:menu-bar", label: menuBarEnabled() ? "Hide plugins from the menu bar" : "Show plugins in the menu bar" },
                 { id: "command:inspector", label: inspectorOpen() ? "Hide inspector" : "Show inspector" },
                 {
                   id: "command:message",

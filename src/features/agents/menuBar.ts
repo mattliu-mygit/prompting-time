@@ -1,7 +1,7 @@
 import type { PluginsSnapshot } from "../../app/store";
 import { readPreference, savePreference } from "../../app/preferences";
 import type { MenuBarAction, MenuBarControl, UpdateMenuBarRequest } from "../../bridge/types";
-import { rowButtons, type AgentAction } from "./agentMenu";
+import { menuBarButtons, type AgentAction } from "./agentMenu";
 import { describeAgent } from "./status";
 import { readStatusV2 } from "./statusV2";
 
@@ -20,8 +20,9 @@ export function saveMenuBarEnabled(enabled: boolean): void {
 const isMenuBarAction = (action: AgentAction): action is MenuBarAction => action === "pause" || action === "resume" || action === "start" || action === "poll";
 
 /**
- * What the menu bar extra shows: each background agent as its pinned sidebar row shows it, its
- * status words and its row's buttons with what runs now (`pending`), and how many items need you.
+ * What the menu bar extra shows: each plugin's status words, as its row in the sidebar's Plugins
+ * section shows them, Pause or Resume (Start while stopped) and Poll now with what runs now
+ * (`pending`), and how many items need you.
  * An agent whose row is red, because it fails or can't start, puts a dot on the icon, as does an
  * agent whose status format 2 lists a blocker. The extra shows while the user keeps it on and at
  * least one background agent is installed.
@@ -36,7 +37,7 @@ export function menuBarRequest(plugins: PluginsSnapshot, pending: Readonly<Recor
       title: plugin.title,
       status: words.meta,
       alert: words.status === "error" || blocked,
-      controls: rowButtons(plugin, status, pending[plugin.name] ?? null).flatMap((control): MenuBarControl[] => (
+      controls: menuBarButtons(plugin, status, pending[plugin.name] ?? null).flatMap((control): MenuBarControl[] => (
         control && isMenuBarAction(control.action) ? [{ action: control.action, label: control.label, enabled: !control.disabled }] : []
       )),
     };
