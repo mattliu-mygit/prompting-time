@@ -10,14 +10,24 @@ type Props = {
   /** The arguments after the action's own, such as a review's run ID. */
   args: readonly string[];
   actions: PluginActions;
-  /** The result of the last run for real, or null when nothing ran for real. */
-  onClose(result: PluginActionResult | null): void;
+  /** How the confirmation ended. */
+  onClose(outcome: ConfirmOutcome): void;
 };
+
+/**
+ * How a confirmation ended: cancelled by the user before anything ran for real; or at the step
+ * that ended it, the preview or the run for real, with what the plugin returned (exit 0 at "run"
+ * when it ran) or the reason Prompting Time could not run it.
+ */
+export type ConfirmOutcome =
+  | { stage: "cancelled" }
+  | { stage: "preview" | "run"; result: PluginActionResult }
+  | { stage: "preview" | "run"; error: string };
 
 type Step =
   | { kind: "previewing"; note: string | null }
   | { kind: "ready" | "running"; fingerprint: string; preview: string; note: string | null }
-  | { kind: "stopped"; message: string; detail: string };
+  | { kind: "stopped"; message: string; detail: string; outcome: ConfirmOutcome };
 
 /** The exit code of a run for real whose request changed after the preview showed it. */
 const CHANGED = 13;
@@ -35,19 +45,24 @@ export function ConfirmActionDialog(props: Props) {
   const action = plugin.actions.find((item) => item.name === name);
   const title = action?.title ?? name;
   const [step, setStep] = createSignal<Step>({ kind: "previewing", note: null });
-  let lastRun: PluginActionResult | null = null;
   let active = true;
 
   function request(confirmedFingerprint: string | null) {
     return props.actions.pluginRequest({ plugin: plugin.name, action: name, args: [...untrack(() => props.args)], confirmedFingerprint });
   }
 
-  function stop(result: PluginActionResult) {
+  function stop(stage: "preview" | "run", result: PluginActionResult) {
     setStep({
       kind: "stopped",
       message: `${title} stopped ${result.exitCode === null ? "on a signal" : `with exit code ${result.exitCode}`}. ${plugin.title} said:`,
       detail: result.stderr.trim() || result.stdout.trim(),
+      outcome: { stage, result },
     });
+  }
+
+  function fail(stage: "preview" | "run", reason: unknown) {
+    const message = messageFor(reason);
+    if (active) setStep({ kind: "stopped", message, detail: "", outcome: { stage, error: message } });
   }
 
   async function preview(note: string | null) {
@@ -58,10 +73,10 @@ export function ConfirmActionDialog(props: Props) {
       if (result.exitCode === 0 && result.fingerprint && result.preview !== null) {
         setStep({ kind: "ready", fingerprint: result.fingerprint, preview: result.preview, note });
       } else {
-        stop(result);
+        stop("preview", result);
       }
     } catch (reason) {
-      if (active) setStep({ kind: "stopped", message: messageFor(reason), detail: "" });
+      fail("preview", reason);
     }
   }
 
@@ -69,16 +84,17 @@ export function ConfirmActionDialog(props: Props) {
     const current = step();
     if (current.kind !== "ready") return;
     setStep({ ...current, kind: "running" });
+    let result: PluginActionResult;
     try {
-      lastRun = await request(current.fingerprint);
+      result = await request(current.fingerprint);
     } catch (reason) {
-      if (active) setStep({ kind: "stopped", message: messageFor(reason), detail: "" });
+      fail("run", reason);
       return;
     }
     if (!active) return;
-    if (lastRun.exitCode === 0) props.onClose(lastRun);
-    else if (lastRun.exitCode === CHANGED) void preview("Nothing was sent: what it would send changed after you saw it. This is the new request; confirm again to send it.");
-    else stop(lastRun);
+    if (result.exitCode === 0) props.onClose({ stage: "run", result });
+    else if (result.exitCode === CHANGED) void preview("Nothing was sent: what it would send changed after you saw it. This is the new request; confirm again to send it.");
+    else stop("run", result);
   }
 
   onSettled(() => {
@@ -111,7 +127,7 @@ export function ConfirmActionDialog(props: Props) {
       onConfirm={() => void confirm()}
       onCancel={() => {
         active = false;
-        props.onClose(lastRun);
+        props.onClose(stopped()?.outcome ?? { stage: "cancelled" });
       }}
     >
       <Show when={action?.description}>{(description) => <p>{description()}</p>}</Show>

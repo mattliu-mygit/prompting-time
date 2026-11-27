@@ -1,19 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PluginActionRequest, PluginActionResult } from "../../bridge/types";
 import { actionResult, fixtureV2Plugin, fixtureV2Status } from "../../test/plugins";
+import type { ConfirmOutcome } from "../agents/ConfirmActionDialog";
 import { createPageHost } from "./pageHost";
 import { MAX_CALL_ARGS, MAX_CALL_ARGS_LENGTH, readPageMessage } from "./protocol";
 
 const call = (id: number, action: string, args: string[] = []) => ({ version: 2, type: "call", id, action, args });
 
-function setup(confirm: (action: string, args: readonly string[]) => Promise<PluginActionResult | null> = async () => actionResult({ stdout: "deleted\n" })) {
+function setup(confirm: (action: string, args: readonly string[]) => Promise<ConfirmOutcome> = async () => ({ stage: "run", result: actionResult({ stdout: "deleted\n" }) })) {
   const posted: Record<string, unknown>[] = [];
   const pluginRequest = vi.fn(async (request: PluginActionRequest): Promise<PluginActionResult> => {
     switch (request.action) {
       case "status":
         return actionResult({ stdout: `${JSON.stringify(fixtureV2Status())}\n` });
       case "rerun":
-        return request.args.includes("missing") ? actionResult({ exitCode: 2, stderr: "fixture-runs: no run missing\n" }) : actionResult({ stdout: "queued again\n" });
+        if (request.args.includes("missing")) return actionResult({ exitCode: 2, stderr: "fixture-runs: no run missing\n" });
+        if (request.args.includes("killed")) return actionResult({ exitCode: null, stdout: "half done\n" });
+        if (request.args.includes("unstartable")) throw new Error("Prompting Time could not start fixture-runs.");
+        return actionResult({ stdout: "queued again\n" });
       default:
         throw new Error(`unexpected ${request.action}`);
     }
@@ -94,8 +98,20 @@ describe("the page host", () => {
     expect(page.pluginRequest).toHaveBeenLastCalledWith({ plugin: "fixture-runs", action: "rerun", args: ["--item", "run-74c91b1d"], confirmedFingerprint: null });
     expect(page.posted.at(-1)).toEqual({ version: 2, type: "result", reply_to: 2, json: "queued again\n" });
 
-    await page.send(call(3, "rerun", ["--item", "missing"]));
-    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 3, message: "fixture-runs: no run missing" });
+  });
+
+  it("tells the page the exit code and stderr of an action that failed, and that it failed when run", async () => {
+    const page = setup();
+    await page.send(call(1, "rerun", ["--item", "missing"]));
+    expect(page.posted.at(-1)).toEqual({
+      version: 2, type: "error", reply_to: 1, message: "fixture-runs: no run missing", stage: "run", exit_code: 2, stderr: "fixture-runs: no run missing\n",
+    });
+
+    await page.send(call(2, "rerun", ["--item", "killed"]));
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 2, message: "half done", stage: "run", exit_code: null, stderr: "" });
+
+    await page.send(call(3, "rerun", ["--item", "unstartable"]));
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 3, message: "Prompting Time could not start fixture-runs.", stage: "run" });
   });
 
   it("refuses an action the manifest does not declare, with an error and nothing run", async () => {
@@ -111,16 +127,16 @@ describe("the page host", () => {
   });
 
   it("runs an action marked confirm only through the confirmation, and never with the page's own confirm flags", async () => {
-    let answer: PluginActionResult | null = actionResult({ stdout: "deleted run-74c91b1d\n" });
+    let answer: ConfirmOutcome = { stage: "run", result: actionResult({ stdout: "deleted run-74c91b1d\n" }) };
     const page = setup(async () => answer);
     await page.send(call(1, "delete", ["--item", "run-74c91b1d"]));
     expect(page.confirm).toHaveBeenCalledExactlyOnceWith("delete", ["--item", "run-74c91b1d"]);
     expect(page.pluginRequest).not.toHaveBeenCalled();
     expect(page.posted).toEqual([{ version: 2, type: "result", reply_to: 1, json: "deleted run-74c91b1d\n" }]);
 
-    answer = null;
+    answer = { stage: "cancelled" };
     await page.send(call(2, "delete", ["--item", "run-74c91b1d"]));
-    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 2, message: "Nothing ran: the confirmation was cancelled." });
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 2, message: "Nothing ran: the confirmation was cancelled.", stage: "cancelled" });
 
     for (const [id, args] of [[3, ["--item", "run-1", "--expect", "d".repeat(64)]], [4, ["--print"]], [5, [`--expect=${"d".repeat(64)}`]]] as const) {
       await page.send(call(id, "delete", [...args]));
@@ -128,6 +144,28 @@ describe("the page host", () => {
     }
     expect(page.confirm).toHaveBeenCalledTimes(2);
     expect(page.pluginRequest).not.toHaveBeenCalled();
+  });
+
+  it("tells the page whether a confirm action was refused at its preview or when run, with the plugin's exit code and stderr", async () => {
+    let answer: ConfirmOutcome = { stage: "preview", result: actionResult({ exitCode: 10, stderr: "fixture-runs: run-1 is still running\n" }) };
+    const page = setup(async () => answer);
+    await page.send(call(1, "delete", ["--item", "run-1"]));
+    expect(page.posted.at(-1)).toEqual({
+      version: 2, type: "error", reply_to: 1, message: "fixture-runs: run-1 is still running", stage: "preview", exit_code: 10, stderr: "fixture-runs: run-1 is still running\n",
+    });
+
+    answer = { stage: "run", result: actionResult({ exitCode: 12, stdout: "nothing deleted\n" }) };
+    await page.send(call(2, "delete", ["--item", "run-1"]));
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 2, message: "nothing deleted", stage: "run", exit_code: 12, stderr: "" });
+
+    // A preview that exited 0 but ended the confirmation is no result.
+    answer = { stage: "preview", result: actionResult({ stdout: "printed nothing to confirm\n" }) };
+    await page.send(call(3, "delete", ["--item", "run-1"]));
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 3, message: "printed nothing to confirm", stage: "preview", exit_code: 0, stderr: "" });
+
+    answer = { stage: "preview", error: "Prompting Time could not start fixture-runs." };
+    await page.send(call(4, "delete", ["--item", "run-1"]));
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 4, message: "Prompting Time could not start fixture-runs.", stage: "preview" });
   });
 
   it("sends the opened route once the page is ready, and again when it loads again", async () => {

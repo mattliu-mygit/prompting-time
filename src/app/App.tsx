@@ -655,9 +655,9 @@ export function App(props: { store: AppStore }) {
                   action={confirmation.action}
                   args={confirmation.args}
                   actions={store.pluginActions}
-                  onClose={(result) => {
+                  onClose={(outcome) => {
                     setEntryConfirmation(null);
-                    if (result?.exitCode === 0) void store.refreshPlugins();
+                    if ("result" in outcome && outcome.stage === "run" && outcome.result.exitCode === 0) void store.refreshPlugins();
                   }}
                 />
               )}

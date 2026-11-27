@@ -8,7 +8,10 @@
  * Page to host: `ready`, once the page listens; and `call`, which runs one of the manifest's
  * actions with `args` after the action's own command. Prompting Time confirms first when the
  * action is marked `confirm`, and answers with `result` (what the action printed, as JSON when it
- * is JSON, else as text) or `error`, each with the call's `id` as `reply_to`.
+ * is JSON, else as text) or `error`, each with the call's `id` as `reply_to`. An `error` always
+ * has a `message` to show; one for a call that reached the plugin or the confirmation also says
+ * how far it got (`stage`) and, when the plugin's command refused, its `exit_code` and
+ * `stderr` (see ActionFailure).
  *
  * Host to page, unasked: `open`, the route of an item or blocker the user opened, sent once the
  * page is ready; and `changed`, the files that changed in the plugin's state folder (null when
@@ -24,9 +27,24 @@ export type PageMessage =
   | { version: typeof PROTOCOL_VERSION; type: "ready" }
   | { version: typeof PROTOCOL_VERSION; type: "call"; id: number; action: string; args: string[] };
 
+/**
+ * How far a call that failed got: "cancelled" when the user cancelled the confirmation, "preview"
+ * when a confirm action's `--print` preview failed, so the user had nothing to confirm, and "run"
+ * when the action failed when run for real (with `--expect` for a confirm action).
+ */
+export type ActionStage = "cancelled" | "preview" | "run";
+
+/**
+ * What an `error` adds for a call that reached the plugin or the confirmation. `stage` is absent
+ * when Prompting Time refused the call before then, as for an undeclared action. `exit_code` and
+ * `stderr` are present only when the plugin's command ran and refused: `exit_code` is null
+ * when it ended on a signal, and `stderr` is what it wrote there, untrimmed, at most its last MiB.
+ */
+export type ActionFailure = { stage?: ActionStage; exit_code?: number | null; stderr?: string };
+
 export type HostUpdate =
   | { type: "result"; reply_to: number; json: unknown }
-  | { type: "error"; reply_to?: number; message: string }
+  | ({ type: "error"; reply_to?: number; message: string } & ActionFailure)
   | { type: "open"; route: string }
   | { type: "changed"; files: string[] | null };
 

@@ -553,12 +553,13 @@ describe("status format 2", () => {
   const failedTitle = "Review this stack of PRs · acme/widgets#60";
   /**
    * The invented format-2 plugin: Rerun succeeds, and Delete previews, then deletes with the
-   * fingerprint. `status` answers its status action; `overrides` replace other bridge calls.
+   * fingerprint, but refuses at its preview to delete run-gone. `status` answers its status action; `overrides` replace other bridge calls.
    */
   function v2Api(status: () => ReturnType<typeof actionResult> = () => actionResult({ stdout: JSON.stringify(fixtureV2Status()) }), overrides: Partial<AppApi> = {}) {
     const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
       if (sent.action === "status") return status();
       if (sent.action === "delete") {
+        if (sent.args.includes("run-gone")) return actionResult({ exitCode: 10, stderr: "fixture-runs: no run run-gone\n" });
         return sent.confirmedFingerprint === null
           ? actionResult({ stdout: `printed the request; nothing deleted\nfingerprint: ${fingerprint}\n`, fingerprint, preview: "delete run-74c91b1d" })
           : actionResult({ stdout: "deleted\n" });
@@ -791,8 +792,18 @@ describe("status format 2", () => {
     await fromPage(page.window, { version: 2, type: "call", id: 4, action: "delete", args: ["--item", "run-review-2"] });
     fireEvent.click(within(await screen.findByRole("alertdialog", { name: "Delete run" })).getByRole("button", { name: "Cancel" }));
     await settle();
-    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "error", reply_to: 4, message: "Nothing ran: the confirmation was cancelled." }, "*");
+    expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "error", reply_to: 4, message: "Nothing ran: the confirmation was cancelled.", stage: "cancelled" }, "*");
     expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ args: ["--item", "run-review-2"], confirmedFingerprint: fingerprint }));
+
+    // A refusal at the preview shows in the confirmation, then tells the page its exit code and stderr.
+    await fromPage(page.window, { version: 2, type: "call", id: 5, action: "delete", args: ["--item", "run-gone"] });
+    const refused = await screen.findByRole("alertdialog", { name: "Delete run" });
+    expect(await within(refused).findByRole("alert")).toHaveTextContent("Delete run stopped with exit code 10.");
+    fireEvent.click(within(refused).getByRole("button", { name: "Close" }));
+    await settle();
+    expect(page.posted).toHaveBeenLastCalledWith({
+      version: 2, type: "error", reply_to: 5, message: "fixture-runs: no run run-gone", stage: "preview", exit_code: 10, stderr: "fixture-runs: no run run-gone\n",
+    }, "*");
 
     emit({ kind: "pluginChanged", sequence: "1", plugin: "fixture-runs", files: ["runs/run-74c91b1d/run.json"] });
     emit({ kind: "pluginChanged", sequence: "2", plugin: "whooper", files: ["round.lock/round.json"] });

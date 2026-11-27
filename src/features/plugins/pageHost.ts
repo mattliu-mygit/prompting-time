@@ -1,6 +1,7 @@
 import type { PluginActions } from "../../app/store";
 import type { PluginActionResult, PluginSnapshot } from "../../bridge/types";
-import { PROTOCOL_VERSION, readPageMessage, type HostMessage, type HostUpdate } from "./protocol";
+import type { ConfirmOutcome } from "../agents/ConfirmActionDialog";
+import { PROTOCOL_VERSION, readPageMessage, type ActionFailure, type ActionStage, type HostMessage, type HostUpdate } from "./protocol";
 
 export type PageHostOptions = {
   /** The plugin's latest snapshot: its title and declared actions, each with its confirm flag. */
@@ -8,8 +9,8 @@ export type PageHostOptions = {
   actions: PluginActions;
   /** Sends a message to the page's frame. */
   post(message: HostMessage): void;
-  /** Runs a confirm action after the user's confirmation: the run for real, or null when cancelled. */
-  confirm(action: string, args: readonly string[]): Promise<PluginActionResult | null>;
+  /** Previews a confirm action and runs it for real once the user confirms; says how that ended. */
+  confirm(action: string, args: readonly string[]): Promise<ConfirmOutcome>;
 };
 
 export type PageHost = {
@@ -27,6 +28,17 @@ export type PageHost = {
  * confirmed. A page never passes them itself, so it cannot run a confirm action unconfirmed.
  */
 const CONFIRM_FLAGS = ["--print", "--expect"];
+
+/** A call that failed, with what the page's `error` adds to its message. */
+class CallError extends Error {
+  constructor(message: string, readonly failure: ActionFailure = {}) {
+    super(message);
+  }
+}
+
+function messageFor(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "Prompting Time could not run the action.";
+}
 
 /**
  * Prompting Time's side of a page of protocol 2. A call runs only an action the manifest
@@ -48,17 +60,31 @@ export function createPageHost(options: PageHostOptions): PageHost {
     const plugin = options.plugin();
     const action = plugin.actions.find((item) => item.name === name);
     if (!action) throw new Error(`${plugin.title} declares no ${name} action.`);
-    let result: PluginActionResult | null;
+    let result: PluginActionResult;
+    let stage: Exclude<ActionStage, "cancelled"> = "run";
     if (action.confirm) {
       if (args.some((arg) => CONFIRM_FLAGS.some((flag) => arg === flag || arg.startsWith(`${flag}=`)))) {
         throw new Error(`${name} asks to confirm first, so Prompting Time adds ${CONFIRM_FLAGS.join(" and ")} itself.`);
       }
-      result = await options.confirm(name, args);
-      if (result === null) throw new Error("Nothing ran: the confirmation was cancelled.");
+      const outcome = await options.confirm(name, args);
+      if (outcome.stage === "cancelled") throw new CallError("Nothing ran: the confirmation was cancelled.", { stage: "cancelled" });
+      if ("error" in outcome) throw new CallError(outcome.error, { stage: outcome.stage });
+      ({ stage, result } = outcome);
     } else {
-      result = await options.actions.pluginRequest({ plugin: plugin.name, action: name, args, confirmedFingerprint: null });
+      try {
+        result = await options.actions.pluginRequest({ plugin: plugin.name, action: name, args, confirmedFingerprint: null });
+      } catch (reason) {
+        throw new CallError(messageFor(reason), { stage });
+      }
     }
-    if (result.exitCode !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `${name} exited with ${result.exitCode ?? "a signal"}.`);
+    // A preview the confirmation ended on never gives the page a result, even one that exited 0.
+    if (result.exitCode !== 0 || stage === "preview") {
+      throw new CallError(result.stderr.trim() || result.stdout.trim() || `${name} exited with ${result.exitCode ?? "a signal"}.`, {
+        stage,
+        exit_code: result.exitCode,
+        stderr: result.stderr,
+      });
+    }
     try {
       return JSON.parse(result.stdout);
     } catch {
@@ -78,7 +104,7 @@ export function createPageHost(options: PageHostOptions): PageHost {
       }
       call(message.action, message.args).then(
         (json) => post({ type: "result", reply_to: message.id, json }),
-        (reason) => post({ type: "error", reply_to: message.id, message: reason instanceof Error ? reason.message : "Prompting Time could not run the action." }),
+        (reason) => post({ type: "error", reply_to: message.id, message: messageFor(reason), ...(reason instanceof CallError ? reason.failure : {}) }),
       );
     },
     open(next) {

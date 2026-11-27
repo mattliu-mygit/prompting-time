@@ -1,7 +1,7 @@
 import { createEffect, createSignal, onSettled, Show, untrack } from "solid-js";
 import type { PluginActions, PluginFilesChange } from "../../app/store";
-import type { PluginActionResult, PluginSnapshot } from "../../bridge/types";
-import { ConfirmActionDialog } from "../agents/ConfirmActionDialog";
+import type { PluginSnapshot } from "../../bridge/types";
+import { ConfirmActionDialog, type ConfirmOutcome } from "../agents/ConfirmActionDialog";
 import { createPageHost } from "./pageHost";
 
 type Props = {
@@ -16,7 +16,7 @@ type Props = {
   onPluginFilesChange(listener: (change: PluginFilesChange) => void): () => void;
 };
 
-type Confirmation = { action: string; args: readonly string[]; resolve(result: PluginActionResult | null): void };
+type Confirmation = { action: string; args: readonly string[]; resolve(outcome: ConfirmOutcome): void };
 
 /**
  * A plugin's page of page protocol 2, in a frame sandboxed to scripts only: the page gets an
@@ -56,7 +56,7 @@ export function PluginPage(props: Props) {
       window.removeEventListener("message", onMessage);
       stopListening();
       host.dispose();
-      untrack(confirmation)?.resolve(null);
+      untrack(confirmation)?.resolve({ stage: "cancelled" });
     };
   });
 
@@ -80,9 +80,9 @@ export function PluginPage(props: Props) {
             action={current.action}
             args={current.args}
             actions={props.actions}
-            onClose={(result) => {
+            onClose={(outcome) => {
               setConfirmation(null);
-              current.resolve(result);
+              current.resolve(outcome);
             }}
           />
         )}

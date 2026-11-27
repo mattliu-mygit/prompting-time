@@ -248,10 +248,15 @@ checks, starts, and stops them, and the window shows them.
   the only one Prompting Time speaks; a manifest must say `page.protocol: 2`. The page sends
   `ready`, then `call {id, action, args}` to run one of its manifest's actions with `args` after
   the action's command, and gets back `result {reply_to, json}`, what the action printed (parsed
-  when it is JSON, else the text), or `error {reply_to, message}`. Prompting Time drops any
-  message that does not fit, refuses an action the manifest does not declare, runs an action
-  marked `confirm` only through the confirmation, and refuses `--print` and `--expect` from the
-  page for one. Unasked, the page gets `open {route}` for the item or blocker the user opened and
+  when it is JSON, else the text), or `error {reply_to, message, stage?, exit_code?, stderr?}`.
+  `message` is for display. `stage` says how far a call got: `cancelled` when the user cancelled
+  the confirmation, `preview` when a confirm action's `--print` refused (the confirmation shows the
+  refusal, and the page hears once the user closes it), or `run` when the action failed when run
+  for real; it is absent when Prompting Time refused the call before then. When the plugin's
+  command refused, `exit_code` (null on a signal) and `stderr` (untrimmed, at most its last MiB)
+  say how. Prompting Time drops any message that does not fit, refuses an action the manifest does
+  not declare, runs an action marked `confirm` only through the confirmation, and refuses
+  `--print` and `--expect` from the page for one. Unasked, the page gets `open {route}` for the item or blocker the user opened and
   `changed {files}` when files in the plugin's state folder change, null when more changed than
   one event lists. A call holds at most 64 arguments of at most 64 KiB together.
 - **Status format 2.** A plugin whose manifest has a `status` key, `{"format": 2, "groups": [{"id",

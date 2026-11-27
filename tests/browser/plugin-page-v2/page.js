@@ -2,7 +2,8 @@
 // (src/features/plugins/protocol.ts): it says ready, shows the route Prompting Time opens, reads
 // the status with `call`, reads again when files change, and offers Rerun, Delete (which asks to
 // confirm first), and a call to an action the manifest does not declare, which Prompting Time
-// refuses. It is plain script, so the fixture needs no build.
+// refuses. A failed call's log line adds how far it got and the plugin's exit code. It is plain
+// script, so the fixture needs no build.
 "use strict";
 
 const VERSION = 2;
@@ -16,6 +17,12 @@ const element = (id) => document.getElementById(id);
 function log(text) {
   const lines = element("log").textContent.split("\n").filter(Boolean);
   element("log").textContent = [...lines, text].slice(-12).join("\n");
+}
+
+/** A failed call's message, then its stage and exit code when Prompting Time sent them. */
+function failure(message) {
+  const parts = [message.stage, "exit_code" in message ? `exit ${message.exit_code ?? "on a signal"}` : null].filter(Boolean);
+  return parts.length ? `${message.message} (${parts.join(", ")})` : message.message;
 }
 
 function call(action, args = []) {
@@ -70,12 +77,12 @@ window.addEventListener("message", (event) => {
     case "error": {
       const waiting = pending.get(message.reply_to);
       if (!waiting) {
-        if (message.type === "error") log(`error: ${message.message}`);
+        if (message.type === "error") log(`error: ${failure(message)}`);
         return;
       }
       pending.delete(message.reply_to);
       if (message.type === "result") waiting.resolve(message.json);
-      else waiting.reject(new Error(message.message));
+      else waiting.reject(new Error(failure(message)));
       return;
     }
     case "open":
