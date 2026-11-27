@@ -73,8 +73,9 @@ map shows the map in the walkthrough's place, which stays as it was to come back
 Escape or Back returns. Example inputs, before and after names the inputs whose result
 changed in one line under What this PR does, from runs at base and head only, never a
 prediction; Changes no test would catch names each place's changed lines no test ran
-under it, with how that was measured, and the rest after the places, or says in one
-quiet line why it couldn't measure. Their Open all inputs and Open all lines show them in
+and changes made on purpose that no test noticed under it, each with how that was
+measured, and the rest after the places, where it only counts the changes tests caught,
+or says in one quiet line why it couldn't measure. Their Open all inputs and Open all lines show them in
 full in the walkthrough's place the same way. The Views menu lists these three views
 only for a review that has their data.
 
@@ -116,8 +117,8 @@ menu bar extra, and always sits beside the words that say it, never alone:
 - Orange (`--s-warning`): waiting on you. A chat "waiting for you", a review that needs a
   look ("look first", or why one that says approve once CI passes isn't safe to approve),
   its banner, a place to look's number and its marks in the code, the marks on changed
-  lines no test ran, under the words that name them, an example input's result that
-  "changed", and a confirmation that asks again.
+  lines no test ran and on changes no test noticed, under the words that name them, an
+  example input's result that "changed", and a confirmation that asks again.
 - Green (`--s-success`): ready to approve ("approve once CI passes" on a review the plugin
   judges safe, or, when it doesn't say, the verdict alone), its banner, a diff's added
   lines, a read layer's check, a new call in Calls before and after, and an added function

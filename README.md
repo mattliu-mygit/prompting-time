@@ -320,15 +320,21 @@ checks, starts, and stops them, and the window shows them.
   what Whooper says it may miss (`limits`). Escape clears the selection, then goes back. Without
   `connections`, the view is hidden, also from Views.
 - **Changes no test would catch.** When `show-review` prints `test_gaps`, the changed lines that
-  Whooper's run of the tests found no test ran, each place to look names its own under it ("No
-  test ran 2 changed lines here: 39, 40"), labeled "Measured: no test ran these lines" with the
-  tool, and a short block after the places gives the counts in words and the lines elsewhere by
-  file. Open all lines shows the view in the walkthrough's place: the counts, each file's lines
-  with the label and its diff cut to them, marked in orange in the gutter, and what the measure may
-  miss (`limits`). A line with a status this version doesn't know shows with Whooper's word and no
-  mark, and never counts as not run. When the run couldn't measure, one quiet line says "Not
-  measured:" and why. j and k step through the files. Without `test_gaps`, the view is hidden,
-  also from Views.
+  Whooper's runs of the tests found no test ran, and the changes Whooper made on purpose to lines
+  the tests ran that no test noticed (status `survived`, with the change), each place to look names
+  its own under it: "No test ran 2 changed lines here: 39, 40", labeled "Measured: no test ran these
+  lines" with the tool, then "Tests ran line 41 but none noticed when Whooper changed `>` to `>=`",
+  labeled "Measured: no test noticed this change". A short block after the places gives the counts
+  in words, with how many of those changes tests caught when `summary` counts them ("Tests caught 5
+  of 7 changes Whooper made on purpose"), and the lines elsewhere by file; a caught change is only
+  counted there. Open all lines shows the view in the walkthrough's place: the counts, then each
+  file's lines grouped as no test ran, no test noticed, and caught, with each change and the test
+  that caught it, and its diff cut to them, the lines no test ran and the changes no test noticed
+  marked in orange in the gutter, and what the measure may miss (`limits`). When `tool` names
+  several runs, joined by "; ", each shows in code type. A line with a status this version doesn't
+  know shows with Whooper's word and no mark, and never counts. When the run couldn't measure, one
+  quiet line says "Not measured:" and why. j and k step through the files. Without `test_gaps`, the
+  view is hidden, also from Views.
 - **Example inputs, before and after.** When `show-review` prints `examples`, inputs Whooper ran
   through the old and new code, one line under What this PR does names the inputs whose result
   changed, and Open all inputs shows a table per function: each input, before, after, compared in
