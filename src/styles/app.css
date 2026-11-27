@@ -2931,6 +2931,13 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   font-weight: var(--s-weight-semibold);
 }
 
+/* The view's heading and the panel's name take the focus only so a screen reader says where it
+   landed; neither is a control, so neither draws a focus ring. */
+.map-head-text h3:focus,
+.map-panel-name:focus {
+  outline: none;
+}
+
 .map-head-text p,
 .map-keys {
   margin: 0;
