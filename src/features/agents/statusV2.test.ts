@@ -80,9 +80,9 @@ describe("status format 2", () => {
     const work = statusV2Work(plugins([fixtureV2Plugin(), fixturePlugin({ status: null })], { "fixture-runs": status, whooper: fixtureStatus() }));
     expect(work.blockers).toEqual([{ plugin: "fixture-runs", pluginTitle: "Fixture runs", blocker: expect.objectContaining({ id: "codex-signed-out" }) }]);
     expect(work.needsYou.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([["Run failed", ["run-newer", "run-74c91b1d"]]]);
-    expect(work.groups.map(({ label, group, items }) => [label, group.folded, items.map(({ id }) => id)])).toEqual([
-      ["Running", false, ["run-running-3"]],
-      ["Done", true, ["run-done-4"]],
+    expect(work.groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
+      ["Running", ["run-running-3"]],
+      ["Done", ["run-done-4"]],
     ]);
   });
 

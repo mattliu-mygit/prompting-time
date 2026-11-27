@@ -113,12 +113,12 @@ const plugin: PluginSnapshot = {
   status: {
     format: 2,
     groups: [
-      { id: "ready", title: "Ready to approve", needsYou: true, order: 1, folded: false },
-      { id: "look", title: "Needs a look", needsYou: true, order: 2, folded: false },
-      { id: "failed", title: "Review failed", needsYou: true, order: 3, folded: false },
-      { id: "reviewing", title: "Reviewing", needsYou: false, order: 4, folded: false },
-      { id: "waiting", title: "Waiting", needsYou: false, order: 5, folded: false },
-      { id: "done", title: "Done", needsYou: false, order: 6, folded: true },
+      { id: "ready", title: "Ready to approve", needsYou: true, order: 1 },
+      { id: "look", title: "Needs a look", needsYou: true, order: 2 },
+      { id: "failed", title: "Review failed", needsYou: true, order: 3 },
+      { id: "reviewing", title: "Reviewing", needsYou: false, order: 4 },
+      { id: "waiting", title: "Waiting", needsYou: false, order: 5 },
+      { id: "done", title: "Done", needsYou: false, order: 6 },
     ],
     itemActions: ["retry", "skip", "remove"],
   },

@@ -497,8 +497,6 @@ export type PluginStatusGroup = {
 	needsYou: boolean,
 	/**  Where the group lists among the plugin's groups, lowest first. */
 	order: number,
-	/**  Whether the group's section starts folded. */
-	folded: boolean,
 };
 
 export type ProjectPathSnapshot = {

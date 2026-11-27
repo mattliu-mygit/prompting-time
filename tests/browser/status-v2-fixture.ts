@@ -3,7 +3,7 @@ import type { PluginActionRequest, PluginActionResult, PluginSnapshot } from "..
 /**
  * `?agents=v2`: an invented plugin, beside the invented Whooper, whose status action prints status
  * format 2, laid out like Monopole's. Its manifest declares four groups (Run failed and Review
- * needed under Needs you, Running, and Done folded), Rerun and Delete run on rows (Delete asks
+ * needed under Needs you, Running, and Done), Rerun and Delete run on rows (Delete asks
  * first), and Check providers, which its one blocker names. Its page, `plugin-page-v2/`, speaks page
  * protocol 2. Everything answers in browser memory.
  */
@@ -33,10 +33,10 @@ export const v2Plugin: PluginSnapshot = {
   status: {
     format: 2,
     groups: [
-      { id: "failed", title: "Run failed", needsYou: true, order: 1, folded: false },
-      { id: "review", title: "Review needed", needsYou: true, order: 2, folded: false },
-      { id: "running", title: "Running", needsYou: false, order: 3, folded: false },
-      { id: "done", title: "Done", needsYou: false, order: 4, folded: true },
+      { id: "failed", title: "Run failed", needsYou: true, order: 1 },
+      { id: "review", title: "Review needed", needsYou: true, order: 2 },
+      { id: "running", title: "Running", needsYou: false, order: 3 },
+      { id: "done", title: "Done", needsYou: false, order: 4 },
     ],
     itemActions: ["rerun", "delete"],
   },

@@ -74,12 +74,12 @@ export const fixtureSettings = {
 export const whooperStatusConfig: NonNullable<PluginSnapshot["status"]> = {
   format: 2,
   groups: [
-    { id: "ready", title: "Ready to approve", needsYou: true, order: 1, folded: false },
-    { id: "look", title: "Needs a look", needsYou: true, order: 2, folded: false },
-    { id: "failed", title: "Review failed", needsYou: true, order: 3, folded: false },
-    { id: "reviewing", title: "Reviewing", needsYou: false, order: 4, folded: false },
-    { id: "waiting", title: "Waiting", needsYou: false, order: 5, folded: false },
-    { id: "done", title: "Done", needsYou: false, order: 6, folded: true },
+    { id: "ready", title: "Ready to approve", needsYou: true, order: 1 },
+    { id: "look", title: "Needs a look", needsYou: true, order: 2 },
+    { id: "failed", title: "Review failed", needsYou: true, order: 3 },
+    { id: "reviewing", title: "Reviewing", needsYou: false, order: 4 },
+    { id: "waiting", title: "Waiting", needsYou: false, order: 5 },
+    { id: "done", title: "Done", needsYou: false, order: 6 },
   ],
   itemActions: ["retry", "skip", "remove"],
 };
@@ -115,7 +115,7 @@ export function fixturePlugin(overrides: Partial<PluginSnapshot> = {}): PluginSn
 
 /**
  * An invented plugin whose status action prints status format 2, laid out like Monopole's: four
- * declared groups, two of them under Needs you, Done folded; Rerun and Delete on rows, Delete asking
+ * declared groups, two of them under Needs you; Rerun and Delete on rows, Delete asking
  * first; Check providers, which a blocker names; and a page that speaks page protocol 2.
  */
 export function fixtureV2Plugin(overrides: Partial<PluginSnapshot> = {}): PluginSnapshot {
@@ -136,10 +136,10 @@ export function fixtureV2Plugin(overrides: Partial<PluginSnapshot> = {}): Plugin
     status: {
       format: 2,
       groups: [
-        { id: "failed", title: "Run failed", needsYou: true, order: 1, folded: false },
-        { id: "review", title: "Review needed", needsYou: true, order: 2, folded: false },
-        { id: "running", title: "Running", needsYou: false, order: 3, folded: false },
-        { id: "done", title: "Done", needsYou: false, order: 4, folded: true },
+        { id: "failed", title: "Run failed", needsYou: true, order: 1 },
+        { id: "review", title: "Review needed", needsYou: true, order: 2 },
+        { id: "running", title: "Running", needsYou: false, order: 3 },
+        { id: "done", title: "Done", needsYou: false, order: 4 },
       ],
       itemActions: ["rerun", "delete"],
     },

@@ -965,7 +965,6 @@ impl From<CorePluginSnapshot> for PluginSnapshot {
                         title: group.title,
                         needs_you: group.needs_you,
                         order: group.order,
-                        folded: group.folded,
                     })
                     .collect(),
                 item_actions: status.item_actions,

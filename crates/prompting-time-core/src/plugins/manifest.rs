@@ -40,7 +40,7 @@ pub struct Manifest {
 }
 
 /// The vocabulary of a plugin's status format 2, which its `status` action fills in. PT keeps no
-/// group names of its own: it places, orders, and folds items by the groups declared here.
+/// group names of its own: it places and orders items by the groups declared here.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StatusConfig {
@@ -63,9 +63,6 @@ pub struct StatusGroup {
     pub needs_you: bool,
     /// Where the group lists among the plugin's groups, lowest first.
     pub order: u32,
-    /// Whether the group's section starts folded.
-    #[serde(default)]
-    pub folded: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -471,7 +468,7 @@ mod tests {
             "format": 2,
             "groups": [
                 { "id": "failed", "title": "Run failed", "needs_you": true, "order": 1 },
-                { "id": "done", "title": "Done", "needs_you": false, "order": 2, "folded": true }
+                { "id": "done", "title": "Done", "needs_you": false, "order": 2 }
             ],
             "item_actions": ["rerun", "submit"]
         });
@@ -491,14 +488,12 @@ mod tests {
                     title: "Run failed".into(),
                     needs_you: true,
                     order: 1,
-                    folded: false
                 },
                 StatusGroup {
                     id: "done".into(),
                     title: "Done".into(),
                     needs_you: false,
                     order: 2,
-                    folded: true
                 },
             ]
         );
@@ -525,6 +520,9 @@ mod tests {
             ("does not fit", |m| m["status"]["extra"] = true.into()),
             ("does not fit", |m| {
                 m["status"]["groups"][0]["color"] = "red".into()
+            }),
+            ("does not fit", |m| {
+                m["status"]["groups"][1]["folded"] = true.into()
             }),
             ("does not fit", |m| {
                 m["status"]["groups"][0]

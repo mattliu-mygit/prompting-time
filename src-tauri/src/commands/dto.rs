@@ -949,8 +949,6 @@ pub struct PluginStatusGroup {
     pub needs_you: bool,
     /// Where the group lists among the plugin's groups, lowest first.
     pub order: u32,
-    /// Whether the group's section starts folded.
-    pub folded: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Type)]

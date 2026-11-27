@@ -172,7 +172,7 @@ impl Fixture {
                 "format": 2,
                 "groups": [
                     { "id": "failed", "title": "Run failed", "needs_you": true, "order": 1 },
-                    { "id": "done", "title": "Done", "needs_you": false, "order": 2, "folded": true }
+                    { "id": "done", "title": "Done", "needs_you": false, "order": 2 }
                 ],
                 "item_actions": ["rerun", "submit"]
             }

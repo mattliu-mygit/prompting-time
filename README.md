@@ -264,7 +264,7 @@ checks, starts, and stops them, and the window shows them.
   `changed {files}` when files in the plugin's state folder change, null when more changed than
   one event lists. A call holds at most 64 arguments of at most 64 KiB together.
 - **Status format 2.** A plugin whose manifest has a `status` key, `{"format": 2, "groups": [{"id",
-  "title", "needs_you", "order", "folded"?}], "item_actions": [...]}`, prints the format in
+  "title", "needs_you", "order"}], "item_actions": [...]}`, prints the format in
   [`docs/plugin-status-v2.schema.json`](docs/plugin-status-v2.schema.json) from its `status` action:
   its row's words and dot (`agent`), problems that stop every job (`blockers`), at most 50
   `items`, each in one of the declared groups, and optionally `paused`. Other top-level fields,
