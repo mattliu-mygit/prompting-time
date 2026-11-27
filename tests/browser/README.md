@@ -93,6 +93,24 @@ hides it until the pull request moves; Views turns Calls before and after off an
 shows Whooper's page under the same banner; and Decide… opens the decision bar, as reaching
 the end of the walkthrough does. Nothing opens on hover.
 
+gadgets#68, "validate project names before creating buckets", is a Go review whose `show-review`
+also prints `connections`: its walkthrough sums up how the changed code connects where the layers
+start, and Open the map shows the map in the walkthrough's place. widgets#101 prints none, so the
+view stays hidden there, in the navigator, and in Views. The check opens gadgets#68's map itself:
+
+```sh
+playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-review-connections.ts")).checkReviewConnections()'
+```
+
+It throws unless a link found by name search is dashed and the others solid, the legend and the
+selected node's links say "found by name search", nothing moves after a selection, no transition
+runs longer than 200 ms, all text is 12px or more, every control is a 30px target, and the map, its
+legend, and its panel stay inside the window. It passes at 1440 × 900 and 960 × 600. Then check by
+hand: j and k step through the changed nodes, Enter selects a focused node, a node's location opens
+its file's diff at that line (the old file's line for the removed projects.slugify), a link selects
+the other end, and Escape clears the selection, then goes back to the walkthrough with the focus on
+Open the map. Nothing opens on hover.
+
 Use `?agents=1` for an invented Whooper pinned at the top of the sidebar, running with its
 next poll at 3:45 PM; combine it with `?work=1` for a full All work list. Select Whooper to
 open its screen, and its Settings tab to change a value and Save, or set "Stop a poll after"

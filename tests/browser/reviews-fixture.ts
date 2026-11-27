@@ -153,12 +153,21 @@ const findings: Record<string, { verdict: string; reason: string; findings: Find
   "fixture-run-103": { verdict: "look_first", reason: "The delay can overflow for long retries.", findings: [question] },
   "fixture-run-88": { verdict: "approve_once_ci_passes", reason: "A move with no change in behavior.", findings: [nits[0]!] },
   "fixture-run-77": { verdict: "look_first", reason: "One question about the delay.", findings: [question] },
+  "fixture-run-68": {
+    verdict: "approve_once_ci_passes",
+    reason: "A small rule with a test; two nits.",
+    findings: [
+      { id: "1", path: "internal/projects/name.go", line: 9, side: "RIGHT", title: "Two dashes pass", kind: "nit", draft: "**nit:** `namePattern` lets `a--b` through; some bucket stores refuse two dashes in a row." },
+      { id: "2", path: "internal/projects/create.go", line: 22, side: "RIGHT", title: "The bucket is the name", kind: "nit", draft: "**nit:** `bucket := name` reads as a leftover; `store.NewBucket(ctx, name)` says the same." },
+    ],
+  },
 };
 const drafts: Record<string, Drafts> = {
   "fixture-run-101": { event: "APPROVE", message: "", findings: { "1": { included: true }, "2": { included: true } } },
   "fixture-run-103": { event: "COMMENT", message: "", findings: {} },
   "fixture-run-88": { event: "APPROVE", message: "", findings: { "1": { included: true } } },
   "fixture-run-77": { event: "COMMENT", message: "", findings: { "1": { included: true, text: "**question:** Should the delay stop doubling at a cap, such as 30 seconds?" } } },
+  "fixture-run-68": { event: "APPROVE", message: "", findings: { "1": { included: true }, "2": { included: true } } },
 };
 
 /**
@@ -196,9 +205,140 @@ const retryOverview = {
   checked: ["Ran the upload tests at head and base", "Searched for other retry loops in the client", "Built the docs"],
   not_checked: ["Didn't run the integration suite, which needs a server", "Didn't time a long retry"],
 };
-const overviews: Record<string, typeof retryOverview> = {
+/** gadgets#68, in Go: project names must fit a bucket name, checked by a new ValidateName in place of slugify. */
+const namePatch = `diff --git a/internal/projects/name.go b/internal/projects/name.go
+new file mode 100644
+index 0000000..5d41c2a
+--- /dev/null
++++ b/internal/projects/name.go
+@@ -0,0 +1,17 @@
++package projects
++
++import (
++\t"fmt"
++\t"regexp"
++)
++
++// namePattern is what a bucket name allows: 3 to 63 lowercase letters, digits, and dashes.
++var namePattern = regexp.MustCompile(\`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$\`)
++
++// ValidateName says why a project name can't name a bucket, or nil when it can.
++func ValidateName(name string) error {
++\tif !namePattern.MatchString(name) {
++\t\treturn fmt.Errorf("project name %q: use 3 to 63 lowercase letters, digits, and dashes", name)
++\t}
++\treturn nil
++}
+diff --git a/internal/projects/create.go b/internal/projects/create.go
+index 7c1e0a4..b92f3d8 100644
+--- a/internal/projects/create.go
++++ b/internal/projects/create.go
+@@ -3,7 +3,6 @@ package projects
+ import (
+ \t"context"
+ \t"fmt"
+-\t"strings"
+ 
+ \t"example.invalid/acme/gadgets/internal/storage"
+ )
+@@ -18,13 +17,11 @@ type Project struct {
+ // Create makes a project and the bucket that holds its files.
+ func Create(ctx context.Context, store *storage.Client, name string) (*Project, error) {
+-\tbucket := slugify(name)
++\tif err := ValidateName(name); err != nil {
++\t\treturn nil, err
++\t}
++\tbucket := name
+ \tif err := store.NewBucket(ctx, bucket); err != nil {
+ \t\treturn nil, fmt.Errorf("create bucket %s: %w", bucket, err)
+ \t}
+ \treturn &Project{Name: name, Bucket: bucket}, nil
+ }
+-
+-// slugify turns any name into a bucket name, so two names can share a bucket.
+-func slugify(name string) string {
+-\treturn strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+-}
+diff --git a/internal/projects/name_test.go b/internal/projects/name_test.go
+new file mode 100644
+index 0000000..e3a0b61
+--- /dev/null
++++ b/internal/projects/name_test.go
+@@ -0,0 +1,11 @@
++package projects
++
++import "testing"
++
++func TestValidateName(t *testing.T) {
++\tfor _, name := range []string{"ab", "Has Space", "-dash-first"} {
++\t\tif ValidateName(name) == nil {
++\t\t\tt.Errorf("ValidateName(%q) = nil, want an error", name)
++\t\t}
++\t}
++}
+`;
+
+/** The patch each run read; runs not listed read the retry policy's. */
+const patches: Record<string, string> = { "fixture-run-68": namePatch };
+
+type Overview = Omit<typeof retryOverview, "flow"> & { flow: typeof retryOverview.flow | null };
+const overviews: Record<string, Overview> = {
   "fixture-run-101": retryOverview,
   "fixture-run-103": { ...retryOverview, verdict_reason: "The delay can overflow for long retries; look at it before approving.", places: retryOverview.places.slice(0, 2) },
+  "fixture-run-68": {
+    summary: "Projects check their names before they get a bucket: `ValidateName` refuses what a bucket can't be named, in place of `slugify`, which turned any name into one.",
+    verdict_reason: "A small rule with a test; two nits.",
+    before_after: [
+      { label: "A project named \"Q3 Report\"", before: "gets the bucket `q3-report`", after: "fails: use 3 to 63 lowercase letters, digits, and dashes" },
+      { label: "Projects \"a b\" and \"a-b\"", before: "share the bucket `a-b`", after: "\"a b\" fails, so each bucket has one project" },
+    ],
+    places: [
+      { id: "p1", title: "Names with spaces now fail", reason: "`slugify` used to turn \"Q3 Report\" into `q3-report`; now `Create` refuses it, and the API passes the error on.", evidence: { kind: "read", detail: "read `Create` and `api.handleCreate`" }, path: "internal/projects/create.go", start_line: 19, end_line: 21 },
+      { id: "p2", title: "Two dashes in a row pass", reason: "`namePattern` allows `a--b`, which some bucket stores refuse.", evidence: { kind: "ran", detail: "ran `TestValidateName`; no case has two dashes" }, path: "internal/projects/name.go", start_line: 9, end_line: 9 },
+    ],
+    layers: [
+      { id: "rule", title: "The name rule", intent: "What a bucket name allows, and the error that says so.", read_hint: "read", ranges: [{ path: "internal/projects/name.go", start_line: 1, end_line: 17 }] },
+      { id: "create", title: "Create checks names", intent: "The check takes the place of `slugify`, which nothing calls now.", read_hint: "read", ranges: [{ path: "internal/projects/create.go", start_line: 3, end_line: 27 }] },
+      { id: "test", title: "A test of the rule", intent: "Three names the rule refuses.", read_hint: "skim", ranges: [{ path: "internal/projects/name_test.go", start_line: 1, end_line: 11 }] },
+    ],
+    flow: null,
+    checked: ["Ran `go test ./internal/projects/...` at head and base", "Searched for other callers of `slugify`"],
+    not_checked: ["Didn't create a real bucket"],
+  },
+};
+
+/**
+ * How each run's changed code connects, as show-review prints it: gadgets#68's new rule and its
+ * callers. gopls couldn't load internal/legacy, so its caller came from a search for the name, as
+ * did api.signup's, which calls users.ValidateName, a different function with the same name.
+ */
+const connections: Record<string, object> = {
+  "fixture-run-68": {
+    nodes: [
+      { id: "validate", name: "projects.ValidateName", kind: "func", path: "internal/projects/name.go", line: 12, change: "added", lines_changed: 6 },
+      { id: "pattern", name: "projects.namePattern", kind: "var", path: "internal/projects/name.go", line: 9, change: "added", lines_changed: 2 },
+      { id: "create", name: "projects.Create", kind: "func", path: "internal/projects/create.go", line: 18, change: "changed", lines_changed: 5 },
+      { id: "slugify", name: "projects.slugify", kind: "func", path: "internal/projects/create.go", line: 28, change: "removed", lines_changed: 5 },
+      { id: "test", name: "projects.TestValidateName", kind: "func", path: "internal/projects/name_test.go", line: 5, change: "added", lines_changed: 7 },
+      { id: "handle", name: "api.handleCreate", kind: "func", path: "internal/api/projects.go", line: 41, change: "unchanged", lines_changed: 0 },
+      { id: "import", name: "migrate.importProjects", kind: "func", path: "internal/migrate/import.go", line: 58, change: "unchanged", lines_changed: 0 },
+      { id: "copy", name: "legacy.copyProject", kind: "func", path: "internal/legacy/copy.go", line: 22, change: "unchanged", lines_changed: 0 },
+      { id: "signup", name: "api.signup", kind: "func", path: "internal/api/users.go", line: 30, change: "unchanged", lines_changed: 0 },
+    ],
+    edges: [
+      { from: "handle", to: "create", kind: "calls", found_by: "gopls" },
+      { from: "import", to: "create", kind: "calls", found_by: "gopls" },
+      { from: "copy", to: "create", kind: "calls", found_by: "name_search" },
+      { from: "create", to: "validate", kind: "calls", found_by: "gopls" },
+      { from: "test", to: "validate", kind: "calls", found_by: "gopls" },
+      { from: "signup", to: "validate", kind: "calls", found_by: "name_search" },
+      { from: "validate", to: "pattern", kind: "uses", found_by: "gopls" },
+    ],
+    limits: [
+      "gopls couldn't load internal/legacy, which doesn't build, so its callers come from name search.",
+      "Callers in other repositories, such as acme/tools, aren't searched.",
+    ],
+  },
 };
 /** The commits after each run's head, as show-review lists them: #101 moved on after its review 2. */
 const sinceReview: Record<string, Array<{ sha: string; title: string; author: string; at: string; files: string[] }>> = {
@@ -272,10 +412,11 @@ export function answerReviewAction(sent: PluginActionRequest): PluginActionResul
       return result({ stdout: JSON.stringify({
         version: 1, run_id: runId, run: { repo: entry.repo, pr: entry.pr }, title: entry.title, author: entry.author, outcome: entry.outcome,
         findings: found ? { status: "reviewed", skip_reason: "", approval: { verdict: found.verdict, reason: found.reason }, findings: found.findings } : null,
-        drafts: drafts[runId] ?? null, diff: found ? patch : null,
+        drafts: drafts[runId] ?? null, diff: found ? patches[runId] ?? patch : null,
         failure: failures[runId] ?? null, asks: asks[runId] ?? [], submitted: entry.submitted,
         head_sha: entry.head_sha, cause: entry.cause, skipped_by_user: entry.skipped_by_user,
         overview: found ? overviews[runId] ?? null : null, commits_since_review: sinceReview[runId] ?? (found ? [] : null), co_change: coChange[runId] ?? [],
+        connections: found ? connections[runId] ?? null : null,
       }) });
     }
     case "draft": {
