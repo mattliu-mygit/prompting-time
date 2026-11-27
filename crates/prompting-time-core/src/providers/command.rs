@@ -37,15 +37,23 @@ fn path_with_environment(inherited_path: Option<&OsStr>, home: Option<&OsStr>) -
         .chain(home.map(|home| PathBuf::from(home).join(".local/bin")))
         .chain(
             [
+                // Homebrew links its `go` here too (in /usr/local/bin on Intel Macs).
                 "/opt/homebrew/bin",
                 "/usr/local/bin",
                 "/usr/bin",
                 "/bin",
                 "/usr/sbin",
                 "/sbin",
+                // Where Go's installer from go.dev puts `go`; a terminal adds it after the system
+                // directories, from /etc/paths.d/go.
+                "/usr/local/go/bin",
             ]
             .map(PathBuf::from),
-        );
+        )
+        // Where `go install` puts programs such as gopls when neither GOBIN nor GOPATH is set. One
+        // installed under a GOBIN or GOPATH set elsewhere is found only through the inherited PATH;
+        // ask `go env GOBIN GOPATH` here if such installations need finding too.
+        .chain(home.map(|home| PathBuf::from(home).join("go/bin")));
     let mut paths = Vec::new();
     for path in candidates {
         // Never resolve PATH entries against a conversation's working directory. HOME may also
@@ -103,6 +111,56 @@ mod tests {
                 "/bin",
                 "/usr/sbin",
                 "/sbin",
+                "/usr/local/go/bin",
+                "/example home/go/bin",
+            ]
+            .map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn go_locations_follow_the_system_directories_as_in_a_terminal() {
+        // A terminal adds /usr/local/go/bin after the system directories, from /etc/paths.d/go,
+        // and the shell's own startup file then adds ~/go/bin, where `go install` puts gopls.
+        let command = command_with_environment("provider", None, Some(OsStr::new("/example home")));
+        assert_eq!(
+            child_path(&command),
+            [
+                "/example home/.local/bin",
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+                "/usr/local/go/bin",
+                "/example home/go/bin",
+            ]
+            .map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn inherited_go_locations_keep_their_inherited_place() {
+        let command = command_with_environment(
+            "provider",
+            Some(OsStr::new(
+                "/example home/go/bin:/usr/local/go/bin:/usr/bin",
+            )),
+            Some(OsStr::new("/example home")),
+        );
+        assert_eq!(
+            child_path(&command),
+            [
+                "/example home/go/bin",
+                "/usr/local/go/bin",
+                "/usr/bin",
+                "/example home/.local/bin",
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
             ]
             .map(PathBuf::from)
         );
@@ -124,7 +182,8 @@ mod tests {
                     "/usr/local/bin",
                     "/bin",
                     "/usr/sbin",
-                    "/sbin"
+                    "/sbin",
+                    "/usr/local/go/bin",
                 ]
                 .map(PathBuf::from)
             );
@@ -154,6 +213,29 @@ mod tests {
         .expect("home CLI should be discoverable");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"home-provider\n");
+    }
+
+    #[tokio::test]
+    async fn minimal_path_discovers_go_install_tool_in_home() {
+        // The PATH macOS gives an app opened from the Finder or the Dock.
+        let directory = tempfile::Builder::new()
+            .prefix("go home ")
+            .tempdir()
+            .unwrap();
+        executable(
+            &directory.path().join("go/bin/prompting-time-test-gopls"),
+            "#!/bin/sh\nprintf 'go-install-tool\\n'\n",
+        );
+        let output = command_with_environment(
+            "prompting-time-test-gopls",
+            Some(OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")),
+            Some(directory.path().as_os_str()),
+        )
+        .output()
+        .await
+        .expect("a program `go install` put in ~/go/bin should be discoverable");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"go-install-tool\n");
     }
 
     #[tokio::test]

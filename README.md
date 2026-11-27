@@ -29,12 +29,14 @@ The interface is Solid 2.0 and TypeScript, built from the shared components in `
 - At least one supported local provider CLI.
 
 Provider discovery, authentication checks, and launches preserve the order of absolute inherited
-`PATH` entries, then append `$HOME/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and the standard
-system binary directories. Duplicate, empty, and relative entries are excluded; the home fallback
-requires an absolute home directory that can be represented in `PATH`. This child-only environment
-also lets an explicitly located CLI find its shebang runtime, such as Node.js. Custom installations
-already in `PATH` take precedence. Prompting Time does not load shell startup files or modify the
-parent process environment.
+`PATH` entries, then append `$HOME/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, the standard
+system binary directories, and Go's: `/usr/local/go/bin`, where Go's installer puts `go`, and
+`$HOME/go/bin`, where `go install` puts programs such as gopls (Homebrew's `go` is in
+`/opt/homebrew/bin`). Plugin commands get the same `PATH`. Duplicate, empty, and relative entries
+are excluded; the home entries require an absolute home directory that can be represented in
+`PATH`. This child-only environment also lets an explicitly located CLI find its shebang runtime,
+such as Node.js. Custom installations already in `PATH` take precedence. Prompting Time does not
+load shell startup files or modify the parent process environment.
 
 ### Codex
 
