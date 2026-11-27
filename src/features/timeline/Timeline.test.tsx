@@ -1052,11 +1052,18 @@ describe("Timeline", () => {
     });
     const view = renderTimeline({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 0, actions: api });
 
+    // Up to 120 cards, each with buttons: a role query would name every button on each page, which
+    // took this test past 5 seconds on a loaded CI runner, so the pages' buttons are found by text.
+    const button = async (text: string) => waitFor(() => {
+      const found = [...document.querySelectorAll("button")].find((element) => element.textContent?.trim() === text);
+      expect(found).toBeDefined();
+      return found!;
+    });
     for (let page = 1; page <= 7; page += 1) {
-      click(await screen.findByRole("button", { name: "Load more approvals" }));
+      click(await button("Load more approvals"));
       await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(page));
       const lastIndex = Math.min((page + 1) * 30 - 1, 225);
-      expect(await screen.findByRole("button", { name: `Review Action ${lastIndex}` })).toBeVisible();
+      expect(await button(`Review Action ${lastIndex}`)).toBeVisible();
       expect(document.querySelectorAll(".approval-card").length).toBeLessThanOrEqual(120);
     }
 
@@ -1076,7 +1083,7 @@ describe("Timeline", () => {
     expect(document.querySelectorAll(".approval-card")).toHaveLength(30);
 
     for (let page = 1; page <= 7; page += 1) {
-      click(await screen.findByRole("button", { name: "Load more approvals" }));
+      click(await button("Load more approvals"));
       await waitFor(() => expect(loadApprovals).toHaveBeenCalledTimes(page + 8));
     }
     view.rerender({ conversation: conversation({ id: "conversation-1" }), refreshVersion: 1, actions: api });
