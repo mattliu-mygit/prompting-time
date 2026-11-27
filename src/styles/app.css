@@ -2877,3 +2877,369 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
 .review-screen:has(> .walkthrough) > .review-body {
   flex: none;
 }
+
+/* The walkthrough waits hidden while the map of how the changed code connects shows in its place. */
+.walkthrough[hidden] {
+  display: none;
+}
+
+/* How the changed code connects, where the layers start: its name, Open the map, and three short lines. */
+.walk-connections-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-space-12);
+}
+
+.walk-connections h3 {
+  margin: 0;
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-medium);
+}
+
+.walk-connections p {
+  margin: 0;
+}
+
+/* The map in full, in the walkthrough's place: the map and what its marks mean on the left, the
+   selected node's panel on the right. Nothing on it moves: no transitions, no smooth scrolling. */
+.map-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+.map-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-8) var(--s-space-16);
+  padding: var(--s-space-12) var(--s-space-16);
+  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.map-head-text {
+  display: grid;
+  gap: 2px;
+  min-inline-size: 0;
+}
+
+.map-head-text h3 {
+  margin: 0;
+  font-size: var(--s-size-base);
+  font-weight: var(--s-weight-semibold);
+}
+
+.map-head-text p,
+.map-keys {
+  margin: 0;
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-sm);
+}
+
+.map-keys {
+  margin-inline-start: auto;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.map-keys kbd {
+  padding: 0 var(--s-space-4);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  font-family: var(--s-code-font-family);
+  font-size: var(--s-size-xs);
+}
+
+.map-body {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr);
+  min-block-size: 0;
+}
+
+.map-body[data-open] {
+  grid-template-columns: minmax(0, 1fr) 28rem;
+}
+
+.map-main {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 0;
+}
+
+/* The map keeps its size and scrolls when it is larger than its space; a smaller one sits centered. */
+.map-canvas {
+  display: flex;
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+}
+
+.map {
+  display: block;
+  flex: none;
+  margin: auto;
+  font-family: var(--s-code-font-family);
+  font-size: 12px;
+}
+
+.map-edge {
+  fill: none;
+  stroke: var(--s-text-muted);
+  stroke-width: 1.25;
+}
+
+.map-edge[data-found-by="name_search"] {
+  stroke-dasharray: 5 4;
+}
+
+.map-edge[data-lit] {
+  stroke: var(--s-text);
+  stroke-width: 2;
+}
+
+.map-node {
+  cursor: pointer;
+}
+
+.map-node circle {
+  fill: var(--s-surface-elevated);
+  stroke: var(--s-text);
+  stroke-width: 1.5;
+}
+
+.map-node[data-change="added"] circle {
+  fill: color-mix(in oklch, var(--s-success) 22%, var(--s-background));
+  stroke: var(--s-success);
+}
+
+.map-node[data-change="removed"] circle {
+  fill: color-mix(in oklch, var(--s-error) 22%, var(--s-background));
+  stroke: var(--s-error);
+}
+
+.map-node[data-change="unchanged"] circle {
+  fill: var(--s-background);
+  stroke: var(--s-border-strong);
+}
+
+.map-node:hover circle {
+  stroke-width: 2.5;
+}
+
+.map-node[aria-pressed="true"] circle {
+  stroke-width: 3.5;
+}
+
+.map-node text {
+  paint-order: stroke;
+  stroke: var(--s-background);
+  stroke-linejoin: round;
+  stroke-width: 3px;
+}
+
+.map-node-name {
+  fill: var(--s-text);
+}
+
+.map-node[data-change="removed"] .map-node-name {
+  text-decoration: line-through;
+}
+
+.map-node[data-change="unchanged"] .map-node-name,
+.map-node-change {
+  fill: var(--s-text-muted);
+}
+
+.map-node-change {
+  font-family: var(--s-font-body);
+}
+
+.map-node[data-change="added"] .map-node-change {
+  fill: var(--s-success);
+}
+
+.map-node[data-change="removed"] .map-node-change {
+  fill: var(--s-error);
+}
+
+/* While a node is selected, what doesn't touch it steps back. */
+.map-edge[data-dim],
+.map-node[data-dim] {
+  opacity: 0.3;
+}
+
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-space-4) var(--s-space-16);
+  margin: 0;
+  padding: var(--s-space-8) var(--s-space-16);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-xs);
+  list-style: none;
+}
+
+.map-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.map-key {
+  inline-size: 0.625rem;
+  block-size: 0.625rem;
+  border: 1.5px solid var(--s-text);
+  border-radius: 50%;
+  background: var(--s-surface-elevated);
+}
+
+.map-key[data-change="added"] {
+  border-color: var(--s-success);
+  background: color-mix(in oklch, var(--s-success) 22%, var(--s-background));
+}
+
+.map-key[data-change="removed"] {
+  border-color: var(--s-error);
+  background: color-mix(in oklch, var(--s-error) 22%, var(--s-background));
+}
+
+.map-key[data-change="unchanged"] {
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-color: var(--s-border-strong);
+  background: var(--s-background);
+}
+
+.map-line {
+  flex: none;
+  inline-size: 1.25rem;
+  block-size: 0;
+  border-block-start: 1.5px solid var(--s-text-muted);
+}
+
+.map-line[data-found-by="name_search"] {
+  border-block-start-style: dashed;
+}
+
+.map-limits {
+  padding: var(--s-space-8) var(--s-space-16) var(--s-space-12);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border-muted);
+  font-size: var(--s-size-sm);
+}
+
+.map-limits h4,
+.map-links h5 {
+  margin: 0 0 var(--s-space-4);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+  letter-spacing: var(--s-tracking-wider);
+  text-transform: uppercase;
+}
+
+.map-limits ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding-inline-start: var(--s-space-16);
+}
+
+/* The selected node: its name, what changed, where it is (which opens the diff there), and its links. */
+.map-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-space-12);
+  min-block-size: 0;
+  padding: var(--s-space-12) var(--s-space-16);
+  overflow-y: auto;
+  border-inline-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  background: var(--s-surface);
+  font-size: var(--s-size-sm);
+}
+
+.map-panel p {
+  margin: 0;
+}
+
+.map-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.map-panel-name {
+  flex: 1;
+  min-inline-size: 0;
+  margin: 0;
+  font-size: var(--s-size-base);
+  font-weight: var(--s-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.map-panel-what {
+  color: var(--s-text-secondary);
+}
+
+.map-change[data-change="added"] {
+  color: var(--s-success);
+}
+
+.map-change[data-change="removed"] {
+  color: var(--s-error);
+}
+
+.map-location {
+  overflow-wrap: anywhere;
+}
+
+.map-location-open {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-4) var(--s-space-8);
+  min-block-size: var(--s-control-height-sm);
+  padding: 0 var(--s-space-4);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  background: var(--s-background);
+  color: var(--s-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.map-location-open:hover {
+  background: var(--s-surface-elevated);
+}
+
+.map-location-open svg {
+  flex: none;
+  inline-size: var(--s-space-12);
+  block-size: var(--s-space-12);
+}
+
+.map-code {
+  display: grid;
+  gap: var(--s-space-8);
+  max-block-size: 26rem;
+  overflow: auto;
+}
+
+.map-links ul {
+  display: grid;
+  gap: var(--s-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.map-found {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}

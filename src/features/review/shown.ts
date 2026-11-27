@@ -2,9 +2,9 @@ import { readShown } from "../agents/reviews";
 
 /**
  * What a review's walkthrough reads from the show-review action, beyond what the page reads: the
- * plugin's overview of the change, the commits after the one the review read, and the files that
- * usually change with the changed ones. Each part that does not fit the format reads as missing, so
- * a plugin that prints none of it gets the page as before.
+ * plugin's overview of the change, the commits after the one the review read, the files that
+ * usually change with the changed ones, and how the changed code connects. Each part that does not
+ * fit the format reads as missing, so a plugin that prints none of it gets the page as before.
  */
 
 /** How the plugin knows a place to look matters: it ran something, read the code, or searched the repo. */
@@ -45,6 +45,28 @@ export type CoChange = { path: string; partner: string; ratio: number; commits: 
 /** One of the review's draft comments, as the plugin's findings list it. */
 export type Finding = { id: string; path: string; line: number; side: "LEFT" | "RIGHT"; title: string; draft: string; kind: string };
 
+/** A function, method, type, variable, or constant in the map of the changed code, and what this change did to it. */
+export type ConnectionNode = {
+  id: string;
+  name: string;
+  kind: "func" | "method" | "type" | "var" | "const";
+  path: string;
+  /** Where it starts: the new file's line, or the old file's for one the change removed, since the new file has none. */
+  line: number;
+  change: "added" | "changed" | "removed" | "unchanged";
+  /** How many of its lines changed, as the plugin counts them. */
+  lines_changed: number;
+};
+
+/**
+ * One node calls or uses another. gopls, Go's language server, found it, or a search for the
+ * name did, which may have matched a different function or type with the same name.
+ */
+export type ConnectionEdge = { from: string; to: string; kind: "calls" | "uses"; found_by: "gopls" | "name_search" };
+
+/** The functions and types the change touches, the code that calls or uses them, and what the plugin's map may miss. */
+export type Connections = { nodes: ConnectionNode[]; edges: ConnectionEdge[]; limits: string[] };
+
 /** What the user chose so far: approve or comment, and which comments go out, with any edited text. */
 export type Drafts = { event: "APPROVE" | "COMMENT"; message: string; findings: Record<string, { included: boolean; text?: string }> };
 
@@ -53,6 +75,8 @@ export type ShownReview = {
   /** null when the plugin doesn't say; empty when the pull request has no commits after the reviewed one. */
   commitsSinceReview: Commit[] | null;
   coChange: CoChange[];
+  /** null when the plugin printed no map of the changed code, or none with a node that fits. */
+  connections: Connections | null;
   findings: Finding[];
   /** The plugin's own reason for its verdict, from its findings. */
   reason: string | null;
@@ -67,6 +91,7 @@ const isString = (value: unknown): value is string => typeof value === "string";
 const isLine = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value > 0;
 /** The entries of an array that fit, each read by `read`; anything else reads as no entries. */
 const listOf = <T>(value: unknown, read: (item: unknown) => T | null): T[] => (Array.isArray(value) ? value.flatMap((item) => read(item) ?? []) : []);
+const isOneOf = <T extends string>(options: readonly T[], value: unknown): value is T => options.includes(value as T);
 
 function readRange(value: unknown): CodeRange | null {
   if (!isRecord(value) || !isString(value.path) || !isLine(value.start_line) || !isLine(value.end_line) || value.end_line < value.start_line) return null;
@@ -120,6 +145,31 @@ export function readOverview(value: unknown): Overview | null {
   };
 }
 
+function readNode(value: unknown): ConnectionNode | null {
+  if (!isRecord(value) || !isString(value.id) || !isString(value.name) || !isString(value.path) || !isLine(value.line)) return null;
+  if (!isOneOf(["func", "method", "type", "var", "const"], value.kind) || !isOneOf(["added", "changed", "removed", "unchanged"], value.change)) return null;
+  const lines = value.lines_changed;
+  if (typeof lines !== "number" || !Number.isInteger(lines) || lines < 0) return null;
+  return { id: value.id, name: value.name, kind: value.kind, path: value.path, line: value.line, change: value.change, lines_changed: lines };
+}
+
+/**
+ * The map of the changed code the plugin printed, or null when it printed none or none with a node
+ * that fits. A node whose id an earlier node has, and an edge to or from a node it doesn't list,
+ * are left out.
+ */
+export function readConnections(value: unknown): Connections | null {
+  if (!isRecord(value)) return null;
+  const ids = new Set<string>();
+  const nodes = listOf(value.nodes, readNode).filter((node) => !ids.has(node.id) && ids.add(node.id));
+  if (nodes.length === 0) return null;
+  const edges = listOf(value.edges, (edge): ConnectionEdge | null => (
+    isRecord(edge) && isString(edge.from) && isString(edge.to) && ids.has(edge.from) && ids.has(edge.to) && isOneOf(["calls", "uses"], edge.kind) && isOneOf(["gopls", "name_search"], edge.found_by)
+      ? { from: edge.from, to: edge.to, kind: edge.kind, found_by: edge.found_by } : null
+  ));
+  return { nodes, edges, limits: listOf(value.limits, (item) => (isString(item) ? item : null)) };
+}
+
 function readCommit(value: unknown): Commit | null {
   if (!isRecord(value) || !isString(value.sha) || !isString(value.title) || !isString(value.at)) return null;
   return { sha: value.sha, title: value.title, author: isString(value.author) ? value.author : null, at: value.at, files: listOf(value.files, (file) => (isString(file) ? file : null)) };
@@ -150,6 +200,7 @@ export function readShownReview(stdout: string, runId: string): ShownReview {
       isRecord(item) && isString(item.path) && isString(item.partner) && typeof item.ratio === "number" && typeof item.commits === "number"
         ? { path: item.path, partner: item.partner, ratio: item.ratio, commits: item.commits } : null
     )),
+    connections: readConnections(shown.connections),
     findings: findings ? listOf(findings.findings, readFinding) : [],
     reason: approval && isString(approval.reason) ? approval.reason : null,
     drafts: readDrafts(shown.drafts),

@@ -3,6 +3,7 @@ import { CheckIcon, ChevronsLeftIcon, ChevronsRightIcon, CloseIcon, Diff, IconBu
 import type { PluginActions } from "../../app/store";
 import type { PluginSnapshot } from "../../bridge/types";
 import type { ReviewEntry } from "../agents/reviews";
+import { ConnectionsSummary } from "./Connections";
 import { DecideBar } from "./DecideBar";
 import { FlowDiagram } from "./FlowDiagram";
 import { plural } from "./ReviewTop";
@@ -18,11 +19,16 @@ type Props = {
   actions: PluginActions;
   /** The verdict banner and the since notice, which head the walkthrough. */
   top: JSX.Element;
-  /** Whether the walkthrough shows, so j and k step only then. */
+  /**
+   * Whether the walkthrough shows: false while the map of how the changed code connects shows in its
+   * place, which keeps the walkthrough as it was to come back to. j and k step only while it shows.
+   */
   active: boolean;
   /** Whether the user may decide here: the newest version, not yet submitted. */
   canDecide: boolean;
   onShowDiff(): void;
+  /** Shows the map of how the changed code connects in the walkthrough's place. */
+  onOpenConnections(): void;
   onSubmitted(runId: string): void;
 };
 
@@ -88,8 +94,9 @@ function NoteCard(props: { note: Note; onClose(): void }) {
  * reason and evidence open on a click or with j and k; the calls before and after; what the plugin
  * checked and didn't; then the change layer by layer, each with its line excerpts and a read check
  * that folds it. A navigator on the left lists the parts, layers, and places, and folds to a rail.
- * Each view's summary sits where its question comes up, when the view is on and has data. The
- * decision waits in the corner until you click it or reach the end.
+ * Each view's summary sits where its question comes up, when the view is on and has data: how the
+ * changed code connects where the layers start, with Open the map, which shows the map in the
+ * walkthrough's place. The decision waits in the corner until you click it or reach the end.
  */
 export function Walkthrough(props: Props) {
   const runId = untrack(() => props.review.run_id);
@@ -130,6 +137,9 @@ export function Walkthrough(props: Props) {
   const [dimmed, setDimmed] = createSignal(false);
   const [decideOpen, setDecideOpen] = createSignal(decided.has(runId));
   let scroller: HTMLDivElement | undefined;
+  // Where the walkthrough was scrolled when the map opened in its place, and the button that opened it.
+  let scrolledTo = 0;
+  let openMap: HTMLButtonElement | undefined;
 
   const isRead = (id: string) => read().has(id);
   const folded = (layer: Layer) => (isRead(layer.id) || layer.read_hint === "skip") && !reopened().has(layer.id);
@@ -183,6 +193,15 @@ export function Walkthrough(props: Props) {
     setTarget({ path, range: { start: line, end: line } });
   }
 
+  // Back from the map: the walkthrough scrolled where it was, which hiding it may forget, and the
+  // focus on Open the map.
+  const shows = createMemo(() => props.active);
+  createEffect(shows, (now, before) => {
+    if (!now || before !== false) return;
+    if (scroller) scroller.scrollTop = scrolledTo;
+    openMap?.focus();
+  });
+
   // Dimming while stepping also dims the window around the review.
   createEffect(() => dimmed() && props.active, (on) => {
     document.body.classList.toggle("review-dimming", on);
@@ -230,12 +249,14 @@ export function Walkthrough(props: Props) {
   const scrollTo = (selector: string) => scroller?.querySelector<HTMLElement>(selector)?.scrollIntoView?.({ block: "start" });
   const showCalls = () => props.views.isOn("calls") && viewHasData("calls", props.shown);
   const showCoChange = () => props.views.isOn("co-change") && viewHasData("co-change", props.shown);
+  const connections = () => (props.views.isOn("connections") ? props.shown.connections : null);
   const parts = () => [
     { id: "verdict", name: "Verdict" },
     { id: "what", name: "What this PR does" },
     { id: "places", name: "Places to look", count: places().length },
     ...(showCalls() ? [{ id: "calls", name: viewName("calls") }] : []),
     { id: "checked", name: "What Whooper checked" },
+    ...(connections() ? [{ id: "connections", name: viewName("connections") }] : []),
   ];
   const fileCount = () => new Set(layers().flatMap((entry) => entry.files.map((file) => file.path))).size;
   /** One file of a layer: its excerpts, with the places' marks, the open place's reason, and Whooper's draft comments. */
@@ -281,7 +302,7 @@ export function Walkthrough(props: Props) {
   }
 
   return (
-    <div class="walkthrough" data-rail={navCollapsed() ? "" : undefined} data-dim={dimmed() ? "" : undefined}>
+    <div class="walkthrough" hidden={!props.active} data-rail={navCollapsed() ? "" : undefined} data-dim={dimmed() ? "" : undefined}>
       <nav class="walk-nav" aria-label="Walkthrough">
         <Show
           when={!navCollapsed()}
@@ -428,6 +449,19 @@ export function Walkthrough(props: Props) {
               </Show>
             </section>
             <p class="walk-divider"><span>The change, layer by layer</span><span class="walk-muted">{plural(fileCount(), "file")} in {plural(layers().length, "layer")}</span></p>
+            <Show when={connections()}>
+              {(map) => (
+                <ConnectionsSummary
+                  connections={map()}
+                  headingId={`connections-${runId}`}
+                  buttonRef={(element) => { openMap = element; }}
+                  onOpen={() => {
+                    scrolledTo = scroller?.scrollTop ?? 0;
+                    props.onOpenConnections();
+                  }}
+                />
+              )}
+            </Show>
             <For each={layers()}>
               {(entry) => (
                 <section class="walk-layer" data-layer={entry.layer.id} data-folded={folded(entry.layer) ? "" : undefined} aria-label={`Layer ${entry.number}: ${entry.layer.title}`}>

@@ -255,3 +255,90 @@ export function fixtureWalkthrough(runId: string, overrides: Record<string, unkn
     ...overrides,
   };
 }
+
+/** An invented Go patch: a new name rule in internal/projects/name.go, and Create, which checks it instead of slugify, removed. */
+export const fixtureGoPatch = [
+  "diff --git a/internal/projects/name.go b/internal/projects/name.go",
+  "new file mode 100644",
+  "--- /dev/null",
+  "+++ b/internal/projects/name.go",
+  "@@ -0,0 +1,11 @@",
+  "+package projects",
+  "+",
+  '+import "regexp"',
+  "+",
+  "+// namePattern is what a bucket name allows.",
+  "+var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)",
+  "+",
+  "+// ValidateName says why a project name can't name a bucket.",
+  "+func ValidateName(name string) error {",
+  "+\treturn check(namePattern.MatchString(name))",
+  "+}",
+  "diff --git a/internal/projects/create.go b/internal/projects/create.go",
+  "--- a/internal/projects/create.go",
+  "+++ b/internal/projects/create.go",
+  "@@ -10,8 +10,6 @@",
+  " func Create(name string) (*Project, error) {",
+  "-\tbucket := slugify(name)",
+  "-\treturn newProject(name, bucket)",
+  "+\tif err := ValidateName(name); err != nil {",
+  "+\t\treturn nil, err",
+  "+\t}",
+  "+\treturn newProject(name, name)",
+  " }",
+  "-",
+  "-func slugify(name string) string {",
+  "-\treturn strings.ToLower(name)",
+  "-}",
+  "",
+].join("\n");
+
+/**
+ * How the changed code of fixtureGoPatch connects, as show-review prints it: ValidateName and
+ * namePattern added, Create changed, slugify removed, and two unchanged callers, one of which only
+ * a search for ValidateName's name found, so it may call a different ValidateName.
+ */
+export function fixtureConnections() {
+  return {
+    nodes: [
+      { id: "validate", name: "projects.ValidateName", kind: "func", path: "internal/projects/name.go", line: 9, change: "added", lines_changed: 3 },
+      { id: "pattern", name: "projects.namePattern", kind: "var", path: "internal/projects/name.go", line: 6, change: "added", lines_changed: 1 },
+      { id: "create", name: "projects.Create", kind: "func", path: "internal/projects/create.go", line: 10, change: "changed", lines_changed: 6 },
+      { id: "slugify", name: "projects.slugify", kind: "func", path: "internal/projects/create.go", line: 15, change: "removed", lines_changed: 4 },
+      { id: "handle", name: "api.handleCreate", kind: "func", path: "internal/api/projects.go", line: 41, change: "unchanged", lines_changed: 0 },
+      { id: "signup", name: "api.signup", kind: "func", path: "internal/api/users.go", line: 30, change: "unchanged", lines_changed: 0 },
+    ],
+    edges: [
+      { from: "handle", to: "create", kind: "calls", found_by: "gopls" },
+      { from: "create", to: "validate", kind: "calls", found_by: "gopls" },
+      { from: "validate", to: "pattern", kind: "uses", found_by: "gopls" },
+      { from: "signup", to: "validate", kind: "calls", found_by: "name_search" },
+    ],
+    limits: ["Callers outside acme/gadgets aren't searched.", "gopls couldn't load internal/legacy, so its callers come from name search."],
+  };
+}
+
+/** What show-review prints for a run of fixtureGoPatch with an overview and how its changed code connects. */
+export function fixtureConnectionsWalkthrough(runId: string, overrides: Record<string, unknown> = {}) {
+  return fixtureWalkthrough(runId, {
+    findings: { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Small and tested." }, findings: [{ id: "1", path: "internal/projects/name.go", line: 6, side: "RIGHT", title: "Two dashes pass", draft: "**nit:** `namePattern` lets `a--b` through.", kind: "nit" }] },
+    diff: fixtureGoPatch,
+    overview: {
+      summary: "Projects check their names before they get a bucket, instead of `slugify` turning any name into one.",
+      verdict_reason: "Small and tested.",
+      before_after: [{ label: "A name with a space", before: "gets a bucket with a dash", after: "fails with a message" }],
+      places: [{ id: "p1", title: "Names with spaces now fail", reason: "`slugify` used to fix them.", evidence: { kind: "read", detail: "read `Create`" }, path: "internal/projects/create.go", start_line: 11, end_line: 13 }],
+      layers: [
+        { id: "rule", title: "The name rule", intent: "What a bucket name allows.", read_hint: "read", ranges: [{ path: "internal/projects/name.go", start_line: 1, end_line: 11 }] },
+        { id: "create", title: "Create checks names", intent: "The check replaces slugify.", read_hint: "read", ranges: [{ path: "internal/projects/create.go", start_line: 10, end_line: 15 }] },
+      ],
+      flow: null,
+      checked: ["Ran go test ./internal/projects/..."],
+      not_checked: ["Didn't create a real bucket"],
+    },
+    commits_since_review: [],
+    co_change: [],
+    connections: fixtureConnections(),
+    ...overrides,
+  });
+}

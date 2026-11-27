@@ -9,10 +9,11 @@ import { FailedReview } from "./FailedReview";
 import { RunNow } from "./RunNow";
 import { blockingCauses, notSafeToApprove, readFindingKinds, readReviews, reviewState, shortDate, shortPullRequest, shortSha, unsafeVerdict, versionsOf, type ReviewEntry } from "./reviews";
 import { readAgentStatus, readBlocked } from "./status";
+import { ConnectionsView } from "../review/Connections";
 import { rememberLook, type LastLook } from "../review/memory";
 import { ReviewTop } from "../review/ReviewTop";
 import { readShownReview, type Overview, type ShownReview } from "../review/shown";
-import { REVIEW_VIEWS, viewHasData, type ReviewViews } from "../review/views";
+import { REVIEW_VIEWS, viewHasData, viewListed, type ReviewViews } from "../review/views";
 import { Walkthrough } from "../review/Walkthrough";
 
 type Props = {
@@ -85,6 +86,8 @@ export function versionLabel(review: ReviewEntry, number: number): string {
 
 /** What show-review printed for the open run, or why it couldn't be read. */
 type ShownRead = { runId: string; shown: ShownReview | null; error: string | null };
+/** What a review with an overview shows: its walkthrough, the plugin's page (Diff), or the map of how the changed code connects in the walkthrough's place. */
+type ReviewMode = "walkthrough" | "diff" | "connections";
 
 /**
  * One review of a pull request. Its controls sit in the window's header row: a ⋯ menu with the pull
@@ -105,8 +108,8 @@ export function ReviewScreen(props: Props) {
     return outcome === "running" ? "running" : outcome === "failed" || outcome === "waiting" ? "problem" : "page";
   });
   const [read, setRead] = createSignal<ShownRead | null>(null);
-  // Whether each run shows its walkthrough or its diff; a review opens on its walkthrough.
-  const [modes, setModes] = createSignal<Readonly<Record<string, "walkthrough" | "diff">>>({});
+  // What each run shows; a review opens on its walkthrough.
+  const [modes, setModes] = createSignal<Readonly<Record<string, ReviewMode>>>({});
   // What the user opened of each run's pull request before, read once as the run opens.
   const looks = new Map<string, LastLook | null>();
   const finished = () => (body() === "page" ? props.runId : null);
@@ -146,7 +149,7 @@ export function ReviewScreen(props: Props) {
     return shown?.overview ? (shown as ShownReview & { overview: Overview }) : null;
   };
   const mode = (runId: string) => modes()[runId] ?? "walkthrough";
-  const setMode = (runId: string, next: "walkthrough" | "diff") => setModes((now) => ({ ...now, [runId]: next }));
+  const setMode = (runId: string, next: ReviewMode) => setModes((now) => ({ ...now, [runId]: next }));
   /** The page shows once show-review answered: for a review without an overview, or in its Diff. */
   const pageShown = () => {
     const runId = finished();
@@ -244,8 +247,8 @@ type RunProps = {
   /** What show-review printed, when the plugin wrote an overview of the run. */
   shown: (ShownReview & { overview: Overview }) | null;
   look: LastLook | null;
-  mode: "walkthrough" | "diff";
-  onMode(mode: "walkthrough" | "diff"): void;
+  mode: ReviewMode;
+  onMode(mode: ReviewMode): void;
   /** Whether the plugin's page shows under this run's part. */
   pageShown: boolean;
   onNotice(text: string, undo: () => void): void;
@@ -319,13 +322,21 @@ function ReviewRun(props: RunProps) {
     else if (value === "remove") void run(() => props.triage.remove(props.review.run_id), () => {});
     else if (value === "restore") void run(() => props.triage.restore(props.review.run_id), () => {});
   }
-  const viewItems = (): MenuItem[] => REVIEW_VIEWS.filter((view) => view.ready).map((view) => ({
+  const viewItems = (): MenuItem[] => REVIEW_VIEWS.filter((view) => (props.shown ? viewListed(view, props.shown) : view.ready)).map((view) => ({
     value: view.id,
     label: view.name,
     description: props.shown && !viewHasData(view.id, props.shown) ? `${view.description} Nothing for this review.` : view.description,
     type: "checkbox" as const,
     checked: props.views.isOn(view.id),
   }));
+  /** How many of the views this review's menu lists are off, for the menu's button. */
+  const viewsOff = () => viewItems().filter((item) => !item.checked).length;
+  /** The map of how the changed code connects, while it shows in the walkthrough's place. */
+  const map = () => (props.mode === "connections" && props.views.isOn("connections") ? props.shown?.connections ?? null : null);
+  // Turning the view off, here or in the palette, or a reread without the map, goes back to the walkthrough.
+  createEffect(() => props.mode === "connections" && map() === null, (gone) => {
+    if (gone) untrack(() => props.onMode("walkthrough"));
+  });
 
   const controls = (
     <div class="review-controls">
@@ -341,12 +352,12 @@ function ReviewRun(props: RunProps) {
       </Show>
       <Show when={props.shown}>
         <div class="review-modes" role="group" aria-label="Show the review as">
-          <button type="button" class="pt-button" aria-pressed={props.mode === "walkthrough" ? "true" : "false"} onClick={() => props.onMode("walkthrough")}>Walkthrough</button>
+          <button type="button" class="pt-button" aria-pressed={props.mode === "diff" ? "false" : "true"} onClick={() => props.onMode("walkthrough")}>Walkthrough</button>
           <button type="button" class="pt-button" aria-pressed={props.mode === "diff" ? "true" : "false"} onClick={() => props.onMode("diff")}>Diff</button>
         </div>
         <Menu
           label="Views in reviews"
-          text={props.views.offCount() > 0 ? `Views · ${props.views.offCount()} off` : "Views"}
+          text={viewsOff() > 0 ? `Views · ${viewsOff()} off` : "Views"}
           items={viewItems()}
           closeOnSelect={false}
           onSelect={(id) => {
@@ -405,7 +416,7 @@ function ReviewRun(props: RunProps) {
       <Show when={error()}>{(text) => <p role="alert" class="inline-error plugin-refusal">{text()}</p>}</Show>
       <Show when={props.shown}>
         {(shown) => (
-          <Show when={props.mode === "walkthrough"} fallback={<Show when={props.pageShown}><div class="review-page-top">{top(shown())}</div></Show>}>
+          <Show when={props.mode !== "diff"} fallback={<Show when={props.pageShown}><div class="review-page-top">{top(shown())}</div></Show>}>
             <Walkthrough
               plugin={props.plugin}
               review={props.review}
@@ -413,11 +424,15 @@ function ReviewRun(props: RunProps) {
               views={props.views}
               actions={props.actions}
               top={top(shown())}
-              active={props.mode === "walkthrough"}
+              active={map() === null}
               canDecide={!earlier() && props.review.submitted === null && !removed()}
               onShowDiff={() => props.onMode("diff")}
+              onOpenConnections={() => props.onMode("connections")}
               onSubmitted={props.onSubmitted}
             />
+            <Show when={map()}>
+              {(connections) => <ConnectionsView connections={connections()} patch={shown().patch} onBack={() => props.onMode("walkthrough")} />}
+            </Show>
           </Show>
         )}
       </Show>
