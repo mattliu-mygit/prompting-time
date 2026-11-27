@@ -180,11 +180,21 @@ describe("Diff's excerpts, marks, and target", () => {
     const css = [...root()!.querySelectorAll("style")].map((style) => style.textContent).join("\n");
     expect(css).toContain('[data-column-number="25"]');
     expect(css).toContain('content:"1"');
+    // Pierre gives the line numbers a pointer while it has a click handler.
+    expect(root()!.querySelector("pre")).toHaveAttribute("data-interactive-line-numbers");
     const cell = root()!.querySelector<HTMLElement>('[data-column-number="26"]:not([data-line-type="change-deletion"])')!;
     fireEvent.pointerDown(cell, { button: 0 });
     fireEvent.pointerUp(cell, { button: 0 });
     fireEvent.click(cell);
     expect(onMark).toHaveBeenCalledWith("place-1");
+  });
+
+  it("draws marks without onMark plain, with no pointer on the line numbers, since a click on them does nothing", async () => {
+    render(() => <Diff file={longFile()} layout="unified" excerpt={[{ start: 24, end: 26 }]} marks={[{ id: "line-25", label: "", start: 25, end: 26 }]} />);
+    await waitFor(() => expect(host()?.shadowRoot?.querySelector('[data-column-number="25"]')).not.toBeNull(), { timeout: 10_000 });
+    const css = [...host()!.shadowRoot!.querySelectorAll("style")].map((style) => style.textContent).join("\n");
+    expect(css).toContain("color:var(--s-warning)");
+    expect(host()!.shadowRoot!.querySelector("pre")).not.toHaveAttribute("data-interactive-line-numbers");
   });
 
   it("scrolls the target's first line into view, again for a new target object", async () => {

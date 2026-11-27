@@ -21,8 +21,8 @@ export type DiffProps<T> = DiffSource & DiffOptions<T>;
 
 /**
  * A mark in the line-number gutter over a range of lines, such as a place a review asks you to look
- * at: the numbers take the warning color, the first carries `label`, and a click on any of them
- * calls `onMark` with `id`. Lines count as in `LineRange`.
+ * at: the numbers take the warning color, the first carries `label`, and, with `onMark`, a click on
+ * any of them calls it with `id`. Lines count as in `LineRange`.
  */
 export interface DiffMark extends LineRange {
   id: string;
@@ -54,7 +54,7 @@ interface DiffOptions<T> {
    * excerpts, such as the lines a walkthrough shows for one step (see excerptFile).
    */
   excerpt?: readonly LineRange[];
-  /** Marks in the line-number gutter; a click on a marked line's number calls `onMark`. */
+  /** Marks in the line-number gutter; a click on a marked line's number calls `onMark`, and without it a mark is plain, with no pointer. */
   marks?: readonly DiffMark[];
   onMark?: (id: string) => void;
   /** Lines to scroll into view and highlight. A new object scrolls again; null highlights nothing. */
@@ -86,7 +86,7 @@ const linesOf = (range: LineRange) => Array.from({ length: Math.max(0, range.end
  */
 function markStyles(marks: readonly DiffMark[], target: DiffTarget | null, deleted: boolean): string {
   const rules = marks.flatMap((mark) => [
-    `${linesOf(mark).map((line) => numberCell(line, deleted)).join(",")}{color:var(--s-warning);background-color:color-mix(in oklch,var(--s-warning) 16%,transparent);box-shadow:inset 2px 0 0 var(--s-warning);cursor:pointer}`,
+    `${linesOf(mark).map((line) => numberCell(line, deleted)).join(",")}{color:var(--s-warning);background-color:color-mix(in oklch,var(--s-warning) 16%,transparent);box-shadow:inset 2px 0 0 var(--s-warning)}`,
     `${numberCell(mark.start, deleted)}::before{content:${JSON.stringify(mark.label)};margin-inline-end:auto;padding-inline:4px;font-weight:600}`,
   ]);
   if (target) rules.push(`${linesOf(target).map((line) => codeRow(line, deleted || target.old === true)).join(",")}{background-color:color-mix(in oklch,var(--s-text) 9%,var(--diffs-bg))}`);
@@ -124,7 +124,7 @@ export function Diff<T>(props: DiffProps<T>) {
     cell.scrollIntoView?.({ block: "center" });
   }
 
-  const options = (layout: "split" | "unified", css: string, excerpted: boolean): FileDiffOptions<T, undefined> => ({
+  const options = (layout: "split" | "unified", css: string, excerpted: boolean, clickable: boolean): FileDiffOptions<T, undefined> => ({
     theme: DIFF_THEME,
     themeType: "dark",
     diffStyle: layout,
@@ -132,11 +132,16 @@ export function Diff<T>(props: DiffProps<T>) {
     // Between an excerpt's hunks, the lines left out may hold changes too, so they get a plain
     // separator rather than Pierre's "10 unmodified lines".
     ...(excerpted ? { hunkSeparators: "simple" as const } : {}),
-    onLineNumberClick: ({ lineNumber, annotationSide }) => {
-      if ((annotationSide === "deletions") !== untrack(deleted)) return;
-      const mark = untrack(() => props.marks)?.find((item) => lineNumber >= item.start && lineNumber <= item.end);
-      if (mark) untrack(() => props.onMark)?.(mark.id);
-    },
+    // Pierre gives every line number a pointer while it has a click handler, so only a Diff with onMark gets one.
+    ...(clickable
+      ? {
+          onLineNumberClick: ({ lineNumber, annotationSide }: { lineNumber: number; annotationSide: "deletions" | "additions" }) => {
+            if ((annotationSide === "deletions") !== untrack(deleted)) return;
+            const mark = untrack(() => props.marks)?.find((item) => lineNumber >= item.start && lineNumber <= item.end);
+            if (mark) untrack(() => props.onMark)?.(mark.id);
+          },
+        }
+      : {}),
     // Pierre calls this from the effect below or, while Shiki loads, from its own callback. The
     // element starts empty; the <For> below draws the thread into it.
     renderAnnotation: (annotation) => {
@@ -163,12 +168,13 @@ export function Diff<T>(props: DiffProps<T>) {
       annotations: props.annotations ?? [],
       css: markStyles(props.marks ?? [], props.target ?? null, deleted()),
       excerpted: props.excerpt !== undefined,
+      clickable: props.onMark !== undefined,
     }),
-    ({ source, layout, annotations, css, excerpted }) => {
+    ({ source, layout, annotations, css, excerpted, clickable }) => {
       if (!source) return;
       // setOptions replaces every option, so the callbacks above go in each time.
-      if (instance) instance.setOptions(options(layout, css, excerpted));
-      else instance = new FileDiff<T>(options(layout, css, excerpted));
+      if (instance) instance.setOptions(options(layout, css, excerpted, clickable));
+      else instance = new FileDiff<T>(options(layout, css, excerpted, clickable));
       instance.render({ ...source, lineAnnotations: [...annotations], containerWrapper: wrapper, forceRender: true });
     },
   );
