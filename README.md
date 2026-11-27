@@ -186,9 +186,10 @@ Prompting Time can host background agents, such as Whooper, as plugins. The Rust
 checks, starts, and stops them, and the window shows them.
 
 - **Screens.** Installed plugins sit pinned at the top of the sidebar, above its sections,
-  one compact row each: the name, which opens the plugin's screen; Pause or Resume (`pause`,
-  `resume`), Start while it is stopped, and Poll now (`round`) as buttons; a ⋯ menu with Stop,
-  Settings, and Open logs; and its status in words and a dot, from its process and the `agent`
+  one compact row each: the name, which opens the plugin's page at its home route, `/`; Pause or
+  Resume (`pause`, `resume`), Start while it is stopped, and Poll now (`round`) as buttons; a ⋯
+  menu, opened by a click, with Stop, Settings, and Open logs, which open the plugin's screen on
+  those tabs; and its status in words and a dot, from its process and the `agent`
   of its status format 2, such as "Running · next poll 3:45 PM" or, in red, "Missing gh". Resume
   replaces Pause while the status says `paused`. The plugin's screen has the same words and
   controls and the tabs Logs (the end of its log, with search and copy) and Settings (where it
@@ -201,7 +202,7 @@ checks, starts, and stops them, and the window shows them.
 - **Menu bar.** While a background agent is installed, Prompting Time puts a clock in the macOS menu
   bar, a template image that macOS draws in the menu bar's own color, with a dot at its top right
   while an agent's row is red, its status lists a blocker, or it can't start. Its menu repeats the
-  pinned rows, from the same status in the same words: each agent's name, which opens its screen;
+  pinned rows, from the same status in the same words: each agent's name, which opens its page;
   its status words; its Pause or Resume (Start while it is stopped) and Poll now; then how many
   items need you, which opens the first; then Open Prompting Time and Quit Prompting Time. It is
   on by default; the palette's "Hide background agents from the menu bar" turns it off and "Show

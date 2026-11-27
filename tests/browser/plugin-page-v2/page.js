@@ -37,7 +37,7 @@ function show() {
   const blocker = lastStatus && route ? lastStatus.blockers.find((entry) => entry.route === route) : null;
   element("title").textContent = item?.title ?? blocker?.title ?? (route === "/providers" ? "Providers" : "Fixture runs");
   element("detail").textContent = item ? [item.group, item.detail].filter(Boolean).join(" · ")
-    : id ? "This run is no longer listed." : blocker ? "Blocks every run." : "Waiting for Prompting Time to open a run.";
+    : id ? "This run is no longer listed." : blocker ? "Blocks every run." : route === "/" ? "Home: every run the plugin keeps." : "Waiting for Prompting Time to open a run.";
   element("summary").textContent = lastStatus ? `${lastStatus.items.length} runs listed, ${lastStatus.blockers.length} blocking problems.` : "";
   element("rerun").disabled = !item;
   element("delete").disabled = !item;

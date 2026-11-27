@@ -311,13 +311,25 @@ describe("background agents", () => {
     expect(api.pluginRequest).not.toHaveBeenCalled();
   });
 
-  it("opens an agent's screen from its row, its settings on a tab, and goes back to a conversation from All work", async () => {
+  it("opens an agent's page at its home route from its name, its screen from the row's menu, and goes back to a conversation from All work", async () => {
     renderApp(agentsApi().api);
-    const name = within(await screen.findByRole("region", { name: "Background agents" })).getByRole("button", { name: "Whooper" });
+    const agents = await screen.findByRole("region", { name: "Background agents" });
+    const name = within(agents).getByRole("button", { name: "Whooper" });
     click(name);
 
     expect(await screen.findByRole("heading", { name: "Whooper", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
+    const frame = screen.getByTitle("Whooper's page") as HTMLIFrameElement;
+    const posted = vi.spyOn(frame.contentWindow!, "postMessage");
+    window.dispatchEvent(new MessageEvent("message", { data: { version: 2, type: "ready" }, source: frame.contentWindow }));
+    await settle();
+    expect(posted).toHaveBeenCalledExactlyOnceWith({ version: 2, type: "open", route: "/" }, "*");
+    expect(name).toHaveAttribute("aria-current", "true");
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+
+    click(within(agents).getByRole("button", { name: "Whooper actions" }));
+    click(await screen.findByRole("menuitem", { name: "Open logs" }));
+    expect(await screen.findByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTitle("Whooper's page")).not.toBeInTheDocument();
     click(screen.getByRole("tab", { name: "Settings" }));
     expect(await screen.findByRole("spinbutton", { name: "Poll every" })).toHaveValue(15);
     expect(name).toHaveAttribute("aria-current", "true");
@@ -510,6 +522,9 @@ describe("menu bar", () => {
     expect(screen.getByRole("treeitem", { name: /^separate cache configuration/ })).toHaveAttribute("aria-selected", "true");
     choose({ kind: "openAgent", plugin: "whooper" });
     expect(screen.getByRole("main", { name: "Background agent" })).toBeInTheDocument();
+    // The agent's name opens its page at its home route, as on its pinned row, and no row stays selected.
+    expect(document.querySelector("iframe.plugin-frame")).not.toBeNull();
+    expect(screen.getByRole("treeitem", { name: /^separate cache configuration/ })).toHaveAttribute("aria-selected", "false");
   });
 
   it("turns the menu bar extra off and on from the palette, and remembers the choice", async () => {

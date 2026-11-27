@@ -40,12 +40,12 @@ const NOTICE_MS = 8000;
 
 /**
  * What the workspace shows of a plugin instead of a conversation: its screen on a tab, or its page
- * at the route of the status format 2 item or blocker the user opened. `entry` is that item's or
- * blocker's key, which the list shows as selected.
+ * at the route of the status format 2 item or blocker the user opened, or at `/` from the plugin's
+ * name. `entry` is that item's or blocker's key, which the list shows as selected, and null at `/`.
  */
 type PluginView =
   | { kind: "agent"; plugin: string; tab: AgentTab }
-  | { kind: "page"; plugin: string; entry: string; target: { route: string } };
+  | { kind: "page"; plugin: string; entry: string | null; target: { route: string } };
 /** A row action of a format-2 plugin that waits for the user's confirmation. */
 type EntryConfirmation = { plugin: string; action: string; args: string[] };
 
@@ -160,6 +160,8 @@ export function App(props: { store: AppStore }) {
   const openPlugin = (name: string, tab: AgentTab = "logs") => showPlugin({ kind: "agent", plugin: name, tab });
   /** A format-2 item or blocker: its plugin's page, which shows its route. */
   const openEntry = (plugin: string, key: string, route: string) => showPlugin({ kind: "page", plugin, entry: key, target: { route } });
+  /** The plugin's name, on its pinned row or in the menu bar: its page at its home route. */
+  const openHome = (plugin: string) => showPlugin({ kind: "page", plugin, entry: null, target: { route: "/" } });
 
   /**
    * Runs one of an agent's controls from its row menu or its screen: Poll now, Pause, and Resume
@@ -191,7 +193,7 @@ export function App(props: { store: AppStore }) {
   /** A choice in the menu bar extra: an agent's button runs as on its row, and the rest open what their sidebar rows open. */
   function runMenuBarCommand(command: MenuBarCommand) {
     if (command.kind === "agent") void runAgentAction(command.plugin, command.action);
-    else if (command.kind === "openAgent") openPlugin(command.plugin);
+    else if (command.kind === "openAgent") openHome(command.plugin);
     else needsYouItems()[0]?.open();
   }
 
@@ -464,9 +466,9 @@ export function App(props: { store: AppStore }) {
             <aside id="work-pane" class="sidebar-pane" aria-label="All work" inert={overlay()} style={{ "--sidebar-width": `${sidebarWidth()}px` }}>
               <BackgroundAgents
                 plugins={snapshot().plugins}
-                selected={pluginView()?.kind === "agent" ? selectedPlugin()?.name ?? null : null}
+                selected={currentKey() === null ? selectedPlugin()?.name ?? null : null}
                 pending={agentPending()}
-                onSelect={(name) => openPlugin(name)}
+                onSelect={openHome}
                 onAction={(name, action) => void runAgentAction(name, action)}
                 onInstall={(kind) => void startInstall(kind)}
               />

@@ -7,7 +7,8 @@ import { createPageHost } from "./pageHost";
 type Props = {
   plugin: PluginSnapshot;
   /**
-   * The route the user opened, from an item's or blocker's row or Command-J. Each new object
+   * The route the user opened, from an item's or blocker's row, Command-J, or the plugin's name
+   * (`/`). Each new object
    * sends `open` again, so opening the same row twice shows it again after the page moved on.
    */
   target: { route: string } | null;

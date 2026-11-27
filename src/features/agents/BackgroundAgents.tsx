@@ -15,7 +15,7 @@ export const INSTALL_ITEMS: readonly (MenuItem & { value: InstallKind })[] = [
 
 type Props = {
   plugins: PluginsSnapshot;
-  /** The plugin whose screen the workspace shows. */
+  /** The plugin whose screen, or page at its home route, the workspace shows. */
   selected: string | null;
   /** The control that runs now for each plugin, by plugin name. */
   pending: Readonly<Record<string, AgentAction>>;
@@ -71,9 +71,9 @@ type RowProps = {
 };
 
 /**
- * One agent: its name, which opens its screen; Pause or Resume, or Start while it is stopped, and
- * Poll now as buttons; a ⋯ menu with Stop, Settings, and Open logs; and its status in words under
- * them, red while it fails or can't start.
+ * One agent: its name, which opens its page at its home route; Pause or Resume, or Start while it
+ * is stopped, and Poll now as buttons; a ⋯ menu with Stop, Settings, and Open logs, which open its
+ * screen on those tabs; and its status in words under them, red while it fails or can't start.
  */
 function AgentRow(props: RowProps) {
   const statusId = createUniqueId();
@@ -88,7 +88,7 @@ function AgentRow(props: RowProps) {
           class="agent-pin-name"
           aria-current={props.selected ? "true" : undefined}
           aria-describedby={statusId}
-          title={`Open ${props.plugin.title}'s screen: logs and settings`}
+          title={`Open ${props.plugin.title}'s page`}
           onClick={() => props.onSelect()}
         >
           <BotIcon />

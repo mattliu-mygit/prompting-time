@@ -72,8 +72,9 @@ focus staying on it.
 
 Use `?agents=1` for an invented Whooper pinned at the top of the sidebar, running with its
 next poll at 3:45 PM, whose status prints status format 2 as `whooper-status --json` does; combine
-it with `?work=1` for a full All work list. Select Whooper to
-open its screen, and its Settings tab to change a value and Save, or set "Stop a poll after"
+it with `?work=1` for a full All work list. Select Whooper to open its page at `/` (see
+Whooper's reviews for the build it needs), or Settings in its row's ⋯ menu to open its screen and
+change a value and Save, or set "Stop a poll after"
 below 5 to see Whooper's refusal. Pause, Resume, Stop, and Start change the invented Whooper in
 browser memory; Pause turns the row to "Paused" with Resume, and Stop asks first. The palette's "Add background agent" commands offer a synthetic
 archive, whose install is refused to show the message, and a synthetic folder. `?agents=missing` shows Whooper stopped for a
@@ -99,7 +100,8 @@ a run, `/providers` for the blocker), and reads the status with `call`. Opening 
 its route to the same page without reloading it. Delete this run opens the confirmation and, after
 Confirm, the page shows "deleted <id>" and "Changed: runs/<id>/run.json", since the fixture sends a
 pluginChanged event for each action that changes something. Call an undeclared action shows
-Prompting Time's refusal, "Fixture runs declares no rm-everything action."
+Prompting Time's refusal, "Fixture runs declares no rm-everything action." Clicking "Fixture runs"
+in the pinned row opens the page at `/`.
 
 ## Whooper's reviews
 
