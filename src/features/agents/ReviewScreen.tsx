@@ -10,10 +10,12 @@ import { RunNow } from "./RunNow";
 import { blockingCauses, notSafeToApprove, readFindingKinds, readReviews, reviewState, shortDate, shortPullRequest, shortSha, unsafeVerdict, versionsOf, type ReviewEntry } from "./reviews";
 import { readAgentStatus, readBlocked } from "./status";
 import { ConnectionsView } from "../review/Connections";
+import { ExamplesView } from "../review/Examples";
 import { rememberLook, type LastLook } from "../review/memory";
 import { ReviewTop } from "../review/ReviewTop";
 import { readShownReview, type Overview, type ShownReview } from "../review/shown";
-import { REVIEW_VIEWS, viewHasData, viewListed, type ReviewViews } from "../review/views";
+import { TestGapsView } from "../review/TestGaps";
+import { REVIEW_VIEWS, viewHasData, viewListed, type FullViewId, type ReviewViews } from "../review/views";
 import { Walkthrough } from "../review/Walkthrough";
 
 type Props = {
@@ -86,8 +88,8 @@ export function versionLabel(review: ReviewEntry, number: number): string {
 
 /** What show-review printed for the open run, or why it couldn't be read. */
 type ShownRead = { runId: string; shown: ShownReview | null; error: string | null };
-/** What a review with an overview shows: its walkthrough, the plugin's page (Diff), or the map of how the changed code connects in the walkthrough's place. */
-type ReviewMode = "walkthrough" | "diff" | "connections";
+/** What a review with an overview shows: its walkthrough, the plugin's page (Diff), or a view in full in the walkthrough's place, such as the map of how the changed code connects. */
+type ReviewMode = "walkthrough" | "diff" | FullViewId;
 
 /**
  * One review of a pull request. Its controls sit in the window's header row: a ⋯ menu with the pull
@@ -322,19 +324,25 @@ function ReviewRun(props: RunProps) {
     else if (value === "remove") void run(() => props.triage.remove(props.review.run_id), () => {});
     else if (value === "restore") void run(() => props.triage.restore(props.review.run_id), () => {});
   }
-  const viewItems = (): MenuItem[] => REVIEW_VIEWS.filter((view) => (props.shown ? viewListed(view, props.shown) : view.ready)).map((view) => ({
-    value: view.id,
-    label: view.name,
-    description: props.shown && !viewHasData(view.id, props.shown) ? `${view.description} Nothing for this review.` : view.description,
-    type: "checkbox" as const,
-    checked: props.views.isOn(view.id),
-  }));
+  const viewItems = (): MenuItem[] => {
+    const shown = props.shown;
+    return shown ? REVIEW_VIEWS.filter((view) => viewListed(view, shown)).map((view) => ({
+      value: view.id,
+      label: view.name,
+      description: viewHasData(view.id, shown) ? view.description : `${view.description} Nothing for this review.`,
+      type: "checkbox" as const,
+      checked: props.views.isOn(view.id),
+    })) : [];
+  };
   /** How many of the views this review's menu lists are off, for the menu's button. */
   const viewsOff = () => viewItems().filter((item) => !item.checked).length;
-  /** The map of how the changed code connects, while it shows in the walkthrough's place. */
-  const map = () => (props.mode === "connections" && props.views.isOn("connections") ? props.shown?.connections ?? null : null);
-  // Turning the view off, here or in the palette, or a reread without the map, goes back to the walkthrough.
-  createEffect(() => props.mode === "connections" && map() === null, (gone) => {
+  /** The view that shows in full in the walkthrough's place, while it is on and the review has its data. */
+  const full = (): FullViewId | null => {
+    const mode = props.mode;
+    return mode !== "walkthrough" && mode !== "diff" && props.shown && props.views.isOn(mode) && viewHasData(mode, props.shown) ? mode : null;
+  };
+  // Turning the view off, here or in the palette, or a reread without its data, goes back to the walkthrough.
+  createEffect(() => props.mode !== "walkthrough" && props.mode !== "diff" && full() === null, (gone) => {
     if (gone) untrack(() => props.onMode("walkthrough"));
   });
 
@@ -424,15 +432,23 @@ function ReviewRun(props: RunProps) {
               views={props.views}
               actions={props.actions}
               top={top(shown())}
-              active={map() === null}
+              active={full() === null}
               canDecide={!earlier() && props.review.submitted === null && !removed()}
               onShowDiff={() => props.onMode("diff")}
-              onOpenConnections={() => props.onMode("connections")}
+              onOpenView={(id) => props.onMode(id)}
               onSubmitted={props.onSubmitted}
             />
-            <Show when={map()}>
-              {(connections) => <ConnectionsView connections={connections()} patch={shown().patch} onBack={() => props.onMode("walkthrough")} />}
-            </Show>
+            <Switch>
+              <Match when={full() === "connections" && shown().connections}>
+                {(connections) => <ConnectionsView connections={connections()} patch={shown().patch} onBack={() => props.onMode("walkthrough")} />}
+              </Match>
+              <Match when={full() === "test-gaps" && shown().testGaps}>
+                {(testGaps) => <TestGapsView testGaps={testGaps()} patch={shown().patch} onBack={() => props.onMode("walkthrough")} />}
+              </Match>
+              <Match when={full() === "inputs" && shown().examples}>
+                {(examples) => <ExamplesView examples={examples()} onBack={() => props.onMode("walkthrough")} />}
+              </Match>
+            </Switch>
           </Show>
         )}
       </Show>

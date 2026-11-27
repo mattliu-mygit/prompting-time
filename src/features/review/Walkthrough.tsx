@@ -5,10 +5,12 @@ import type { PluginSnapshot } from "../../bridge/types";
 import type { ReviewEntry } from "../agents/reviews";
 import { ConnectionsSummary } from "./Connections";
 import { DecideBar } from "./DecideBar";
+import { ExamplesLine } from "./Examples";
 import { FlowDiagram } from "./FlowDiagram";
 import { plural } from "./ReviewTop";
 import type { CodeRange, Finding, Layer, Overview, Place, ShownReview } from "./shown";
-import { viewHasData, viewName, type ReviewViews } from "./views";
+import { inPlace, notRunLines, PlaceGaps, TestGapsBlock } from "./TestGaps";
+import { viewHasData, viewName, type FullViewId, type ReviewViews } from "./views";
 import type { JSX } from "@solidjs/web";
 
 type Props = {
@@ -20,20 +22,23 @@ type Props = {
   /** The verdict banner and the since notice, which head the walkthrough. */
   top: JSX.Element;
   /**
-   * Whether the walkthrough shows: false while the map of how the changed code connects shows in its
-   * place, which keeps the walkthrough as it was to come back to. j and k step only while it shows.
+   * Whether the walkthrough shows: false while a view shows in full in its place, such as the map of
+   * how the changed code connects, which keeps the walkthrough as it was to come back to. j and k
+   * step only while it shows.
    */
   active: boolean;
   /** Whether the user may decide here: the newest version, not yet submitted. */
   canDecide: boolean;
   onShowDiff(): void;
-  /** Shows the map of how the changed code connects in the walkthrough's place. */
-  onOpenConnections(): void;
+  /** Shows view `id` in full in the walkthrough's place. */
+  onOpenView(id: FullViewId): void;
   onSubmitted(runId: string): void;
 };
 
 /** A place to look with its number, as the list, the navigator, and the gutter call it. */
 type PlaceEntry = { place: Place; number: number };
+/** The changed lines among a place's lines that no test ran, and the tool that measured it. */
+type PlaceGapLines = { lines: number[]; tool: string };
 /** One file of a layer: its patch file, the lines the layer shows, and the places to look in them. */
 type LayerFile = { path: string; file: FileDiffMetadata | null; ranges: LineRange[]; places: PlaceEntry[] };
 type LayerEntry = { layer: Layer; number: number; files: LayerFile[] };
@@ -56,8 +61,8 @@ function Inline(props: { text: string }) {
   return <For each={parts()}>{(part) => (part.code ? <code class="walk-code">{part.text}</code> : part.text)}</For>;
 }
 
-/** A place's reason and evidence, under its lines in the code. */
-function PlaceCard(props: { entry: PlaceEntry; onClose?: () => void }) {
+/** A place's reason and evidence, under its lines in the code, and its changed lines no test ran. */
+function PlaceCard(props: { entry: PlaceEntry; gaps: PlaceGapLines | null; onClose?: () => void }) {
   return (
     <div class="place-card">
       <p class="place-card-head">
@@ -67,12 +72,13 @@ function PlaceCard(props: { entry: PlaceEntry; onClose?: () => void }) {
       </p>
       <p class="place-reason"><Inline text={props.entry.place.reason} /></p>
       <p class="place-evidence">{EVIDENCE[props.entry.place.evidence.kind]} · <Inline text={props.entry.place.evidence.detail} /></p>
+      <Show when={props.gaps}>{(gaps) => <PlaceGaps lines={gaps().lines} tool={gaps().tool} />}</Show>
     </div>
   );
 }
 
 /** What sits under a line of the walkthrough's code: an open place's reason, or one of Whooper's draft comments. */
-function NoteCard(props: { note: Note; onClose(): void }) {
+function NoteCard(props: { note: Note; gapsOf(id: string): PlaceGapLines | null; onClose(): void }) {
   return (
     <Show
       when={props.note.kind === "place" ? props.note : null}
@@ -83,7 +89,10 @@ function NoteCard(props: { note: Note; onClose(): void }) {
         </div>
       }
     >
-      {(note) => <PlaceCard entry={(note() as Extract<Note, { kind: "place" }>).entry} onClose={props.onClose} />}
+      {(note) => {
+        const entry = () => (note() as Extract<Note, { kind: "place" }>).entry;
+        return <PlaceCard entry={entry()} gaps={props.gapsOf(entry().place.id)} onClose={props.onClose} />;
+      }}
     </Show>
   );
 }
@@ -94,9 +103,11 @@ function NoteCard(props: { note: Note; onClose(): void }) {
  * reason and evidence open on a click or with j and k; the calls before and after; what the plugin
  * checked and didn't; then the change layer by layer, each with its line excerpts and a read check
  * that folds it. A navigator on the left lists the parts, layers, and places, and folds to a rail.
- * Each view's summary sits where its question comes up, when the view is on and has data: how the
- * changed code connects where the layers start, with Open the map, which shows the map in the
- * walkthrough's place. The decision waits in the corner until you click it or reach the end.
+ * Each view's summary sits where its question comes up, when the view is on and has data: the
+ * inputs whose result changed under What this PR does; each place's changed lines no test ran under
+ * it, and the rest after the places; how the changed code connects where the layers start. Each of
+ * those three has a button that shows its view in full in the walkthrough's place. The decision
+ * waits in the corner until you click it or reach the end.
  */
 export function Walkthrough(props: Props) {
   const runId = untrack(() => props.review.run_id);
@@ -137,9 +148,15 @@ export function Walkthrough(props: Props) {
   const [dimmed, setDimmed] = createSignal(false);
   const [decideOpen, setDecideOpen] = createSignal(decided.has(runId));
   let scroller: HTMLDivElement | undefined;
-  // Where the walkthrough was scrolled when the map opened in its place, and the button that opened it.
+  // Where the walkthrough was scrolled when a view opened in full in its place, and the button that opened it.
   let scrolledTo = 0;
-  let openMap: HTMLButtonElement | undefined;
+  let opener: HTMLButtonElement | undefined;
+  /** Shows view `id` in full in the walkthrough's place; coming back finds the walkthrough where it was, with the focus on `button`. */
+  function openView(id: FullViewId, button: HTMLButtonElement) {
+    scrolledTo = scroller?.scrollTop ?? 0;
+    opener = button;
+    props.onOpenView(id);
+  }
 
   const isRead = (id: string) => read().has(id);
   const folded = (layer: Layer) => (isRead(layer.id) || layer.read_hint === "skip") && !reopened().has(layer.id);
@@ -193,13 +210,13 @@ export function Walkthrough(props: Props) {
     setTarget({ path, range: { start: line, end: line } });
   }
 
-  // Back from the map: the walkthrough scrolled where it was, which hiding it may forget, and the
-  // focus on Open the map.
+  // Back from a view in full: the walkthrough scrolled where it was, which hiding it may forget, and
+  // the focus on the button that opened the view.
   const shows = createMemo(() => props.active);
   createEffect(shows, (now, before) => {
     if (!now || before !== false) return;
     if (scroller) scroller.scrollTop = scrolledTo;
-    openMap?.focus();
+    opener?.focus();
   });
 
   // Dimming while stepping also dims the window around the review.
@@ -250,6 +267,23 @@ export function Walkthrough(props: Props) {
   const showCalls = () => props.views.isOn("calls") && viewHasData("calls", props.shown);
   const showCoChange = () => props.views.isOn("co-change") && viewHasData("co-change", props.shown);
   const connections = () => (props.views.isOn("connections") ? props.shown.connections : null);
+  const examples = () => (props.views.isOn("inputs") ? props.shown.examples : null);
+  const testGaps = () => (props.views.isOn("test-gaps") ? props.shown.testGaps : null);
+  /** Each place's changed lines no test ran, once the plugin measured them. */
+  const placeGaps = createMemo(() => {
+    const gaps = testGaps();
+    const notRun = gaps?.measured ? notRunLines(gaps) : [];
+    return new Map(places().flatMap((entry): Array<[string, PlaceGapLines]> => {
+      const lines = notRun.filter((line) => inPlace(line, entry.place)).map((line) => line.line);
+      return lines.length > 0 ? [[entry.place.id, { lines, tool: gaps!.tool }]] : [];
+    }));
+  });
+  const gapsOf = (id: string) => placeGaps().get(id) ?? null;
+  /** The changed lines no test ran outside every place to look. */
+  const gapsElsewhere = () => {
+    const gaps = testGaps();
+    return gaps ? notRunLines(gaps).filter((line) => !places().some((entry) => inPlace(line, entry.place))) : [];
+  };
   const parts = () => [
     { id: "verdict", name: "Verdict" },
     { id: "what", name: "What this PR does" },
@@ -293,7 +327,7 @@ export function Walkthrough(props: Props) {
               target={targeted()?.range ?? null}
               annotations={annotations()}
               annotationKey={(annotation) => (annotation.metadata.kind === "place" ? `place:${annotation.metadata.entry.place.id}` : `draft:${annotation.metadata.finding.id}`)}
-              renderAnnotation={(annotation) => <NoteCard note={annotation().metadata} onClose={() => setOpenPlace(null)} />}
+              renderAnnotation={(annotation) => <NoteCard note={annotation().metadata} gapsOf={gapsOf} onClose={() => setOpenPlace(null)} />}
             />
           )}
         </Show>
@@ -397,6 +431,7 @@ export function Walkthrough(props: Props) {
                   </tbody>
                 </table>
               </Show>
+              <Show when={examples()}>{(found) => <ExamplesLine examples={found()} onOpen={(button) => openView("inputs", button)} />}</Show>
             </section>
             <section class="walk-section walk-prose" data-part="places" aria-labelledby={`places-${runId}`}>
               <h3 id={`places-${runId}`}>Places to look <span class="walk-count">{places().length} · each is a numbered mark in the code below · j and k step through them</span></h3>
@@ -409,12 +444,24 @@ export function Walkthrough(props: Props) {
                         <p class="place-title">{entry.place.title}</p>
                         <p class="place-reason"><Inline text={entry.place.reason} /></p>
                         <p class="place-evidence">{EVIDENCE[entry.place.evidence.kind]} · <Inline text={entry.place.evidence.detail} /></p>
+                        <Show when={gapsOf(entry.place.id)}>{(gaps) => <PlaceGaps lines={gaps().lines} tool={gaps().tool} />}</Show>
                       </div>
                       <button type="button" class="walk-link" aria-label={`Show place ${entry.number} in the code, ${rangeText(entry.place)}`} onClick={() => look(entry.number - 1)}>{rangeText(entry.place)}</button>
                     </li>
                   )}
                 </For>
               </ol>
+              <Show when={testGaps()}>
+                {(gaps) => (
+                  <TestGapsBlock
+                    testGaps={gaps()}
+                    elsewhere={gapsElsewhere()}
+                    hasPlaces={places().length > 0}
+                    headingId={`test-gaps-${runId}`}
+                    onOpen={(button) => openView("test-gaps", button)}
+                  />
+                )}
+              </Show>
             </section>
             <Show when={showCalls() ? overview().flow : null}>
               {(flow) => (
@@ -451,15 +498,7 @@ export function Walkthrough(props: Props) {
             <p class="walk-divider"><span>The change, layer by layer</span><span class="walk-muted">{plural(fileCount(), "file")} in {plural(layers().length, "layer")}</span></p>
             <Show when={connections()}>
               {(map) => (
-                <ConnectionsSummary
-                  connections={map()}
-                  headingId={`connections-${runId}`}
-                  buttonRef={(element) => { openMap = element; }}
-                  onOpen={() => {
-                    scrolledTo = scroller?.scrollTop ?? 0;
-                    props.onOpenConnections();
-                  }}
-                />
+                <ConnectionsSummary connections={map()} headingId={`connections-${runId}`} onOpen={(button) => openView("connections", button)} />
               )}
             </Show>
             <For each={layers()}>

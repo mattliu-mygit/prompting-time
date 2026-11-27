@@ -318,7 +318,49 @@ export function fixtureConnections() {
   };
 }
 
-/** What show-review prints for a run of fixtureGoPatch with an overview and how its changed code connects. */
+/**
+ * Which changed lines of fixtureGoPatch the tests ran, as show-review prints it: no test ran lines
+ * 11 and 12 of create.go, in the place to look, nor line 14 after it or line 10 of name.go.
+ */
+export function fixtureTestGaps() {
+  return {
+    measured: true,
+    reason: null,
+    tool: "go test -coverprofile",
+    lines: [
+      { path: "internal/projects/create.go", line: 11, status: "not_run" },
+      { path: "internal/projects/create.go", line: 12, status: "not_run" },
+      { path: "internal/projects/create.go", line: 14, status: "not_run" },
+      { path: "internal/projects/name.go", line: 10, status: "not_run" },
+    ],
+    summary: { changed_lines: 15, run: 2, not_run: 4 },
+    limits: ["Coverage says a line ran, not that a test checked what it did.", "Tests of other packages that call Create didn't run."],
+  };
+}
+
+/**
+ * Example inputs run through fixtureGoPatch's functions, as show-review prints them: Create at base
+ * and head, where "a b" now fails, and ValidateName, which only the head has.
+ */
+export function fixtureExamples() {
+  return {
+    functions: [
+      { name: "projects.Create", path: "internal/projects/create.go", line: 10 },
+      { name: "projects.ValidateName", path: "internal/projects/name.go", line: 9 },
+    ],
+    rows: [
+      { function: "projects.Create", input: "\"abc\"", before: "&Project{Name: \"abc\", Bucket: \"abc\"}", after: "&Project{Name: \"abc\", Bucket: \"abc\"}", status: "same", label: "ran_base_and_head", note: null },
+      { function: "projects.Create", input: "\"a b\"", before: "&Project{Name: \"a b\", Bucket: \"a b\"}", after: "error: name \"a b\" can't name a bucket", status: "different", label: "ran_base_and_head", note: null },
+      { function: "projects.Create", input: "\"x\"", before: "&Project{Name: \"x\"}", after: "&Project{Name: \"x\"}", status: "flaky", label: "ran_base_and_head", note: "the two runs at base gave different results" },
+      { function: "projects.Create", input: "\"\"", before: null, after: null, status: "error", label: "ran_base_and_head", note: "the run at base timed out" },
+      { function: "projects.ValidateName", input: "\"a--b\"", before: null, after: "nil", status: "different", label: "ran_head_only", note: "new in this PR" },
+      { function: "projects.ValidateName", input: "\"Q3\"", before: null, after: null, status: "same", label: "not_compared", note: "the test didn't build" },
+    ],
+    limits: ["Create ran with an in-memory store, not a real bucket."],
+  };
+}
+
+/** What show-review prints for a run of fixtureGoPatch with an overview, how its changed code connects, its test gaps, and example inputs. */
 export function fixtureConnectionsWalkthrough(runId: string, overrides: Record<string, unknown> = {}) {
   return fixtureWalkthrough(runId, {
     findings: { status: "reviewed", skip_reason: "", approval: { verdict: "approve_once_ci_passes", reason: "Small and tested." }, findings: [{ id: "1", path: "internal/projects/name.go", line: 6, side: "RIGHT", title: "Two dashes pass", draft: "**nit:** `namePattern` lets `a--b` through.", kind: "nit" }] },
@@ -339,6 +381,8 @@ export function fixtureConnectionsWalkthrough(runId: string, overrides: Record<s
     commits_since_review: [],
     co_change: [],
     connections: fixtureConnections(),
+    test_gaps: fixtureTestGaps(),
+    examples: fixtureExamples(),
     ...overrides,
   });
 }

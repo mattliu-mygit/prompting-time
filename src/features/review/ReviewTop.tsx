@@ -6,6 +6,17 @@ import type { Commit, ShownReview } from "./shown";
 import { viewHasData, viewName, type ReviewViews } from "./views";
 
 export const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+/** "a", "a and b", "a, b, and c". */
+export const series = (items: readonly string[]) => (items.length > 2 ? `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}` : items.join(" and "));
+
+/** Words in a sentence, "a, b, and c", the names among them in code type. */
+export function Series(props: { items: ReadonlyArray<{ text: string; code: boolean }> }) {
+  const parts = () => props.items.flatMap((item, index) => [
+    ...(index === 0 ? [] : [{ text: index < props.items.length - 1 ? ", " : props.items.length > 2 ? ", and " : " and ", code: false }]),
+    item,
+  ]);
+  return <For each={parts()}>{(part) => (part.code ? <code class="walk-code">{part.text}</code> : part.text)}</For>;
+}
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 /** "at 3:12 PM" today, "on Nov 24" before. */
 export const whenText = (iso: string) => `${shortDate(iso).includes(":") ? "at" : "on"} ${shortDate(iso)}`;

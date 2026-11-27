@@ -3,8 +3,9 @@ import { readShown } from "../agents/reviews";
 /**
  * What a review's walkthrough reads from the show-review action, beyond what the page reads: the
  * plugin's overview of the change, the commits after the one the review read, the files that
- * usually change with the changed ones, and how the changed code connects. Each part that does not
- * fit the format reads as missing, so a plugin that prints none of it gets the page as before.
+ * usually change with the changed ones, how the changed code connects, the changed lines no test
+ * ran, and example inputs run through the old and new code. Each part that does not fit the format
+ * reads as missing, so a plugin that prints none of it gets the page as before.
  */
 
 /** How the plugin knows a place to look matters: it ran something, read the code, or searched the repo. */
@@ -67,6 +68,42 @@ export type ConnectionEdge = { from: string; to: string; kind: "calls" | "uses";
 /** The functions and types the change touches, the code that calls or uses them, and what the plugin's map may miss. */
 export type Connections = { nodes: ConnectionNode[]; edges: ConnectionEdge[]; limits: string[] };
 
+/**
+ * A changed line and what the plugin's run of the tests found for it: "not_run" when no test ran it.
+ * A later format may add other statuses, which keep their own words here.
+ */
+export type TestGapLine = { path: string; line: number; status: string };
+
+/** How many changed lines the run counted, how many of them some test ran, and how many none did. */
+export type TestGapCounts = { changed_lines: number; run: number; not_run: number };
+
+/**
+ * Which changed lines the tests ran, as the plugin measured them by running the tests with `tool`,
+ * or, when `measured` is false, why it couldn't; and what the measure may miss.
+ */
+export type TestGaps = { measured: boolean; reason: string | null; tool: string; lines: TestGapLine[]; summary: TestGapCounts; limits: string[] };
+
+/** A function the plugin ran example inputs through, and where it starts. */
+export type ExampleFunction = { name: string; path: string; line: number };
+
+/**
+ * One example input run through a function: what it gave at the pull request's base (`before`) and
+ * at its head (`after`); whether the two are the same, differ, vary between runs, or a run failed;
+ * and which code ran it, both, the head only, or neither (`label`), with the plugin's note.
+ */
+export type ExampleRow = {
+  function: string;
+  input: string;
+  before: string | null;
+  after: string | null;
+  status: "same" | "different" | "flaky" | "error";
+  label: "ran_base_and_head" | "ran_head_only" | "not_compared";
+  note: string | null;
+};
+
+/** Example inputs the plugin ran through the old and new code of some changed functions, and what that may miss. */
+export type Examples = { functions: ExampleFunction[]; rows: ExampleRow[]; limits: string[] };
+
 /** What the user chose so far: approve or comment, and which comments go out, with any edited text. */
 export type Drafts = { event: "APPROVE" | "COMMENT"; message: string; findings: Record<string, { included: boolean; text?: string }> };
 
@@ -77,6 +114,10 @@ export type ShownReview = {
   coChange: CoChange[];
   /** null when the plugin printed no map of the changed code, or none with a node that fits. */
   connections: Connections | null;
+  /** null when the plugin printed no run of the tests over the changed lines, or one that doesn't fit. */
+  testGaps: TestGaps | null;
+  /** null when the plugin printed no example inputs, or none with a row that fits. */
+  examples: Examples | null;
   findings: Finding[];
   /** The plugin's own reason for its verdict, from its findings. */
   reason: string | null;
@@ -89,8 +130,11 @@ type Json = Record<string, unknown>;
 const isRecord = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === "string";
 const isLine = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value > 0;
+const isCount = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0;
 /** The entries of an array that fit, each read by `read`; anything else reads as no entries. */
 const listOf = <T>(value: unknown, read: (item: unknown) => T | null): T[] => (Array.isArray(value) ? value.flatMap((item) => read(item) ?? []) : []);
+/** The strings of an array; anything else reads as none. */
+const strings = (value: unknown) => listOf(value, (item) => (isString(item) ? item : null));
 const isOneOf = <T extends string>(options: readonly T[], value: unknown): value is T => options.includes(value as T);
 
 function readRange(value: unknown): CodeRange | null {
@@ -140,17 +184,16 @@ export function readOverview(value: unknown): Overview | null {
     places: listOf(value.places, readPlace),
     layers: listOf(value.layers, readLayer),
     flow: readFlow(value.flow),
-    checked: listOf(value.checked, (item) => (isString(item) ? item : null)),
-    not_checked: listOf(value.not_checked, (item) => (isString(item) ? item : null)),
+    checked: strings(value.checked),
+    not_checked: strings(value.not_checked),
   };
 }
 
 function readNode(value: unknown): ConnectionNode | null {
   if (!isRecord(value) || !isString(value.id) || !isString(value.name) || !isString(value.path) || !isLine(value.line)) return null;
   if (!isOneOf(["func", "method", "type", "var", "const"], value.kind) || !isOneOf(["added", "changed", "removed", "unchanged"], value.change)) return null;
-  const lines = value.lines_changed;
-  if (typeof lines !== "number" || !Number.isInteger(lines) || lines < 0) return null;
-  return { id: value.id, name: value.name, kind: value.kind, path: value.path, line: value.line, change: value.change, lines_changed: lines };
+  if (!isCount(value.lines_changed)) return null;
+  return { id: value.id, name: value.name, kind: value.kind, path: value.path, line: value.line, change: value.change, lines_changed: value.lines_changed };
 }
 
 /**
@@ -167,12 +210,61 @@ export function readConnections(value: unknown): Connections | null {
     isRecord(edge) && isString(edge.from) && isString(edge.to) && ids.has(edge.from) && ids.has(edge.to) && isOneOf(["calls", "uses"], edge.kind) && isOneOf(["gopls", "name_search"], edge.found_by)
       ? { from: edge.from, to: edge.to, kind: edge.kind, found_by: edge.found_by } : null
   ));
-  return { nodes, edges, limits: listOf(value.limits, (item) => (isString(item) ? item : null)) };
+  return { nodes, edges, limits: strings(value.limits) };
+}
+
+/**
+ * The plugin's run of the tests over the changed lines, or null when it printed none or one without
+ * `measured`, `tool`, or its counts. A line whose path and number an earlier line has is left out;
+ * a line with a status this version doesn't know stays, with that status.
+ */
+export function readTestGaps(value: unknown): TestGaps | null {
+  if (!isRecord(value) || typeof value.measured !== "boolean" || !isString(value.tool)) return null;
+  const summary = value.summary;
+  if (!isRecord(summary) || !isCount(summary.changed_lines) || !isCount(summary.run) || !isCount(summary.not_run)) return null;
+  const seen = new Set<string>();
+  const lines = listOf(value.lines, (line): TestGapLine | null => (
+    isRecord(line) && isString(line.path) && isLine(line.line) && isString(line.status) && line.status !== "" ? { path: line.path, line: line.line, status: line.status } : null
+  )).filter((line) => !seen.has(`${line.path}:${line.line}`) && seen.add(`${line.path}:${line.line}`));
+  return {
+    measured: value.measured,
+    reason: isString(value.reason) ? value.reason : null,
+    tool: value.tool,
+    lines,
+    summary: { changed_lines: summary.changed_lines, run: summary.run, not_run: summary.not_run },
+    limits: strings(value.limits),
+  };
+}
+
+/**
+ * The example inputs the plugin ran, or null when it printed none or none with a row that fits. A
+ * row with a status or label this version doesn't know is left out, since only a row that says how
+ * it ran may show: nothing predicted.
+ */
+export function readExamples(value: unknown): Examples | null {
+  if (!isRecord(value)) return null;
+  const rows = listOf(value.rows, (row): ExampleRow | null => {
+    if (!isRecord(row) || !isString(row.function) || !isString(row.input)) return null;
+    if (!isOneOf(["same", "different", "flaky", "error"], row.status) || !isOneOf(["ran_base_and_head", "ran_head_only", "not_compared"], row.label)) return null;
+    return {
+      function: row.function, input: row.input,
+      before: isString(row.before) ? row.before : null,
+      after: isString(row.after) ? row.after : null,
+      status: row.status, label: row.label,
+      note: isString(row.note) ? row.note : null,
+    };
+  });
+  if (rows.length === 0) return null;
+  return {
+    functions: listOf(value.functions, (item) => (isRecord(item) && isString(item.name) && isString(item.path) && isLine(item.line) ? { name: item.name, path: item.path, line: item.line } : null)),
+    rows,
+    limits: strings(value.limits),
+  };
 }
 
 function readCommit(value: unknown): Commit | null {
   if (!isRecord(value) || !isString(value.sha) || !isString(value.title) || !isString(value.at)) return null;
-  return { sha: value.sha, title: value.title, author: isString(value.author) ? value.author : null, at: value.at, files: listOf(value.files, (file) => (isString(file) ? file : null)) };
+  return { sha: value.sha, title: value.title, author: isString(value.author) ? value.author : null, at: value.at, files: strings(value.files) };
 }
 
 function readFinding(value: unknown): Finding | null {
@@ -201,6 +293,8 @@ export function readShownReview(stdout: string, runId: string): ShownReview {
         ? { path: item.path, partner: item.partner, ratio: item.ratio, commits: item.commits } : null
     )),
     connections: readConnections(shown.connections),
+    testGaps: readTestGaps(shown.test_gaps),
+    examples: readExamples(shown.examples),
     findings: findings ? listOf(findings.findings, readFinding) : [],
     reason: approval && isString(approval.reason) ? approval.reason : null,
     drafts: readDrafts(shown.drafts),

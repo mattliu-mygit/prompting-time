@@ -1,8 +1,9 @@
 import { createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
-import { ArrowLeftIcon, Button, ChevronDownIcon, ChevronRightIcon, CloseIcon, Diff, IconButton, parsePatchFiles, type DiffTarget, type FileDiffMetadata } from "@prompting-time/ui";
-import { plural } from "./ReviewTop";
+import { Button, ChevronDownIcon, ChevronRightIcon, CloseIcon, Diff, IconButton, parsePatchFiles, type DiffTarget, type FileDiffMetadata } from "@prompting-time/ui";
+import { listenToViewKeys, ViewHead, ViewLimits } from "./FullView";
+import { plural, series, Series } from "./ReviewTop";
 import type { ConnectionEdge, ConnectionNode, Connections } from "./shown";
-import { REVIEW_VIEWS, viewName } from "./views";
+import { viewName } from "./views";
 
 /** Each kind of node in words, one and many. */
 const KIND: Record<ConnectionNode["kind"], readonly [string, string]> = {
@@ -23,8 +24,6 @@ const NAMED_CALLERS = 4;
 const cut = (text: string) => (text.length > NAME_CHARACTERS ? `${text.slice(0, NAME_CHARACTERS - 1)}…` : text);
 /** A circle's radius: larger for more lines changed, with unchanged callers small and quiet. */
 const radius = (node: ConnectionNode) => (node.change === "unchanged" ? 6 : Math.min(24, 8 + 2 * Math.sqrt(node.lines_changed)));
-/** "a", "a and b", "a, b, and c". */
-const series = (items: readonly string[]) => (items.length > 2 ? `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}` : items.join(" and "));
 /** "function", or "functions and types" for several nodes of those kinds. */
 function kindsOf(nodes: readonly ConnectionNode[]): string {
   const kinds = (Object.keys(KIND) as ConnectionNode["kind"][]).filter((kind) => nodes.some((node) => node.kind === kind));
@@ -147,21 +146,12 @@ function openAt(file: FileDiffMetadata, node: ConnectionNode): DiffTarget | null
   return line === undefined ? null : { start: line, end: line, ...(old ? { old: true } : {}) };
 }
 
-/** Words in a sentence, "a, b, and c", the names among them in code type. */
-function Series(props: { items: ReadonlyArray<{ text: string; code: boolean }> }) {
-  const parts = () => props.items.flatMap((item, index) => [
-    ...(index === 0 ? [] : [{ text: index < props.items.length - 1 ? ", " : props.items.length > 2 ? ", and " : " and ", code: false }]),
-    item,
-  ]);
-  return <For each={parts()}>{(part) => (part.code ? <code class="walk-code">{part.text}</code> : part.text)}</For>;
-}
-
 /**
  * How the changed code connects, in the walkthrough where the layers start: how many functions and
  * types the change touches, the unchanged code that calls them, how many links only a search for a
  * name found, and Open the map, which shows the whole map in the walkthrough's place.
  */
-export function ConnectionsSummary(props: { connections: Connections; headingId: string; onOpen(): void; buttonRef(element: HTMLButtonElement): void }) {
+export function ConnectionsSummary(props: { connections: Connections; headingId: string; onOpen(button: HTMLButtonElement): void }) {
   const changed = () => props.connections.nodes.filter((node) => node.change !== "unchanged");
   const callers = () => props.connections.nodes.filter((node) => node.change === "unchanged");
   const searched = () => props.connections.edges.filter((edge) => edge.found_by === "name_search").length;
@@ -178,9 +168,9 @@ export function ConnectionsSummary(props: { connections: Connections; headingId:
   ];
   return (
     <section class="walk-view-summary walk-prose walk-connections" data-part="connections" aria-labelledby={props.headingId}>
-      <div class="walk-connections-head">
+      <div class="walk-view-head">
         <h3 id={props.headingId}>{viewName("connections")}</h3>
-        <Button ref={props.buttonRef} onClick={() => props.onOpen()}>Open the map</Button>
+        <Button onClick={(event) => props.onOpen(event.currentTarget)}>Open the map</Button>
       </div>
       <p>{changes()}</p>
       <Show when={callers().length > 0} fallback={<p>No unchanged code in the map calls or uses them.</p>}>
@@ -201,8 +191,6 @@ type ViewProps = {
   patch: string | null;
   onBack(): void;
 };
-
-const typing = (event: KeyboardEvent) => event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
 
 /**
  * How the changed code connects, in full, in the walkthrough's place: a map of the functions and
@@ -254,19 +242,13 @@ export function ConnectionsView(props: ViewProps) {
 
   onSettled(() => {
     heading?.focus();
-    // On the window, after the app's own Escape, which closes All work's list first.
-    const keys = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || typing(event) || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key !== "j" && event.key !== "k" && event.key !== "Escape") return;
-      if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"]:not([hidden])')].some((element) => element.checkVisibility?.())) return;
-      event.preventDefault();
-      if (event.key === "Escape") {
+    return listenToViewKeys({
+      step,
+      escape() {
         if (untrack(selected) !== null) setSelected(null);
         else untrack(() => props.onBack)();
-      } else step(event.key === "j" ? 1 : -1);
-    };
-    window.addEventListener("keydown", keys);
-    return () => window.removeEventListener("keydown", keys);
+      },
+    });
   });
 
   const groups = (id: string) => [
@@ -275,15 +257,8 @@ export function ConnectionsView(props: ViewProps) {
   ].filter((group) => group.edges.length > 0);
 
   return (
-    <section class="map-view" aria-labelledby="map-heading">
-      <header class="map-head">
-        <Button onClick={() => props.onBack()}><ArrowLeftIcon />Back to the walkthrough</Button>
-        <div class="map-head-text">
-          <h3 id="map-heading" tabindex="-1" ref={(element: HTMLHeadingElement) => { heading = element; }}>{viewName("connections")}</h3>
-          <p>{REVIEW_VIEWS.find((view) => view.id === "connections")!.description} Callers are on the left.</p>
-        </div>
-        <p class="map-keys"><kbd>j</kbd> <kbd>k</kbd> step through the changed code · <kbd>Esc</kbd> goes back</p>
-      </header>
+    <section class="full-view map-view" aria-labelledby="connections-heading">
+      <ViewHead id="connections" detail="Callers are on the left." steps="step through the changed code" headingRef={(element) => { heading = element; }} onBack={() => props.onBack()} />
       <div class="map-body" data-open={chosen() ? "" : undefined}>
         <div class="map-main">
           <div
@@ -349,12 +324,7 @@ export function ConnectionsView(props: ViewProps) {
             <li><i class="map-line" data-found-by="name_search" />found by name search: may be a different function or type with the same name</li>
           </ul>
           <Show when={props.connections.limits.length > 0}>
-            <section class="map-limits" aria-labelledby="map-limits-heading">
-              <h4 id="map-limits-heading">What this map may miss</h4>
-              <ul>
-                <For each={props.connections.limits}>{(limit) => <li>{limit}</li>}</For>
-              </ul>
-            </section>
+            <ViewLimits id="connections" heading="What this map may miss" limits={props.connections.limits} />
           </Show>
         </div>
         <Show when={chosen()}>

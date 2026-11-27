@@ -2878,13 +2878,14 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   flex: none;
 }
 
-/* The walkthrough waits hidden while the map of how the changed code connects shows in its place. */
+/* The walkthrough waits hidden while a view shows in full in its place. */
 .walkthrough[hidden] {
   display: none;
 }
 
-/* How the changed code connects, where the layers start: its name, Open the map, and three short lines. */
-.walk-connections-head {
+/* A view's summary in the walkthrough, such as How the changed code connects where the layers
+   start: its name, and the button that shows the view in full, on one line. */
+.walk-view-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2901,16 +2902,16 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   margin: 0;
 }
 
-/* The map in full, in the walkthrough's place: the map and what its marks mean on the left, the
-   selected node's panel on the right. Nothing on it moves: no transitions, no smooth scrolling. */
-.map-view {
+/* A view in full, in the walkthrough's place: its head, then its content. Nothing in it moves: no
+   transitions, no smooth scrolling. */
+.full-view {
   display: flex;
   flex: 1;
   flex-direction: column;
   min-block-size: 0;
 }
 
-.map-head {
+.view-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2919,45 +2920,46 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
 }
 
-.map-head-text {
+.view-head-text {
   display: grid;
   gap: 2px;
   min-inline-size: 0;
 }
 
-.map-head-text h3 {
+.view-head-text h3 {
   margin: 0;
   font-size: var(--s-size-base);
   font-weight: var(--s-weight-semibold);
 }
 
-/* The view's heading and the panel's name take the focus only so a screen reader says where it
+/* A view's heading and the map panel's name take the focus only so a screen reader says where it
    landed; neither is a control, so neither draws a focus ring. */
-.map-head-text h3:focus,
+.view-head-text h3:focus,
 .map-panel-name:focus {
   outline: none;
 }
 
-.map-head-text p,
-.map-keys {
+.view-head-text p,
+.view-keys {
   margin: 0;
   color: var(--s-text-secondary);
   font-size: var(--s-size-sm);
 }
 
-.map-keys {
+.view-keys {
   margin-inline-start: auto;
   color: var(--s-text-muted);
   font-size: var(--s-size-xs);
 }
 
-.map-keys kbd {
+.view-keys kbd {
   padding: 0 var(--s-space-4);
   border: var(--s-border-thin) var(--s-border-style) var(--s-border);
   font-family: var(--s-code-font-family);
   font-size: var(--s-size-xs);
 }
 
+/* The map in full: the map and what its marks mean on the left, the selected node's panel on the right. */
 .map-body {
   display: grid;
   flex: 1;
@@ -3132,13 +3134,13 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   border-block-start-style: dashed;
 }
 
-.map-limits {
+.view-limits {
   padding: var(--s-space-8) var(--s-space-16) var(--s-space-12);
   border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border-muted);
   font-size: var(--s-size-sm);
 }
 
-.map-limits h4,
+.view-limits h4,
 .map-links h5 {
   margin: 0 0 var(--s-space-4);
   color: var(--s-text-muted);
@@ -3148,7 +3150,7 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   text-transform: uppercase;
 }
 
-.map-limits ul {
+.view-limits ul {
   display: grid;
   gap: 2px;
   margin: 0;
@@ -3249,4 +3251,159 @@ body.review-dimming :is(.app-toolbar, .sidebar-pane) {
   gap: var(--s-space-8);
   color: var(--s-text-muted);
   font-size: var(--s-size-xs);
+}
+
+/* A view's name before its words in a walkthrough line, such as "Changes no test would catch". */
+.walk-view-name {
+  margin-inline-end: var(--s-space-8);
+  color: var(--s-text-secondary);
+  font-weight: var(--s-weight-medium);
+}
+
+/* When the plugin couldn't measure which changed lines the tests ran: one quiet line, no box. */
+.walk-view-quiet {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+}
+
+/* The tool in an evidence line keeps the line's size. */
+.place-evidence code {
+  font-size: inherit;
+}
+
+/* At a place to look: its changed lines no test ran, under its reason and evidence. */
+.place-gaps {
+  display: grid;
+  gap: 2px;
+  margin-block-start: var(--s-space-4);
+  font-size: var(--s-size-sm);
+}
+
+.place-gaps p {
+  margin: 0;
+}
+
+/* Example inputs, before and after, under What this PR does: one line, and Open all inputs. */
+.walk-view-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-8) var(--s-space-12);
+  padding: var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  font-size: var(--s-size-sm);
+}
+
+.walk-view-line p {
+  flex: 1;
+  min-inline-size: 16rem;
+}
+
+/* A view in full that reads top to bottom, such as the changed lines no test ran by file: one
+   centered column that scrolls. Its one track starts at zero, so a long line of code scrolls in its
+   diff instead of widening the window's content. */
+.full-view-scroll {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.full-view-column {
+  display: grid;
+  gap: var(--s-space-24);
+  inline-size: min(100%, 72rem);
+  margin-inline: auto;
+  padding: var(--s-space-16) var(--s-space-24) 6rem;
+  font-size: var(--s-size-sm);
+}
+
+.full-view-column p {
+  margin: 0;
+}
+
+.full-view-column h4 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-space-4) var(--s-space-12);
+  margin: 0;
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.full-view-column .view-limits {
+  padding-inline: 0;
+}
+
+/* Changes no test would catch, by file: the file's lines no test ran, how that is known, and its
+   diff cut to them. j and k mark the current file with a line on its left, at once. */
+.gaps-file {
+  display: grid;
+  gap: var(--s-space-8);
+  padding-inline-start: var(--s-space-12);
+  border-inline-start: 2px solid transparent;
+}
+
+.gaps-file[data-current] {
+  border-inline-start-color: var(--s-text-secondary);
+}
+
+/* Example inputs, before and after, in full: a table per function. */
+.examples-function {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+/* The same column widths in every table, so the tables line up. */
+.examples-table {
+  inline-size: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.examples-table th:nth-child(1) {
+  inline-size: 16%;
+}
+
+.examples-table th:nth-child(2),
+.examples-table th:nth-child(3) {
+  inline-size: 27%;
+}
+
+.examples-table th:nth-child(4) {
+  inline-size: 11%;
+}
+
+.examples-table th,
+.examples-table td {
+  padding: var(--s-space-8);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border-muted);
+  text-align: start;
+  vertical-align: top;
+}
+
+.examples-table thead th {
+  border: 0;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+}
+
+.examples-table tbody tr[aria-current="true"] {
+  background: var(--s-surface-elevated);
+}
+
+.example-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A result that changed between the base and the head needs a look: orange, with its word. */
+.example-status[data-changed] {
+  color: var(--s-warning);
+  font-weight: var(--s-weight-medium);
 }
