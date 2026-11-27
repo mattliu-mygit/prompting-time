@@ -101,12 +101,20 @@ plugin.
 Use `?agents=v2` (with `?work=1` for chats too) for an invented "Fixture runs" plugin beside
 Whooper; both print status format 2. Its row in the Plugins section reads "Running 1 evaluation".
 Needs you is one list: the red blocker "Codex is signed out" ("blocks every job · Fixture runs"),
-then two runs whose line reads "Run failed · Fixture runs" and one "Review needed · Fixture runs",
-then, with `?work=1`, the chats waiting on you. Its Running run and six Done runs stay out of the
-sidebar; they are the plugin's page's to show (the palette's Work group still finds them).
-Command-J steps through the blocker, those three items, and the waiting chats. Each row's ⋯ menu opens on a click: Rerun moves a run to Running,
-Delete run opens the confirmation with the invented request and deletes the run after Confirm, and
-the blocker's Check providers clears it. Everything answers in browser memory.
+then two runs whose line reads "Run failed · Fixture runs", Whooper's "add a retry policy for
+uploads" ("Needs a look · Whooper"), and one "Review needed · Fixture runs", then, with `?work=1`,
+the chats waiting on you. Its Running run and six Done runs stay out of the sidebar; they are the
+plugin's page's to show (the palette's Work group still finds them). Command-J steps through the
+blocker, those four items, and the waiting chats. Each row's ⋯ menu opens on a click: Rerun moves
+a run to Running, Delete run opens the confirmation with the invented request and deletes the run
+after Confirm, and the blocker's Check providers clears it. Everything answers in browser memory.
+
+With `?agents=v2&work=1`, chips above Needs you read "All 7", "Chats 2", "Fixture runs 4", and
+"Whooper 1"; a click on one lists only its entries, and the choice stays after a reload. Under
+Chats, a search finds only chats; under a plugin, only that plugin's entries. Hide in any row's ⋯
+menu, a chat's included, takes the entry out of Needs you and shows "Hidden <title>" with Undo; the
+folded "Hidden · 1" at the end of Needs you opens on a click to the entry with Show again. The
+fixture's items keep their times across reloads, so a hidden one stays hidden after one.
 
 Clicking a row, or Command-J landing on one, opens the plugin's page, which speaks page protocol 2
 and needs no build: the server serves `tests/browser/plugin-page-v2/` at `/plugin-page-v2/` with the

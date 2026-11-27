@@ -13,8 +13,8 @@ import { answerV2Action, V2_PLUGIN, v2Plugin } from "./status-v2-fixture";
  * words. `?agents=reviews` lists invented reviews as items in Whooper's groups, which open in the
  * plugin page the dev server serves.
  * `?agents=v2` adds an invented plugin that prints status format 2 (status-v2-fixture.ts), whose
- * actions send pluginChanged events. `?agents=none` installs no plugin, but its pickers answer, so
- * Add plugin reaches the install dialog.
+ * actions send pluginChanged events, and gives Whooper one review that needs a look.
+ * `?agents=none` installs no plugin, but its pickers answer, so Add plugin reaches the install dialog.
  */
 export const agentsScenario = new URLSearchParams(location.search).get("agents");
 
@@ -136,6 +136,11 @@ const request = JSON.stringify({
   ],
 }, null, 2);
 const fingerprint = "9c".repeat(32);
+/** `?agents=v2`: one review that needs a look, so Needs you holds the chats and two plugins' entries to filter. */
+const v2WhooperItem = {
+  id: "run-fixture-1", group: "look", title: "add a retry policy for uploads", detail: "widgets#101 · @sam-fixture · 1 finding", dot: "attention",
+  project: null, updated_at: "2026-11-27T14:10:00Z", route: "/reviews/run-fixture-1", actions: [],
+};
 let mentionsRefused = agentsScenario !== "mentions";
 /** Whether the invented Whooper runs and is paused; Stop, Start, Pause, and Resume change them in browser memory. */
 let running = agentsScenario !== "missing";
@@ -178,7 +183,7 @@ async function pluginRequest(sent: PluginActionRequest): Promise<PluginActionRes
         round: { running: false, started_at: null, reviewing: null }, last_round: null,
         ...(agentsScenario === "reviews" ? { reviews, rounds: fixtureRounds(), blocked: blocked ? { ...dockerCause, since: blockedSince.toISOString(), waiting } : null } : {}),
         format: 2, agent,
-        ...(agentsScenario === "reviews" ? fixtureStatusV2Parts() : { blockers: [], items: [], truncated: false }),
+        ...(agentsScenario === "reviews" ? fixtureStatusV2Parts() : { blockers: [], items: agentsScenario === "v2" ? [v2WhooperItem] : [], truncated: false }),
       }) });
     }
     case "round":

@@ -42,7 +42,10 @@ export const v2Plugin: PluginSnapshot = {
   },
 };
 
-const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+// A fixed moment, so the items keep their `updated_at` across reloads and an item hidden in Needs
+// you stays hidden after one.
+const FIXTURE_NOW = Date.parse("2026-11-27T15:00:00Z");
+const minutesAgo = (minutes: number) => new Date(FIXTURE_NOW - minutes * 60_000).toISOString();
 
 type Item = { id: string; group: string; title: string; detail: string | null; dot: string; project: string | null; updated_at: string; route: string; actions: string[] };
 
