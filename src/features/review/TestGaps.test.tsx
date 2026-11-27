@@ -297,7 +297,7 @@ describe("changes no test would catch", () => {
   });
 
   it("shows why, and no lines, in full for a run that couldn't measure", () => {
-    render(() => <TestGapsView testGaps={readTestGaps({ ...fixtureTestGaps(), measured: false, reason: "the tests didn't build" })!} patch={null} onBack={vi.fn()} />);
+    render(() => <TestGapsView testGaps={readTestGaps({ ...fixtureTestGaps(), measured: false, reason: "the tests didn't build" })!} patch={null} pluginTitle={plugin.title} onBack={vi.fn()} />);
     const view = screen.getByRole("region", { name: NAME });
     expect(view).toHaveTextContent("Not measured: the tests didn't build");
     expect(view).not.toHaveTextContent("No test ran");

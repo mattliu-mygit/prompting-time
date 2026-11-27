@@ -54,7 +54,7 @@ const decided = new Set<string>();
 const [navCollapsed, setNavCollapsed] = createSignal(false);
 
 /** A place's reason and evidence, under its lines in the code, and its changed lines no test ran or changes no test noticed. */
-function PlaceCard(props: { entry: PlaceEntry; gaps: PlaceGapLines | null; onClose?: () => void }) {
+function PlaceCard(props: { entry: PlaceEntry; gaps: PlaceGapLines | null; pluginTitle: string; onClose?: () => void }) {
   return (
     <div class="place-card">
       <p class="place-card-head">
@@ -64,26 +64,26 @@ function PlaceCard(props: { entry: PlaceEntry; gaps: PlaceGapLines | null; onClo
       </p>
       <p class="place-reason"><Inline text={props.entry.place.reason} /></p>
       <p class="place-evidence">{EVIDENCE[props.entry.place.evidence.kind]} · <Inline text={props.entry.place.evidence.detail} /></p>
-      <Show when={props.gaps}>{(gaps) => <PlaceGaps gaps={gaps()} />}</Show>
+      <Show when={props.gaps}>{(gaps) => <PlaceGaps gaps={gaps()} pluginTitle={props.pluginTitle} />}</Show>
     </div>
   );
 }
 
-/** What sits under a line of the walkthrough's code: an open place's reason, or one of Whooper's draft comments. */
-function NoteCard(props: { note: Note; gapsOf(id: string): PlaceGapLines | null; onClose(): void }) {
+/** What sits under a line of the walkthrough's code: an open place's reason, or one of the plugin's draft comments, headed with its title. */
+function NoteCard(props: { note: Note; pluginTitle: string; gapsOf(id: string): PlaceGapLines | null; onClose(): void }) {
   return (
     <Show
       when={props.note.kind === "place" ? props.note : null}
       fallback={
         <div class="draft-card" data-included={(props.note as Extract<Note, { kind: "draft" }>).included ? "" : undefined}>
-          <p class="draft-card-head">Whooper's draft comment · {(props.note as Extract<Note, { kind: "draft" }>).included ? "included" : "left out"}</p>
+          <p class="draft-card-head">{props.pluginTitle}'s draft comment · {(props.note as Extract<Note, { kind: "draft" }>).included ? "included" : "left out"}</p>
           <Markdown content={(props.note as Extract<Note, { kind: "draft" }>).text} />
         </div>
       }
     >
       {(note) => {
         const entry = () => (note() as Extract<Note, { kind: "place" }>).entry;
-        return <PlaceCard entry={entry()} gaps={props.gapsOf(entry().place.id)} onClose={props.onClose} />;
+        return <PlaceCard entry={entry()} gaps={props.gapsOf(entry().place.id)} pluginTitle={props.pluginTitle} onClose={props.onClose} />;
       }}
     </Show>
   );
@@ -275,11 +275,11 @@ export function Walkthrough(props: Props) {
     { id: "what", name: "What this PR does" },
     { id: "places", name: "Places to look", count: places().length },
     ...(showCalls() ? [{ id: "calls", name: viewName("calls") }] : []),
-    { id: "checked", name: "What Whooper checked" },
+    { id: "checked", name: `What ${props.plugin.title} checked` },
     ...(connections() ? [{ id: "connections", name: viewName("connections") }] : []),
   ];
   const fileCount = () => new Set(layers().flatMap((entry) => entry.files.map((file) => file.path))).size;
-  /** One file of a layer: its excerpts, with the places' marks, the open place's reason, and Whooper's draft comments. */
+  /** One file of a layer: its excerpts, with the places' marks, the open place's reason, and the plugin's draft comments. */
   function LayerFileView(fileProps: { file: LayerFile }) {
     const side = () => (fileProps.file.file?.type === "deleted" ? "deletions" : "additions");
     const marks = createMemo((): DiffMark[] => fileProps.file.places.map((entry) => ({ id: entry.place.id, label: String(entry.number), start: entry.place.start_line, end: entry.place.end_line })));
@@ -313,7 +313,7 @@ export function Walkthrough(props: Props) {
               target={targeted()?.range ?? null}
               annotations={annotations()}
               annotationKey={(annotation) => (annotation.metadata.kind === "place" ? `place:${annotation.metadata.entry.place.id}` : `draft:${annotation.metadata.finding.id}`)}
-              renderAnnotation={(annotation) => <NoteCard note={annotation().metadata} gapsOf={gapsOf} onClose={() => setOpenPlace(null)} />}
+              renderAnnotation={(annotation) => <NoteCard note={annotation().metadata} pluginTitle={props.plugin.title} gapsOf={gapsOf} onClose={() => setOpenPlace(null)} />}
             />
           )}
         </Show>
@@ -430,7 +430,7 @@ export function Walkthrough(props: Props) {
                         <p class="place-title">{entry.place.title}</p>
                         <p class="place-reason"><Inline text={entry.place.reason} /></p>
                         <p class="place-evidence">{EVIDENCE[entry.place.evidence.kind]} · <Inline text={entry.place.evidence.detail} /></p>
-                        <Show when={gapsOf(entry.place.id)}>{(gaps) => <PlaceGaps gaps={gaps()} />}</Show>
+                        <Show when={gapsOf(entry.place.id)}>{(gaps) => <PlaceGaps gaps={gaps()} pluginTitle={props.plugin.title} />}</Show>
                       </div>
                       <button type="button" class="walk-link" aria-label={`Show place ${entry.number} in the code, ${rangeText(entry.place)}`} onClick={() => look(entry.number - 1)}>{rangeText(entry.place)}</button>
                     </li>
@@ -442,6 +442,7 @@ export function Walkthrough(props: Props) {
                   <TestGapsBlock
                     testGaps={gaps()}
                     places={overview().places}
+                    pluginTitle={props.plugin.title}
                     headingId={`test-gaps-${runId}`}
                     onOpen={(button) => openView("test-gaps", button)}
                   />
@@ -457,7 +458,7 @@ export function Walkthrough(props: Props) {
               )}
             </Show>
             <section class="walk-section walk-prose" data-part="checked" aria-labelledby={`checked-${runId}`}>
-              <h3 id={`checked-${runId}`}>What Whooper checked and didn't</h3>
+              <h3 id={`checked-${runId}`}>What {props.plugin.title} checked and didn't</h3>
               <div class="walk-checks">
                 <div>
                   <h4>Checked</h4>

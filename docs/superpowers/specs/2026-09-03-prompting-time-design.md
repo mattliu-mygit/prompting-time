@@ -62,9 +62,10 @@ on hover, anywhere: menus, rails, notices, and the decision open on a click or a
 A review whose plugin printed an overview opens on Prompting Time's walkthrough, its
 navigator open on the left and its column centered beside it: the verdict banner, then
 "Changes since you last looked" folded to one line, What this PR does, Places to look
-(one name everywhere, stepped with j and k), Calls before and after, What Whooper
-checked and didn't, and the change layer by layer, each with a read check that folds
-it. Its decision waits as Decide… until clicked or the end is reached. Diff shows the
+(one name everywhere, stepped with j and k), Calls before and after, what the plugin
+checked and didn't (headed with its manifest title, as in "What Whooper checked and
+didn't"), and the change layer by layer, each with a read check that folds it. Its
+decision waits as Decide… until clicked or the end is reached. Diff shows the
 plugin's page under the same banner and notice, and a review without an overview opens
 on the page. The Views menu beside Walkthrough | Diff, and the palette, turn each view
 on or off for every review; a view's summary shows only when the review has data for it.

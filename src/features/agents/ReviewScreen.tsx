@@ -443,7 +443,7 @@ function ReviewRun(props: RunProps) {
                 {(connections) => <ConnectionsView connections={connections()} patch={shown().patch} onBack={() => props.onMode("walkthrough")} />}
               </Match>
               <Match when={full() === "test-gaps" && shown().testGaps}>
-                {(testGaps) => <TestGapsView testGaps={testGaps()} patch={shown().patch} onBack={() => props.onMode("walkthrough")} />}
+                {(testGaps) => <TestGapsView testGaps={testGaps()} patch={shown().patch} pluginTitle={props.plugin.title} onBack={() => props.onMode("walkthrough")} />}
               </Match>
               <Match when={full() === "inputs" && shown().examples}>
                 {(examples) => <ExamplesView examples={examples()} onBack={() => props.onMode("walkthrough")} />}

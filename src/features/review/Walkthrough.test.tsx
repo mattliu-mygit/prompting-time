@@ -1,8 +1,8 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { flush } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PluginActionRequest } from "../../bridge/types";
-import { actionResult, fixturePlugin, fixtureReviews, fixtureStatus, fixtureWalkthrough, pageActions } from "../../test/plugins";
+import type { PluginActionRequest, PluginSnapshot } from "../../bridge/types";
+import { actionResult, fixtureConnectionsWalkthrough, fixturePlugin, fixtureReviews, fixtureStatus, fixtureTestGaps, fixtureWalkthrough, pageActions } from "../../test/plugins";
 import { render, settle } from "../../test/render";
 import { ReviewScreen } from "../agents/ReviewScreen";
 import { createReviewViews } from "./views";
@@ -15,7 +15,7 @@ const review = { ...base, head_sha: "2252c0f0000", pr_head_sha: "cccc2222dddd", 
 /** Review 1 of the same pull request, which said look first. */
 const earlier = { ...base, run_id: "r-earlier", started_at: "2026-11-24T09:00:00Z", ended_at: "2026-11-24T09:20:00Z", verdict: "look_first", findings: 1, needs_you: false, head_sha: "1111111aaaa", pr_head_sha: "cccc2222dddd", safe_to_approve: false, cause: null, skipped_by_user: false };
 
-function renderWalkthrough(options: { shown?: object; entry?: object } = {}) {
+function renderWalkthrough(options: { shown?: object; entry?: object; plugin?: PluginSnapshot } = {}) {
   const pluginRequest = vi.fn(async (sent: PluginActionRequest) => {
     switch (sent.action) {
       case "show-review": return actionResult({ stdout: JSON.stringify(options.shown ?? fixtureWalkthrough(sent.args[0]!)) });
@@ -32,7 +32,7 @@ function renderWalkthrough(options: { shown?: object; entry?: object } = {}) {
   const views = createReviewViews();
   render(() => (
     <ReviewScreen
-      plugin={plugin}
+      plugin={options.plugin ?? plugin}
       status={{ value: fixtureStatus("2026-11-26T23:45:00Z", { reviews: [options.entry ?? review, earlier] }), error: null }}
       runId={RUN}
       actions={{ pluginRequest, savePluginSettings: vi.fn() }}
@@ -183,6 +183,60 @@ describe("a review's walkthrough", () => {
     expect(screen.getByText("Ran the client tests at head and base")).toBeInTheDocument();
     expect(screen.getByText("Didn't run the upload integration suite")).toBeInTheDocument();
     expect(screen.getByLabelText("Files that usually change with these")).toHaveTextContent("src/server.rs changed with client.rs in 80% of 10 commits");
+  });
+
+  it("names the plugin by its manifest's title in the walkthrough and in each view in full, never Whooper", async () => {
+    // Only the title differs from the fixture plugin's, so text built from its name, "whooper",
+    // rather than its title would still say Whooper.
+    const reviewer = fixturePlugin({ title: "Reviewer", actions: plugin.actions });
+    // A change no test noticed at the second place to look (name.go's line 6) and one after the
+    // places (create.go's line 14), and a change tests caught; the limits are Reviewer's own words.
+    const testGaps = {
+      ...fixtureTestGaps(),
+      lines: [
+        { path: "internal/projects/create.go", line: 12, status: "not_run" },
+        { path: "internal/projects/name.go", line: 6, status: "survived", change: "`{1,61}` to `{1,62}`" },
+        { path: "internal/projects/create.go", line: 14, status: "survived", change: "`newProject(name, name)` to `nil, nil`" },
+        { path: "internal/projects/name.go", line: 10, status: "caught", change: "`namePattern.MatchString(name)` to `true`", test: "TestValidateName" },
+      ],
+      summary: { changed_lines: 15, run: 4, not_run: 1, survived: 2, caught: 1 },
+      limits: ["Reviewer changed only lines a test ran, one change on each."],
+    };
+    /** Everything the review says to read or to hear: its text, and its elements' labels and tooltips. */
+    const said = () => [document.body.textContent, ...[...document.querySelectorAll("[aria-label], [title]")].flatMap((element) => [element.getAttribute("aria-label"), element.getAttribute("title")])].join("\n");
+    renderWalkthrough({ plugin: reviewer, shown: fixtureConnectionsWalkthrough(RUN, { test_gaps: testGaps }) });
+    const nav = await walkthrough();
+    expect(within(nav).getByRole("button", { name: "What Reviewer checked" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What Reviewer checked and didn't" })).toBeInTheDocument();
+    expect(document.querySelectorAll(".walk-places li")[1]).toHaveTextContent("Tests ran line 6 but none noticed when Reviewer changed {1,61} to {1,62}");
+    const block = screen.getByRole("region", { name: "Changes no test would catch" });
+    expect(block).toHaveTextContent("Tests caught 1 of 3 changes Reviewer made on purpose.");
+    expect(block).toHaveTextContent("Outside the places to look, tests ran 1 changed line but none noticed when Reviewer changed it:");
+    await waitFor(() => expect(document.querySelector(".draft-card-head")).toHaveTextContent("Reviewer's draft comment · included"), { timeout: 10_000 });
+    // j twice opens the second place's reason under its line.
+    fireEvent.keyDown(document.body, { key: "j" });
+    flush();
+    fireEvent.keyDown(document.body, { key: "j" });
+    flush();
+    await waitFor(() => expect(placeCard()).toHaveTextContent("Tests ran line 6 but none noticed when Reviewer changed {1,61} to {1,62}"), { timeout: 10_000 });
+    expect(said()).not.toContain("Whooper");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open all lines" }));
+    flush();
+    const gaps = screen.getByRole("region", { name: "Changes no test would catch" });
+    expect(gaps.querySelector(".gaps-counts")).toHaveTextContent("Tests caught 1 of 3 changes Reviewer made on purpose.");
+    expect(within(gaps).getByRole("region", { name: "internal/projects/create.go" })).toHaveTextContent("Tests ran line 14 but none noticed when Reviewer changed newProject(name, name) to nil, nil");
+    expect(within(gaps).getByRole("region", { name: "internal/projects/name.go" })).toHaveTextContent("Tests caught this change Reviewer made on purpose:Line 10");
+    expect(said()).not.toContain("Whooper");
+
+    for (const [open, view] of [["Open all inputs", "Example inputs, before and after"], ["Open the map", "How the changed code connects"]]) {
+      fireEvent.click(screen.getByRole("button", { name: "Back to the walkthrough" }));
+      flush();
+      fireEvent.click(screen.getByRole("button", { name: open }));
+      flush();
+      expect(screen.getByRole("region", { name: view })).toBeInTheDocument();
+      expect(said()).not.toContain("Whooper");
+    }
   });
 
   it("turns a view off for every review from the Views menu, and shows no summary for a view without data", async () => {

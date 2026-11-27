@@ -100,14 +100,14 @@ describe("changes no test would catch", () => {
     const counts = (changed_lines: number, run: number, not_run: number, survived: number | null = null, caught: number | null = null) => ({ changed_lines, run, not_run, survived, caught });
     expect(lineList([40, 39])).toBe("39, 40");
     expect(lineList([50, 39, 40, 41, 42, 39])).toBe("39–42, 50");
-    expect(countsText(counts(21, 3, 4))).toBe("Tests ran 3 of 21 changed lines, and no test ran 4. The run counted the other 14 as neither, such as comments.");
-    expect(countsText(counts(14, 14, 0))).toBe("Tests ran 14 of 14 changed lines.");
-    expect(countsText(counts(1, 0, 1))).toBe("Tests ran 0 of 1 changed line, and no test ran 1.");
-    expect(countsText(counts(21, 4, 5, 2, 5))).toBe("Tests ran 4 of 21 changed lines, and no test ran 5. The run counted the other 12 as neither, such as comments. Tests caught 5 of 7 changes Whooper made on purpose.");
-    expect(countsText(counts(3, 3, 0, 0, 1))).toBe("Tests ran 3 of 3 changed lines. Tests caught 1 of 1 change Whooper made on purpose.");
+    expect(countsText(counts(21, 3, 4), "Whooper")).toBe("Tests ran 3 of 21 changed lines, and no test ran 4. The run counted the other 14 as neither, such as comments.");
+    expect(countsText(counts(14, 14, 0), "Whooper")).toBe("Tests ran 14 of 14 changed lines.");
+    expect(countsText(counts(1, 0, 1), "Whooper")).toBe("Tests ran 0 of 1 changed line, and no test ran 1.");
+    expect(countsText(counts(21, 4, 5, 2, 5), "Whooper")).toBe("Tests ran 4 of 21 changed lines, and no test ran 5. The run counted the other 12 as neither, such as comments. Tests caught 5 of 7 changes Whooper made on purpose.");
+    expect(countsText(counts(3, 3, 0, 0, 1), "Whooper")).toBe("Tests ran 3 of 3 changed lines. Tests caught 1 of 1 change Whooper made on purpose.");
     // No change made, or only one of the two counts, says nothing of changes.
-    expect(countsText(counts(3, 3, 0, 0, 0))).toBe("Tests ran 3 of 3 changed lines.");
-    expect(countsText(counts(3, 3, 0, 2, null))).toBe("Tests ran 3 of 3 changed lines.");
+    expect(countsText(counts(3, 3, 0, 0, 0), "Whooper")).toBe("Tests ran 3 of 3 changed lines.");
+    expect(countsText(counts(3, 3, 0, 2, null), "Whooper")).toBe("Tests ran 3 of 3 changed lines.");
   });
 });
 

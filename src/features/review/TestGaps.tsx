@@ -65,14 +65,15 @@ export function gapsAt(gaps: TestGaps, place: Place): PlaceGapLines | null {
 
 /**
  * "Tests ran 3 of 21 changed lines, and no test ran 4.", with the lines the run counted as neither,
- * and, when the plugin says, how many of the changes it made on purpose a test caught.
+ * and, when the plugin says, how many of the changes it made on purpose a test caught, naming the
+ * plugin by its title: "Tests caught 5 of 7 changes Whooper made on purpose."
  */
-export function countsText(counts: TestGapCounts): string {
+export function countsText(counts: TestGapCounts, pluginTitle: string): string {
   const rest = counts.changed_lines - counts.run - counts.not_run;
   const changes = counts.survived !== null && counts.caught !== null ? counts.survived + counts.caught : 0;
   return `Tests ran ${counts.run} of ${plural(counts.changed_lines, "changed line")}${counts.not_run > 0 ? `, and no test ran ${counts.not_run}` : ""}.`
     + (rest > 0 ? ` The run counted the other ${rest} as neither, such as comments.` : "")
-    + (changes > 0 ? ` Tests caught ${counts.caught} of ${plural(changes, "change")} Whooper made on purpose.` : "");
+    + (changes > 0 ? ` Tests caught ${counts.caught} of ${plural(changes, "change")} ${pluginTitle} made on purpose.` : "");
 }
 
 /** The runs of the tests the plugin measured with, each in code type, "a and b"; `tool` joins several with "; ". */
@@ -91,9 +92,9 @@ function MeasuredNotRun(props: { count: number; tool: string }) {
   );
 }
 
-/** "Tests ran line 39 but none noticed when Whooper changed `>` to `>=`": a change made on purpose that no test noticed. */
-function Unnoticed(props: { line: ChangedLine }) {
-  return <p>Tests ran line {props.line.line} but none noticed when Whooper changed <Inline text={props.line.change} /></p>;
+/** A change made on purpose that no test noticed, naming the plugin by its title: "Tests ran line 39 but none noticed when Whooper changed `>` to `>=`". */
+function Unnoticed(props: { line: ChangedLine; pluginTitle: string }) {
+  return <p>Tests ran line {props.line.line} but none noticed when {props.pluginTitle} changed <Inline text={props.line.change} /></p>;
 }
 
 /** How a finding of changes no test noticed is known: the plugin changed each line on purpose and ran the tests again. */
@@ -102,7 +103,7 @@ function MeasuredUnnoticed(props: { count: number }) {
 }
 
 /** At a place to look: the changed lines among its lines that no test ran, the changes there no test noticed, and how each is known. */
-export function PlaceGaps(props: { gaps: PlaceGapLines }) {
+export function PlaceGaps(props: { gaps: PlaceGapLines; pluginTitle: string }) {
   return (
     <div class="place-gaps">
       <Show when={props.gaps.notRun.length > 0}>
@@ -113,7 +114,7 @@ export function PlaceGaps(props: { gaps: PlaceGapLines }) {
       </Show>
       <Show when={props.gaps.survived.length > 0}>
         <div>
-          <For each={props.gaps.survived}>{(line) => <Unnoticed line={line} />}</For>
+          <For each={props.gaps.survived}>{(line) => <Unnoticed line={line} pluginTitle={props.pluginTitle} />}</For>
           <MeasuredUnnoticed count={props.gaps.survived.length} />
         </div>
       </Show>
@@ -128,7 +129,7 @@ export function PlaceGaps(props: { gaps: PlaceGapLines }) {
  * Open all lines, which shows every line by file in the walkthrough's place. When the plugin
  * couldn't measure, one quiet line says why.
  */
-export function TestGapsBlock(props: { testGaps: TestGaps; places: readonly Place[]; headingId: string; onOpen(button: HTMLButtonElement): void }) {
+export function TestGapsBlock(props: { testGaps: TestGaps; places: readonly Place[]; pluginTitle: string; headingId: string; onOpen(button: HTMLButtonElement): void }) {
   const outside = (line: TestGapLine) => !props.places.some((place) => inPlace(line, place));
   const notRun = createMemo(() => props.testGaps.lines.filter((line) => line.status === NOT_RUN && outside(line)));
   const survived = createMemo(() => byFile(changedLines(props.testGaps.lines, SURVIVED).filter(outside)).flatMap((file) => file.lines));
@@ -150,7 +151,7 @@ export function TestGapsBlock(props: { testGaps: TestGaps; places: readonly Plac
             <Button onClick={(event) => props.onOpen(event.currentTarget)}>Open all lines</Button>
           </Show>
         </div>
-        <p>{countsText(props.testGaps.summary)}</p>
+        <p>{countsText(props.testGaps.summary, props.pluginTitle)}</p>
         <Show when={notRun().length > 0}>
           <div class="walk-view-group">
             <p>{hasPlaces() ? "Outside the places to look, no test ran" : "No test ran"} {plural(notRun().length, "changed line")}:</p>
@@ -164,7 +165,7 @@ export function TestGapsBlock(props: { testGaps: TestGaps; places: readonly Plac
         </Show>
         <Show when={survived().length > 0}>
           <div class="walk-view-group">
-            <p>{hasPlaces() ? "Outside the places to look, tests ran" : "Tests ran"} {plural(survived().length, "changed line")} but none noticed when Whooper changed {survived().length === 1 ? "it" : "them"}:</p>
+            <p>{hasPlaces() ? "Outside the places to look, tests ran" : "Tests ran"} {plural(survived().length, "changed line")} but none noticed when {props.pluginTitle} changed {survived().length === 1 ? "it" : "them"}:</p>
             <ul>
               <For each={survived()}>
                 {(line) => <li><code>{line.path}</code> <span class="walk-muted">{line.line}:</span> <Inline text={line.change} /></li>}
@@ -195,7 +196,7 @@ const othersText = (lines: readonly TestGapLine[]) => `${lines.length === 1 ? "l
  * measure shows why instead, and no lines. Last, what the measure may miss. j and k step through
  * the files; Escape clears the current file, then goes back. Nothing moves on a key.
  */
-export function TestGapsView(props: { testGaps: TestGaps; patch: string | null; onBack(): void }) {
+export function TestGapsView(props: { testGaps: TestGaps; patch: string | null; pluginTitle: string; onBack(): void }) {
   const patchFiles = createMemo(() => (props.patch ? parsePatchFiles(props.patch).flatMap((parsed) => parsed.files) : []));
   const files = createMemo(() => byFile(props.testGaps.lines).map((group) => {
     const notRun = group.lines.filter((line) => line.status === NOT_RUN).map((line) => line.line);
@@ -248,7 +249,7 @@ export function TestGapsView(props: { testGaps: TestGaps; patch: string | null; 
           >
             <p class="gaps-counts">
               <Show when={props.testGaps.tool}>Measured with <Tool tool={props.testGaps.tool} />. </Show>
-              {countsText(props.testGaps.summary)}
+              {countsText(props.testGaps.summary, props.pluginTitle)}
             </p>
             <For each={files()}>
               {(file, index) => (
@@ -262,13 +263,13 @@ export function TestGapsView(props: { testGaps: TestGaps; patch: string | null; 
                   </Show>
                   <Show when={file.survived.length > 0}>
                     <div class="gaps-group">
-                      <For each={file.survived}>{(line) => <Unnoticed line={line} />}</For>
+                      <For each={file.survived}>{(line) => <Unnoticed line={line} pluginTitle={props.pluginTitle} />}</For>
                       <MeasuredUnnoticed count={file.survived.length} />
                     </div>
                   </Show>
                   <Show when={file.caught.length > 0}>
                     <div class="gaps-group gaps-caught">
-                      <p>Tests caught {file.caught.length === 1 ? "this change" : "these changes"} Whooper made on purpose:</p>
+                      <p>Tests caught {file.caught.length === 1 ? "this change" : "these changes"} {props.pluginTitle} made on purpose:</p>
                       <ul>
                         <For each={file.caught}>
                           {(line) => (

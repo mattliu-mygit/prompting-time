@@ -183,7 +183,9 @@ leaves the outcome unconfirmed, with no replay.
 ## Background agent plugins
 
 Prompting Time can host background agents, such as Whooper, as plugins. The Rust core installs,
-checks, starts, and stops them, and the window shows them.
+checks, starts, and stops them, and the window shows them. The window names a plugin by the
+`title` its manifest gives, so the walkthrough's "What Whooper checked and didn't" reads "What
+Reviewer checked and didn't" for a plugin titled Reviewer.
 
 - **Screens.** Installed plugins sit pinned at the top of the sidebar, above its sections,
   one compact row each: the name, which opens the plugin's screen; Pause or Resume (`pause`,
