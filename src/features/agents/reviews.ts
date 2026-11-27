@@ -226,7 +226,7 @@ export function readFindingKinds(stdout: string, runId: string): string[] | null
 }
 
 /** What the show-review action printed for run `runId`, in format version 1, as Whooper's whooper-show prints it. */
-export function readShown(stdout: string, runId: string): Record<string, unknown> {
+function readShown(stdout: string, runId: string): Record<string, unknown> {
   let shown: unknown = null;
   try {
     shown = JSON.parse(stdout);

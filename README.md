@@ -183,9 +183,7 @@ leaves the outcome unconfirmed, with no replay.
 ## Background agent plugins
 
 Prompting Time can host background agents, such as Whooper, as plugins. The Rust core installs,
-checks, starts, and stops them, and the window shows them. The window names a plugin by the
-`title` its manifest gives, so the walkthrough's "What Whooper checked and didn't" reads "What
-Reviewer checked and didn't" for a plugin titled Reviewer.
+checks, starts, and stops them, and the window shows them.
 
 - **Screens.** Installed plugins sit pinned at the top of the sidebar, above its sections,
   one compact row each: the name, which opens the plugin's screen; Pause or Resume (`pause`,
@@ -280,79 +278,15 @@ Reviewer checked and didn't" for a plugin titled Reviewer.
   section, the section scrolls just far enough to show it. The window's header names the review's
   state, and for one that says approve once CI passes but that the plugin judges not safe to
   approve it says why, from the kinds of its findings (`show-review`): "approve once CI passes · has
-  a question", or "didn't read the whole change" for a review that skipped it. The review's
-  controls join that one header row: a ⋯ menu with the pull request's versions as "Review N ·
-  <short sha> · <time>" (an earlier one is read-only), Rerun review (`retry <run>`), Skip
-  (`skip <run>`, with Undo beside it, `--undo`), and Remove; Retry review after a failure; and,
-  for a review with an overview, Walkthrough | Diff and Views. A review without one has a banner
-  when the pull request has commits after the reviewed one. While a review is open, All work
-  folds to a rail labeled "All work · 6 need you" on its side, with a dot for each agent and each
-  item that needs you; a click or Command-\ opens the list beside it, and the same, Escape, or a
-  click elsewhere closes it. Nothing opens on hover.
-- **Walkthrough.** When `show-review` prints an `overview`, a finished review opens on Prompting
-  Time's walkthrough instead of the page, with a navigator on the left that folds to a rail. First
-  comes the verdict as a banner tinted green (safe to approve), orange (needs a look), or red
-  (failed or blocked), with the plugin's reason; then "Changes since you last looked", one folded
-  line when `commits_since_review` lists commits, with Rerun review and ×, which hides it for this
-  review and pull request head. The line opens the commits and the version you last opened, which
-  Prompting Time remembers per pull request on this device. Then What this PR does, with its
-  before and after; Places to look, each numbered in orange, with its reason and evidence (j and k
-  step through them, open each reason under its lines, and dim the rest until the mouse moves);
-  Calls before and after (`overview.flow`), old and new calls overlaid, a removed one struck
-  through; What Whooper checked and didn't; and the change layer by layer, each layer's lines
-  drawn by `@prompting-time/ui`'s Diff as excerpts with the places as numbered marks in the gutter,
-  the plugin's draft comments under their lines, and a read check that folds the layer. The
-  decision waits as Decide… until clicked or the end is reached, then sets Comment or Approve with
-  `draft <run>` and submits through the confirmation. Diff shows the page under the same banner
-  and notice. Views, beside them and in Command-K, turns each view on or off for every review:
-  Changes since you last looked, Example inputs, before and after (`examples`), Changes no test
-  would catch (`test_gaps`), Calls before and after, Files that usually change with these
-  (`co_change`), and How the changed code connects (`connections`); a view's summary shows only
-  when the review has data for it.
-- **How the changed code connects.** When `show-review` prints `connections`, the changed
-  functions and types and the code that calls or uses them, as a language tool found them, such as
-  gopls for Go or TypeScript's own language service, or a search for the name did, the walkthrough
-  sums them up where the layers start: how many change and how, the unchanged callers by name, and
-  how many links only name search found and which tools found the rest. Open the map shows the map
-  in the walkthrough's place, callers on the left: a circle's size is its lines changed, added is
-  green and removed red with the word under each name, changed is plain, and unchanged callers are
-  small and gray. A link found by name search is dashed, and the legend and links say "found by
-  name search", since it may match a different function with the same name. The others are solid
-  and say which tool found them, such as "found by gopls" or "found by TypeScript"; a tool
-  Prompting Time doesn't know yet keeps the name Whooper prints. A click, Enter, or j and k
-  through the changed nodes selects one; its panel says what changed, opens the file's diff at its
-  line (the old file's line for a removed function), and lists its links. Under the map is what
-  Whooper says it may miss (`limits`). Escape clears the selection, then goes back. Without
-  `connections`, the view is hidden, also from Views.
-- **Changes no test would catch.** When `show-review` prints `test_gaps`, the changed lines that
-  Whooper's runs of the tests found no test ran, and the changes Whooper made on purpose to lines
-  the tests ran that no test noticed (status `survived`, with the change), each place to look names
-  its own under it: "No test ran 2 changed lines here: 39, 40", labeled "Measured: no test ran these
-  lines" with the tool, then "Tests ran line 41 but none noticed when Whooper changed `>` to `>=`",
-  labeled "Measured: no test noticed this change". A short block after the places gives the counts
-  in words, with how many of those changes tests caught when `summary` counts them ("Tests caught 5
-  of 7 changes Whooper made on purpose"), and the lines elsewhere by file; a caught change is only
-  counted there. Open all lines shows the view in the walkthrough's place: the counts, then each
-  file's lines grouped as no test ran, no test noticed, and caught, with each change and the test
-  that caught it, and its diff cut to them, the lines no test ran and the changes no test noticed
-  marked in orange in the gutter, and what the measure may miss (`limits`). When `tool` names
-  several runs, joined by "; ", each shows in code type. A line with a status this version doesn't
-  know shows with Whooper's word and no mark, and never counts. When the run couldn't measure, one
-  quiet line says "Not measured:" and why. j and k step through the files. Without `test_gaps`, the
-  view is hidden, also from Views.
-- **Example inputs, before and after.** When `show-review` prints `examples`, inputs Whooper ran
-  through the old and new code, one line under What this PR does names the inputs whose result
-  changed, and Open all inputs shows a table per function: each input, before, after, compared in
-  words (changed, in orange, same, varies between runs, or run failed), and how it ran ("Ran at
-  base and head", "Ran at head only", or "Not compared") with Whooper's note, the changed rows
-  first. Only a row that ran at both can say changed, and a row with a status or label this version
-  doesn't know is left out, so nothing predicted shows. j and k step through the inputs. Without
-  `examples`, the view is hidden, also from Views.
+  a question", or "didn't read the whole change" for a review that skipped it. A review's header
+  also shows "Review N · <short sha> · <time>" with the pull request's other versions
+  (an earlier one is read-only), Rerun review (`retry <run>`), Skip and Undo (`skip <run>
+  [--undo]`), Remove, and a banner when the pull request has commits after the reviewed one.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a
   line saying it recorded none), and earlier questions with their answers (`asks`); a review waiting
-  on a blocking cause links to that cause's screen, under a red banner. Retry review in the header runs `retry <run>`,
+  on a blocking cause links to that cause's screen. Retry review in the header runs `retry <run>`,
   which queues the pull request for the plugin's next round, shows what it printed, and then offers
   Run now, which runs `round`. Ask why runs `ask <run> <question>` and adds the answer. A failure shows the plugin's own words. The screen runs only actions that need no
   confirmation.
