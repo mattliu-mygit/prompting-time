@@ -80,12 +80,13 @@ supported, with the inspector opening as an overlay when it would crowd the chat
 
 A single compact header holds the conversation title, provider, current status,
 and pane controls. **More → Archive conversation** keeps archival out of the main
-reading area. The sidebar starts with the pinned background agents, then **Search work
-and chats**, **New chat**, and the status filter above its list; New chat moves into the
-header when the sidebar is hidden, and the palette's **Search** stays in the header. The
-list's sections work like VS Code's sidebar panes: every section's heading, with its count,
-stays on screen, the folded sections stack at the bottom, and the open ones share the space
-above them, each scrolling on its own. Drag the sidebar's right edge, or focus it and use
+reading area. The sidebar starts with **Search work and chats**, **New chat**, and the
+status filter; then **Needs you**, shown only while something needs you; then the chats;
+and at its bottom a small **Plugins** section with **Add plugin…**. New chat moves into
+the header when the sidebar is hidden or folded to its rail, and the palette's **Search**
+stays in the header. The list's sections work like VS Code's sidebar panes: every
+section's heading, with its count, stays on screen, the folded sections stack at the
+bottom, and the open ones share the space above them, each scrolling on its own. Drag the sidebar's right edge, or focus it and use
 the arrow keys, to make it 220 to 520 pixels wide; the width, like which of its sections are
 open, is remembered on this device.
 
@@ -180,33 +181,36 @@ future prompt after arbitrarily much newer content. These fixes apply to new inp
 backfill previously lost steering or historical answers. A crash without durable confirmation
 leaves the outcome unconfirmed, with no replay.
 
-## Background agent plugins
+## Plugins
 
 Prompting Time can host background agents, such as Whooper, as plugins. The Rust core installs,
 checks, starts, and stops them, and the window shows them.
 
-- **Screens.** Installed plugins sit pinned at the top of the sidebar, above its sections,
-  one compact row each: the name, which opens the plugin's page at its home route, `/`; Pause or
-  Resume (`pause`, `resume`), Start while it is stopped, and Poll now (`round`) as buttons; a ⋯
-  menu, opened by a click, with Stop, Settings, and Open logs, which open the plugin's screen on
-  those tabs; and its status in words and a dot, from its process and the `agent`
-  of its status format 2, such as "Running · next poll 3:45 PM" or, in red, "Missing gh". Resume
-  replaces Pause while the status says `paused`. The plugin's screen has the same words and
-  controls and the tabs Logs (the end of its log, with search and copy) and Settings (where it
-  came from, who runs it, the programs it needs, and its settings in a form drawn from its
-  settings schema, which the plugin checks and saves). Everything else the plugin shows, such as
-  its history, is on its page. Stop asks first and names the items whose dot says they run now.
-  With no plugin installed the pinned row offers to install one, and the palette always does:
+- **Screens.** Installed plugins sit in the Plugins section at the bottom of the sidebar, one
+  quiet row each: the name, which opens the plugin's page at its home route, `/`; its status in
+  words and a dot, from its process and the `agent` of its status format 2, such as "Running ·
+  next poll 3:45 PM" or, in red, "Missing gh"; and a ⋯ menu, opened by a click, with Poll now
+  (`round`), Pause or Resume (`pause`, `resume`; Resume while the status says `paused`), Stop or
+  Start, Settings, and Logs. While a plugin shows, the chat sidebar folds to a narrow rail, "»
+  Chats · N waiting on you" in words turned 90 degrees (without the count when no chat waits);
+  a click on the rail unfolds it and leaves the plugin in place until a chat is chosen. The
+  window's header then shows the plugin's name, its status words, and a ⋯ menu with the same
+  controls; Settings and Logs open in the main view as the tabs Logs (the end of its log, with
+  search and copy) and Settings (where it came from, who runs it, the programs it needs, and its
+  settings in a form drawn from its settings schema, which the plugin checks and saves), and
+  Open page in that menu goes back to the page. Everything else the plugin shows, such as its
+  history, is on its page. Stop asks first and names the items whose dot says they run now.
+  **Add plugin…**, always at the end of the Plugins section, and the palette install a plugin:
   from a release archive on this Mac, checked by its SHA-256, or by running a plugin folder in
   place, for development.
-- **Menu bar.** While a background agent is installed, Prompting Time puts a clock in the macOS menu
+- **Menu bar.** While a plugin is installed, Prompting Time puts a clock in the macOS menu
   bar, a template image that macOS draws in the menu bar's own color, with a dot at its top right
-  while an agent's row is red, its status lists a blocker, or it can't start. Its menu repeats the
-  pinned rows, from the same status in the same words: each agent's name, which opens its page;
+  while a plugin's row is red, its status lists a blocker, or it can't start. Its menu repeats the
+  Plugins section's rows, from the same status in the same words: each plugin's name, which opens its page;
   its status words; its Pause or Resume (Start while it is stopped) and Poll now; then how many
   items need you, which opens the first; then Open Prompting Time and Quit Prompting Time. It is
-  on by default; the palette's "Hide background agents from the menu bar" turns it off and "Show
-  background agents in the menu bar" back on, and this device remembers the choice.
+  on by default; the palette's "Hide plugins from the menu bar" turns it off and "Show
+  plugins in the menu bar" back on, and this device remembers the choice.
 
 - **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
   and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
@@ -265,18 +269,20 @@ checks, starts, and stops them, and the window shows them.
   its row's words and dot (`agent`), problems that stop every job (`blockers`), at most 50
   `items`, each in one of the declared groups, and optionally `paused`. Other top-level fields,
   such as what the plugin's page reads, are ignored. Group IDs are unique and lowercase-kebab,
-  and `item_actions` name declared actions. All work lists the blockers first under Needs you,
-  then the items of each group marked `needs_you`, one part per group, and each other group in a
-  section of its own, open unless `folded`, ordered by `order` with each group's items newest
-  first; Command-J steps through the blockers and those items, and the menu bar counts the items.
-  "Search work and chats" finds blockers by title and items in every group by title, detail, or
-  project folder; Escape clears it and Enter opens the first result. A row's ⋯ menu, opened by a
+  and `item_actions` name declared actions. The sidebar's Needs you is one list: the blockers
+  ("blocks every job"), then the items of each group marked `needs_you`, by the groups' `order`
+  and each group's items newest first, each showing its title, its group's title beside its dot,
+  and the plugin's name, then the chats waiting on you. Items in the other groups stay out of the
+  sidebar; they are the plugin's page's to show, and the palette's Work group still finds them.
+  Command-J steps through Needs you, and the menu bar counts the plugins' items in it. "Search
+  work and chats" finds blockers by title and Needs you items by title, detail, or project
+  folder; Escape clears it and Enter opens the first result. A row's ⋯ menu, opened by a
   click, lists the item's `actions` and runs the chosen one as `<command> --item <id>`, through
   the confirmation for an action marked `confirm`; a blocker's `action` runs with no extra
   arguments. An item or blocker that does not fit is left out, as are row actions the manifest
   does not allow. A click on an item or blocker, Command-J landing on one, or choosing one in the
-  palette opens the plugin's page at its `route`, keeping the page loaded from one row to the
-  next. When the item or blocker the page shows leaves Needs you, because the plugin's status
+  palette opens the plugin's page at its `route`, with the sidebar folded to its rail, keeping
+  the page loaded from one row to the next. When the item or blocker the page shows leaves Needs you, because the plugin's status
   moves it to another group or drops it, as after the user acts on it in the page, Prompting Time
   opens the next thing under Needs you in Command-J's order, or stays when nothing is left; an
   item opened from another group stays, as does any while its plugin's status can't be read.
