@@ -1438,7 +1438,7 @@ body {
   block-size: 0.875rem;
 }
 
-.work-entry:not(:hover, :focus-within, [aria-selected="true"]):not(:has([data-state="open"])) .work-entry-menu {
+.work-entry:not(:focus-within, [aria-selected="true"]):not(:has([data-state="open"])) .work-entry-menu {
   opacity: 0;
 }
 
