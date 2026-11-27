@@ -83,8 +83,8 @@ do the same.
 Use `?agents=1` for an invented Whooper in the Plugins section, running with its next poll at
 3:45 PM, whose status prints status format 2 as `whooper-status --json` does; combine it with
 `?work=1` for a full All work list. Clicking Whooper's name opens its page at `/` (see Whooper's
-reviews for the build it needs) and folds the sidebar to a rail on the left: "»" and "Chats", or
-"Chats · N waiting on you" with `?work=1`, turned 90 degrees. The header shows Whooper's name, its
+reviews for the build it needs) and folds the sidebar to a rail on the left: "»" and "All work", or
+"All work · N waiting on you" with `?work=1`, turned 90 degrees. The header shows Whooper's name, its
 status words, and a ⋯ menu (More) with its controls, Settings, and Logs; Settings and Logs open in
 the main view, and Open page in the same menu goes back to the page. Clicking the rail unfolds the
 sidebar and leaves Whooper's page in place; choosing a chat shows the chat. In Settings, change a

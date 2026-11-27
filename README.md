@@ -80,7 +80,7 @@ supported, with the inspector opening as an overlay when it would crowd the chat
 
 A single compact header holds the conversation title, provider, current status,
 and pane controls. **More → Archive conversation** keeps archival out of the main
-reading area. The sidebar starts with **Search work and chats**, **New chat**, and the
+reading area. The sidebar, **All work**, starts with **Search work and chats**, **New chat**, and the
 status filter; then **Needs you**, shown only while something needs you; then the chats;
 and at its bottom a small **Plugins** section with **Add plugin…**. New chat moves into
 the header when the sidebar is hidden or folded to its rail, and the palette's **Search**
@@ -191,8 +191,8 @@ checks, starts, and stops them, and the window shows them.
   words and a dot, from its process and the `agent` of its status format 2, such as "Running ·
   next poll 3:45 PM" or, in red, "Missing gh"; and a ⋯ menu, opened by a click, with Poll now
   (`round`), Pause or Resume (`pause`, `resume`; Resume while the status says `paused`), Stop or
-  Start, Settings, and Logs. While a plugin shows, the chat sidebar folds to a narrow rail, "»
-  Chats · N waiting on you" in words turned 90 degrees (without the count when no chat waits);
+  Start, Settings, and Logs. While a plugin shows, the All work sidebar folds to a narrow rail, "»
+  All work · N waiting on you" in words turned 90 degrees (without the count when no chat waits);
   a click on the rail unfolds it and leaves the plugin in place until a chat is chosen. The
   window's header then shows the plugin's name, its status words, and a ⋯ menu with the same
   controls; Settings and Logs open in the main view as the tabs Logs (the end of its log, with

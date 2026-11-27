@@ -218,7 +218,7 @@ describe("Whooper's reviews as status format 2 items", () => {
     expect(document.querySelector("iframe.plugin-frame")).toHaveAttribute("src", "pt-plugin://whooper/index.html");
     expect(screen.getByRole("heading", { level: 1, name: "Whooper" })).toBeInTheDocument();
     expect(selectedRow()).toBe("move the projection, Review failed · Whooper");
-    click(screen.getByRole("button", { name: "Chats" }));
+    click(screen.getByRole("button", { name: "All work" }));
 
     fireEvent.input(search, { target: { value: "auth" } });
     flush();
@@ -336,7 +336,7 @@ describe("the Plugins section", () => {
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     // The sidebar folds to its rail, so the header's menu is the plugin's only one on screen.
     expect(screen.queryByRole("complementary", { name: "All work" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Chats" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "All work" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("button", { name: "Whooper actions" })).not.toBeInTheDocument();
     expect(within(screen.getByRole("banner")).getByText(`Running · next poll ${shortTime(nextPoll())}`)).toBeInTheDocument();
 
@@ -354,7 +354,7 @@ describe("the Plugins section", () => {
     expect(await screen.findByTitle("Whooper's page")).toBeInTheDocument();
 
     // The rail unfolds the sidebar; the plugin stays until a chat is chosen.
-    click(screen.getByRole("button", { name: "Chats" }));
+    click(screen.getByRole("button", { name: "All work" }));
     expect(screen.getByRole("complementary", { name: "All work" })).toBeVisible();
     expect(rail()).toBeNull();
     expect(screen.getByTitle("Whooper's page")).toBeInTheDocument();
@@ -371,7 +371,7 @@ describe("the Plugins section", () => {
     api.listConversations = vi.fn().mockResolvedValue({ items: [waiting], nextCursor: null });
     renderApp(api);
     click(within(await screen.findByRole("region", { name: "Plugins" })).getByRole("button", { name: "Whooper" }));
-    expect(screen.getByRole("button", { name: "Chats · 1 waiting on you" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All work · 1 waiting on you" })).toBeInTheDocument();
     expect(rail()?.firstElementChild).toHaveTextContent("»");
   });
 

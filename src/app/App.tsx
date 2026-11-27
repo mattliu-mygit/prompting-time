@@ -147,10 +147,10 @@ export function App(props: { store: AppStore }) {
   ];
   /** The format-2 work the sidebar lists under Needs you: for all statuses and for waiting, none for the rest. */
   const sidebarPluginWork = (): StatusV2Work => (snapshot().statusFilter === "all" || snapshot().statusFilter === "waiting" ? pluginWork() : NO_STATUS_V2_WORK);
-  /** The rail's words: "Chats", and how many chats wait on you when any do. */
+  /** The rail's words: "All work", and how many chats wait on you when any do. */
   const railLabel = () => {
     const count = waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? [])).length;
-    return count > 0 ? `Chats · ${count} waiting on you` : "Chats";
+    return count > 0 ? `All work · ${count} waiting on you` : "All work";
   };
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
 
