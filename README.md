@@ -302,11 +302,11 @@ checks, starts, and stops them, and the window shows them.
   the plugin's draft comments under their lines, and a read check that folds the layer. The
   decision waits as Decide… until clicked or the end is reached, then sets Comment or Approve with
   `draft <run>` and submits through the confirmation. Diff shows the page under the same banner
-  and notice. Views, beside them and in Command-K, turns each view with data in the format on or
-  off for every review: Changes since you last looked, Calls before and after, Files that
-  usually change with these (`co_change`), and How the changed code connects (`connections`); a
-  view's summary shows only when the review has data for it. Two more views keep their names until
-  the format carries their data.
+  and notice. Views, beside them and in Command-K, turns each view on or off for every review:
+  Changes since you last looked, Example inputs, before and after (`examples`), Changes no test
+  would catch (`test_gaps`), Calls before and after, Files that usually change with these
+  (`co_change`), and How the changed code connects (`connections`); a view's summary shows only
+  when the review has data for it.
 - **How the changed code connects.** When `show-review` prints `connections`, the changed
   functions and types and the code that calls or uses them, as gopls found them or a search for
   the name did, the walkthrough sums them up where the layers start: how many change and how, the
@@ -319,6 +319,24 @@ checks, starts, and stops them, and the window shows them.
   at its line (the old file's line for a removed function), and lists its links. Under the map is
   what Whooper says it may miss (`limits`). Escape clears the selection, then goes back. Without
   `connections`, the view is hidden, also from Views.
+- **Changes no test would catch.** When `show-review` prints `test_gaps`, the changed lines that
+  Whooper's run of the tests found no test ran, each place to look names its own under it ("No
+  test ran 2 changed lines here: 39, 40"), labeled "Measured: no test ran these lines" with the
+  tool, and a short block after the places gives the counts in words and the lines elsewhere by
+  file. Open all lines shows the view in the walkthrough's place: the counts, each file's lines
+  with the label and its diff cut to them, marked in orange in the gutter, and what the measure may
+  miss (`limits`). A line with a status this version doesn't know shows with Whooper's word and no
+  mark, and never counts as not run. When the run couldn't measure, one quiet line says "Not
+  measured:" and why. j and k step through the files. Without `test_gaps`, the view is hidden,
+  also from Views.
+- **Example inputs, before and after.** When `show-review` prints `examples`, inputs Whooper ran
+  through the old and new code, one line under What this PR does names the inputs whose result
+  changed, and Open all inputs shows a table per function: each input, before, after, compared in
+  words (changed, in orange, same, varies between runs, or run failed), and how it ran ("Ran at
+  base and head", "Ran at head only", or "Not compared") with Whooper's note, the changed rows
+  first. Only a row that ran at both can say changed, and a row with a status or label this version
+  doesn't know is left out, so nothing predicted shows. j and k step through the inputs. Without
+  `examples`, the view is hidden, also from Views.
 - **Failed reviews.** Page protocol 1 shows only a review with findings, so a review the status
   lists as failed opens on Prompting Time's own screen instead of the page. It reads the run with
   `show-review <run>` and shows the pull request, the reason the plugin recorded (`failure`, or a
