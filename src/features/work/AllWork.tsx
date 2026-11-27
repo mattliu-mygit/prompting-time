@@ -5,6 +5,7 @@ import type { ConversationSummary, ProviderId } from "../../bridge/types";
 import { effectiveConversationStatus, type ChildPageSnapshot, type EffectiveStatus, type SelectedPath } from "../../app/store";
 import { readPreference, savePreference } from "../../app/preferences";
 import { blockerKey, itemKey, type PluginBlocker, type PluginGroup, type StatusV2Blocker, type StatusV2Item, type StatusV2Work } from "../agents/statusV2";
+import { blockerVersion, inFilter, isHidden, itemVersion, narrowWork, needsYouEntries, type HiddenEntry, type NeedsYouFilter } from "./needsYou";
 
 type Props = {
   /** Active roots in list order, already filtered by status. */
@@ -30,12 +31,23 @@ type Props = {
   onOpenEntry(plugin: string, key: string, route: string): void;
   /** A choice in a format-2 row's ⋯ menu: an item's action with `--item <id>`, a blocker's with no arguments. */
   onEntryAction(plugin: string, action: string, args: string[], label: string): void;
+  /** The Needs you entries the user hid; each stays out of Needs you and in its "Hidden" fold while it is there unchanged. */
+  hidden: readonly HiddenEntry[];
+  /** Hide in a Needs you row's ⋯ menu, with the row's title. */
+  onHide(entry: HiddenEntry, title: string): void;
+  /** Show again in the "Hidden" fold, by the entry's key. */
+  onShowAgain(key: string): void;
+  /** Which entries Needs you lists; search finds only those too. */
+  filter: NeedsYouFilter;
+  onFilter(filter: NeedsYouFilter): void;
+  /** A plugin's title, for its filter chip while it has nothing in Needs you. */
+  pluginTitle(plugin: string): string;
   onToggle(id: string): void;
   onLoadChildPage(id: string, restart: boolean): void;
 };
 export type WorkGroup = { key: string; label: string; path: string | null; conversations: ConversationSummary[] };
-/** A conversation; a search result shows its folder and no children (`found`). */
-type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number; found?: boolean };
+/** A conversation; a search result shows its folder and no children (`found`), and a root waiting on you under Needs you has a ⋯ menu with Hide (`hideable`). */
+type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number; found?: boolean; hideable?: boolean };
 /**
  * An item or a blocker of a plugin that prints status format 2. `reason` is why it needs you: its
  * Needs you group's title, such as "Run failed", or "blocks every job" for a blocker.
@@ -46,12 +58,20 @@ type Row = ConversationRow | EntryRow;
 type Entry = Row[];
 /** A labeled part of the search results, or a section's only, unlabeled part. */
 type Part = { key: string; label: string | null; entries: Entry[] };
-type Section = { key: string; label: string; title?: string; count: number; parts: Part[] };
+/** A filter chip above Needs you: its words, such as "Chats", and how many entries it lists. */
+type FilterChip = { value: NeedsYouFilter; label: string; count: number };
+/** A hidden entry in the "Hidden" fold: its title and the gray line its row had. */
+type HiddenRow = { key: string; title: string; meta: string };
+/** What Needs you adds to a section: its filter chips (none while one kind of entry is there), what it says when its filter lists nothing, and the hidden entries. */
+type NeedsYouParts = { chips: FilterChip[]; empty: string | null; hidden: HiddenRow[] };
+type Section = { key: string; label: string; title?: string; count: number; parts: Part[]; needsYou?: NeedsYouParts };
 
 /** The sections the user opened or folded, by key, which this device keeps across launches; the rest start folded except Needs you. */
 const SECTIONS_PREFERENCE = "prompting-time.sidebar-sections";
 
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
+/** Hide in a Needs you row's ⋯ menu, after the row's actions; theirs are `action:<name>`. */
+const HIDE_ITEM = { value: "hide", label: "Hide" };
 const statusText: Record<EffectiveStatus, string> = {
   idle: "ready", queued: "queued", running: "working", waiting: "waiting for you",
   completed: "completed", interrupted: "interrupted", failed: "failed",
@@ -104,6 +124,38 @@ export function searchWork(work: StatusV2Work, conversations: readonly Conversat
 
 const blockerEntries = (blockers: readonly PluginBlocker[]): Entry[] => blockers.map(({ plugin, pluginTitle, blocker }) => [{ kind: "entry", key: blockerKey(plugin, blocker.id), plugin, pluginTitle, reason: "blocks every job", entry: { blocker }, depth: 0 }]);
 const groupEntries = ({ plugin, pluginTitle, group, items }: PluginGroup): Entry[] => items.map((item) => [{ kind: "entry", key: itemKey(plugin, item.id), plugin, pluginTitle, reason: group.title, entry: { item }, depth: 0 }]);
+const entryTitle = (row: EntryRow) => ("item" in row.entry ? row.entry.item.title : row.entry.blocker.title);
+/** A chat row's gray line: its provider and status, after its folder in a search result (`found`), such as "Codex · waiting for you". */
+const chatMeta = (chat: ConversationSummary, found: boolean) => `${found ? `${chat.projectRoot ? folderName(chat.projectRoot) : "no folder"} · ` : ""}${chat.provider ? providerNames[chat.provider] : "No provider"} · ${conversationState(chat).words}`;
+
+/** What a filter chip says: "All", "Chats", or the plugin's title. */
+function filterLabel(filter: NeedsYouFilter, pluginTitle: (plugin: string) => string): string {
+  return filter === "all" ? "All" : filter === "chats" ? "Chats" : pluginTitle(filter.slice("plugin:".length));
+}
+
+/**
+ * The chips above Needs you: All, Chats, and one per plugin by title, each with how many entries it
+ * lists, none hidden. A source shows while it has entries, and the chosen one always. With one source and
+ * All chosen, a chip would only repeat the list, so there are none.
+ */
+function filterChips(entries: readonly { plugin: string | null; pluginTitle: string | null }[], filter: NeedsYouFilter, pluginTitle: (plugin: string) => string): FilterChip[] {
+  const counts = new Map<NeedsYouFilter, FilterChip>();
+  for (const { plugin, pluginTitle: title } of entries) {
+    const value: NeedsYouFilter = plugin === null ? "chats" : `plugin:${plugin}`;
+    const chip = counts.get(value) ?? { value, label: plugin === null ? "Chats" : title ?? plugin, count: 0 };
+    counts.set(value, { ...chip, count: chip.count + 1 });
+  }
+  if (filter !== "all" && !counts.has(filter)) counts.set(filter, { value: filter, label: filterLabel(filter, pluginTitle), count: 0 });
+  const sources = [...counts.values()].sort((left, right) => Number(right.value === "chats") - Number(left.value === "chats") || left.label.localeCompare(right.label));
+  if (sources.length < 2 && filter === "all") return [];
+  return [{ value: "all", label: "All", count: entries.length }, ...sources];
+}
+
+/** What Needs you says when its filter lists nothing, as when the user hid all of it. */
+function emptyText(filter: NeedsYouFilter, pluginTitle: (plugin: string) => string): string {
+  if (filter === "chats") return "No chat waits on you";
+  return filter === "all" ? "Nothing else needs you" : `Nothing from ${filterLabel(filter, pluginTitle)} needs you`;
+}
 
 function readOpenSections(): Record<string, boolean> {
   try {
@@ -123,9 +175,11 @@ function readOpenSections(): Record<string, boolean> {
  * section into that space or folds it back into the stack. "Needs you", shown only while something
  * needs you, is one list in Command-J's order: the blockers of the plugins that print status format
  * 2, the items of their groups marked `needs_you`, each saying why it needs you and its plugin's
- * name, and the roots waiting on you. Then the chats of each project and those without a folder,
- * each root followed by its loaded children, folded until opened. Each item or blocker row has a ⋯
- * menu of its actions.
+ * name, and the roots waiting on you. Chips above it choose all, the chats, or one plugin's, and
+ * every row's ⋯ menu has Hide, after an item's or blocker's actions; the hidden entries wait in a
+ * folded "Hidden · N" line at its end, each with Show again. Then the chats of each project and
+ * those without a folder, each root followed by its loaded children, folded until opened; a waiting
+ * root that is hidden or filtered out of Needs you shows with its project's.
  * The sections the user opens or folds stay so across launches. The rows are a tree for keyboard
  * users: arrow keys move and open rows across the open sections, Home and End jump, and Enter or
  * Space opens a conversation, an item, or a blocker.
@@ -143,6 +197,8 @@ export function AllWork(props: Props) {
   // open sections and the stack, which draws a new one, so the new heading takes the focus back.
   let refocus: string | null = null;
   let resultsBox: HTMLElement | undefined;
+  // Whether the "Hidden" fold at the end of Needs you is open; it starts folded.
+  const [hiddenOpen, setHiddenOpen] = createSignal(false);
 
   function toggleSection(key: string, heading: HTMLElement) {
     if (document.activeElement === heading) refocus = key;
@@ -172,13 +228,31 @@ export function AllWork(props: Props) {
         return entries;
       }, []);
     };
-    const groups = groupWork(props.conversations);
-    const waitingChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
+    const filter = props.filter;
+    const hidden = props.hidden;
+    const chatHidden = (chat: ConversationSummary) => isHidden(hidden, chat.id, "");
+    // A waiting root the filter leaves out or the user hid shows with its project's chats.
+    const groups = groupWork(props.conversations, (chat) => inFilter(filter, null) && !chatHidden(chat));
+    const waitingChats = waitingRoots(props.conversations);
     const work = props.pluginWork;
-    const needsYou = [...blockerEntries(work.blockers), ...work.needsYou.flatMap(groupEntries), ...chatEntries(waitingChats)];
-    const single = (key: string, entries: Entry[]): Part[] => [{ key, label: null, entries }];
+    const entries = needsYouEntries(work, waitingChats);
+    const unhidden = entries.filter(({ key, version }) => !isHidden(hidden, key, version));
+    const shownWork = narrowWork(work, hidden, filter);
+    const shownChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
+    const needsYou = [...blockerEntries(shownWork.blockers), ...shownWork.needsYou.flatMap(groupEntries),
+      ...chatEntries(shownChats).map((entry) => entry.map((row) => (row.kind === "conversation" && row.depth === 0 ? { ...row, hideable: true } : row)))];
+    const single = (key: string, entries: Entry[]): Part[] => (entries.length > 0 ? [{ key, label: null, entries }] : []);
+    const hiddenRows: HiddenRow[] = [
+      ...blockerEntries(work.blockers.filter(({ plugin, blocker }) => isHidden(hidden, blockerKey(plugin, blocker.id), blockerVersion(blocker)))),
+      ...work.needsYou.flatMap((group) => groupEntries({ ...group, items: group.items.filter((item) => isHidden(hidden, itemKey(group.plugin, item.id), itemVersion(item))) })),
+    ].flatMap(([row]) => (row?.kind === "entry" && inFilter(filter, row.plugin) ? [{ key: row.key, title: entryTitle(row), meta: `${row.reason} · ${row.pluginTitle}` }] : []))
+      .concat(inFilter(filter, null) ? waitingChats.filter(chatHidden).map((chat) => ({ key: chat.id, title: chat.title, meta: chatMeta(chat, false) })) : []);
+    const anyHidden = entries.length > unhidden.length;
     return [
-      ...(needsYou.length > 0 ? [{ key: "needs-you", label: "Needs you", count: needsYou.length, parts: single("needs-you", needsYou) }] : []),
+      ...(unhidden.length > 0 || anyHidden ? [{
+        key: "needs-you", label: "Needs you", count: unhidden.length, parts: single("needs-you", needsYou),
+        needsYou: { chips: filterChips(unhidden, filter, props.pluginTitle), empty: needsYou.length > 0 ? null : emptyText(filter, props.pluginTitle), hidden: hiddenRows },
+      }] : []),
       ...groups.filter((group) => group.key !== "needs-you").map((group): Section => {
         const key = `chats:${group.path ?? "no-folder"}`;
         return { key, label: `Chats · ${group.label}`, title: group.path ?? undefined, count: group.conversations.length, parts: single(key, chatEntries(group.conversations)) };
@@ -187,10 +261,10 @@ export function AllWork(props: Props) {
   });
 
   const searching = () => searchTokens(props.query).length > 0;
-  /** While searching, the results as parts: the blockers and items under Needs you, then the chats. */
+  /** While searching, the results as parts: the blockers and items under Needs you, then the chats; only those the filter lists, and none the user hid. */
   const results = createMemo((): Part[] => {
     if (!searching()) return [];
-    const { blockers, groups, chats } = searchWork(props.pluginWork, props.conversations, props.query);
+    const { blockers, groups, chats } = searchWork(narrowWork(props.pluginWork, props.hidden, props.filter), inFilter(props.filter, null) ? props.conversations : [], props.query);
     const work = [...blockerEntries(blockers), ...groups.flatMap(groupEntries)];
     return [
       ...(work.length > 0 ? [{ key: "found:needs-you", label: "Needs you", entries: work }] : []),
@@ -279,12 +353,16 @@ export function AllWork(props: Props) {
         const entry = current().entry;
         return "blocker" in entry ? entry.blocker : null;
       };
-      const title = () => item()?.title ?? blocker()?.title ?? "";
+      const title = () => entryTitle(current());
       // Why it needs you, beside its dot, then its plugin's name.
       const meta = () => `${current().reason} · ${current().pluginTitle}`;
       const menuItems = () => {
         const names = item()?.actions ?? (blocker()?.action ? [blocker()!.action!] : []);
-        return names.map((name) => ({ value: name, label: props.actionTitle(current().plugin, name) }));
+        return [...names.map((name) => ({ value: `action:${name}`, label: props.actionTitle(current().plugin, name) })), HIDE_ITEM];
+      };
+      const version = () => {
+        const shown = item();
+        return shown ? itemVersion(shown) : blockerVersion(blocker()!);
       };
       const isBlocker = "blocker" in first.entry;
       return (
@@ -300,20 +378,19 @@ export function AllWork(props: Props) {
           status={item()?.dot ?? blocker()?.dot ?? "idle"}
           meta={meta()}
           trailing={
-            <Show when={menuItems().length > 0}>
-              {/* The menu opens on a click and runs the choice; neither opens the row. */}
-              <span class="work-entry-menu" onClick={(event) => event.stopPropagation()}>
-                <Menu
-                  label={`Actions for ${title()}`}
-                  icon={<EllipsisIcon />}
-                  items={menuItems()}
-                  onSelect={(action) => {
-                    const shown = item();
-                    props.onEntryAction(current().plugin, action, shown ? ["--item", shown.id] : [], title());
-                  }}
-                />
-              </span>
-            </Show>
+            // The menu opens on a click and runs the choice; neither opens the row.
+            <span class="work-entry-menu" onClick={(event) => event.stopPropagation()}>
+              <Menu
+                label={`Actions for ${title()}`}
+                icon={<EllipsisIcon />}
+                items={menuItems()}
+                onSelect={(value) => {
+                  if (value === HIDE_ITEM.value) return props.onHide({ key: first.key, plugin: current().plugin, version: version() }, title());
+                  const shown = item();
+                  props.onEntryAction(current().plugin, value.slice("action:".length), shown ? ["--item", shown.id] : [], title());
+                }}
+              />
+            </span>
           }
           onClick={() => open(current())}
         />
@@ -323,12 +400,12 @@ export function AllWork(props: Props) {
     const id = first.key;
     const conversation = () => (row() as ConversationRow).conversation;
     const state = () => conversationState(conversation());
-    const provider = () => (conversation().provider ? providerNames[conversation().provider!] : "No provider");
     const found = first.kind === "conversation" && first.found === true;
+    const hideable = first.kind === "conversation" && first.hideable === true;
     const expanded = () => !found && props.expandedById[id] === true;
     const page = () => props.childPagesById[id];
     const expandable = () => !found && (conversation().hasChildren || page() !== undefined);
-    const meta = () => `${found ? `${conversation().projectRoot ? folderName(conversation().projectRoot!) : "no folder"} · ` : ""}${provider()} · ${state().words}`;
+    const meta = () => chatMeta(conversation(), found);
     return (
       <ListRow
         {...treeItem(id, row)}
@@ -343,6 +420,12 @@ export function AllWork(props: Props) {
         status={state().status}
         meta={meta()}
         trailing={
+          <>
+          <Show when={hideable}>
+            <span class="work-entry-menu" onClick={(event) => event.stopPropagation()}>
+              <Menu label={`Actions for ${conversation().title}`} icon={<EllipsisIcon />} items={[HIDE_ITEM]} onSelect={() => props.onHide({ key: id, plugin: null, version: "" }, conversation().title)} />
+            </span>
+          </Show>
           <Show when={expandable()}>
             <button
               type="button"
@@ -357,6 +440,7 @@ export function AllWork(props: Props) {
               {expanded() ? <ChevronDownIcon /> : <ChevronRightIcon />}
             </button>
           </Show>
+          </>
         }
         onClick={() => props.onSelect(id)}
       >
@@ -410,6 +494,51 @@ export function AllWork(props: Props) {
   }
 
   const resultCount = () => results().reduce((sum, part) => sum + part.entries.length, 0);
+  /** Where search looks, after its count while a filter is chosen: " in Chats" or " in <plugin>". */
+  const searchScope = () => (props.filter === "all" ? "" : ` in ${filterLabel(props.filter, props.pluginTitle)}`);
+
+  /** The chips that choose which entries Needs you lists, each with its count; a click chooses one. */
+  function filterRow(chips: () => FilterChip[]) {
+    return (
+      <div class="work-filters" role="group" aria-label="Show in Needs you">
+        <For each={chips()} keyed={(chip) => chip.value}>
+          {(chip) => (
+            <button type="button" class="work-filter" aria-pressed={props.filter === chip().value ? "true" : "false"} onClick={() => props.onFilter(chip().value)}>
+              {chip().label} <span class="work-filter-count">{chip().count}</span>
+            </button>
+          )}
+        </For>
+      </div>
+    );
+  }
+
+  /** "Hidden · N", folded at the end of Needs you; a click opens the hidden entries, each with Show again. */
+  function hiddenFold(rows: () => HiddenRow[]) {
+    const listId = createUniqueId();
+    return (
+      <div class="work-hidden">
+        <button type="button" class="work-hidden-toggle" aria-expanded={hiddenOpen() ? "true" : "false"} aria-controls={listId} onClick={() => setHiddenOpen((open) => !open)}>
+          {hiddenOpen() ? <ChevronDownIcon /> : <ChevronRightIcon />}
+          Hidden · {rows().length}
+        </button>
+        <Show when={hiddenOpen()}>
+          <ul id={listId} class="work-hidden-list" aria-label="Hidden">
+            <For each={rows()} keyed={(row) => row.key}>
+              {(row) => (
+                <li class="work-hidden-row">
+                  <span class="work-hidden-text">
+                    <span class="work-hidden-title">{row().title}</span>
+                    <span class="work-hidden-meta">{row().meta}</span>
+                  </span>
+                  <button type="button" class="pt-button" aria-label={`Show ${row().title} again`} onClick={() => props.onShowAgain(row().key)}>Show again</button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </div>
+    );
+  }
 
   return (
     <div class="all-work">
@@ -421,7 +550,7 @@ export function AllWork(props: Props) {
             resultsBox = element;
           }}
         >
-          <p class="work-empty" role="status">{resultCount() === 0 ? "Nothing matches" : `${resultCount()} ${resultCount() === 1 ? "result" : "results"}`} · Esc clears</p>
+          <p class="work-empty" role="status">{resultCount() === 0 ? "Nothing matches" : `${resultCount()} ${resultCount() === 1 ? "result" : "results"}`}{searchScope()} · Esc clears</p>
           <For each={results()} keyed={(part) => part.key}>
             {(part) => {
               const partId = createUniqueId();
@@ -446,6 +575,7 @@ export function AllWork(props: Props) {
                 <section class="work-section">
                   {heading(section, labelId, true)}
                   <div class="work-section-body">
+                    <Show when={section().needsYou?.chips.length}>{filterRow(() => section().needsYou!.chips)}</Show>
                     <For each={section().parts} keyed={(part) => part.key}>
                       {(part) => {
                         const partId = createUniqueId();
@@ -461,6 +591,8 @@ export function AllWork(props: Props) {
                         );
                       }}
                     </For>
+                    <Show when={section().needsYou?.empty}>{(text) => <p class="work-empty">{text()}</p>}</Show>
+                    <Show when={section().needsYou?.hidden.length}>{hiddenFold(() => section().needsYou!.hidden)}</Show>
                   </div>
                 </section>
               );
@@ -485,13 +617,14 @@ export function waitingRoots(conversations: readonly ConversationSummary[]): Con
 }
 
 /**
- * "Needs you" first, holding every root waiting on you (a root also waits when a descendant does),
- * then one group per project, sorted by name, then conversations without a folder. A root shows in
- * one group only.
+ * "Needs you" first, holding every root waiting on you (a root also waits when a descendant does)
+ * that `inNeedsYou` keeps there, then one group per project, sorted by name, then conversations
+ * without a folder. A root shows in one group only; a waiting root left out of Needs you, as one the
+ * user hid, shows in its project's.
  */
-export function groupWork(conversations: readonly ConversationSummary[]): WorkGroup[] {
+export function groupWork(conversations: readonly ConversationSummary[], inNeedsYou: (conversation: ConversationSummary) => boolean = () => true): WorkGroup[] {
   const active = conversations.filter((conversation) => !conversation.archived);
-  const needsYou: WorkGroup = { key: "needs-you", label: "Needs you", path: null, conversations: waitingRoots(active) };
+  const needsYou: WorkGroup = { key: "needs-you", label: "Needs you", path: null, conversations: waitingRoots(active).filter(inNeedsYou) };
   const waiting = new Set(needsYou.conversations);
   const projects = new Map<string, WorkGroup>();
   const projectless: WorkGroup = { key: "projectless", label: "no folder", path: null, conversations: [] };

@@ -17,6 +17,7 @@ import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
 import { AllWork, conversationState, searchWork, waitingRoots } from "../features/work/AllWork";
+import { inFilter, isHidden, keepHidden, narrowWork, needsYouEntries, readFilter, readHidden, saveFilter, saveHidden, type HiddenEntry, type NeedsYouEntry, type NeedsYouFilter } from "../features/work/needsYou";
 import { NewConversationDialog } from "./NewConversationDialog";
 import { readSidebarWidth, SidebarResizer } from "./SidebarResizer";
 import { createSnapshot, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
@@ -34,8 +35,8 @@ const statusOptions: Array<{ value: StatusFilter; label: string }> = [
 const providerNames: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
 const NARROW_INSPECTOR = "(max-width: 72rem)";
 
-/** A short note at the bottom of the window about what a row action did; an alert when it failed. */
-type Notice = { text: string; alert?: boolean };
+/** A short note at the bottom of the window about what a row action did, an alert when it failed, with Undo when it can be undone. */
+type Notice = { text: string; alert?: boolean; undo?: () => void };
 const NOTICE_MS = 8000;
 
 /**
@@ -107,8 +108,24 @@ export function App(props: { store: AppStore }) {
   };
   /** What plugins that print status format 2 add to All work: blockers, and items in their declared groups. */
   const pluginWork = createMemo(() => statusV2Work(snapshot().plugins));
-  /** The items of format-2 Needs you groups, in list order, each with what a notice names it. */
-  const needsYouItems = () => pluginWork().needsYou.flatMap(({ plugin, items }) => items.map((item) => ({ key: itemKey(plugin, item.id), label: item.title, open: () => openEntry(plugin, itemKey(plugin, item.id), item.route) })));
+  /** The Needs you entries this device hides, until each changes or leaves Needs you. */
+  const [hidden, setHidden] = createSignal<readonly HiddenEntry[]>(readHidden());
+  /** Which entries the sidebar's Needs you lists, as this device chose. */
+  const [chosenFilter, setChosenFilter] = createSignal<NeedsYouFilter>(readFilter());
+  /** The chosen filter, or all when it names a plugin that no longer prints status format 2. */
+  const filter = (): NeedsYouFilter => {
+    const chosen = chosenFilter();
+    return chosen.startsWith("plugin:") && !snapshot().plugins.items.some(({ name, status }) => `plugin:${name}` === chosen && status?.format === 2) ? "all" : chosen;
+  };
+  /** Every root waiting on you, whatever the sidebar's status filter shows. */
+  const waitingChats = () => waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []));
+  /** Everything under Needs you in Command-J's order, hidden entries included. */
+  const needsYou = createMemo(() => needsYouEntries(pluginWork(), waitingChats()));
+  /** What needs you less what the user hid: what the menu bar counts and auto-advance watches. */
+  const unhidden = createMemo(() => needsYou().filter(({ key, version }) => !isHidden(hidden(), key, version)));
+  const openNeedsYou = (entry: NeedsYouEntry) => (entry.plugin === null ? selectConversation(entry.key) : openEntry(entry.plugin, entry.key, entry.route!));
+  /** The format-2 items under Needs you that the user didn't hide, in list order: the menu bar counts them and opens the first. */
+  const needsYouItems = () => unhidden().filter(({ kind }) => kind === "item");
   // The menu bar extra shows what the Plugins section and Needs you show, and changes with them.
   createEffect(() => menuBarRequest(snapshot().plugins, agentPending(), needsYouItems().length, menuBarEnabled()), (request) => store.updateMenuBar(request));
   /** The key of what the list shows as selected: the item or blocker the page shows, or the conversation when no plugin shows. */
@@ -127,13 +144,8 @@ export function App(props: { store: AppStore }) {
   const lifecycleModalOpen = () => creating() || archiveTarget() !== null || installTarget() !== null || entryConfirmation() !== null;
   const paletteAvailable = () => snapshot().phase === "ready" && !overlay() && !lifecycleModalOpen() && !composerModalOpen();
   const workspaceLabel = () => (pluginView() && selectedPlugin() ? "Plugin" : "Conversation workspace");
-  /** Everything under "Needs you", in list order: format-2 blockers and items, then the conversations waiting on you. */
-  const waiting = () => [
-    ...pluginWork().blockers.map(({ plugin, blocker }) => ({ key: blockerKey(plugin, blocker.id), label: blocker.title, open: () => openEntry(plugin, blockerKey(plugin, blocker.id), blocker.route) })),
-    ...needsYouItems(),
-    ...waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []))
-      .map(({ id, title }) => ({ key: id, label: title, open: () => selectConversation(id) })),
-  ];
+  /** What Needs you lists, in list order: format-2 blockers and items, then the conversations waiting on you; none hidden, only what the filter lists. Command-J steps through it. */
+  const waiting = () => unhidden().filter(({ plugin }) => inFilter(filter(), plugin));
   /** Every format-2 blocker and item, in list order, as the palette's Work group finds and opens them. */
   const paletteWork = () => [
     ...pluginWork().blockers.map(({ plugin, pluginTitle, blocker }) => ({
@@ -149,7 +161,7 @@ export function App(props: { store: AppStore }) {
   const sidebarPluginWork = (): StatusV2Work => (snapshot().statusFilter === "all" || snapshot().statusFilter === "waiting" ? pluginWork() : NO_STATUS_V2_WORK);
   /** The rail's words: "All work", and how many chats wait on you when any do. */
   const railLabel = () => {
-    const count = waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? [])).length;
+    const count = unhidden().filter(({ kind }) => kind === "chat").length;
     return count > 0 ? `All work · ${count} waiting on you` : "All work";
   };
   const filterLabel = () => `Filter conversations: ${statusOptions.find((option) => option.value === snapshot().statusFilter)?.label}`;
@@ -174,19 +186,54 @@ export function App(props: { store: AppStore }) {
   /** The plugin's row in the sidebar, its name in the menu bar, or Open page in the header's ⋯ menu: its page at its home route. */
   const openHome = (plugin: string) => showPlugin({ kind: "page", plugin, entry: null, target: { route: "/" } });
 
-  // When the item or blocker the page shows leaves Needs you, as after the user acts on it there,
-  // open the next thing waiting on you: the first after it in Command-J's order that is still
-  // there, else the first there is. With nothing left, stay. A plugin whose status can't be read
-  // lists nothing for the moment, which doesn't count as leaving.
-  createEffect(waiting, (now, before) => untrack(() => {
+  // When the item or blocker the page shows leaves Needs you, as after the user acts on it there or
+  // hides it, open the next thing Needs you lists: the first after it in Command-J's order that is
+  // still there, else the first there is. With nothing left, stay. A plugin whose status can't be
+  // read lists nothing for the moment, which doesn't count as leaving, and choosing a filter isn't
+  // leaving either.
+  createEffect(unhidden, (now, before) => untrack(() => {
     const view = pluginView();
     if (view?.kind !== "page" || view.entry === null || !before || now.some(({ key }) => key === view.entry)) return;
     const index = before.findIndex(({ key }) => key === view.entry);
     const plugin = pluginNamed(view.plugin);
     if (index === -1 || !plugin || !readStatusV2(plugin, snapshot().plugins.statuses[plugin.name])) return;
-    const nextKey = [...before.slice(index + 1), ...before.slice(0, index)].find(({ key }) => now.some((entry) => entry.key === key))?.key;
-    (now.find(({ key }) => key === nextKey) ?? now[0])?.open();
+    const listed = now.filter(({ plugin: source }) => inFilter(filter(), source));
+    const nextKey = [...before.slice(index + 1), ...before.slice(0, index)].find(({ key }) => listed.some((entry) => entry.key === key))?.key;
+    const next = listed.find(({ key }) => key === nextKey) ?? listed[0];
+    if (next) openNeedsYou(next);
   }));
+
+  // An entry the user hid stays hidden while it is in Needs you unchanged; once it changes or leaves,
+  // this device forgets it, so it shows the next time it needs you. A chat Prompting Time hasn't
+  // loaded, or a plugin whose status it can't read now, can't be checked, so its entries stay hidden.
+  createEffect(() => keepHidden(hidden(), needsYou(), (entry) => {
+    if (entry.plugin === null) return snapshot().conversationsById[entry.key] !== undefined;
+    const plugin = pluginNamed(entry.plugin);
+    return plugin !== null && readStatusV2(plugin, snapshot().plugins.statuses[plugin.name]) !== null;
+  }), (kept) => {
+    if (kept.length !== untrack(hidden).length) changeHidden(kept);
+  });
+
+  function changeHidden(next: readonly HiddenEntry[]) {
+    setHidden(next);
+    saveHidden(next);
+  }
+
+  /** Hide in a Needs you row's menu: the entry leaves Needs you, and a notice offers Undo. */
+  function hide(entry: HiddenEntry, title: string) {
+    const next = [...hidden().filter(({ key }) => key !== entry.key), entry];
+    changeHidden(next);
+    notify({ text: `Hidden ${title}`, undo: () => showAgain(entry.key) });
+  }
+
+  function showAgain(key: string) {
+    changeHidden(hidden().filter((entry) => entry.key !== key));
+  }
+
+  function chooseFilter(next: NeedsYouFilter) {
+    setChosenFilter(next);
+    saveFilter(next);
+  }
 
   /**
    * Runs one of a plugin's controls from its row's ⋯ menu, the header's, or the menu bar: Poll now, Pause, and Resume
@@ -219,7 +266,10 @@ export function App(props: { store: AppStore }) {
   function runMenuBarCommand(command: MenuBarCommand) {
     if (command.kind === "agent") void runAgentAction(command.plugin, command.action);
     else if (command.kind === "openAgent") openHome(command.plugin);
-    else needsYouItems()[0]?.open();
+    else {
+      const first = needsYouItems()[0];
+      if (first) openNeedsYou(first);
+    }
   }
 
   /**
@@ -273,7 +323,7 @@ export function App(props: { store: AppStore }) {
     if (items.length === 0) return;
     const index = items.findIndex(({ key }) => key === currentKey());
     const next = items[(index + 1) % items.length]!;
-    if (next.key !== currentKey()) next.open();
+    if (next.key !== currentKey()) openNeedsYou(next);
   }
 
   function openNewConversation() {
@@ -413,7 +463,7 @@ export function App(props: { store: AppStore }) {
       setQuery("");
     } else if (event.key === "Enter" && query().trim() !== "") {
       event.preventDefault();
-      const { blockers, groups, chats } = searchWork(sidebarPluginWork(), selectVisibleConversations(snapshot()), query());
+      const { blockers, groups, chats } = searchWork(narrowWork(sidebarPluginWork(), hidden(), filter()), inFilter(filter(), null) ? selectVisibleConversations(snapshot()) : [], query());
       const blocker = blockers[0];
       const group = groups[0];
       const item = group?.items[0];
@@ -538,6 +588,12 @@ export function App(props: { store: AppStore }) {
                 actionTitle={(plugin, action) => pluginNamed(plugin)?.actions.find((item) => item.name === action)?.title ?? action}
                 onOpenEntry={openEntry}
                 onEntryAction={(plugin, action, args, label) => void runEntryAction(plugin, action, args, label)}
+                hidden={hidden()}
+                onHide={hide}
+                onShowAgain={showAgain}
+                filter={filter()}
+                onFilter={chooseFilter}
+                pluginTitle={(plugin) => pluginNamed(plugin)?.title ?? plugin}
                 conversations={selectVisibleConversations(snapshot())}
                 conversationsById={snapshot().conversationsById}
                 childPagesById={snapshot().childPagesById}
@@ -638,6 +694,14 @@ export function App(props: { store: AppStore }) {
           {(current: Notice) => (
             <div class={["app-notice", { "app-notice-alert": current.alert }]} role={current.alert ? "alert" : "status"}>
               <span>{current.text}</span>
+              <Show when={current.undo}>
+                {(undo) => (
+                  <button type="button" class="pt-button" onClick={() => {
+                    undo()();
+                    notify(null);
+                  }}>Undo</button>
+                )}
+              </Show>
               <IconButton label="Dismiss" onClick={() => notify(null)}><CloseIcon /></IconButton>
             </div>
           )}

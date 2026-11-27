@@ -184,6 +184,43 @@ describe("All work and ⌘J", () => {
     expect(reveal.mock.contexts.at(-1)).toBe(screen.getByRole("treeitem", { name: "Evaluation rows, Codex, waiting for you" }));
   });
 
+  it("hides a chat waiting on you until it stops waiting: ⌘J skips it, Undo brings it back, and this device remembers it", async () => {
+    const { store, unmount } = renderApp(waitingApi());
+    const needsYou = await screen.findByRole("tree", { name: "Needs you" });
+    fireEvent.click(within(needsYou).getByRole("button", { name: "Actions for Evaluation rows" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Hide" }));
+    await waitFor(() => expect(document.querySelector(".app-notice")).toHaveTextContent("Hidden Evaluation rows"));
+    flush();
+    expect(within(needsYou).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual(["Tag names, Codex, waiting for you"]);
+    expect(JSON.parse(window.localStorage.getItem("prompting-time.needs-you-hidden")!)).toEqual([{ key: "first", plugin: null, version: "" }]);
+    press("j");
+    await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("second"));
+    press("j");
+    await settle();
+    expect(store.getSnapshot().selectedConversationId).toBe("second");
+
+    click(within(document.querySelector<HTMLElement>(".app-notice")!).getByRole("button", { name: "Undo" }));
+    expect(within(needsYou).getAllByRole("treeitem")).toHaveLength(2);
+    expect(document.querySelector(".app-notice")).toBeNull();
+
+    fireEvent.click(within(needsYou).getByRole("button", { name: "Actions for Evaluation rows" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Hide" }));
+    await waitFor(() => expect(within(needsYou).getAllByRole("treeitem")).toHaveLength(1));
+    unmount();
+    renderApp(waitingApi());
+    expect(within(await screen.findByRole("tree", { name: "Needs you" })).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual(["Tag names, Codex, waiting for you"]);
+    expect(screen.getByRole("button", { name: "Hidden · 1" })).toBeInTheDocument();
+  });
+
+  it("forgets a hidden chat once it no longer waits, so it shows the next time it waits", async () => {
+    window.localStorage.setItem("prompting-time.needs-you-hidden", JSON.stringify([{ key: "first", plugin: null, version: "" }, { key: "gone", plugin: null, version: "" }]));
+    const answered = createdConversation({ id: "first", title: "Evaluation rows", provider: "codex", runStatus: "completed", rollupStatus: "completed", currentRunId: "run-first" });
+    renderApp(createApi({ listConversations: vi.fn().mockResolvedValue({ items: [answered], nextCursor: null }) }));
+    await screen.findByRole("treeitem", { name: /^Evaluation rows/ });
+    // A chat Prompting Time hasn't loaded can't be checked, so it stays hidden.
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("prompting-time.needs-you-hidden")!)).toEqual([{ key: "gone", plugin: null, version: "" }]));
+  });
+
   it("does nothing on ⌘J when nothing waits on you", async () => {
     const { store } = renderApp(createApi());
     await screen.findByRole("treeitem", { name: /Auth refactor/ });
@@ -667,6 +704,74 @@ describe("status format 2", () => {
     expect(selected()).toMatch(new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`));
   });
 
+  it("hides a Needs you item until it changes, skipping it with Command-J and in the menu bar's count", async () => {
+    const status = fixtureV2Status();
+    const { api, emit, lastRequest } = v2Api(() => actionResult({ stdout: JSON.stringify(status) }));
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: `Actions for ${failedTitle}` }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Hide" }));
+    await waitFor(() => expect(document.querySelector(".app-notice")).toHaveTextContent(`Hidden ${failedTitle}`));
+    flush();
+    expect(screen.queryByRole("treeitem", { name: new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`) })).not.toBeInTheDocument();
+    await waitFor(() => expect(lastRequest()).toMatchObject({ needsYou: 1 }));
+    press("j");
+    expect(selected()).toMatch(/^Codex is signed out/);
+    press("j");
+    expect(selected()).toMatch(/^Tighten upload retries/);
+    press("j");
+    expect(selected()).toMatch(/^Codex is signed out/);
+
+    // The plugin updates the run, so it needs a new look.
+    status.items = status.items.map((item) => (item.id === "run-74c91b1d" ? { ...item, updated_at: "2026-11-27T09:00:00Z" } : item));
+    emit({ kind: "pluginChanged", sequence: "1", plugin: "fixture-runs", files: ["runs/run-74c91b1d/run.json"] });
+    await settle();
+    await settle();
+    click(rail()!);
+    await screen.findByRole("treeitem", { name: new RegExp(`^${failedTitle.replaceAll(".", "\\.")}`) });
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("prompting-time.needs-you-hidden")!)).toEqual([]));
+    await waitFor(() => expect(lastRequest()).toMatchObject({ needsYou: 2 }));
+  });
+
+  it("filters Needs you to the chats or one plugin, remembered on this device, with Command-J and search keeping to the filter", async () => {
+    const chat = createdConversation({ id: "first", title: "Evaluation rows", provider: "codex", runStatus: "waiting", rollupStatus: "needsAttention", currentRunId: "run-first" });
+    const conversations = { listConversations: vi.fn().mockResolvedValue({ items: [chat], nextCursor: null }) };
+    const { api } = v2Api(undefined, conversations);
+    const { store, unmount } = renderApp(api);
+    await screen.findByRole("treeitem", { name: /^Codex is signed out/ });
+    const filters = () => screen.getByRole("group", { name: "Show in Needs you" });
+    expect(within(filters()).getAllByRole("button").map((chip) => chip.textContent)).toEqual(["All 4", "Chats 1", "Fixture runs 3"]);
+
+    click(within(filters()).getByRole("button", { name: "Chats 1" }));
+    expect(window.localStorage.getItem("prompting-time.needs-you-filter")).toBe("chats");
+    expect(within(screen.getByRole("tree", { name: "Needs you" })).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual(["Evaluation rows, Codex, waiting for you"]);
+    press("j");
+    await waitFor(() => expect(store.getSnapshot().selectedConversationId).toBe("first"));
+    press("j");
+    await settle();
+    expect(screen.queryByRole("main", { name: "Plugin" })).not.toBeInTheDocument();
+
+    // Search finds only what the filter lists: under Chats, no run.
+    const search = screen.getByRole("searchbox", { name: "Search work and chats" });
+    fireEvent.input(search, { target: { value: "retries" } });
+    flush();
+    expect(screen.getByRole("region", { name: "Search results" })).toHaveTextContent("Nothing matches in Chats · Esc clears");
+    fireEvent.keyDown(search, { key: "Enter" });
+    flush();
+    expect(screen.queryByRole("main", { name: "Plugin" })).not.toBeInTheDocument();
+    fireEvent.keyDown(search, { key: "Escape" });
+    flush();
+
+    unmount();
+    renderApp(v2Api(undefined, conversations).api);
+    await screen.findByRole("treeitem", { name: /^Evaluation rows/ });
+    expect(within(filters()).getByRole("button", { name: "Chats 1" })).toHaveAttribute("aria-pressed", "true");
+    click(within(filters()).getByRole("button", { name: "Fixture runs 3" }));
+    // The chat the filter leaves out is with its folder's chats.
+    expect(within(screen.getByRole("tree", { name: "Chats · synthetic-project" })).getByRole("treeitem", { name: /^Evaluation rows/ })).toBeInTheDocument();
+    press("j");
+    expect(selected()).toMatch(/^Codex is signed out/);
+  });
+
   it("runs a row's action with --item and the item's id, and one marked confirm only after the confirmation", async () => {
     const { api, pluginRequest } = v2Api();
     renderApp(api);
@@ -765,6 +870,17 @@ describe("status format 2", () => {
       await changed(emit, "2");
       await waitFor(() => expect(selected()).toMatch(/^Codex is signed out/));
       expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/providers" }, "*");
+    });
+
+    it("opens the next Needs you item when the user hides the one the page shows", async () => {
+      const { api } = changingApi({ items: [failed, review, running] });
+      renderApp(api);
+      const page = await openPage(/^Review this stack of PRs/);
+      click(rail()!);
+      fireEvent.click(screen.getByRole("button", { name: `Actions for ${String(failed!.title)}` }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Hide" }));
+      await waitFor(() => expect(selected()).toMatch(/^Tighten upload retries/));
+      expect(page.posted).toHaveBeenLastCalledWith({ version: 2, type: "open", route: "/runs/run-review-2" }, "*");
     });
 
     it("stays for an item opened from another group, and when nothing is left in Needs you", async () => {

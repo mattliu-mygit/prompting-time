@@ -7,6 +7,7 @@ import { axeViolations, render, settle } from "../../test/render";
 import { fixturePlugin, fixtureStatus, fixtureV2Plugin, fixtureV2Status, fixtureWhooperItems } from "../../test/plugins";
 import { NO_STATUS_V2_WORK, statusV2Work, type StatusV2Work } from "../agents/statusV2";
 import { AllWork, groupWork } from "./AllWork";
+import type { HiddenEntry, NeedsYouFilter } from "./needsYou";
 
 function node(id: string, title: string, parentId: string | null = null, overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return { id, title, parentId, hasChildren: false, summary: null,
@@ -34,6 +35,8 @@ type Options = {
   open?: Record<string, boolean> | null;
   /** What plugins that print status format 2 add. */
   pluginWork?: StatusV2Work;
+  hidden?: HiddenEntry[];
+  filter?: NeedsYouFilter;
 };
 const SECTIONS = "prompting-time.sidebar-sections";
 
@@ -52,6 +55,12 @@ function renderWork(options: Options = {}) {
   const onLoadChildPage = vi.fn();
   const onOpenEntry = vi.fn();
   const onEntryAction = vi.fn();
+  // Hide, Show again, and the filter change what App would pass back.
+  const [hidden, setHidden] = createSignal<HiddenEntry[]>(options.hidden ?? []);
+  const [filter, setFilter] = createSignal<NeedsYouFilter>(options.filter ?? "all");
+  const onHide = vi.fn((entry: HiddenEntry) => setHidden((current) => [...current, entry]));
+  const onShowAgain = vi.fn((key: string) => setHidden((current) => current.filter((entry) => entry.key !== key)));
+  const onFilter = vi.fn((next: NeedsYouFilter) => setFilter(next));
   const view = render(() => (
     <AllWork
       selectedEntry={options.selectedEntry ?? null}
@@ -60,6 +69,12 @@ function renderWork(options: Options = {}) {
       actionTitle={(_plugin, action) => `${action[0]!.toUpperCase()}${action.slice(1)}`}
       onOpenEntry={onOpenEntry}
       onEntryAction={onEntryAction}
+      hidden={hidden()}
+      onHide={onHide}
+      onShowAgain={onShowAgain}
+      filter={filter()}
+      onFilter={onFilter}
+      pluginTitle={(plugin) => plugin}
       conversations={conversations()}
       conversationsById={options.conversationsById ?? { root, child, grandchild, sibling }}
       childPagesById={childPagesById()}
@@ -76,7 +91,7 @@ function renderWork(options: Options = {}) {
     setQuery(text);
     flush();
   };
-  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenEntry, onEntryAction, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenEntry, onEntryAction, onHide, onShowAgain, onFilter, hidden, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -230,6 +245,117 @@ describe("AllWork", () => {
     view.search("");
     expect(screen.queryByRole("region", { name: "Search results" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Needs you 5" })).toBeVisible();
+  });
+
+  describe("hiding and filtering Needs you", () => {
+    const evaluation = node("waiting", "Evaluation rows", null, { runStatus: "waiting", rollupStatus: "needsAttention" });
+    const needsYouNames = () => names(screen.getByRole("tree", { name: "Needs you" }));
+    const chips = () => [...document.querySelectorAll<HTMLButtonElement>(".work-filter")].map((chip) => `${chip.textContent}${chip.getAttribute("aria-pressed") === "true" ? " (chosen)" : ""}`);
+    const click = (element: HTMLElement) => {
+      fireEvent.click(element);
+      flush();
+    };
+    const hideFromMenu = async (title: string) => {
+      fireEvent.click(screen.getByRole("button", { name: `Actions for ${title}` }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Hide" }));
+      await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+      flush();
+    };
+
+    it("hides an item from its menu until Show again, keeping it in a folded Hidden line", async () => {
+      const view = renderWork({ conversations: [evaluation], conversationsById: { waiting: evaluation }, pluginWork: whooperWork(), open: {} });
+      await hideFromMenu("add the tags package");
+      expect(view.onHide).toHaveBeenCalledExactlyOnceWith({ key: "item:whooper:run-77", plugin: "whooper", version: "2026-11-26T14:30:00Z" }, "add the tags package");
+      expect(view.onEntryAction).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Needs you 3" })).toBeVisible();
+      expect(needsYouNames()).not.toContain("add the tags package, Needs a look · Whooper");
+
+      // The fold says what it holds and how many, and opens on a click.
+      const fold = screen.getByRole("button", { name: "Hidden · 1" });
+      expect(fold).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByRole("list", { name: "Hidden" })).not.toBeInTheDocument();
+      click(fold);
+      expect(within(screen.getByRole("list", { name: "Hidden" })).getByRole("listitem")).toHaveTextContent("add the tags packageNeeds a look · WhooperShow again");
+      expect(await axeViolations()).toEqual([]);
+      click(screen.getByRole("button", { name: "Show add the tags package again" }));
+      expect(view.onShowAgain).toHaveBeenCalledExactlyOnceWith("item:whooper:run-77");
+      expect(needsYouNames()).toContain("add the tags package, Needs a look · Whooper");
+      expect(screen.queryByRole("button", { name: /^Hidden/ })).not.toBeInTheDocument();
+    });
+
+    it("shows a hidden item again once it changes, and a blocker once its words or dot do", () => {
+      const blockers = [{ id: "docker", title: "Docker isn't running", dot: "error", route: "/setup" }];
+      renderWork({
+        conversations: [], pluginWork: whooperWork(fixtureWhooperItems(), { blockers }), open: {},
+        hidden: [
+          { key: "item:whooper:run-101", plugin: "whooper", version: "2026-11-25T08:00:00Z" },
+          { key: "item:whooper:run-77", plugin: "whooper", version: "2026-11-26T14:30:00Z" },
+          { key: "blocker:whooper:docker", plugin: "whooper", version: "attention Docker isn't running" },
+        ],
+      });
+      expect(needsYouNames()).toEqual([
+        "Docker isn't running, blocks every job · Whooper",
+        "separate cache configuration, Ready to approve · Whooper",
+        "move the projection, Review failed · Whooper",
+      ]);
+      expect(screen.getByRole("button", { name: "Hidden · 1" })).toBeVisible();
+    });
+
+    it("hides a chat waiting on you, which then shows with its project's chats", async () => {
+      const view = renderWork({ conversations: [evaluation, sibling], conversationsById: { waiting: evaluation, sibling }, open: { "chats:/work/alpha": true } });
+      // Only chats wait, so there is nothing to filter.
+      expect(chips()).toEqual([]);
+      await hideFromMenu("Evaluation rows");
+      expect(view.onHide).toHaveBeenCalledExactlyOnceWith({ key: "waiting", plugin: null, version: "" }, "Evaluation rows");
+      expect(screen.queryByRole("tree", { name: "Needs you" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Needs you 0" })).toBeVisible();
+      expect(screen.getByText("Nothing else needs you")).toBeVisible();
+      expect(names(screen.getByRole("tree", { name: "Chats · alpha" }))).toEqual(["Evaluation rows, Codex, waiting for you"]);
+      // Outside Needs you, a chat has no menu.
+      expect(screen.queryByRole("button", { name: "Actions for Evaluation rows" })).not.toBeInTheDocument();
+      click(screen.getByRole("button", { name: "Hidden · 1" }));
+      expect(screen.getByRole("list", { name: "Hidden" })).toHaveTextContent("Evaluation rowsCodex · waiting for you");
+    });
+
+    it("filters Needs you by chats or plugin with a count on each chip, and searches only what the filter lists", async () => {
+      const v2 = statusV2Work({
+        loaded: true, error: null, items: [fixturePlugin(), fixtureV2Plugin()],
+        statuses: { whooper: { value: fixtureStatus("Running", { items: fixtureWhooperItems() }), error: null }, "fixture-runs": { value: fixtureV2Status(), error: null } },
+      });
+      const view = renderWork({ conversations: [evaluation], conversationsById: { waiting: evaluation }, pluginWork: v2, open: { "chats:/work/alpha": true } });
+      expect(chips()).toEqual(["All 7 (chosen)", "Chats 1", "Fixture runs 3", "Whooper 3"]);
+
+      click(screen.getByRole("button", { name: "Chats 1" }));
+      expect(view.onFilter).toHaveBeenCalledWith("chats");
+      expect(needsYouNames()).toEqual(["Evaluation rows, Codex, waiting for you"]);
+      // The heading still counts everything that needs you.
+      expect(screen.getByRole("button", { name: "Needs you 7" })).toBeVisible();
+
+      click(screen.getByRole("button", { name: "Fixture runs 3" }));
+      expect(needsYouNames()).toEqual([
+        "Codex is signed out, blocks every job · Fixture runs",
+        "Review this stack of PRs · acme/widgets#60, Run failed · Fixture runs",
+        "Tighten upload retries, Review needed · Fixture runs",
+      ]);
+      // The chat the filter leaves out shows with its project's chats.
+      expect(names(screen.getByRole("tree", { name: "Chats · alpha" }))).toEqual(["Evaluation rows, Codex, waiting for you"]);
+
+      view.search("tags");
+      const results = screen.getByRole("region", { name: "Search results" });
+      expect(within(results).getByRole("status")).toHaveTextContent("Nothing matches in fixture-runs · Esc clears");
+      view.search("evaluation");
+      expect(within(results).queryAllByRole("treeitem")).toEqual([]);
+      view.search("retries");
+      expect(within(results).getAllByRole("treeitem").map((row) => row.getAttribute("aria-label"))).toEqual(["Tighten upload retries, Review needed · Fixture runs"]);
+      view.search("");
+
+      // Hiding the filter's last entries leaves its chip, at 0, and says so.
+      click(screen.getByRole("button", { name: "Chats 1" }));
+      await hideFromMenu("Evaluation rows");
+      expect(chips()).toEqual(["All 6", "Chats 0 (chosen)", "Fixture runs 3", "Whooper 3"]);
+      expect(screen.getByText("No chat waits on you")).toBeVisible();
+      expect(await axeViolations()).toEqual([]);
+    });
   });
 
   describe("a plugin that prints status format 2", () => {
