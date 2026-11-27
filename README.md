@@ -279,11 +279,20 @@ checks, starts, and stops them, and the window shows them.
   folder; Escape clears it and Enter opens the first result. A row's ⋯ menu, opened by a
   click, lists the item's `actions` and runs the chosen one as `<command> --item <id>`, through
   the confirmation for an action marked `confirm`; a blocker's `action` runs with no extra
-  arguments. An item or blocker that does not fit is left out, as are row actions the manifest
+  arguments.
+  Every Needs you row's ⋯ menu, a waiting chat's too, ends with Hide, which takes the entry out of
+  Needs you until it changes: an item until its `updated_at` does, a blocker until its title or
+  dot does, and a chat until it stops waiting. A notice says "Hidden <title>" with Undo, and
+  "Hidden · N", folded at the end of Needs you, opens on a click to the hidden entries, each
+  with Show again. Chips above Needs you, shown while it holds more than one kind of entry,
+  choose what it lists: All, Chats, or one plugin's, each with its count. Command-J and search
+  keep to the chosen chip; Command-J, the menu bar's count, and opening the next item skip what
+  is hidden. A chat that is hidden or filtered out shows with its folder's chats. This device
+  remembers what it hides and the chosen chip. An item or blocker that does not fit is left out, as are row actions the manifest
   does not allow. A click on an item or blocker, Command-J landing on one, or choosing one in the
   palette opens the plugin's page at its `route`, with the sidebar folded to its rail, keeping
   the page loaded from one row to the next. When the item or blocker the page shows leaves Needs you, because the plugin's status
-  moves it to another group or drops it, as after the user acts on it in the page, Prompting Time
+  moves it to another group or drops it, as after the user acts on it in the page, or the user hides it, Prompting Time
   opens the next thing under Needs you in Command-J's order, or stays when nothing is left; an
   item opened from another group stays, as does any while its plugin's status can't be read.
   Whooper's page draws a review's diff and header and a failed review itself.
