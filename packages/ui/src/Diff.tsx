@@ -29,6 +29,14 @@ export interface DiffMark extends LineRange {
   label: string;
 }
 
+/**
+ * Lines to scroll to and highlight, counted as in `LineRange`, or with `old` as the old file's
+ * lines, for lines the change removed from a file it keeps, such as a function it deletes.
+ */
+export interface DiffTarget extends LineRange {
+  old?: boolean;
+}
+
 interface DiffOptions<T> {
   /** Side by side ("split", the default) or in one column ("unified"). */
   layout?: "split" | "unified";
@@ -50,7 +58,7 @@ interface DiffOptions<T> {
   marks?: readonly DiffMark[];
   onMark?: (id: string) => void;
   /** Lines to scroll into view and highlight. A new object scrolls again; null highlights nothing. */
-  target?: LineRange | null;
+  target?: DiffTarget | null;
 }
 
 /** The gutter cell of line `line`, in one column or split: the new file's, or the old file's for a deleted file. */
@@ -76,12 +84,12 @@ const linesOf = (range: LineRange) => Array.from({ length: Math.max(0, range.end
  * the only way in, and it promises no compatibility, even in patch releases: these rules lean on
  * its data-column-number, data-line, and data-line-type attributes, which Diff.test checks.
  */
-function markStyles(marks: readonly DiffMark[], target: LineRange | null, deleted: boolean): string {
+function markStyles(marks: readonly DiffMark[], target: DiffTarget | null, deleted: boolean): string {
   const rules = marks.flatMap((mark) => [
     `${linesOf(mark).map((line) => numberCell(line, deleted)).join(",")}{color:var(--s-warning);background-color:color-mix(in oklch,var(--s-warning) 16%,transparent);box-shadow:inset 2px 0 0 var(--s-warning);cursor:pointer}`,
     `${numberCell(mark.start, deleted)}::before{content:${JSON.stringify(mark.label)};margin-inline-end:auto;padding-inline:4px;font-weight:600}`,
   ]);
-  if (target) rules.push(`${linesOf(target).map((line) => codeRow(line, deleted)).join(",")}{background-color:color-mix(in oklch,var(--s-text) 9%,var(--diffs-bg))}`);
+  if (target) rules.push(`${linesOf(target).map((line) => codeRow(line, deleted || target.old === true)).join(",")}{background-color:color-mix(in oklch,var(--s-text) 9%,var(--diffs-bg))}`);
   return rules.join("\n");
 }
 
@@ -107,10 +115,10 @@ export function Diff<T>(props: DiffProps<T>) {
   const file = createMemo(() => (props.file && props.excerpt ? excerptFile(props.file, props.excerpt) : props.file ?? null));
   const deleted = () => props.file?.type === "deleted";
   /** The target to scroll to once Pierre has drawn its lines, which may wait for Shiki. */
-  let pending: LineRange | null = null;
+  let pending: DiffTarget | null = null;
 
   function scrollToPending() {
-    const cell = pending && wrapper.querySelector("diffs-container")?.shadowRoot?.querySelector(numberCell(pending.start, untrack(deleted)));
+    const cell = pending && wrapper.querySelector("diffs-container")?.shadowRoot?.querySelector(numberCell(pending.start, untrack(deleted) || pending.old === true));
     if (!cell) return;
     pending = null;
     cell.scrollIntoView?.({ block: "center" });

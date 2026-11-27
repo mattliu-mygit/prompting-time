@@ -5,7 +5,7 @@ export { Checkbox, type CheckboxProps } from "./Checkbox";
 export { CommandPalette, type CommandPaletteProps, type PaletteGroup, type PaletteItem } from "./CommandPalette";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog";
 export { CopyButton, type CopyButtonProps } from "./CopyButton";
-export { Diff, type DiffMark, type DiffProps, type DiffSource } from "./Diff";
+export { Diff, type DiffMark, type DiffProps, type DiffSource, type DiffTarget } from "./Diff";
 export { excerptFile, type LineRange } from "./excerpt";
 export { DIFF_THEME, diffTheme, registerDiffTheme } from "./diffTheme";
 export { NumberField, TextField, type FieldProps, type NumberFieldProps, type TextFieldProps } from "./Field";

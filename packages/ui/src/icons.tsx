@@ -106,6 +106,14 @@ export const ChevronRightIcon = () => (
   </Icon>
 );
 
+/** Goes back to where a view was opened from, such as a review's walkthrough. */
+export const ArrowLeftIcon = () => (
+  <Icon>
+    <path d="m12 19-7-7 7-7" />
+    <path d="M19 12H5" />
+  </Icon>
+);
+
 /** Opens a collapsed rail or panel, such as the PR list's rail. */
 export const ChevronsRightIcon = () => (
   <Icon>

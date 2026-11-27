@@ -200,4 +200,20 @@ describe("Diff's excerpts, marks, and target", () => {
     // @ts-expect-error jsdom has no scrollIntoView; the test put one in for itself.
     delete Element.prototype.scrollIntoView;
   });
+
+  it("highlights and scrolls to a removed line of a file the change keeps, for a target that counts old lines", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled(this.getAttribute("data-column-number"), this.getAttribute("data-line-type"));
+    };
+    // Old line 25 is the removed `return errTooMany`; new line 25 is the line that replaced it.
+    render(() => <Diff file={longFile()} layout="unified" target={{ start: 25, end: 25, old: true }} />);
+    await waitFor(() => expect(scrolled).toHaveBeenCalledWith("25", "change-deletion"), { timeout: 10_000 });
+    const root = host()!.shadowRoot!;
+    const css = [...root.querySelectorAll("style")].map((style) => style.textContent).join("\n");
+    expect(css).toContain('[data-line="25"][data-line-type="change-deletion"]');
+    expect(root.querySelector('[data-line="25"][data-line-type="change-deletion"]')).toHaveTextContent("errTooMany");
+    // @ts-expect-error jsdom has no scrollIntoView; the test put one in for itself.
+    delete Element.prototype.scrollIntoView;
+  });
 });
