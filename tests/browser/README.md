@@ -111,8 +111,11 @@ its file's diff at that line (the old file's line for the removed projects.slugi
 the other end, and Escape clears the selection, then goes back to the walkthrough with the focus on
 Open the map. Nothing opens on hover.
 
-gadgets#68 also prints `test_gaps`, the changed lines its tests ran, and `examples`, inputs run
-through Create at the base and the head and through the new ValidateName at the head only.
+gadgets#68 also prints `test_gaps`, the changed lines its tests ran and the changes Whooper made on
+purpose to the ones they ran: no name in its test is long enough to notice the change to
+namePattern's limit, in the second place to look, and the test caught both changes to
+ValidateName's check. It prints `examples` too, inputs run through Create at the base and the head
+and through the new ValidateName at the head only.
 widgets#103 prints a `test_gaps` that couldn't measure, since it changes Rust, and widgets#101
 prints neither, so both views stay hidden there and in Views. Each check opens its view itself:
 
@@ -121,10 +124,13 @@ playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/c
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-review-examples.ts")).checkReviewExamples()'
 ```
 
-The first throws unless widgets#103 says "Not measured:" and why in one quiet line, gadgets#68's
-first place names its lines no test ran with "Measured: no test ran these lines", and in Open all
-lines create.go names them above its diff, only those lines are orange in the gutter, and none
-shows a pointer. The second throws unless the line under What this PR does names the inputs whose
+The first throws unless widgets#103 says "Not measured:" and why in one quiet line; gadgets#68's
+first place names its lines no test ran with "Measured: no test ran these lines", its second names
+the change no test noticed with "Measured: no test noticed this change", and the block after the
+places counts the changes tests caught without naming one; and in Open all lines create.go names
+its lines above its diff, name.go groups its lines (no test ran, then no test noticed, then caught,
+with the test), only the lines no test ran and the change no test noticed are orange in the
+gutter, and none shows a pointer. The second throws unless the line under What this PR does names the inputs whose
 result changed, the changed rows come first, and only "changed" is orange. Both throw unless j makes
 the first item current with nothing moving, no transition runs longer than 200 ms, all text is 12px
 or more, every control is a 30px target, and nothing reaches past the window's right edge. Both

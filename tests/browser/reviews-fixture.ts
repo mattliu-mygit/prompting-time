@@ -341,9 +341,12 @@ const connections: Record<string, object> = {
   },
 };
 /**
- * Which changed lines each run's tests ran, as show-review prints it. gadgets#68's tests run only
- * ValidateName, and only with names it refuses, so no test ran Create's new lines or ValidateName's
- * `return nil`. widgets#103 changes Rust, which Whooper doesn't measure.
+ * Which changed lines each run's tests ran, and which changes made on purpose they noticed, as
+ * show-review prints it. gadgets#68's tests run only ValidateName, and only with names it refuses,
+ * so no test ran Create's new lines or ValidateName's `return nil`. They caught both changes Whooper
+ * made to ValidateName's check, but none of their names is long enough to notice the one to
+ * namePattern's limit, in the second place to look. widgets#103 changes Rust, which Whooper doesn't
+ * measure.
  */
 const testGaps: Record<string, object> = {
   "fixture-run-68": {
@@ -355,11 +358,15 @@ const testGaps: Record<string, object> = {
       { path: "internal/projects/create.go", line: 20, status: "not_run" },
       { path: "internal/projects/create.go", line: 21, status: "not_run" },
       { path: "internal/projects/create.go", line: 22, status: "not_run" },
+      { path: "internal/projects/name.go", line: 9, status: "survived", change: "`{1,61}` to `{1,62}`" },
+      { path: "internal/projects/name.go", line: 13, status: "caught", change: "`!namePattern.MatchString(name)` to `namePattern.MatchString(name)`", test: "TestValidateName" },
+      { path: "internal/projects/name.go", line: 14, status: "caught", change: "`fmt.Errorf(…)` to `nil`", test: "TestValidateName" },
       { path: "internal/projects/name.go", line: 16, status: "not_run" },
     ],
-    summary: { changed_lines: 21, run: 4, not_run: 5 },
+    summary: { changed_lines: 21, run: 4, not_run: 5, survived: 1, caught: 2 },
     limits: [
-      "Coverage says a line ran, not that a test checked what it did.",
+      "Whooper changed only lines a test ran, one change on each, so a line no test ran has none.",
+      "A change no test noticed can still behave the same as the code it replaced, so that no test could notice it.",
       "Only the tests in internal/projects ran; tests of code that calls Create, such as internal/api, didn't.",
       "name_test.go is a test, so its lines aren't counted.",
     ],
