@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { flush } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginActionRequest } from "../../bridge/types";
-import { actionResult, fixtureConnections, fixtureConnectionsWalkthrough, fixturePlugin, fixtureReviews, fixtureStatus, fixtureWalkthrough, pageActions } from "../../test/plugins";
+import { actionResult, fixtureConnections, fixtureConnectionsWalkthrough, fixturePlugin, fixtureReviews, fixtureStatus, fixtureTypeScriptConnections, fixtureWalkthrough, pageActions } from "../../test/plugins";
 import { render } from "../../test/render";
 import { ReviewScreen } from "../agents/ReviewScreen";
 import { createReviewViews } from "./views";
@@ -38,17 +38,30 @@ const walkthrough = () => screen.findByRole("navigation", { name: "Walkthrough" 
 const summary = () => screen.queryByRole("region", { name: "How the changed code connects" });
 const node = (name: RegExp) => screen.getByRole("button", { name });
 const panel = () => screen.getByRole("complementary");
+const legend = () => screen.getByRole("list", { name: "What the map's marks mean" });
+/** A selected node's links in one of its panel's groups, "Called or used by" or "Calls or uses". */
+const links = (group: string) => within(within(panel()).getByRole("region", { name: group })).getAllByRole("listitem");
 const press = (key: string) => {
   fireEvent.keyDown(document.body, { key });
+  flush();
+};
+const open = () => {
+  fireEvent.click(screen.getByRole("button", { name: "Open the map" }));
   flush();
 };
 
 async function openMap() {
   renderReview();
   await walkthrough();
-  fireEvent.click(screen.getByRole("button", { name: "Open the map" }));
-  flush();
+  open();
   return screen.getByRole("group", { name: "Map of the changed code" });
+}
+
+/** Opens review RUN with the Go review's walkthrough and `connections` as its map, and returns its summary of the map. */
+async function renderMap(connections: object) {
+  renderReview(fixtureConnectionsWalkthrough(RUN, { connections }));
+  await walkthrough();
+  return summary()!;
 }
 
 afterEach(() => {
@@ -75,7 +88,7 @@ describe("how the changed code connects", () => {
     expect(found.compareDocumentPosition(screen.getByRole("region", { name: "Layer 1: The name rule" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(found).toHaveTextContent("4 functions and variables change here: 2 added, 1 changed, and 1 removed.");
     expect(found).toHaveTextContent("2 unchanged callers: api.handleCreate and api.signup.");
-    expect(found).toHaveTextContent("1 of 4 links was found by name search, so it may point at a different function or type with the same name.");
+    expect(found).toHaveTextContent("1 of 4 links was found by name search, so it may point at a different function or type with the same name; gopls found the rest.");
     expect(within(nav).getByRole("button", { name: "How the changed code connects" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /^Views/ }));
@@ -127,16 +140,63 @@ describe("how the changed code connects", () => {
     await openMap();
     expect(document.querySelectorAll('.map-edge[data-found-by="name_search"]')).toHaveLength(1);
     expect(document.querySelectorAll('.map-edge[data-found-by="gopls"]')).toHaveLength(3);
-    const legend = screen.getByRole("list", { name: "What the map's marks mean" });
-    expect(legend).toHaveTextContent("calls or uses, found by gopls");
-    expect(legend).toHaveTextContent("found by name search: may be a different function or type with the same name");
-    expect(legend.querySelector('.map-line[data-found-by="name_search"]')).not.toBeNull();
+    expect(legend()).toHaveTextContent("calls or uses, found by gopls");
+    expect(legend()).toHaveTextContent("found by name search: may be a different function or type with the same name");
+    expect(legend().querySelector('.map-line[data-found-by="name_search"]')).not.toBeNull();
 
     fireEvent.click(node(/^api\.signup,/));
     flush();
-    const link = within(within(panel()).getByRole("region", { name: "Calls or uses" })).getByRole("listitem");
+    const [link] = links("Calls or uses");
     expect(link).toHaveAttribute("data-found-by", "name_search");
     expect(link).toHaveTextContent("found by name search, so api.signup may call a different function named projects.ValidateName");
+  });
+
+  it("draws what TypeScript found solid, as it does what gopls found, and says found by TypeScript in the summary, the legend, and the links", async () => {
+    const found = await renderMap(fixtureTypeScriptConnections());
+    expect(found).toHaveTextContent("1 of 3 links was found by name search, so it may point at a different function or type with the same name; TypeScript found the rest.");
+    open();
+    // Only a link found by name search matches the dashed line's rule.
+    expect(document.querySelectorAll('.map-edge[data-found-by="typescript"]')).toHaveLength(2);
+    expect(document.querySelectorAll('.map-edge[data-found-by="name_search"]')).toHaveLength(1);
+    expect(legend()).toHaveTextContent("calls or uses, found by TypeScript");
+    expect(legend()).toHaveTextContent("found by name search: may be a different function or type with the same name");
+
+    fireEvent.click(node(/^formatTokens,/));
+    flush();
+    const [sidebar, report] = links("Called or used by");
+    expect(sidebar).toHaveTextContent("TraceSidebar calls formatTokens");
+    expect(sidebar).toHaveAttribute("data-found-by", "typescript");
+    expect(sidebar!.querySelector(".map-found")).toHaveTextContent(/^found by TypeScript$/);
+    expect(report).toHaveAttribute("data-found-by", "name_search");
+    expect(report).toHaveTextContent("found by name search, so exportReport may call a different function named formatTokens");
+  });
+
+  it("names a tool this version doesn't know as the plugin prints it, and draws its links solid", async () => {
+    const connections = fixtureConnections();
+    // A later Whooper that asks callgraph, Go's call graph tool, for one link.
+    connections.edges[0] = { ...connections.edges[0]!, found_by: "callgraph" };
+    const found = await renderMap(connections);
+    expect(found).toHaveTextContent("1 of 4 links was found by name search, so it may point at a different function or type with the same name; callgraph and gopls found the rest.");
+    open();
+    expect(document.querySelectorAll('.map-edge[data-found-by="callgraph"]')).toHaveLength(1);
+    expect(document.querySelectorAll('.map-edge[data-found-by="name_search"]')).toHaveLength(1);
+    expect(legend()).toHaveTextContent("calls or uses, found by callgraph or gopls");
+
+    fireEvent.click(node(/^api\.handleCreate,/));
+    flush();
+    const [link] = links("Calls or uses");
+    expect(link).toHaveTextContent("api.handleCreate calls projects.Create");
+    expect(link).toHaveAttribute("data-found-by", "callgraph");
+    expect(link!.querySelector(".map-found")).toHaveTextContent(/^found by callgraph$/);
+  });
+
+  it("names no tool where no language tool found a link", async () => {
+    const connections = fixtureConnections();
+    connections.edges = connections.edges.map((edge) => ({ ...edge, found_by: "name_search" }));
+    const found = await renderMap(connections);
+    expect(found).toHaveTextContent(/4 of 4 links were found by name search, so each may point at a different function or type with the same name\.$/);
+    open();
+    expect(within(legend()).getAllByRole("listitem").map((item) => item.textContent)).toContain("calls or uses");
   });
 
   it("lists what the map may miss in Whooper's words", async () => {

@@ -6,8 +6,8 @@ import type { Commit, ShownReview } from "./shown";
 import { viewHasData, viewName, type ReviewViews } from "./views";
 
 export const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
-/** "a", "a and b", "a, b, and c". */
-export const series = (items: readonly string[]) => (items.length > 2 ? `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}` : items.join(" and "));
+/** "a", "a and b", "a, b, and c"; or "a or b" with "or" for `joiner`. */
+export const series = (items: readonly string[], joiner = "and") => (items.length > 2 ? `${items.slice(0, -1).join(", ")}, ${joiner} ${items.at(-1)}` : items.join(` ${joiner} `));
 
 /** Words in a sentence, "a, b, and c", the names among them in code type. */
 export function Series(props: { items: ReadonlyArray<{ text: string; code: boolean }> }) {

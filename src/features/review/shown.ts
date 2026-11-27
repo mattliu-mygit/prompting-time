@@ -61,10 +61,12 @@ export type ConnectionNode = {
 };
 
 /**
- * One node calls or uses another. gopls, Go's language server, found it, or a search for the
- * name did, which may have matched a different function or type with the same name.
+ * One node calls or uses another, and what found it: "name_search" when only a search for the name
+ * did, which may have matched a different function or type with the same name; else the language
+ * tool that did, such as "gopls", Go's language server, or "typescript", TypeScript's own language
+ * service. A later format may name other tools, which keep their own names here.
  */
-export type ConnectionEdge = { from: string; to: string; kind: "calls" | "uses"; found_by: "gopls" | "name_search" };
+export type ConnectionEdge = { from: string; to: string; kind: "calls" | "uses"; found_by: string };
 
 /** The functions and types the change touches, the code that calls or uses them, and what the plugin's map may miss. */
 export type Connections = { nodes: ConnectionNode[]; edges: ConnectionEdge[]; limits: string[] };
@@ -207,8 +209,9 @@ function readNode(value: unknown): ConnectionNode | null {
 
 /**
  * The map of the changed code the plugin printed, or null when it printed none or none with a node
- * that fits. A node whose id an earlier node has, and an edge to or from a node it doesn't list,
- * are left out.
+ * that fits. A node whose id an earlier node has, an edge to or from a node it doesn't list, and an
+ * edge that doesn't say what found it are left out; an edge found by a tool this version doesn't
+ * know stays, with the tool's name.
  */
 export function readConnections(value: unknown): Connections | null {
   if (!isRecord(value)) return null;
@@ -216,7 +219,7 @@ export function readConnections(value: unknown): Connections | null {
   const nodes = listOf(value.nodes, readNode).filter((node) => !ids.has(node.id) && ids.add(node.id));
   if (nodes.length === 0) return null;
   const edges = listOf(value.edges, (edge): ConnectionEdge | null => (
-    isRecord(edge) && isString(edge.from) && isString(edge.to) && ids.has(edge.from) && ids.has(edge.to) && isOneOf(["calls", "uses"], edge.kind) && isOneOf(["gopls", "name_search"], edge.found_by)
+    isRecord(edge) && isString(edge.from) && isString(edge.to) && ids.has(edge.from) && ids.has(edge.to) && isOneOf(["calls", "uses"], edge.kind) && isString(edge.found_by) && edge.found_by !== ""
       ? { from: edge.from, to: edge.to, kind: edge.kind, found_by: edge.found_by } : null
   ));
   return { nodes, edges, limits: strings(value.limits) };

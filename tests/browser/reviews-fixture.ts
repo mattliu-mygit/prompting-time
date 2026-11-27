@@ -161,6 +161,14 @@ const findings: Record<string, { verdict: string; reason: string; findings: Find
       { id: "2", path: "internal/projects/create.go", line: 22, side: "RIGHT", title: "The bucket is the name", kind: "nit", draft: "**nit:** `bucket := name` reads as a leftover; `store.NewBucket(ctx, name)` says the same." },
     ],
   },
+  "fixture-run-69": {
+    verdict: "look_first",
+    reason: "Each row adds up every span under it again.",
+    findings: [
+      { id: "1", path: "web/src/trace/TraceSidebar.tsx", line: 26, side: "RIGHT", title: "Each row walks its spans", kind: "question", draft: "**question:** `totalTokens(span)` walks every span under this row, for each row, so a deep trace adds up the same spans many times. Could `TraceSidebar` add them up once and pass each row its count?" },
+      { id: "2", path: "web/src/trace/tokens.ts", line: 10, side: "RIGHT", title: "A million reads as 1000.0k", kind: "nit", draft: "**nit:** `formatTokens(1_000_000)` returns `1000.0k`; an `M` step would read better." },
+    ],
+  },
 };
 const drafts: Record<string, Drafts> = {
   "fixture-run-101": { event: "APPROVE", message: "", findings: { "1": { included: true }, "2": { included: true } } },
@@ -168,6 +176,7 @@ const drafts: Record<string, Drafts> = {
   "fixture-run-88": { event: "APPROVE", message: "", findings: { "1": { included: true } } },
   "fixture-run-77": { event: "COMMENT", message: "", findings: { "1": { included: true, text: "**question:** Should the delay stop doubling at a cap, such as 30 seconds?" } } },
   "fixture-run-68": { event: "APPROVE", message: "", findings: { "1": { included: true }, "2": { included: true } } },
+  "fixture-run-69": { event: "COMMENT", message: "", findings: { "1": { included: true }, "2": { included: true } } },
 };
 
 /**
@@ -278,8 +287,65 @@ index 0000000..e3a0b61
 +}
 `;
 
+/** gadgets#69, in TypeScript: the trace sidebar shows the tokens each span used, from a new tokens.ts. */
+const tokenPatch = `diff --git a/web/src/trace/tokens.ts b/web/src/trace/tokens.ts
+new file mode 100644
+index 0000000..8c1d2e4
+--- /dev/null
++++ b/web/src/trace/tokens.ts
+@@ -0,0 +1,11 @@
++import type { Span } from "./span";
++
++/** The tokens a span used, with every span under it. */
++export function totalTokens(span: Span): number {
++  return span.children.reduce((sum, child) => sum + totalTokens(child), span.usage?.totalTokens ?? 0);
++}
++
++/** A count of tokens in a few characters: 812, or 1.2k from a thousand up. */
++export function formatTokens(count: number): string {
++  return count < 1000 ? String(count) : \`\${(count / 1000).toFixed(1)}k\`;
++}
+diff --git a/web/src/trace/TraceSidebar.tsx b/web/src/trace/TraceSidebar.tsx
+index 4a7b9c0..e15d2f6 100644
+--- a/web/src/trace/TraceSidebar.tsx
++++ b/web/src/trace/TraceSidebar.tsx
+@@ -1,14 +1,15 @@
+ import { formatDuration } from "../format";
+ import type { Span } from "./span";
++import { formatTokens, totalTokens } from "./tokens";
+ 
+ type Props = { root: Span; selectedId: string | null; onSelect(id: string): void };
+ 
+-/** Every span of a trace, in order, under how many there are. */
++/** Every span of a trace, in order, under how many there are and the tokens they used. */
+ export function TraceSidebar({ root, selectedId, onSelect }: Props) {
+   const spans = flatten(root);
+   return (
+     <aside className="trace-sidebar">
+-      <h2>{spans.length} spans</h2>
++      <h2>{spans.length} spans · {formatTokens(totalTokens(root))} tokens</h2>
+       <ul>
+         {spans.map((span) => <SpanRow key={span.id} span={span} selected={span.id === selectedId} onSelect={onSelect} />)}
+       </ul>
+@@ -16,12 +17,13 @@ export function TraceSidebar({ root, selectedId, onSelect }: Props) {
+   );
+ }
+ 
+-/** One span: its name and how long it took. */
++/** One span: its name, how long it took, and the tokens it and the spans under it used. */
+ function SpanRow({ span, selected, onSelect }: { span: Span; selected: boolean; onSelect(id: string): void }) {
+   return (
+     <li className="span-row" aria-selected={selected} onClick={() => onSelect(span.id)}>
+       <span className="span-name">{span.name}</span>
+       <span className="span-duration">{formatDuration(span.durationMs)}</span>
++      <span className="span-tokens">{formatTokens(totalTokens(span))}</span>
+     </li>
+   );
+ }
+`;
+
 /** The patch each run read; runs not listed read the retry policy's. */
-const patches: Record<string, string> = { "fixture-run-68": namePatch };
+const patches: Record<string, string> = { "fixture-run-68": namePatch, "fixture-run-69": tokenPatch };
 
 type Overview = Omit<typeof retryOverview, "flow"> & { flow: typeof retryOverview.flow | null };
 const overviews: Record<string, Overview> = {
@@ -305,12 +371,34 @@ const overviews: Record<string, Overview> = {
     checked: ["Ran `go test ./internal/projects/...` at head and base", "Searched for other callers of `slugify`"],
     not_checked: ["Didn't create a real bucket"],
   },
+  "fixture-run-69": {
+    summary: "The trace sidebar shows the tokens each span used, with the spans under it, and the trace's total in its heading: `totalTokens` adds them up, and `formatTokens` writes a count short, such as `1.2k`.",
+    verdict_reason: "Each row adds up every span under it again, which slows deep traces; look at it before approving.",
+    before_after: [
+      { label: "A span that used 1,240 tokens", before: "shows its name and how long it took", after: "also shows `1.2k`" },
+      { label: "The sidebar's heading", before: "`42 spans`", after: "`42 spans · 18.3k tokens`" },
+    ],
+    places: [
+      { id: "p1", title: "Each row adds up its spans again", reason: "`SpanRow` calls `totalTokens` for every span, and each call walks every span under it, so a trace nested 200 deep adds up its deepest span 200 times.", evidence: { kind: "read", detail: "read `SpanRow` and `totalTokens`" }, path: "web/src/trace/TraceSidebar.tsx", start_line: 26, end_line: 26 },
+      { id: "p2", title: "A million reads as 1000.0k", reason: "`formatTokens` stops at k, so a trace that used 1,000,000 tokens shows `1000.0k`.", evidence: { kind: "ran", detail: "ran `formatTokens(1_000_000)`" }, path: "web/src/trace/tokens.ts", start_line: 9, end_line: 11 },
+    ],
+    layers: [
+      { id: "count", title: "Counting tokens", intent: "Two new functions: one adds up the tokens of a span and the spans under it, one writes a count in a few characters.", read_hint: "read", ranges: [{ path: "web/src/trace/tokens.ts", start_line: 1, end_line: 11 }] },
+      { id: "sidebar", title: "The sidebar shows them", intent: "The heading shows the trace's total, and each row its span's.", read_hint: "read", ranges: [{ path: "web/src/trace/TraceSidebar.tsx", start_line: 1, end_line: 29 }] },
+    ],
+    flow: null,
+    checked: ["Ran `npm test` in web/ at head and base", "Searched web/scripts for other callers of `formatTokens`"],
+    not_checked: ["Didn't open a deep trace in a browser"],
+  },
 };
 
 /**
  * How each run's changed code connects, as show-review prints it: gadgets#68's new rule and its
  * callers. gopls couldn't load internal/legacy, so its caller came from a search for the name, as
  * did api.signup's, which calls users.ValidateName, a different function with the same name.
+ * gadgets#69's token counts, in TypeScript, whose links TypeScript's language service found, but
+ * for exportReport's in web/scripts, plain JavaScript outside TypeScript's project: a search for
+ * formatTokens found it, and exportReport calls its own formatTokens.
  */
 const connections: Record<string, object> = {
   "fixture-run-68": {
@@ -337,6 +425,29 @@ const connections: Record<string, object> = {
     limits: [
       "gopls couldn't load internal/legacy, which doesn't build, so its callers come from name search.",
       "Callers in other repositories, such as acme/tools, aren't searched.",
+    ],
+  },
+  "fixture-run-69": {
+    nodes: [
+      { id: "total", name: "totalTokens", kind: "func", path: "web/src/trace/tokens.ts", line: 4, change: "added", lines_changed: 5 },
+      { id: "format", name: "formatTokens", kind: "func", path: "web/src/trace/tokens.ts", line: 9, change: "added", lines_changed: 4 },
+      { id: "sidebar", name: "TraceSidebar", kind: "func", path: "web/src/trace/TraceSidebar.tsx", line: 8, change: "changed", lines_changed: 4 },
+      { id: "row", name: "SpanRow", kind: "func", path: "web/src/trace/TraceSidebar.tsx", line: 21, change: "changed", lines_changed: 3 },
+      { id: "page", name: "TracePage", kind: "func", path: "web/src/trace/TracePage.tsx", line: 31, change: "unchanged", lines_changed: 0 },
+      { id: "report", name: "exportReport", kind: "func", path: "web/scripts/report.js", line: 14, change: "unchanged", lines_changed: 0 },
+    ],
+    edges: [
+      { from: "page", to: "sidebar", kind: "calls", found_by: "typescript" },
+      { from: "sidebar", to: "row", kind: "calls", found_by: "typescript" },
+      { from: "sidebar", to: "total", kind: "calls", found_by: "typescript" },
+      { from: "sidebar", to: "format", kind: "calls", found_by: "typescript" },
+      { from: "row", to: "total", kind: "calls", found_by: "typescript" },
+      { from: "row", to: "format", kind: "calls", found_by: "typescript" },
+      { from: "report", to: "format", kind: "calls", found_by: "name_search" },
+    ],
+    limits: [
+      "TypeScript's project leaves out web/scripts, which is plain JavaScript, so callers there come from name search.",
+      "Calls through a prop or a callback, such as onSelect, aren't followed.",
     ],
   },
 };

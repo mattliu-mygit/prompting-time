@@ -1,6 +1,6 @@
 import { flush } from "solid-js";
 import { afterEach, describe, expect, it } from "vitest";
-import { fixtureConnections, fixtureConnectionsWalkthrough, fixtureExamples, fixtureReviews, fixtureTestGaps, fixtureWalkthrough } from "../../test/plugins";
+import { fixtureConnections, fixtureConnectionsWalkthrough, fixtureExamples, fixtureReviews, fixtureTestGaps, fixtureTypeScriptConnections, fixtureWalkthrough } from "../../test/plugins";
 import type { ReviewEntry } from "../agents/reviews";
 import { layoutConnections } from "./Connections";
 import { hideSince, lastLook, rememberLook, sinceHidden } from "./memory";
@@ -34,16 +34,27 @@ describe("readShownReview", () => {
     expect(readShownReview(JSON.stringify(fixtureWalkthrough(RUN, { overview: { summary: 3 } })), RUN).overview).toBeNull();
   });
 
-  it("reads how the changed code connects, leaving out nodes and edges that don't fit", () => {
+  it("reads how the changed code connects, leaving out nodes and edges that don't fit, and keeps the links any language tool found", () => {
     expect(readShownReview(JSON.stringify(fixtureConnectionsWalkthrough(RUN)), RUN).connections).toEqual(fixtureConnections());
+    expect(readConnections(fixtureTypeScriptConnections())).toEqual(fixtureTypeScriptConnections());
     const { nodes, edges } = fixtureConnections();
+    // A link found by a tool this version doesn't know stays, with the tool's name.
+    const unknownTool = { from: "signup", to: "create", kind: "calls", found_by: "callgraph" };
     const read = readConnections({
       nodes: [...nodes, { ...nodes[0]!, name: "a second node with the first one's id" }, { ...nodes[1]!, id: "field", kind: "field" }, { ...nodes[1]!, id: "no-count", lines_changed: -1 }],
-      edges: [...edges, { from: "create", to: "missing", kind: "calls", found_by: "gopls" }, { from: "create", to: "pattern", kind: "calls", found_by: "the model" }],
+      edges: [
+        ...edges,
+        unknownTool,
+        { from: "create", to: "missing", kind: "calls", found_by: "gopls" },
+        // A link that doesn't say what found it is left out.
+        { from: "create", to: "pattern", kind: "calls", found_by: "" },
+        { from: "create", to: "pattern", kind: "calls", found_by: 3 },
+        { from: "create", to: "pattern", kind: "calls" },
+      ],
       limits: ["One limit", 3],
     })!;
     expect(read.nodes.map((node) => node.name)).toEqual(nodes.map((node) => node.name));
-    expect(read.edges).toEqual(edges);
+    expect(read.edges).toEqual([...edges, unknownTool]);
     expect(read.limits).toEqual(["One limit"]);
     // None at all, or none with a node that fits, reads as no map.
     expect(readConnections(null)).toBeNull();

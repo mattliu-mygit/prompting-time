@@ -32,6 +32,10 @@ function kindsOf(nodes: readonly ConnectionNode[]): string {
 /** "changed · 19 lines" under a node's name, or "unchanged". */
 const changeText = (node: ConnectionNode) => (node.change === "unchanged" ? "unchanged" : `${node.change} · ${plural(node.lines_changed, "line")}`);
 const location = (node: ConnectionNode) => `${node.path}:${node.line}`;
+/** A language tool as people write its name: TypeScript for the plugin's "typescript"; any other, such as gopls, as the plugin prints it. */
+const toolName = (foundBy: string) => (foundBy === "typescript" ? "TypeScript" : foundBy);
+/** The language tools that found links of the map, each named once, in the order they first appear: everything but name search. */
+const toolsOf = (edges: readonly ConnectionEdge[]) => [...new Set(edges.filter((edge) => edge.found_by !== "name_search").map((edge) => toolName(edge.found_by)))];
 
 export type PlacedNode = ConnectionNode & { x: number; y: number; r: number };
 export type ConnectionsLayout = { nodes: PlacedNode[]; width: number; height: number };
@@ -149,12 +153,14 @@ function openAt(file: FileDiffMetadata, node: ConnectionNode): DiffTarget | null
 /**
  * How the changed code connects, in the walkthrough where the layers start: how many functions and
  * types the change touches, the unchanged code that calls them, how many links only a search for a
- * name found, and Open the map, which shows the whole map in the walkthrough's place.
+ * name found and which language tools found the rest, and Open the map, which shows the whole map
+ * in the walkthrough's place.
  */
 export function ConnectionsSummary(props: { connections: Connections; headingId: string; onOpen(button: HTMLButtonElement): void }) {
   const changed = () => props.connections.nodes.filter((node) => node.change !== "unchanged");
   const callers = () => props.connections.nodes.filter((node) => node.change === "unchanged");
   const searched = () => props.connections.edges.filter((edge) => edge.found_by === "name_search").length;
+  const tools = () => toolsOf(props.connections.edges);
   const changes = () => {
     const counts = (["added", "changed", "removed"] as const).map((change) => ({ change, count: changed().filter((node) => node.change === change).length })).filter((item) => item.count > 0);
     if (counts.length === 0) return "None of these functions or types change.";
@@ -178,7 +184,7 @@ export function ConnectionsSummary(props: { connections: Connections; headingId:
       </Show>
       <Show when={searched() > 0}>
         <p class="walk-muted">
-          {searched()} of {plural(props.connections.edges.length, "link")} {searched() === 1 ? "was" : "were"} found by name search, so {searched() === 1 ? "it" : "each"} may point at a different function or type with the same name.
+          {searched()} of {plural(props.connections.edges.length, "link")} {searched() === 1 ? "was" : "were"} found by name search, so {searched() === 1 ? "it" : "each"} may point at a different function or type with the same name{tools().length > 0 ? `; ${series(tools())} found the rest` : ""}.
         </p>
       </Show>
     </section>
@@ -197,11 +203,12 @@ type ViewProps = {
  * types the change touches and the code that calls or uses them, callers on the left. A circle's
  * size is its lines changed; added is green and removed red, each with its word under the name,
  * changed is plain, and unchanged callers are small and gray. An arrow points from a caller to
- * what it calls or uses, dashed when only a search for the name found it. A click on a node, Enter
- * on it, or j and k through the changed ones selects it: its links stay bright and its panel shows
- * where it is, which opens the diff at that line, and its links, each a way to select the other
- * end. Under the map: what its marks mean, and what it may miss. Escape clears the selection, then
- * goes back. Nothing moves or opens on hover.
+ * what it calls or uses: solid when a language tool such as gopls or TypeScript found it, dashed
+ * when only a search for the name did. A click on a node, Enter on it, or j and k through the
+ * changed ones selects it: its links stay bright and its panel shows where it is, which opens the
+ * diff at that line, and its links, each with what found it and a way to select the other end.
+ * Under the map: what its marks mean, naming the tools that found its links, and what it may miss.
+ * Escape clears the selection, then goes back. Nothing moves or opens on hover.
  */
 export function ConnectionsView(props: ViewProps) {
   const map = createMemo(() => layoutConnections(props.connections));
@@ -220,6 +227,7 @@ export function ConnectionsView(props: ViewProps) {
     return new Set([id, ...props.connections.edges.flatMap((edge) => (edge.from === id ? [edge.to] : edge.to === id ? [edge.from] : []))]);
   });
   const lit = (edge: ConnectionEdge) => selected() !== null && (edge.from === selected() || edge.to === selected());
+  const tools = () => toolsOf(props.connections.edges);
   let heading: HTMLHeadingElement | undefined;
   let canvas: HTMLDivElement | undefined;
   let panelName: HTMLHeadingElement | undefined;
@@ -320,7 +328,7 @@ export function ConnectionsView(props: ViewProps) {
             <li><i class="map-key" data-change="removed" />removed</li>
             <li><i class="map-key" data-change="unchanged" />unchanged caller</li>
             <li>larger circle: more lines changed</li>
-            <li><i class="map-line" />calls or uses, found by gopls</li>
+            <li><i class="map-line" />calls or uses{tools().length > 0 ? `, found by ${series(tools(), "or")}` : ""}</li>
             <li><i class="map-line" data-found-by="name_search" />found by name search: may be a different function or type with the same name</li>
           </ul>
           <Show when={props.connections.limits.length > 0}>
@@ -376,9 +384,9 @@ export function ConnectionsView(props: ViewProps) {
                               </p>
                               <p class="map-found">
                                 <i class="map-line" data-found-by={edge.found_by} aria-hidden="true" />
-                                {edge.found_by === "gopls"
-                                  ? "found by gopls"
-                                  : `found by name search, so ${node(edge.from).name} may ${verb === "calls" ? "call" : "use"} a different ${KIND[node(edge.to).kind][0]} named ${node(edge.to).name}`}
+                                {edge.found_by === "name_search"
+                                  ? `found by name search, so ${node(edge.from).name} may ${verb === "calls" ? "call" : "use"} a different ${KIND[node(edge.to).kind][0]} named ${node(edge.to).name}`
+                                  : `found by ${toolName(edge.found_by)}`}
                               </p>
                             </li>
                           );

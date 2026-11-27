@@ -75,8 +75,8 @@ focus staying on it.
 Use `?agents=reviews&work=1` at 1440 × 900 and 960 × 600. Review 2 of widgets#101, "add a
 retry policy for uploads", has an overview: three places to look, three layers, five calls
 before and after, two commits after the reviewed one, and a file that usually changes with
-mod.rs. widgets#103 has an overview too; every other review opens on Whooper's page. The check
-opens widgets#101 itself:
+mod.rs. widgets#103, gadgets#68, and gadgets#69 have overviews too; every other review opens on
+Whooper's page. The check opens widgets#101 itself:
 
 ```sh
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-review-walkthrough.ts")).checkReviewWalkthrough()'
@@ -95,21 +95,24 @@ the end of the walkthrough does. Nothing opens on hover.
 
 gadgets#68, "validate project names before creating buckets", is a Go review whose `show-review`
 also prints `connections`: its walkthrough sums up how the changed code connects where the layers
-start, and Open the map shows the map in the walkthrough's place. widgets#101 prints none, so the
-view stays hidden there, in the navigator, and in Views. The check opens gadgets#68's map itself:
+start, and Open the map shows the map in the walkthrough's place. gadgets#69, "show token counts in
+the trace sidebar", is a TypeScript review whose map's links TypeScript's own language service
+found, but for one in plain JavaScript, which name search found. widgets#101 prints none, so the
+view stays hidden there, in the navigator, and in Views. The check opens both maps itself:
 
 ```sh
 playwright-cli -s=layout-check eval 'async () => (await import("/tests/browser/check-review-connections.ts")).checkReviewConnections()'
 ```
 
-It throws unless a link found by name search is dashed and the others solid, the legend and the
-selected node's links say "found by name search", nothing moves after a selection, no transition
-runs longer than 200 ms, all text is 12px or more, every control is a 30px target, and the map, its
-legend, and its panel stay inside the window. It passes at 1440 × 900 and 960 × 600. Then check by
-hand: j and k step through the changed nodes, Enter selects a focused node, a node's location opens
-its file's diff at that line (the old file's line for the removed projects.slugify), a link selects
-the other end, and Escape clears the selection, then goes back to the walkthrough with the focus on
-Open the map. Nothing opens on hover.
+It throws unless, on each map, a link found by name search is dashed and the others solid, the
+legend and the selected node's links say "found by name search" and, for the others, "found by
+gopls" on gadgets#68's and "found by TypeScript" on gadgets#69's, nothing moves after a selection,
+no transition runs longer than 200 ms, all text is 12px or more, every control is a 30px target,
+and the map, its legend, and its panel stay inside the window. It passes at 1440 × 900 and
+960 × 600. Then check by hand: j and k step through the changed nodes, Enter selects a focused
+node, a node's location opens its file's diff at that line (the old file's line for the removed
+projects.slugify), a link selects the other end, and Escape clears the selection, then goes back to
+the walkthrough with the focus on Open the map. Nothing opens on hover.
 
 gadgets#68 also prints `test_gaps`, the changed lines its tests ran and the changes Whooper made on
 purpose to the ones they ran: no name in its test is long enough to notice the change to

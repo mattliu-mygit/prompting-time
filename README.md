@@ -310,16 +310,19 @@ Reviewer checked and didn't" for a plugin titled Reviewer.
   (`co_change`), and How the changed code connects (`connections`); a view's summary shows only
   when the review has data for it.
 - **How the changed code connects.** When `show-review` prints `connections`, the changed
-  functions and types and the code that calls or uses them, as gopls found them or a search for
-  the name did, the walkthrough sums them up where the layers start: how many change and how, the
-  unchanged callers by name, and how many links only name search found. Open the map shows the
-  map in the walkthrough's place, callers on the left: a circle's size is its lines changed, added
-  is green and removed red with the word under each name, changed is plain, and unchanged callers
-  are small and gray. A link found by name search is dashed, and the legend and links say "found
-  by name search", since it may match a different function with the same name. A click, Enter, or
-  j and k through the changed nodes selects one; its panel says what changed, opens the file's diff
-  at its line (the old file's line for a removed function), and lists its links. Under the map is
-  what Whooper says it may miss (`limits`). Escape clears the selection, then goes back. Without
+  functions and types and the code that calls or uses them, as a language tool found them, such as
+  gopls for Go or TypeScript's own language service, or a search for the name did, the walkthrough
+  sums them up where the layers start: how many change and how, the unchanged callers by name, and
+  how many links only name search found and which tools found the rest. Open the map shows the map
+  in the walkthrough's place, callers on the left: a circle's size is its lines changed, added is
+  green and removed red with the word under each name, changed is plain, and unchanged callers are
+  small and gray. A link found by name search is dashed, and the legend and links say "found by
+  name search", since it may match a different function with the same name. The others are solid
+  and say which tool found them, such as "found by gopls" or "found by TypeScript"; a tool
+  Prompting Time doesn't know yet keeps the name Whooper prints. A click, Enter, or j and k
+  through the changed nodes selects one; its panel says what changed, opens the file's diff at its
+  line (the old file's line for a removed function), and lists its links. Under the map is what
+  Whooper says it may miss (`limits`). Escape clears the selection, then goes back. Without
   `connections`, the view is hidden, also from Views.
 - **Changes no test would catch.** When `show-review` prints `test_gaps`, the changed lines that
   Whooper's runs of the tests found no test ran, and the changes Whooper made on purpose to lines

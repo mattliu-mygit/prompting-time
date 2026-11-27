@@ -319,6 +319,28 @@ export function fixtureConnections() {
 }
 
 /**
+ * How a TypeScript change connects, as show-review prints it: the trace sidebar shows token counts
+ * from a new formatTokens. TypeScript's language service found every link but exportReport's, in
+ * plain JavaScript outside TypeScript's project, which only a search for formatTokens found.
+ */
+export function fixtureTypeScriptConnections() {
+  return {
+    nodes: [
+      { id: "format", name: "formatTokens", kind: "func", path: "web/src/trace/tokens.ts", line: 9, change: "added", lines_changed: 3 },
+      { id: "sidebar", name: "TraceSidebar", kind: "func", path: "web/src/trace/TraceSidebar.tsx", line: 8, change: "changed", lines_changed: 2 },
+      { id: "page", name: "TracePage", kind: "func", path: "web/src/trace/TracePage.tsx", line: 31, change: "unchanged", lines_changed: 0 },
+      { id: "report", name: "exportReport", kind: "func", path: "web/scripts/report.js", line: 14, change: "unchanged", lines_changed: 0 },
+    ],
+    edges: [
+      { from: "page", to: "sidebar", kind: "calls", found_by: "typescript" },
+      { from: "sidebar", to: "format", kind: "calls", found_by: "typescript" },
+      { from: "report", to: "format", kind: "calls", found_by: "name_search" },
+    ],
+    limits: ["TypeScript's project leaves out web/scripts, which is plain JavaScript, so its callers come from name search."],
+  };
+}
+
+/**
  * Which changed lines of fixtureGoPatch the tests ran, as show-review prints it: no test ran lines
  * 11 and 12 of create.go, in the first place to look, nor line 14 after it. TestValidateName ran
  * name.go's lines 6 and 10: it caught the change Whooper made to line 10 on purpose, but no test
