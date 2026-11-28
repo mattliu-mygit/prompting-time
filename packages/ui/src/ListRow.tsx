@@ -19,6 +19,11 @@ export interface ListRowProps extends Omit<JSX.HTMLAttributes<HTMLElement>, "tit
    * caller passes role="treeitem", its aria attributes, tabindex, and key handling.
    */
   element?: "button" | "li";
+  /**
+   * A control in the icon's cell, such as a checkbox that selects the row for a bulk action. It
+   * sits over the icon, and the caller's styles choose which of the two shows.
+   */
+  leading?: JSX.Element;
   /** A control at the end of the title line, such as a button that shows a row's children. */
   trailing?: JSX.Element;
   /** Content under the meta line, across the row. */
@@ -29,7 +34,7 @@ export interface ListRowProps extends Omit<JSX.HTMLAttributes<HTMLElement>, "tit
 /** One row of a list such as All work: icon, title, count, and a gray meta line with a status dot. */
 export function ListRow(props: ListRowProps) {
   const id = createUniqueId();
-  const rest = omit(props, "icon", "title", "meta", "status", "count", "selected", "element", "trailing", "children", "onClick", "class");
+  const rest = omit(props, "icon", "title", "meta", "status", "count", "selected", "element", "leading", "trailing", "children", "onClick", "class");
   // aria-labelledby joins the parts with spaces; a name taken from the content would run "2" and
   // the meta line together wherever the browser does not treat the parts as blocks.
   const labelledBy = () =>
@@ -51,6 +56,9 @@ export function ListRow(props: ListRowProps) {
       <span class="pt-list-row-icon" aria-hidden="true">
         {props.icon}
       </span>
+      <Show when={props.leading}>
+        <span class="pt-list-row-leading">{props.leading}</span>
+      </Show>
       <span id={`${id}-title`} class="pt-list-row-title">
         {props.title}
       </span>

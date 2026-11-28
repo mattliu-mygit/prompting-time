@@ -282,8 +282,11 @@
   background: var(--s-surface-elevated);
 }
 
-.pt-list-row-icon {
+.pt-list-row-icon,
+.pt-list-row-leading {
   display: grid;
+  grid-row: 1;
+  grid-column: 1;
   place-items: center;
 }
 

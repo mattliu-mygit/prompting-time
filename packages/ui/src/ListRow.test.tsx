@@ -33,7 +33,7 @@ describe("ListRow and StatusDot", () => {
     expect(await axeViolations()).toEqual([]);
   });
 
-  it("draws a tree item with its own name, a trailing control, and content under the meta line", async () => {
+  it("draws a tree item with its own name, a leading and a trailing control, and content under the meta line", async () => {
     render(() => (
       <ul role="tree" aria-label="All work">
         <ListRow
@@ -48,6 +48,7 @@ describe("ListRow and StatusDot", () => {
           title="Auth refactor"
           status="attention"
           meta="Codex · waiting for you"
+          leading={<input type="checkbox" tabindex={-1} aria-label="Select Auth refactor" />}
           trailing={<button type="button" tabindex={-1} aria-label="Collapse Auth refactor" />}
         >
           <button type="button">Load more conversations</button>
@@ -59,6 +60,8 @@ describe("ListRow and StatusDot", () => {
     expect(item).not.toHaveAttribute("aria-current");
     expect(item).not.toHaveAttribute("type");
     expect(item).toContainElement(screen.getByRole("button", { name: "Collapse Auth refactor" }));
+    // The leading control shares the icon's cell but not its aria-hidden.
+    expect(item.querySelector(".pt-list-row-leading")).toContainElement(screen.getByRole("checkbox", { name: "Select Auth refactor" }));
     expect(item.querySelector(".pt-list-row-children")).toContainElement(screen.getByRole("button", { name: "Load more conversations" }));
     expect(await axeViolations()).toEqual([]);
   });
