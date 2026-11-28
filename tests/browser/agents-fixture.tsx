@@ -147,7 +147,7 @@ let running = agentsScenario !== "missing";
 let paused = false;
 const logLines = Array.from({ length: 40 }, (_, index) => `15:${String(index).padStart(2, "0")}:0${index % 10} ${index % 9 === 4 ? "review acme/widgets#110: setup: Cannot connect to the Docker daemon. Is the docker daemon running?" : `poll: ${index % 3} review requests, ${index % 2} from Slack`}`);
 
-const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides });
+const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stdoutTruncated: false, stderr: "", fingerprint: null, preview: null, ...overrides });
 
 // The app's event listeners, each numbering its events in order, so the fixture can add pluginChanged.
 const appListeners = new Set<(event: AppEvent) => void>();

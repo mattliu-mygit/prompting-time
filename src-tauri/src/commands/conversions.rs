@@ -989,6 +989,7 @@ impl From<CoreActionOutput> for PluginActionResult {
         Self {
             exit_code: output.exit_code,
             stdout: output.stdout,
+            stdout_truncated: output.stdout_truncated,
             stderr: output.stderr,
             fingerprint: output.fingerprint,
             preview: output.preview,

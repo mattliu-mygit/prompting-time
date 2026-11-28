@@ -10,8 +10,8 @@ use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use prompting_time_core::plugins::{
-    ActionRequest, PluginChange, PluginError, PluginHost, PluginHostConfig, PluginProcess,
-    PluginSource,
+    ACTION_OUTPUT_LIMIT, ActionRequest, PluginChange, PluginError, PluginHost, PluginHostConfig,
+    PluginProcess, PluginSource,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -105,6 +105,11 @@ printf '%s\n' "$*" >> "$XDG_STATE_HOME/fake-agent-rerun.log"
 echo "queued again"
 "#;
 
+const DUMP: &str = r#"#!/bin/sh
+# Prints as many bytes as its argument says.
+head -c "$1" /dev/zero | tr '\0' x
+"#;
+
 struct Fixture {
     root: TempDir,
 }
@@ -166,7 +171,9 @@ impl Fixture {
                 { "name": "submit", "title": "Submit", "description": "Posts a review.",
                   "command": ["bin/fake-submit"], "confirm": true },
                 { "name": "rerun", "title": "Rerun", "description": "Runs a job again.",
-                  "command": ["bin/fake-rerun", "--now"], "confirm": false }
+                  "command": ["bin/fake-rerun", "--now"], "confirm": false },
+                { "name": "dump", "title": "Dump", "description": "Prints many bytes.",
+                  "command": ["bin/fake-dump"], "confirm": false }
             ],
             "status": {
                 "format": 2,
@@ -194,6 +201,7 @@ impl Fixture {
             ("fake-settings", SETTINGS),
             ("fake-submit", SUBMIT),
             ("fake-rerun", RERUN),
+            ("fake-dump", DUMP),
         ] {
             executable(&folder.join("bin").join(name), body);
         }
@@ -660,6 +668,38 @@ async fn actions_return_their_output_and_exit_code_and_confirm_actions_need_a_fi
         .await,
         Err(PluginError::UnknownPlugin(_))
     ));
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_action_that_prints_more_than_pt_keeps_says_its_output_is_cut_off() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    host.install(PluginSource::Folder {
+        path: fixture.plugin(json!([])),
+    })
+    .await
+    .unwrap();
+    let limit = ACTION_OUTPUT_LIMIT as usize;
+
+    let whole = host
+        .run_action(action("dump", &[&limit.to_string()], None))
+        .await
+        .unwrap();
+    assert_eq!(whole.exit_code, Some(0));
+    assert_eq!(whole.stdout.len(), limit);
+    assert!(
+        !whole.stdout_truncated,
+        "output of exactly the limit is whole"
+    );
+
+    let cut = host
+        .run_action(action("dump", &[&(limit + 1).to_string()], None))
+        .await
+        .unwrap();
+    assert_eq!(cut.exit_code, Some(0));
+    assert_eq!(cut.stdout.len(), limit, "PT keeps the start");
+    assert!(cut.stdout_truncated);
     host.shutdown().await;
 }
 

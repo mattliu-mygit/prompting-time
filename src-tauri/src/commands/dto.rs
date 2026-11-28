@@ -1014,7 +1014,10 @@ pub struct PluginActionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PluginActionResult {
     pub exit_code: Option<i32>,
+    /// The start of what the action printed, at most PLUGIN_ACTION_OUTPUT_LIMIT bytes.
     pub stdout: String,
+    /// Whether the action printed more than PLUGIN_ACTION_OUTPUT_LIMIT bytes, so stdout is cut off.
+    pub stdout_truncated: bool,
     pub stderr: String,
     pub fingerprint: Option<String>,
     /// What a --print run will do, for the confirmation: the text of the file it saved in the

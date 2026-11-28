@@ -18,8 +18,8 @@ use prompting_time_core::domain::{
 };
 use prompting_time_core::handoff::HandoffError;
 use prompting_time_core::plugins::{
-    ActionOutput as CoreActionOutput, ActionRequest as CoreActionRequest, PluginError,
-    PluginLog as CorePluginLog, PluginProcess as CorePluginProcess,
+    ACTION_OUTPUT_LIMIT, ActionOutput as CoreActionOutput, ActionRequest as CoreActionRequest,
+    PluginError, PluginLog as CorePluginLog, PluginProcess as CorePluginProcess,
     PluginSnapshot as CorePluginSnapshot, PluginSource as CorePluginSource,
 };
 use prompting_time_core::providers::{
@@ -552,6 +552,7 @@ pub fn binding_builder() -> tauri_specta::Builder<tauri::Wry> {
         ])
         .typ::<AppEvent>()
         .typ::<MenuBarCommand>()
+        .constant("PLUGIN_ACTION_OUTPUT_LIMIT", ACTION_OUTPUT_LIMIT)
 }
 
 #[derive(Debug, thiserror::Error)]

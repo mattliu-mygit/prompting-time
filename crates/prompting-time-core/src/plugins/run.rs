@@ -19,9 +19,15 @@ use crate::providers::child_path;
 /// quits or replaces the plugin. A review's teardown that takes longer is cut short; raise this if
 /// plugins report half-finished cleanups.
 pub(crate) const STOP_GRACE: Duration = Duration::from_secs(5);
-/// The most of each output stream PT keeps: the start of stdout, which holds JSON results, and the
-/// end of stderr, which holds the reason a command failed.
-const OUTPUT_LIMIT: u64 = 1024 * 1024;
+/// The most of a command's stdout PT keeps, from its start, where JSON results begin. A page's
+/// `call` gets this output back whole or not at all, and the window holds several copies of it at
+/// once (the bytes, the IPC message, the JavaScript string, the parsed value, and the copy posted
+/// to the page), so this bounds what one action costs the window: in Node, 8 MiB of JSON taking
+/// those steps briefly used about 50 MiB of heap and 76 ms. Raise it if a plugin's page needs a
+/// larger reply; a page that needs much more should read its data in parts.
+pub const ACTION_OUTPUT_LIMIT: u32 = 8 * 1024 * 1024;
+/// The most of a command's stderr PT keeps, from its end, which holds the reason it failed.
+const STDERR_LIMIT: u64 = 1024 * 1024;
 /// The end of the start command's log PT keeps when the command exits.
 pub(crate) const EXIT_LOG_LIMIT: u64 = 4 * 1024;
 
@@ -44,7 +50,10 @@ pub(crate) fn plugin_command(
 
 pub(crate) struct Finished {
     pub(crate) status: ExitStatus,
+    /// The start of what the command printed, at most `ACTION_OUTPUT_LIMIT` bytes.
     pub(crate) stdout: Vec<u8>,
+    /// Whether the command printed more than `stdout` holds.
+    pub(crate) stdout_truncated: bool,
     pub(crate) stderr: Vec<u8>,
 }
 
@@ -86,10 +95,10 @@ pub(crate) async fn run_to_end(
             return Err(PluginError::Quitting);
         }
     };
-    let (stdout, stderr) = tokio::task::spawn_blocking(move || {
+    let ((stdout, stdout_truncated), stderr) = tokio::task::spawn_blocking(move || {
         Ok::<_, io::Error>((
-            read_head(&mut stdout, OUTPUT_LIMIT)?,
-            read_tail(&mut stderr, OUTPUT_LIMIT)?,
+            read_head(&mut stdout, u64::from(ACTION_OUTPUT_LIMIT))?,
+            read_tail(&mut stderr, STDERR_LIMIT)?,
         ))
     })
     .await
@@ -101,6 +110,7 @@ pub(crate) async fn run_to_end(
     Ok(Finished {
         status,
         stdout,
+        stdout_truncated,
         stderr,
     })
 }
@@ -175,11 +185,13 @@ fn scratch_file(scratch: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn read_head(file: &mut File, limit: u64) -> io::Result<Vec<u8>> {
+/// The first `limit` bytes of `file`, and whether it holds more.
+fn read_head(file: &mut File, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+    let length = file.metadata()?.len();
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.take(limit).read_to_end(&mut bytes)?;
-    Ok(bytes)
+    Ok((bytes, length > limit))
 }
 
 fn read_tail(file: &mut File, limit: u64) -> io::Result<Vec<u8>> {

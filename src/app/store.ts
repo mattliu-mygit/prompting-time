@@ -1,4 +1,5 @@
 import { createSignal, onSettled, type Accessor } from "solid-js";
+import { PLUGIN_ACTION_OUTPUT_LIMIT } from "../bridge/types";
 import type {
   ConversationPath,
   RunStatus,
@@ -445,6 +446,9 @@ export function createAppStore(api: AppApi): AppStore {
       const result = await api.pluginRequest({ plugin, action: STATUS_ACTION, args: [], confirmedFingerprint: null });
       if (result.exitCode !== 0) {
         return { value: null, error: result.stderr.trim() || `The status action exited with ${result.exitCode ?? "a signal"}.` };
+      }
+      if (result.stdoutTruncated) {
+        return { value: null, error: `The status action's output was larger than ${PLUGIN_ACTION_OUTPUT_LIMIT / 1024 / 1024} MiB, the most Prompting Time reads.` };
       }
       return { value: JSON.parse(result.stdout) as unknown, error: null };
     } catch (reason) {

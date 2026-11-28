@@ -48,6 +48,7 @@ use install::{Installed, STAGING_DIR};
 pub use manifest::{GET_SETTINGS_ACTION, Manifest, ManifestError, SAVE_SETTINGS_ACTION};
 pub use page::PageFileError;
 pub use prerequisites::PrerequisiteStatus;
+pub use run::ACTION_OUTPUT_LIMIT;
 use watcher::StateWatcher;
 
 const CHANGE_CHANNEL_CAPACITY: usize = 64;
@@ -155,7 +156,10 @@ pub struct ActionRequest {
 pub struct ActionOutput {
     /// None when a signal ended the command.
     pub exit_code: Option<i32>,
+    /// The start of what the action printed, at most `ACTION_OUTPUT_LIMIT` bytes.
     pub stdout: String,
+    /// Whether the action printed more than `ACTION_OUTPUT_LIMIT` bytes, so `stdout` is cut off.
+    pub stdout_truncated: bool,
     pub stderr: String,
     /// The fingerprint a `--print` run printed, for the confirmation.
     pub fingerprint: Option<String>,
@@ -385,6 +389,7 @@ impl PluginHost {
         let output = ActionOutput {
             exit_code: finished.status.code(),
             stdout: String::from_utf8_lossy(&finished.stdout).into_owned(),
+            stdout_truncated: finished.stdout_truncated,
             stderr: String::from_utf8_lossy(&finished.stderr).into_owned(),
             fingerprint: None,
             preview: None,

@@ -187,7 +187,7 @@ export function fixtureReviewEntries(): Entry[] {
   return entries.map((entry) => ({ ...entry }));
 }
 
-const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides });
+const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stdoutTruncated: false, stderr: "", fingerprint: null, preview: null, ...overrides });
 const refused = (stderr: string) => result({ exitCode: 1, stderr });
 
 /** The request whooper-submit --print would save for the run's drafts. */

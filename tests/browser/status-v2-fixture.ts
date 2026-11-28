@@ -65,7 +65,7 @@ let items: Item[] = [
   })),
 ];
 
-const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides });
+const result = (overrides: Partial<PluginActionResult>): PluginActionResult => ({ exitCode: 0, stdout: "", stdoutTruncated: false, stderr: "", fingerprint: null, preview: null, ...overrides });
 const fingerprint = "5d".repeat(32);
 
 /** The `--item <id>` the request names, or null. */

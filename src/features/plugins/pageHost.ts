@@ -1,5 +1,5 @@
 import type { PluginActions } from "../../app/store";
-import type { PluginActionResult, PluginSnapshot } from "../../bridge/types";
+import { PLUGIN_ACTION_OUTPUT_LIMIT, type PluginActionResult, type PluginSnapshot } from "../../bridge/types";
 import type { ConfirmOutcome } from "../agents/ConfirmActionDialog";
 import { PROTOCOL_VERSION, readPageMessage, type ActionFailure, type ActionStage, type HostMessage, type HostUpdate } from "./protocol";
 
@@ -83,6 +83,13 @@ export function createPageHost(options: PageHostOptions): PageHost {
         stage,
         exit_code: result.exitCode,
         stderr: result.stderr,
+      });
+    }
+    // Cut-off JSON would reach the page as text it cannot parse, so it gets no part of the output.
+    if (result.stdoutTruncated) {
+      throw new CallError(`${name}'s output was larger than ${PLUGIN_ACTION_OUTPUT_LIMIT / 1024 / 1024} MiB, the most Prompting Time passes to a page, so none of it was sent.`, {
+        stage,
+        truncated: true,
       });
     }
     try {

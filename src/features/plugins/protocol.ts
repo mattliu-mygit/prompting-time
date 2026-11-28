@@ -8,10 +8,11 @@
  * Page to host: `ready`, once the page listens; and `call`, which runs one of the manifest's
  * actions with `args` after the action's own command. Prompting Time confirms first when the
  * action is marked `confirm`, and answers with `result` (what the action printed, as JSON when it
- * is JSON, else as text) or `error`, each with the call's `id` as `reply_to`. An `error` always
- * has a `message` to show; one for a call that reached the plugin or the confirmation also says
- * how far it got (`stage`) and, when the plugin's command refused, its `exit_code` and
- * `stderr` (see ActionFailure).
+ * is JSON, else as text) or `error`, each with the call's `id` as `reply_to`. A `result` holds the
+ * whole output: an action that printed more than PLUGIN_ACTION_OUTPUT_LIMIT bytes gets an `error`
+ * with `truncated: true` instead. An `error` always has a `message` to show; one for a call that
+ * reached the plugin or the confirmation also says how far it got (`stage`) and, when the
+ * plugin's command refused, its `exit_code` and `stderr` (see ActionFailure).
  *
  * Host to page, unasked: `open`, the route of an item or blocker the user opened, sent once the
  * page is ready; and `changed`, the files that changed in the plugin's state folder (null when
@@ -39,8 +40,10 @@ export type ActionStage = "cancelled" | "preview" | "run";
  * when Prompting Time refused the call before then, as for an undeclared action. `exit_code` and
  * `stderr` are present only when the plugin's command ran and refused: `exit_code` is null
  * when it ended on a signal, and `stderr` is what it wrote there, untrimmed, at most its last MiB.
+ * `truncated` is present, and true, only when the command succeeded but printed more than
+ * PLUGIN_ACTION_OUTPUT_LIMIT bytes, so Prompting Time sends none of it rather than a cut-off part.
  */
-export type ActionFailure = { stage?: ActionStage; exit_code?: number | null; stderr?: string };
+export type ActionFailure = { stage?: ActionStage; exit_code?: number | null; stderr?: string; truncated?: true };
 
 export type HostUpdate =
   | { type: "result"; reply_to: number; json: unknown }

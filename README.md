@@ -231,8 +231,10 @@ checks, starts, and stops them, and the window shows them.
   Prompting Time started, and Start honors the run lock; the plugin runs again the next time
   Prompting Time opens. The start command's output goes to `<Application Support>/plugins/<name>.log`,
   which each start empties; the Logs tab shows its last 256 KiB.
-- **Actions.** Prompting Time runs a plugin's actions and returns their output and exit code. An
-  action marked `confirm` first runs with `--print`, which changes nothing outside this Mac, saves
+- **Actions.** Prompting Time runs a plugin's actions and returns their output and exit code. It
+  keeps the first 8 MiB of what an action prints on stdout and the last MiB of its stderr, and
+  says when stdout was longer; a status larger than that fails to read with an error saying so.
+  An action marked `confirm` first runs with `--print`, which changes nothing outside this Mac, saves
   the request it would run in a file in the plugin's state folder, names that file in its output,
   and prints `fingerprint: <hex>`, the file's SHA-256, last. Prompting Time returns that file's
   text for the confirmation, and runs the action for real only with the fingerprint the user
@@ -254,8 +256,11 @@ checks, starts, and stops them, and the window shows them.
 - **Page messages.** The page talks to Prompting Time only through postMessage, in page protocol 2,
   the only one Prompting Time speaks; a manifest must say `page.protocol: 2`. The page sends
   `ready`, then `call {id, action, args}` to run one of its manifest's actions with `args` after
-  the action's command, and gets back `result {reply_to, json}`, what the action printed (parsed
-  when it is JSON, else the text), or `error {reply_to, message, stage?, exit_code?, stderr?}`.
+  the action's command, and gets back `result {reply_to, json}`, all the action printed (parsed
+  when it is JSON, else the text), or `error {reply_to, message, stage?, exit_code?, stderr?,
+  truncated?}`. An action that succeeds but prints more than 8 MiB gets an `error` with
+  `truncated: true` and no part of its output, so a page never parses cut-off JSON; a page that
+  needs more reads it in parts.
   `message` is for display. `stage` says how far a call got: `cancelled` when the user cancelled
   the confirmation, `preview` when a confirm action's `--print` refused (the confirmation shows the
   refusal, and the page hears once the user closes it), or `run` when the action failed when run

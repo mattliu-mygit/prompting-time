@@ -195,5 +195,5 @@ export function fixtureWhooperItems() {
 
 /** A plugin action's result, exit 0 unless the overrides say otherwise. */
 export function actionResult(overrides: Partial<PluginActionResult> = {}): PluginActionResult {
-  return { exitCode: 0, stdout: "", stderr: "", fingerprint: null, preview: null, ...overrides };
+  return { exitCode: 0, stdout: "", stdoutTruncated: false, stderr: "", fingerprint: null, preview: null, ...overrides };
 }

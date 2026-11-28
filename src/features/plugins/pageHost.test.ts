@@ -17,6 +17,8 @@ function setup(confirm: (action: string, args: readonly string[]) => Promise<Con
         if (request.args.includes("missing")) return actionResult({ exitCode: 2, stderr: "fixture-runs: no run missing\n" });
         if (request.args.includes("killed")) return actionResult({ exitCode: null, stdout: "half done\n" });
         if (request.args.includes("unstartable")) throw new Error("Prompting Time could not start fixture-runs.");
+        if (request.args.includes("huge")) return actionResult({ stdout: '{"runs": [{"id": "run-1"}, {"id": "ru', stdoutTruncated: true });
+        if (request.args.includes("huge-refused")) return actionResult({ exitCode: 3, stdout: "x", stdoutTruncated: true, stderr: "fixture-runs: too much\n" });
         return actionResult({ stdout: "queued again\n" });
       default:
         throw new Error(`unexpected ${request.action}`);
@@ -112,6 +114,23 @@ describe("the page host", () => {
 
     await page.send(call(3, "rerun", ["--item", "unstartable"]));
     expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 3, message: "Prompting Time could not start fixture-runs.", stage: "run" });
+  });
+
+  it("answers an action that printed more than Prompting Time keeps with an error, not the cut-off part", async () => {
+    const page = setup(async () => ({ stage: "run", result: actionResult({ stdout: "[1, 2", stdoutTruncated: true }) }));
+    await page.send(call(1, "rerun", ["--item", "huge"]));
+    expect(page.posted.at(-1)).toEqual({
+      version: 2, type: "error", reply_to: 1, stage: "run", truncated: true,
+      message: "rerun's output was larger than 8 MiB, the most Prompting Time passes to a page, so none of it was sent.",
+    });
+
+    // A confirm action run for real is cut off the same way.
+    await page.send(call(2, "delete", ["run-1"]));
+    expect(page.posted.at(-1)).toMatchObject({ type: "error", reply_to: 2, stage: "run", truncated: true });
+
+    // A refusal still says how the plugin refused.
+    await page.send(call(3, "rerun", ["--item", "huge-refused"]));
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 3, message: "fixture-runs: too much", stage: "run", exit_code: 3, stderr: "fixture-runs: too much\n" });
   });
 
   it("refuses an action the manifest does not declare, with an error and nothing run", async () => {

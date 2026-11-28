@@ -64,6 +64,9 @@ export const commands = {
 	updateMenuBar: (request: UpdateMenuBarRequest) => typedError<null, CommandError>(__TAURI_INVOKE("update_menu_bar", { request })),
 };
 
+/* Constants */
+export const PLUGIN_ACTION_OUTPUT_LIMIT = 8388608 as const;
+
 /* Types */
 export type AppEvent = { kind: "conversationChanged"; sequence: string; conversationId: string } | { kind: "runChanged"; sequence: string; conversationId: string; runId: string } | { kind: "reloadRequired"; sequence: string } | { kind: "pluginChanged"; sequence: string; plugin: string; 
 /**
@@ -404,7 +407,10 @@ export type PluginActionRequest = {
 
 export type PluginActionResult = {
 	exitCode: number | null,
+	/**  The start of what the action printed, at most PLUGIN_ACTION_OUTPUT_LIMIT bytes. */
 	stdout: string,
+	/**  Whether the action printed more than PLUGIN_ACTION_OUTPUT_LIMIT bytes, so stdout is cut off. */
+	stdoutTruncated: boolean,
 	stderr: string,
 	fingerprint: string | null,
 	/**

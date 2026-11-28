@@ -705,6 +705,19 @@ describe("app store", () => {
     expect(fake.api.pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ plugin: "broken-agent" }));
   });
 
+  it("says a status larger than Prompting Time reads was cut off, rather than that it is not JSON", async () => {
+    const fake = createFakeApi();
+    fake.api.listPlugins = vi.fn().mockResolvedValue([fixturePlugin()]);
+    fake.api.pluginRequest = vi.fn().mockResolvedValue(actionResult({ stdout: '{"format": 2, "items": [', stdoutTruncated: true }));
+    const store = createAppStore(fake.api);
+    await store.initialize();
+
+    await waitFor(() => expect(store.getSnapshot().plugins.loaded).toBe(true));
+    expect(store.getSnapshot().plugins.statuses).toEqual({
+      whooper: { value: null, error: "The status action's output was larger than 8 MiB, the most Prompting Time reads." },
+    });
+  });
+
   it("stops and starts a plugin and shows its new snapshot before reading the plugins again", async () => {
     const fake = createFakeApi();
     const stopped = fixturePlugin({ process: { kind: "notRunning", exit: null } });
