@@ -1142,3 +1142,36 @@ async fn an_install_waits_for_the_actions_running_from_the_copy_it_replaces() {
     install.await.unwrap().unwrap();
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn arguments_larger_than_pt_passes_are_refused_before_anything_runs() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    host.install(PluginSource::Folder {
+        path: fixture.plugin(json!([])),
+    })
+    .await
+    .unwrap();
+
+    let values = json!({ "notes": "x".repeat(2 * 1024 * 1024) }).to_string();
+    assert!(
+        matches!(
+            host.save_settings(NAME, &values).await,
+            Err(PluginError::InvalidRequest(message)) if message.contains("256 KiB")
+        ),
+        "settings too large to pass as one argument"
+    );
+    assert!(
+        !fixture
+            .path("state")
+            .join("fake-agent.settings.json")
+            .exists()
+    );
+    let many = vec!["x".repeat(1024); 300];
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert!(matches!(
+        host.run_action(action("rerun", &many, None)).await,
+        Err(PluginError::InvalidRequest(message)) if message.contains("256 KiB")
+    ));
+    host.shutdown().await;
+}

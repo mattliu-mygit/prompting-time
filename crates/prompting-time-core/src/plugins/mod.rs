@@ -61,6 +61,10 @@ const PREVIEW_LIMIT: u64 = 1024 * 1024;
 /// The most of a start command's log PT returns for its Logs tab. Whooper writes a few lines per
 /// round, so this holds days of rounds; the whole file stays on disk for an editor.
 const LOG_READ_LIMIT: u64 = 256 * 1024;
+/// The most bytes of arguments PT adds after an action's command, such as the settings
+/// save-settings gets as one JSON argument. macOS refuses to start a command whose arguments and
+/// environment hold more than 1 MiB, so PT refuses well below that with a message saying why.
+const ARGUMENTS_LIMIT: usize = 256 * 1024;
 /// The flags with which PT previews a confirm action and runs what the user confirmed.
 const CONFIRM_FLAGS: [&str; 2] = ["--print", "--expect"];
 
@@ -387,6 +391,13 @@ impl PluginHost {
             return Err(PluginError::InvalidRequest(format!(
                 "{} asks to confirm first, so Prompting Time adds --print and --expect itself; its arguments may not hold {flag}.",
                 action.name
+            )));
+        }
+        if args.iter().map(|arg| arg.len() + 1).sum::<usize>() > ARGUMENTS_LIMIT {
+            return Err(PluginError::InvalidRequest(format!(
+                "The arguments for {} hold more than {} KiB, the most Prompting Time passes to a plugin's command.",
+                action.name,
+                ARGUMENTS_LIMIT / 1024
             )));
         }
         let preview = match (action.confirm, request.confirmed_fingerprint) {
@@ -969,5 +980,106 @@ mod tests {
         );
         assert_eq!(printed_fingerprint("fingerprint: abc"), None);
         assert_eq!(printed_fingerprint(""), None);
+    }
+    /// A state folder holding `request`, and the --print output that names its file.
+    fn saved(request: &[u8]) -> (tempfile::TempDir, PathBuf, String) {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir_all(state.join("runs/run-1")).unwrap();
+        let file = state.join("runs/run-1/submit-request.json");
+        fs::write(&file, request).unwrap();
+        (root, file, format!("{:x}", Sha256::digest(request)))
+    }
+
+    #[test]
+    fn a_preview_is_the_named_file_in_the_state_folder_whose_sha256_is_the_fingerprint() {
+        let (root, file, fingerprint) = saved(b"request for run-1");
+        let state = root.path().join("state");
+        for stdout in [
+            format!(
+                "printed the request to {}; nothing posted\n",
+                file.display()
+            ),
+            format!("saved {}.\nfingerprint: {fingerprint}\n", file.display()),
+            format!("{},", file.display()),
+        ] {
+            assert_eq!(
+                saved_preview(&stdout, &state, &fingerprint).as_deref(),
+                Some("request for run-1"),
+                "{stdout}"
+            );
+        }
+        // A path that names the file another way, through `..`, is the same file.
+        let roundabout = state.join("runs/../runs/run-1/submit-request.json");
+        assert_eq!(
+            saved_preview(&roundabout.display().to_string(), &state, &fingerprint).as_deref(),
+            Some("request for run-1")
+        );
+        for stdout in [
+            String::new(),
+            "printed the request to runs/run-1/submit-request.json".to_owned(),
+            format!("printed the request to {}x", file.display()),
+            format!("printed the request to {}", state.display()),
+        ] {
+            assert_eq!(
+                saved_preview(&stdout, &state, &fingerprint),
+                None,
+                "{stdout}"
+            );
+        }
+        assert_eq!(
+            saved_preview(&file.display().to_string(), &state, &"0".repeat(64)),
+            None,
+            "a file whose SHA-256 is not the fingerprint"
+        );
+        assert_eq!(
+            saved_preview(
+                &file.display().to_string(),
+                &root.path().join("missing"),
+                &fingerprint
+            ),
+            None,
+            "a state folder that does not exist"
+        );
+    }
+
+    #[test]
+    fn a_preview_is_never_a_file_outside_the_state_folder_too_large_or_not_text() {
+        let (root, _, fingerprint) = saved(b"request for run-1");
+        let state = root.path().join("state");
+        let outside = root.path().join("outside.json");
+        fs::write(&outside, b"request for run-1").unwrap();
+        let link = state.join("runs/run-1/link.json");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        for file in [&outside, &link] {
+            assert_eq!(
+                saved_preview(&file.display().to_string(), &state, &fingerprint),
+                None,
+                "{}",
+                file.display()
+            );
+        }
+
+        let large = vec![b'x'; usize::try_from(PREVIEW_LIMIT).unwrap() + 1];
+        let (root, file, fingerprint) = saved(&large);
+        assert_eq!(
+            saved_preview(
+                &file.display().to_string(),
+                &root.path().join("state"),
+                &fingerprint
+            ),
+            None,
+            "larger than the preview limit"
+        );
+        let (root, file, fingerprint) = saved(&[0xff, 0xfe]);
+        assert_eq!(
+            saved_preview(
+                &file.display().to_string(),
+                &root.path().join("state"),
+                &fingerprint
+            ),
+            None,
+            "not UTF-8"
+        );
     }
 }
