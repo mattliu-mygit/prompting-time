@@ -1,6 +1,7 @@
 //! The manifest a plugin ships as `prompting-time-plugin.json`: what Prompting Time reads to
-//! install, check, start, and configure it. Whooper's `schemas/prompting-time-plugin.json` is the
-//! format's schema; this module applies the same rules, then checks the files the manifest names.
+//! install, check, start, and configure it. `docs/prompting-time-plugin.schema.json` is the format's
+//! schema; this module applies the same rules and those a schema cannot state, then checks the
+//! files the manifest names.
 
 use std::collections::HashSet;
 use std::fs;

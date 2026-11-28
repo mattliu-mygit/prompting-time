@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mattliu-mygit/prompting-time/docs/prompting-time-plugin.schema.json",
+  "title": "Prompting Time plugin manifest, version 1",
+  "description": "What Prompting Time reads from a plugin's prompting-time-plugin.json to install, check, start, configure, and show it. docs/plugin-contract.md says what Prompting Time expects of the commands it names. Paths are relative to the plugin's folder and stay inside it: no leading /, and no . or .. component. Prompting Time also checks what a schema cannot: that the start command and every action's command are executable files, that the settings file holds a JSON object, that action names are unique, that a manifest with a prerequisite's only_when has a get-settings action, and that status.item_actions name declared actions.",
+  "type": "object",
+  "required": ["manifest_version", "name", "title", "version", "description", "start", "prerequisites", "page", "settings", "actions"],
+  "additionalProperties": false,
+  "properties": {
+    "manifest_version": { "description": "The number of this manifest format.", "const": 1 },
+    "name": {
+      "description": "The plugin's ID. It names the plugin's folder, its state folder ($XDG_STATE_HOME/<name>), and its page's address, pt-plugin://<name>/.",
+      "$ref": "#/$defs/id"
+    },
+    "title": { "description": "The name Prompting Time shows.", "type": "string" },
+    "version": {
+      "description": "The plugin's version, three numbers.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "description": { "type": "string" },
+    "start": {
+      "description": "The command Prompting Time starts when it opens, unless a copy already holds the run lock, and stops when it quits: a path, then its arguments.",
+      "$ref": "#/$defs/command"
+    },
+    "prerequisites": {
+      "description": "The programs Prompting Time looks for on the PATH it gives plugin commands before it starts the plugin.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "purpose"],
+        "additionalProperties": false,
+        "properties": {
+          "command": { "description": "A program name, such as gh.", "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "purpose": { "description": "Why the plugin needs it, for the message when it is missing.", "type": "string" },
+          "only_when": {
+            "description": "The program is needed only when one of the values in the settings object `setting` is `value`, as the get-settings action prints the settings: {\"setting\": \"jobs\", \"value\": \"devin\"} holds for {\"jobs\": {\"review\": \"devin\"}}.",
+            "type": "object",
+            "required": ["setting", "value"],
+            "additionalProperties": false,
+            "properties": { "setting": { "type": "string" }, "value": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "required": ["entry", "protocol"],
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "description": "The page's HTML file, in a folder of its own inside the plugin's folder, such as page/dist/index.html. Prompting Time serves every file in that folder to the page, and nothing outside it.",
+          "type": "string",
+          "pattern": "^[^/]+(/[^/]+)+$"
+        },
+        "protocol": {
+          "description": "The page protocol the page speaks: 2, in which the page runs the manifest's actions itself.",
+          "const": 2
+        }
+      }
+    },
+    "status": {
+      "description": "What the status action prints in status format 2, which docs/plugin-status-v2.schema.json describes: the groups its items go in, and the actions their rows offer.",
+      "type": "object",
+      "required": ["format", "groups"],
+      "additionalProperties": false,
+      "properties": {
+        "format": { "const": 2 },
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "needs_you", "order"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "description": "What each item names as its group; unique among the groups.", "$ref": "#/$defs/id" },
+              "title": { "type": "string", "pattern": "\\S" },
+              "needs_you": { "description": "Whether the group's items wait on the user, which lists them under Needs you.", "type": "boolean" },
+              "order": { "description": "Where the group lists among the plugin's groups, lowest first.", "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "item_actions": {
+          "description": "The actions an item's row may offer, each one of the manifest's actions. Prompting Time runs one as its command, then --item and the item's id.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "settings": { "description": "The path of the JSON Schema of the settings, from which Prompting Time draws its settings form.", "type": "string" },
+    "actions": {
+      "description": "The commands Prompting Time runs. Some names have a meaning of their own; see docs/plugin-contract.md.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "title", "description", "command", "confirm"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "$ref": "#/$defs/id" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "command": { "description": "A path and its fixed arguments; Prompting Time adds the rest, such as a run ID.", "$ref": "#/$defs/command" },
+          "confirm": {
+            "description": "Prompting Time runs the action only after the user confirms what it will do, as docs/plugin-contract.md describes; for an action that acts outside this Mac, such as posting to GitHub.",
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "command": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+  }
+}

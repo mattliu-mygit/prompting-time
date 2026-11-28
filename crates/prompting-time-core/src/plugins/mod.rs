@@ -6,19 +6,9 @@
 //! state folder; stops and starts the start command on demand; reads the end of its output; and
 //! stops the process group it started when PT quits, leaving a copy started elsewhere running.
 //!
-//! Beyond the manifest, PT relies on conventions that Whooper follows:
-//! - A plugin keeps its state in `$XDG_STATE_HOME/<name>` (default `~/.local/state/<name>`), and PT
-//!   passes the XDG_STATE_HOME it watches to every plugin command.
-//! - A running start command holds `<state folder>/run.lock/pid`, holding its process ID.
-//! - An action named `get-settings` prints the settings as JSON, and one named `save-settings`
-//!   saves the settings given as one JSON argument.
-//! - An action with `confirm: true` takes `--print`, which changes nothing outside this Mac, saves
-//!   the request it would run in a file in the state folder, names that file by its absolute path
-//!   in its output, and prints `fingerprint: <hex>`, the file's SHA-256, on its last line; and
-//!   `--expect <hex>`, which refuses a request whose fingerprint changed since.
-//! - An action the manifest's `status.item_actions` names takes `--item <id>` after its fixed
-//!   arguments, naming one item of the `status` action's format-2 output; the window passes it as an
-//!   ordinary argument, so a confirm action still gets `--print` or `--expect` after it.
+//! Beyond the manifest (`docs/prompting-time-plugin.schema.json`), PT relies on the conventions in
+//! `docs/plugin-contract.md`: the state folder, the run lock, the action names with a meaning of
+//! their own, `--item`, and the `--print` and `--expect` flags of a confirm action.
 
 mod install;
 pub mod manifest;

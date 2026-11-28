@@ -215,8 +215,10 @@ checks, starts, and stops them, and the window shows them.
   on by default; the palette's "Hide plugins from the menu bar" turns it off and "Show
   plugins in the menu bar" back on, and this device remembers the choice.
 
-- **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`
-  and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
+- **Install.** A plugin is a release archive holding one folder with `prompting-time-plugin.json`,
+  in the format of [`docs/prompting-time-plugin.schema.json`](docs/prompting-time-plugin.schema.json),
+  and the commands it names; [`docs/plugin-contract.md`](docs/plugin-contract.md) says what
+  Prompting Time expects of those commands. Prompting Time downloads it over HTTPS with macOS's `curl` and
   refuses it unless its SHA-256 matches the one given. For development, a local archive (with
   the same check) or a local folder, which runs in place, works too. Installed copies live in
   `<Application Support>/plugins/<name>/`, beside a record of where each came from. Installing
