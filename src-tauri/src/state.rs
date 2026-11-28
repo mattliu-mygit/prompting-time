@@ -18,7 +18,7 @@ use prompting_time_core::providers::{
 use prompting_time_core::router::Router;
 use prompting_time_core::store::Store;
 use prompting_time_core::workspace::WorkspaceManager;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -187,7 +187,9 @@ impl NotificationTracker {
 }
 
 impl AppState {
-    pub fn failed(diagnostic: StartupDiagnostic) -> Arc<Self> {
+    /// The state when conversations cannot start. Plugins, if their folder could be set up, still
+    /// run.
+    pub fn failed(diagnostic: StartupDiagnostic, plugins: Option<PluginHost>) -> Arc<Self> {
         let (event_shutdown, _) = watch::channel(false);
         Arc::new(Self {
             service: Mutex::new(None),
@@ -198,7 +200,7 @@ impl AppState {
             event_task: Mutex::new(None),
             focused: AtomicBool::new(true),
             notifications: Mutex::new(NotificationTracker::new(Arc::new(NoopNotifier))),
-            plugins: None,
+            plugins,
         })
     }
 
@@ -210,7 +212,18 @@ impl AppState {
         app_data_dir: PathBuf,
         notifier: Arc<dyn NotificationSink>,
     ) -> Arc<Self> {
-        match Self::try_initialize(&app_data_dir).await {
+        // Plugins stay unavailable when their folder cannot be set up; conversations work.
+        let plugins = PluginHostConfig::from_environment(app_data_dir.join(PLUGINS_DIR))
+            .and_then(|config| PluginHost::new(config).ok());
+        Self::initialize_with_plugins(&app_data_dir, notifier, plugins).await
+    }
+
+    async fn initialize_with_plugins(
+        app_data_dir: &Path,
+        notifier: Arc<dyn NotificationSink>,
+        plugins: Option<PluginHost>,
+    ) -> Arc<Self> {
+        match Self::try_initialize(app_data_dir).await {
             Ok((service, providers)) => Arc::new(Self {
                 event_shutdown: watch::channel(false).0,
                 service: Mutex::new(Some(Arc::new(service))),
@@ -220,11 +233,9 @@ impl AppState {
                 event_task: Mutex::new(None),
                 focused: AtomicBool::new(true),
                 notifications: Mutex::new(NotificationTracker::new(notifier)),
-                // Plugins stay unavailable when their folder cannot be set up; conversations work.
-                plugins: PluginHostConfig::from_environment(app_data_dir.join(PLUGINS_DIR))
-                    .and_then(|config| PluginHost::new(config).ok()),
+                plugins,
             }),
-            Err(diagnostic) => Self::failed(diagnostic),
+            Err(diagnostic) => Self::failed(diagnostic, plugins),
         }
     }
 
@@ -340,10 +351,10 @@ impl AppState {
         self.startup_diagnostic.as_ref()
     }
 
-    /// Forwards conversation and plugin changes to the window and starts the installed plugins.
-    /// Only the first call does anything: a second would forward every change twice and start the
-    /// plugins again.
-    pub fn start_event_forwarding(self: &Arc<Self>, app: AppHandle) {
+    /// Forwards conversation and plugin changes to the window and starts the installed plugins,
+    /// which start even when conversations could not. Only the first call does anything: a second
+    /// would forward every change twice and start the plugins again.
+    pub fn start_event_forwarding<R: Runtime>(self: &Arc<Self>, app: AppHandle<R>) {
         let mut event_task = self
             .event_task
             .lock()
@@ -351,10 +362,11 @@ impl AppState {
         if event_task.is_some() {
             return;
         }
-        let Ok(service) = self.service() else {
+        let service = self.service().ok();
+        if service.is_none() && self.plugins.is_none() {
             return;
-        };
-        let mut changes = service.subscribe_changes();
+        }
+        let mut changes = service.as_ref().map(|service| service.subscribe_changes());
         let mut plugin_changes = self.plugins.as_ref().map(PluginHost::subscribe);
         // Plugins start once the window can hear about them, as Prompting Time opens.
         let mut plugin_start = self
@@ -370,7 +382,9 @@ impl AppState {
                 tokio::time::interval_at(first_recovery, STALE_RECOVERY_INTERVAL);
             recovery_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut recoveries = JoinSet::new();
-            state.resync_notifications(&service, false).await;
+            if let Some(service) = &service {
+                state.resync_notifications(service, false).await;
+            }
             loop {
                 tokio::select! {
                     changed = shutdown.changed() => {
@@ -379,7 +393,9 @@ impl AppState {
                         }
                     }
                     _ = recovery_ticks.tick(), if recoveries.is_empty() => {
-                        let recovery_service = Arc::clone(&service);
+                        let Some(recovery_service) = service.clone() else {
+                            continue;
+                        };
                         recoveries.spawn(async move {
                             let _ = tokio::time::timeout(
                                 STARTUP_RECOVERY_TIMEOUT,
@@ -412,7 +428,12 @@ impl AppState {
                             plugin_changes = None;
                         }
                     },
-                    change = changes.recv() => match change {
+                    change = async {
+                        match &mut changes {
+                            Some(changes) => changes.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => match change {
                         Ok(change) => {
                             let invalidation = match change.run_id {
                                 Some(run_id) => AppInvalidation::Run {
@@ -424,16 +445,19 @@ impl AppState {
                                 },
                             };
                             events.emit(&app, invalidation);
-                            if let Ok(overview) = service
-                                .load_conversation_overview(change.conversation_id)
-                                .await
+                            if let Some(service) = &service
+                                && let Ok(overview) = service
+                                    .load_conversation_overview(change.conversation_id)
+                                    .await
                             {
                                 state.observe_notification(&overview, true);
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             events.emit_reload(&app);
-                            state.resync_notifications(&service, true).await;
+                            if let Some(service) = &service {
+                                state.resync_notifications(service, true).await;
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
@@ -604,11 +628,11 @@ impl AppEventSequencer {
         }
     }
 
-    fn emit(&mut self, app: &AppHandle, invalidation: AppInvalidation) {
+    fn emit<R: Runtime>(&mut self, app: &AppHandle<R>, invalidation: AppInvalidation) {
         let _ = app.emit(APP_EVENT_NAME, self.next(invalidation));
     }
 
-    fn emit_reload(&mut self, app: &AppHandle) {
+    fn emit_reload<R: Runtime>(&mut self, app: &AppHandle<R>) {
         let (sequence, _) = self.take_sequence();
         let _ = app.emit(
             APP_EVENT_NAME,
@@ -1217,6 +1241,81 @@ mod tests {
             Some("storage-error")
         );
         assert_eq!(state.providers().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn installed_plugins_start_when_the_conversation_service_fails() {
+        let temporary = tempdir().unwrap();
+        let app_data_dir = temporary.path().join("app");
+        // A folder where the database file belongs keeps the conversation service from starting.
+        fs::create_dir_all(app_data_dir.join(DATABASE_FILE)).unwrap();
+        let plugin = temporary.path().join("plugin");
+        fs::create_dir_all(plugin.join("bin")).unwrap();
+        fs::write(
+            plugin.join("prompting-time-plugin.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "name": "fixture-agent",
+                "title": "Fixture agent",
+                "version": "0.1.0",
+                "description": "An invented background agent.",
+                "start": ["bin/fixture-run"],
+                "prerequisites": [],
+                "page": { "entry": "page/index.html", "protocol": 2 },
+                "settings": "settings.json",
+                "actions": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(plugin.join("settings.json"), "{}").unwrap();
+        let run = plugin.join("bin/fixture-run");
+        fs::write(&run, "#!/bin/sh\nexec sleep 600\n").unwrap();
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
+        let config = || PluginHostConfig {
+            plugins_dir: app_data_dir.join(PLUGINS_DIR),
+            state_home: temporary.path().join("state"),
+            downloader: PathBuf::from("/usr/bin/false"),
+        };
+        // Installing starts the plugin; stopping this host leaves it installed and not running.
+        let installer = PluginHost::new(config()).unwrap();
+        installer
+            .install(prompting_time_core::plugins::PluginSource::Folder { path: plugin })
+            .await
+            .unwrap();
+        installer.shutdown().await;
+
+        let state = AppState::initialize_with_plugins(
+            &app_data_dir,
+            Arc::new(NoopNotifier),
+            Some(PluginHost::new(config()).unwrap()),
+        )
+        .await;
+        assert!(state.service().is_err());
+        assert_eq!(
+            state.startup_diagnostic().map(|error| error.code),
+            Some("storage-error")
+        );
+        let app = tauri::test::mock_app();
+        state.start_event_forwarding(app.handle().clone());
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let plugins = state.plugins().unwrap().list().await;
+            if matches!(
+                plugins[0].process,
+                prompting_time_core::plugins::PluginProcess::Started { .. }
+            ) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the installed plugin never started: {:?}",
+                plugins[0].process
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        state.shutdown().await;
     }
 
     #[test]

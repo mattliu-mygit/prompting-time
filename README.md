@@ -234,7 +234,8 @@ checks, starts, and stops them, and the window shows them.
   did not start keeps running. Stop and Start do the same on request: Stop ends only the copy
   Prompting Time started, and Start honors the run lock; the plugin runs again the next time
   Prompting Time opens. The start command's output goes to `<Application Support>/plugins/<name>.log`,
-  which each start empties; the Logs tab shows its last 256 KiB.
+  which each start empties; the Logs tab shows its last 256 KiB. Plugins start even when
+  conversations cannot, such as when the conversation database does not open.
 - **Actions.** Prompting Time runs a plugin's actions and returns their output and exit code. It
   keeps the first 8 MiB of what an action prints on stdout and the last MiB of its stderr, and
   says when stdout was longer; a status larger than that fails to read with an error saying so.

@@ -40,14 +40,19 @@ pub fn run() {
                         Arc::new(state::TauriNotifier::new(app.handle().clone())),
                     ))
                 }
-                Err(_) => AppState::failed(StartupDiagnostic {
-                    code: "storage-error",
-                    message: "Prompting Time could not resolve its Application Support directory."
-                        .to_owned(),
-                    action: Some(
-                        "Restart Prompting Time and verify macOS storage access.".to_owned(),
-                    ),
-                }),
+                Err(_) => AppState::failed(
+                    StartupDiagnostic {
+                        code: "storage-error",
+                        message:
+                            "Prompting Time could not resolve its Application Support directory."
+                                .to_owned(),
+                        action: Some(
+                            "Restart Prompting Time and verify macOS storage access.".to_owned(),
+                        ),
+                    },
+                    // Plugins live in the Application Support folder too.
+                    None,
+                ),
             };
             state.start_event_forwarding(app.handle().clone());
             app.manage(state);

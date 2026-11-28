@@ -28,4 +28,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 tempfile = "3"
