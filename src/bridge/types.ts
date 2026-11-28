@@ -466,7 +466,8 @@ export type PluginSnapshot = {
 	settingsSchema: string,
 	/**
 	 *  Where the window loads the plugin's page, in a frame sandboxed to scripts only, such as
-	 *  "pt-plugin://whooper/index.html".
+	 *  "pt-plugin://whooper/index.html?pt=<token>". The token, which only this URL carries, keeps
+	 *  another plugin's page from loading the page in its own frame.
 	 */
 	pageUrl: string,
 	actions: PluginAction[],

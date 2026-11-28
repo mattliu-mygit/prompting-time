@@ -1,6 +1,16 @@
 //! The pt-plugin:// scheme, which serves each plugin's page to the sandboxed frame the window shows
 //! it in: `pt-plugin://<plugin>/<path in the page's folder>`, such as
-//! `pt-plugin://whooper/index.html` for Whooper's `page/dist/index.html`.
+//! `pt-plugin://whooper/index.html?pt=<token>` for Whooper's `page/dist/index.html`.
+//!
+//! A frame can navigate itself anywhere its window's policy allows, which is any `pt-plugin:` URL,
+//! and the window takes whatever then runs in a plugin's frame for that plugin's page. So each
+//! plugin's HTML documents are served only with a token this process makes for that plugin and
+//! puts only in the page URL it gives the window: a page can reload itself, but cannot load another
+//! plugin's page, whose token it never sees. The page's other files, such as its scripts, need no
+//! token; another page could load them, but only as its own code.
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use prompting_time_core::plugins::{PageFileError, PluginHost};
@@ -27,12 +37,37 @@ const SEGMENT: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'}');
 
-/// The URL of a plugin's page entry, such as `pt-plugin://whooper/index.html`.
+/// The query parameter that carries a page's token.
+const TOKEN_PARAMETER: &str = "pt";
+
+/// Each plugin's token, made the first time PT gives the window its page URL, for as long as PT runs.
+static TOKENS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Mutex::default);
+
+/// The URL of a plugin's page entry, such as `pt-plugin://whooper/index.html?pt=<token>`.
 pub fn page_url(plugin: &str, entry_file_name: &str) -> String {
+    let token = TOKENS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(plugin.to_owned())
+        .or_insert_with(|| uuid::Uuid::new_v4().simple().to_string())
+        .clone();
     format!(
-        "{SCHEME}://{plugin}/{}",
+        "{SCHEME}://{plugin}/{}?{TOKEN_PARAMETER}={token}",
         utf8_percent_encode(entry_file_name, SEGMENT)
     )
+}
+
+/// Whether `query` holds the token of `plugin`'s page.
+fn has_token(plugin: &str, query: Option<&str>) -> bool {
+    let tokens = TOKENS.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(token) = tokens.get(plugin) else {
+        return false;
+    };
+    query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair.split_once('=') == Some((TOKEN_PARAMETER, token.as_str())))
+    })
 }
 
 /// Answers one request from a plugin's page. Each answer allows the origin "null", the origin of a
@@ -50,9 +85,19 @@ pub fn respond(plugins: Option<&PluginHost>, request: &Request<Vec<u8>>) -> Resp
     let Ok(path) = percent_decode_str(request.uri().path()).decode_utf8() else {
         return failure(StatusCode::NOT_FOUND, "No such plugin page file.");
     };
+    let content_type = content_type(&path);
     match plugins.page_file(plugin, &path) {
+        Ok(_)
+            if content_type.starts_with("text/html")
+                && !has_token(plugin, request.uri().query()) =>
+        {
+            failure(
+                StatusCode::FORBIDDEN,
+                "A plugin's page loads only at the address Prompting Time gives its frame.",
+            )
+        }
         Ok(bytes) => with_common_headers(Response::builder())
-            .header(header::CONTENT_TYPE, content_type(&path))
+            .header(header::CONTENT_TYPE, content_type)
             .header(header::CONTENT_SECURITY_POLICY, PAGE_CSP)
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
             // An update replaces the files while the window runs, so nothing is reused.
@@ -186,7 +231,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let host = host_with_plugin(root.path()).await;
 
-        let page = get(&host, "pt-plugin://page-agent/index.html");
+        let page = get(&host, &page_url("page-agent", "index.html"));
         assert_eq!(page.status(), StatusCode::OK);
         assert_eq!(page.body(), b"<!doctype html><title>Page</title>");
         assert_eq!(
@@ -254,6 +299,7 @@ mod tests {
 
         for uri in [
             "pt-plugin://page-agent/missing.js",
+            "pt-plugin://page-agent/missing.html",
             "pt-plugin://page-agent/assets",
             "pt-plugin://page-agent/",
             "pt-plugin://other-agent/index.html",
@@ -281,14 +327,47 @@ mod tests {
     }
 
     #[test]
-    fn a_page_url_names_the_plugin_and_encodes_the_entry() {
+    fn a_page_url_names_the_plugin_encodes_the_entry_and_carries_the_plugins_token() {
+        let whooper = page_url("whooper", "index.html");
+        let (address, token) = whooper.split_once("?pt=").unwrap();
+        assert_eq!(address, "pt-plugin://whooper/index.html");
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(
             page_url("whooper", "index.html"),
-            "pt-plugin://whooper/index.html"
+            whooper,
+            "a plugin keeps its token"
         );
+        let fixture = page_url("fixture", "my page#1.html");
+        let (address, other) = fixture.split_once("?pt=").unwrap();
+        assert_eq!(address, "pt-plugin://fixture/my%20page%231.html");
+        assert_ne!(other, token, "each plugin has its own token");
+    }
+
+    #[tokio::test]
+    async fn a_page_document_loads_only_with_its_own_plugins_token() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host_with_plugin(root.path()).await;
+        let page = page_url("page-agent", "index.html");
+        let other = page_url("another-agent", "index.html");
+        let (_, other_token) = other.split_once("?pt=").unwrap();
+
+        assert_eq!(get(&host, &page).status(), StatusCode::OK);
+        for uri in [
+            "pt-plugin://page-agent/index.html".to_owned(),
+            "pt-plugin://page-agent/index.html?pt=".to_owned(),
+            format!("pt-plugin://page-agent/index.html?pt={other_token}"),
+            format!("pt-plugin://page-agent/index.html?ptx={other_token}"),
+        ] {
+            let response = get(&host, &uri);
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            assert_ne!(response.body(), b"<!doctype html><title>Page</title>");
+        }
+        // The page's other files, such as its scripts, need no token.
         assert_eq!(
-            page_url("fixture", "my page#1.html"),
-            "pt-plugin://fixture/my%20page%231.html"
+            get(&host, "pt-plugin://page-agent/assets/index.js").status(),
+            StatusCode::OK
         );
+        host.shutdown().await;
     }
 }

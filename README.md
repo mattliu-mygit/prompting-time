@@ -249,7 +249,10 @@ checks, starts, and stops them, and the window shows them.
   folder inside the plugin's folder, such as `page/dist/` for `page/dist/index.html`, so the page
   never reads the plugin's commands or manifest. The window loads
   it from `pt-plugin://<name>/<path>` in an iframe sandboxed to scripts only, so the page has the
-  origin "null" and reaches neither the window nor Tauri. Prompting Time serves only files inside
+  origin "null" and reaches neither the window nor Tauri. Its HTML files load only with
+  `?pt=<token>`, a token Prompting Time makes for each plugin when it runs and puts only in the
+  address it gives the plugin's frame, so a page can reload itself but cannot navigate its frame to
+  another plugin's page, which the window would take for its own. Prompting Time serves only files inside
   that folder (403 for `..` or a symlink out of it), each with `Access-Control-Allow-Origin: null`,
   for the page's module scripts and fonts, and a Content Security Policy that allows the page's own
   files, inline styles, and data URLs, and no fetches. The window has its own policy, in

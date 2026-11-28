@@ -917,7 +917,8 @@ pub struct PluginSnapshot {
     /// The settings' JSON Schema, as JSON text.
     pub settings_schema: String,
     /// Where the window loads the plugin's page, in a frame sandboxed to scripts only, such as
-    /// "pt-plugin://whooper/index.html".
+    /// "pt-plugin://whooper/index.html?pt=<token>". The token, which only this URL carries, keeps
+    /// another plugin's page from loading the page in its own frame.
     pub page_url: String,
     pub actions: Vec<PluginAction>,
     pub prerequisites: Vec<PluginPrerequisite>,
