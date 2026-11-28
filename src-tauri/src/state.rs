@@ -340,7 +340,17 @@ impl AppState {
         self.startup_diagnostic.as_ref()
     }
 
+    /// Forwards conversation and plugin changes to the window and starts the installed plugins.
+    /// Only the first call does anything: a second would forward every change twice and start the
+    /// plugins again.
     pub fn start_event_forwarding(self: &Arc<Self>, app: AppHandle) {
+        let mut event_task = self
+            .event_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if event_task.is_some() {
+            return;
+        }
         let Ok(service) = self.service() else {
             return;
         };
@@ -432,12 +442,7 @@ impl AppState {
             recoveries.abort_all();
             while recoveries.join_next().await.is_some() {}
         });
-        let previous = self
-            .event_task
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .replace(task);
-        debug_assert!(previous.is_none(), "event forwarding starts only once");
+        *event_task = Some(task);
     }
 
     fn observe_notification(&self, overview: &ConversationOverview, allow_notification: bool) {
