@@ -239,6 +239,10 @@ struct Inner {
     plugins: Mutex<BTreeMap<String, Plugin>>,
     /// Serializes installs, starts, and shutdown, which replace and start processes.
     operations: tokio::sync::Mutex<()>,
+    /// One lock per plugin name, kept across installs: each action holds it shared while it runs,
+    /// and an install holds it exclusively while it replaces the plugin's files, so no action runs
+    /// from files an install deletes.
+    action_locks: Mutex<BTreeMap<String, Arc<tokio::sync::RwLock<()>>>>,
     changes: broadcast::Sender<PluginChange>,
     quitting: watch::Sender<bool>,
     /// Each command PT runs holds a clone until it ends; shutdown takes this one and waits until the
@@ -284,6 +288,7 @@ impl PluginHost {
             config,
             plugins: Mutex::new(BTreeMap::new()),
             operations: tokio::sync::Mutex::new(()),
+            action_locks: Mutex::new(BTreeMap::new()),
             changes,
             quitting: watch::channel(false).0,
             runs: Mutex::new(Some(runs)),
@@ -315,20 +320,25 @@ impl PluginHost {
     }
 
     /// Installs a plugin in place of any plugin of the same name, then starts it as PT does when it
-    /// opens. Nothing changes when the download, checksum, archive, or manifest fails.
+    /// opens. Nothing changes when the download, checksum, archive, or manifest fails. The
+    /// replacement waits until the actions running from the copy it replaces end, and actions
+    /// called meanwhile wait for the new copy; an action that runs for minutes, such as a question
+    /// to a coding agent, holds the install up that long.
     pub async fn install(&self, source: PluginSource) -> Result<PluginSnapshot, PluginError> {
         let _run = self.inner.begin_run()?;
         let prepared =
             install::prepare(&self.inner.config, source, self.inner.quitting.subscribe()).await?;
         let _operations = self.inner.operations.lock().await;
+        let name = prepared.installed.manifest.name.clone();
+        let actions = self.inner.action_lock(&name).write_owned().await;
         if *self.inner.quitting.borrow() {
             return Err(PluginError::Quitting);
         }
-        let name = prepared.installed.manifest.name.clone();
         // The copy being replaced stops first, so its process never runs on files that are gone.
         self.inner.remove(&name).await;
         let installed = install::commit(&self.inner.config.plugins_dir, prepared)?;
         self.inner.insert(installed);
+        drop(actions);
         self.inner.watch(&name);
         self.inner.apply_start_rule(&name).await;
         self.inner
@@ -351,6 +361,9 @@ impl PluginHost {
     /// Runs one of a plugin's actions to its end and returns its output and exit code, which say
     /// how it went: Whooper's submit exits 10 to 13 for its refusals, for example.
     pub async fn run_action(&self, request: ActionRequest) -> Result<ActionOutput, PluginError> {
+        self.inner.installed(&request.plugin)?;
+        let _running = self.inner.action_lock(&request.plugin).read_owned().await;
+        // Read again under the lock: an install may have replaced the plugin while this waited.
         let installed = self.inner.installed(&request.plugin)?;
         let action = installed
             .manifest
@@ -569,6 +582,14 @@ impl Inner {
         self.runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn action_lock(&self, name: &str) -> Arc<tokio::sync::RwLock<()>> {
+        let mut locks = self
+            .action_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(locks.entry(name.to_owned()).or_default())
     }
 
     fn begin_run(&self) -> Result<mpsc::Sender<()>, PluginError> {

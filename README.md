@@ -219,7 +219,9 @@ checks, starts, and stops them, and the window shows them.
   and the commands it names. Prompting Time downloads it over HTTPS with macOS's `curl` and
   refuses it unless its SHA-256 matches the one given. For development, a local archive (with
   the same check) or a local folder, which runs in place, works too. Installed copies live in
-  `<Application Support>/plugins/<name>/`, beside a record of where each came from.
+  `<Application Support>/plugins/<name>/`, beside a record of where each came from. Installing
+  over a plugin waits until the actions running from its old files end, so an action that runs for
+  minutes holds the install up that long.
 - **Prerequisites.** Before starting a plugin, Prompting Time looks for each program its manifest
   lists on the PATH plugin commands get, the same one provider CLIs get. A program needed only
   for some settings is checked against what the plugin's `get-settings` action prints.

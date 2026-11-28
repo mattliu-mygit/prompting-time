@@ -105,6 +105,14 @@ printf '%s\n' "$*" >> "$XDG_STATE_HOME/fake-agent-rerun.log"
 echo "queued again"
 "#;
 
+const SLOW: &str = r#"#!/bin/sh
+# Says it started, waits until the test lets it go on, then reads a file of its own plugin folder,
+# its working directory.
+touch "$XDG_STATE_HOME/slow-started"
+while [ ! -f "$XDG_STATE_HOME/slow-go" ]; do sleep 0.05; done
+cat bin/fake-slow > /dev/null && echo "read its own files"
+"#;
+
 const DUMP: &str = r#"#!/bin/sh
 # Prints as many bytes as its argument says.
 head -c "$1" /dev/zero | tr '\0' x
@@ -173,7 +181,9 @@ impl Fixture {
                 { "name": "rerun", "title": "Rerun", "description": "Runs a job again.",
                   "command": ["bin/fake-rerun", "--now"], "confirm": false },
                 { "name": "dump", "title": "Dump", "description": "Prints many bytes.",
-                  "command": ["bin/fake-dump"], "confirm": false }
+                  "command": ["bin/fake-dump"], "confirm": false },
+                { "name": "slow", "title": "Slow", "description": "Waits, then reads its files.",
+                  "command": ["bin/fake-slow"], "confirm": false }
             ],
             "status": {
                 "format": 2,
@@ -202,6 +212,7 @@ impl Fixture {
             ("fake-submit", SUBMIT),
             ("fake-rerun", RERUN),
             ("fake-dump", DUMP),
+            ("fake-slow", SLOW),
         ] {
             executable(&folder.join("bin").join(name), body);
         }
@@ -1092,5 +1103,42 @@ async fn a_confirm_action_refuses_the_confirmation_flags_in_its_arguments() {
         .await
         .unwrap();
     assert_eq!(rerun.exit_code, Some(0));
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_install_waits_for_the_actions_running_from_the_copy_it_replaces() {
+    let fixture = Fixture::new();
+    let (archive, sha256) = fixture.archive(&fixture.plugin(json!([])));
+    let source = PluginSource::Archive {
+        path: archive,
+        sha256,
+    };
+    let host = fixture.host();
+    host.install(source.clone()).await.unwrap();
+
+    let slow = tokio::spawn({
+        let host = host.clone();
+        async move { host.run_action(action("slow", &[], None)).await }
+    });
+    eventually("the action runs", || {
+        fixture.path("state/slow-started").exists()
+    })
+    .await;
+    let install = tokio::spawn({
+        let host = host.clone();
+        async move { host.install(source).await }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !install.is_finished(),
+        "the install waits while an action runs from the files it replaces"
+    );
+
+    fs::write(fixture.path("state/slow-go"), "").unwrap();
+    let slow = slow.await.unwrap().unwrap();
+    assert_eq!(slow.exit_code, Some(0), "{}", slow.stderr);
+    assert_eq!(slow.stdout.trim(), "read its own files");
+    install.await.unwrap().unwrap();
     host.shutdown().await;
 }
