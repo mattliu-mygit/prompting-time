@@ -117,8 +117,8 @@ export function sharedActions(entries: readonly NeedsYouEntry[]): { plugin: stri
   return { plugin: first.plugin, actions: first.actions.filter((action) => entries.every(({ actions }) => actions.includes(action))) };
 }
 
-/** What a bulk action did, for its notice: "Rerun ran on 2, failed on 1", and "cancelled 1" for confirmations the user cancelled. */
+/** What a bulk action did, for its notice, leaving out what is zero: "Rerun ran on 2, failed on 1", or "Delete run cancelled 3" when the user cancelled its confirmation. */
 export function bulkSummary(title: string, { ran, failed, cancelled }: { ran: number; failed: number; cancelled: number }): string {
-  const parts = [`ran on ${ran}`, failed > 0 && `failed on ${failed}`, cancelled > 0 && `cancelled ${cancelled}`].filter(Boolean);
-  return `${title} ${parts.join(", ")}`;
+  const parts = [ran > 0 && `ran on ${ran}`, failed > 0 && `failed on ${failed}`, cancelled > 0 && `cancelled ${cancelled}`].filter(Boolean);
+  return `${title} ${parts.length > 0 ? parts.join(", ") : "ran on 0"}`;
 }

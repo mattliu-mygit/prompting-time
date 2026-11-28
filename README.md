@@ -314,9 +314,12 @@ checks, starts, and stops them, and the window shows them.
   checks the focused row, Command-A on a row checks all the chip lists, and Escape unchecks them.
   While any is checked, a bar at the bottom of the sidebar says how many and offers Hide ("Hid N"
   with Undo) and the row actions every checked entry lists, when all are items of one plugin. Such
-  an action runs once per item with `--item <id>`, one after another, an action marked `confirm`
-  through its confirmation for each item, where Cancel stops the rest; a notice then says what
-  happened, such as "Rerun ran on 2, failed on 1". A checked entry that leaves what Needs you lists
+  an action runs once per item with `--item <id>`, one after another. One marked `confirm` asks
+  once for all of them: Prompting Time previews each item in turn with `--print`, shows one
+  confirmation listing each item's title and what it will send, or "won't run" with the plugin's
+  words when its preview refused, and on Confirm runs each ready item with its own `--expect`;
+  Cancel runs nothing. Items whose run exits 13 are previewed again and shown for one more
+  confirmation. A notice then says what happened, such as "Rerun ran on 2, failed on 1". A checked entry that leaves what Needs you lists
   is unchecked. An item or blocker that does not fit is left out, as are row actions the manifest
   does not allow. A click on an item or blocker, Command-J landing on one, or choosing one in the
   palette opens the plugin's page at its `route`, with the sidebar folded to its rail, keeping

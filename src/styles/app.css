@@ -1710,6 +1710,34 @@ body {
   gap: var(--s-space-4);
 }
 
-.plugin-confirm-subject {
+/* A bulk confirmation's items, each title over what it will send, in one scrolling list. */
+.bulk-confirm-list {
+  display: grid;
+  gap: var(--s-space-12);
+  max-block-size: 24rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.bulk-confirm-item {
+  display: grid;
+  gap: var(--s-space-4);
+  min-inline-size: 0;
+}
+
+.bulk-confirm-title {
+  margin: 0;
+  color: var(--s-text);
+  font-weight: var(--s-weight-medium);
+}
+
+.bulk-confirm-list .plugin-preview {
+  max-block-size: none;
+}
+
+.plugin-confirm-refused {
+  margin: 0;
   color: var(--s-text-muted);
 }

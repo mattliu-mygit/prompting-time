@@ -117,8 +117,9 @@ Escape unchecks them. The bar at the bottom of the sidebar says "N selected" wit
 row actions every checked item offers when all are Fixture runs items: check both failed runs for
 Rerun and Delete run, add "Tighten upload retries" and only Delete run is left, add the blocker or
 a chat and only Hide. Rerun on both failed runs ends with "Rerun ran on 1, failed on 1" and Fixture
-runs' words; Delete run opens one confirmation per run, "1 of 2 · <title>", and Cancel stops the
-rest; Hide shows "Hid N" with Undo.
+runs' words; Delete run opens one confirmation for all of them, "2 items", listing each run's
+title over its invented request, deletes them all on Confirm, and deletes none on Cancel; Hide
+shows "Hid N" with Undo.
 
 With `?agents=v2&work=1`, chips above Needs you read "All 7", "Chats 2", "Fixture runs 4", and
 "Whooper 1"; a click on one lists only its entries, and the choice stays after a reload. Under

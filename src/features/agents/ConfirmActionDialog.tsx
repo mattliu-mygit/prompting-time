@@ -10,8 +10,6 @@ type Props = {
   /** The arguments after the action's own, such as a review's run ID. */
   args: readonly string[];
   actions: PluginActions;
-  /** Which of several the confirmation is about, such as "2 of 3 · Tighten upload retries", for a bulk action. */
-  subject?: string;
   /** How the confirmation ended. */
   onClose(outcome: ConfirmOutcome): void;
 };
@@ -132,7 +130,6 @@ export function ConfirmActionDialog(props: Props) {
         props.onClose(stopped()?.outcome ?? { stage: "cancelled" });
       }}
     >
-      <Show when={props.subject}>{(subject) => <p class="plugin-confirm-subject">{subject()}</p>}</Show>
       <Show when={action?.description}>{(description) => <p>{description()}</p>}</Show>
       <Show when={note()}>{(text) => <p role="status" class="plugin-confirm-note">{text()}</p>}</Show>
       <Show when={step().kind === "previewing"}>

@@ -92,6 +92,11 @@ An action with `"confirm": true` runs only after the user confirms what it will 
    request it would run now has another fingerprint, and exit 13 when it does: the confirmation
    then shows the new request and asks again. Any other refusal shows the exit code and stderr.
 
+For a bulk action on several items, Prompting Time previews each item in turn, shows one
+confirmation for all of them, and then runs each with its own `--expect`. A later preview may
+replace the file an earlier one saved, so the `--expect` check must compare the request the action
+would run now, not the saved file.
+
 Prompting Time adds `--print` and `--expect` itself and refuses a request whose arguments hold
 `--print`, `--expect`, `--print=…`, or `--expect=…`, from a page, a row's item ID, or anything
 else. The action should accept those flags only spelled out in full, not abbreviated, so no other

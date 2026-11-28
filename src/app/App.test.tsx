@@ -866,7 +866,7 @@ describe("status format 2", () => {
       expect(screen.queryByRole("group", { name: "Checked in Needs you" })).not.toBeInTheDocument();
     });
 
-    it("confirms a confirm action once per item, and Cancel stops the rest", async () => {
+    it("confirms a confirm action once for all checked items, then runs each with its own fingerprint", async () => {
       const { api, pluginRequest } = v2Api(status);
       renderApp(api);
       await screen.findByRole("treeitem", { name: /^Score last week's sessions/ });
@@ -874,19 +874,34 @@ describe("status format 2", () => {
       check("Score last week's sessions");
       check("Tighten upload retries");
       click(within(bar()).getByRole("button", { name: "Delete run" }));
-      let dialog = await screen.findByRole("alertdialog", { name: "Delete run" });
-      expect(dialog).toHaveTextContent(`1 of 3 · ${failedTitle}`);
-      expect(within(bar()).getByRole("status")).toHaveTextContent("Delete run · 1 of 3");
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete run" });
+      const shown = await within(dialog).findByRole("list", { name: "What it will send" });
+      expect(within(shown).getAllByRole("listitem").map((item) => item.querySelector(".bulk-confirm-title")?.textContent)).toEqual([failedTitle, "Score last week's sessions", "Tighten upload retries"]);
+      expect(dialog).toHaveTextContent("3 items: Fixture runs will send exactly this for 3 items.");
+      expect(within(bar()).getByRole("status")).toHaveTextContent("Delete run · confirming 3");
       const confirm = within(dialog).getByRole("button", { name: "Delete run" });
       await waitFor(() => expect(confirm).toBeEnabled());
       fireEvent.click(confirm);
-      await waitFor(() => expect(screen.getByRole("alertdialog", { name: "Delete run" })).toHaveTextContent("2 of 3 · Score last week's sessions"));
-      dialog = screen.getByRole("alertdialog", { name: "Delete run" });
-      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-      await waitFor(() => expect(notice()).toHaveTextContent("Delete run ran on 1, cancelled 2"));
+      await waitFor(() => expect(notice()).toHaveTextContent("Delete run ran on 3"));
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
       const deletes = pluginRequest.mock.calls.map(([sent]) => sent).filter((sent) => sent.action === "delete");
-      expect(deletes.map((sent) => [sent.args[1], sent.confirmedFingerprint !== null])).toEqual([["run-74c91b1d", false], ["run-74c91b1d", true], ["run-second", false]]);
+      expect(deletes.map((sent) => [sent.args[1], sent.confirmedFingerprint !== null])).toEqual([
+        ["run-74c91b1d", false], ["run-second", false], ["run-review-2", false], ["run-74c91b1d", true], ["run-second", true], ["run-review-2", true],
+      ]);
+    });
+
+    it("runs nothing when the user cancels the bulk confirmation", async () => {
+      const { api, pluginRequest } = v2Api(status);
+      renderApp(api);
+      await screen.findByRole("treeitem", { name: /^Score last week's sessions/ });
+      check(failedTitle);
+      check("Tighten upload retries");
+      click(within(bar()).getByRole("button", { name: "Delete run" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete run" });
+      await within(dialog).findByRole("list", { name: "What it will send" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(notice()).toHaveTextContent("Delete run cancelled 2"));
+      expect(pluginRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "delete", confirmedFingerprint: expect.any(String) }));
     });
   });
 
