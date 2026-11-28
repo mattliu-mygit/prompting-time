@@ -49,23 +49,22 @@ built tarball instead, attached to each Prompting Time release.
 
 ## Use in a plugin page
 
-A plugin's page depends on the release tarball by URL, and its build bundles the package into the
-page's `dist`, so nothing loads from outside the page at run time:
+A plugin's page depends on the npm package at an exact version, and its build bundles the package
+into the page's `dist`, so nothing loads from outside the page at run time:
 
 ```json
 "dependencies": {
-  "@prompting-time/ui": "https://github.com/mattliu-mygit/prompting-time/releases/download/v0.1.0/prompting-time-ui-0.1.0.tgz",
+  "@prompting-time/ui": "0.1.0",
   "@solidjs/web": "2.0.1",
   "solid-js": "2.0.1"
 }
 ```
 
-The URL pins the version. npm writes the tarball's sha512 to `package-lock.json` as `integrity`
-(pnpm writes it to `pnpm-lock.yaml` under `resolution`); check that it equals the integrity in the
-release notes, then commit the lockfile. `npm ci` and `pnpm install --frozen-lockfile` refuse a
-tarball whose hash differs.
+The exact version pins it. npm writes the package's sha512 to `package-lock.json` as `integrity`
+(pnpm writes it to `pnpm-lock.yaml` under `resolution`); commit the lockfile. `npm ci` and
+`pnpm install --frozen-lockfile` refuse a package whose hash differs.
 
-The tarball holds:
+The package holds:
 
 - `dist/index.js`: the compiled components with every dependency bundled except Solid, which the
   page supplies (`solid-js` and `@solidjs/web` 2.x, as peer dependencies), so the package and the
@@ -80,18 +79,19 @@ The tarball holds:
 - `src/styles.css` and the CSS it imports, with `fonts/` (Katagami and its OFL license). The page's
   bundler copies the fonts into its own `dist`.
 
-## Release the tarball
+## Release
 
-There is no release workflow yet, so a release attaches the tarball by hand:
+Releases go to npm as `@prompting-time/ui`, under the MIT license:
 
 1. Set `version` in this `package.json` to the release's version.
 2. Run `bash scripts/pack-ui.sh` from the repository root. It builds the package, writes
    `packages/ui/prompting-time-ui-<version>.tgz`, and prints its integrity.
-3. Attach the tarball to the GitHub release for `v<version>` and put the integrity in the release
-   notes.
-
-The package stays `private`, so `pnpm publish` refuses it; the release asset is its only
-distribution.
+3. Publish that tarball, not the folder:
+   `npm publish packages/ui/prompting-time-ui-<version>.tgz --access public`. pnpm's pack applies
+   `publishConfig`'s exports, which point at `dist`; npm publishing the folder would not. The npm
+   account needs two-factor authentication: npm confirms in the browser, or takes `--otp <code>`.
+4. Check that `npm view @prompting-time/ui@<version> dist.integrity` equals the integrity
+   `pack-ui.sh` printed.
 
 ## Develop
 

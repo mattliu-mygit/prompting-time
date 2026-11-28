@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds @prompting-time/ui and packs it as packages/ui/prompting-time-ui-<version>.tgz, the
-# tarball a Prompting Time release attaches for plugin pages. Prints the tarball's path and its
-# sha512 integrity, the value a plugin's lockfile records for it (packages/ui/README.md).
+# tarball a release publishes to npm. Prints the tarball's path and its sha512 integrity, which
+# npm then reports as the version's dist.integrity (packages/ui/README.md).
 set -euo pipefail
 
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
