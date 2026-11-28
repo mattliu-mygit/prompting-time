@@ -1054,3 +1054,43 @@ async fn the_log_returns_the_end_of_what_the_start_command_printed() {
     ));
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_confirm_action_refuses_the_confirmation_flags_in_its_arguments() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    host.install(PluginSource::Folder {
+        path: fixture.plugin(json!([])),
+    })
+    .await
+    .unwrap();
+    let fingerprint = "a".repeat(64);
+    let expect_equals = format!("--expect={fingerprint}");
+
+    for args in [
+        vec!["run-1", "--expect", fingerprint.as_str()],
+        vec!["run-1", expect_equals.as_str()],
+        vec!["run-1", "--print"],
+        vec!["run-1", "--print=yes"],
+        vec!["--item", "--expect"],
+    ] {
+        for confirmed in [None, Some(fingerprint.clone())] {
+            assert!(
+                matches!(
+                    host.run_action(action("submit", &args, confirmed.clone())).await,
+                    Err(PluginError::InvalidRequest(message)) if message.contains("--print and --expect")
+                ),
+                "{args:?} {confirmed:?}"
+            );
+        }
+    }
+    assert_eq!(fixture.submit_log(), "", "nothing ran");
+
+    // An action without confirm gets its arguments as they are.
+    let rerun = host
+        .run_action(action("rerun", &["--print"], None))
+        .await
+        .unwrap();
+    assert_eq!(rerun.exit_code, Some(0));
+    host.shutdown().await;
+}

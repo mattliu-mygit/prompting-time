@@ -61,6 +61,8 @@ const PREVIEW_LIMIT: u64 = 1024 * 1024;
 /// The most of a start command's log PT returns for its Logs tab. Whooper writes a few lines per
 /// round, so this holds days of rounds; the whole file stays on disk for an editor.
 const LOG_READ_LIMIT: u64 = 256 * 1024;
+/// The flags with which PT previews a confirm action and runs what the user confirmed.
+const CONFIRM_FLAGS: [&str; 2] = ["--print", "--expect"];
 
 pub struct PluginHostConfig {
     /// Where PT keeps installed plugins and its records of them, such as
@@ -359,6 +361,21 @@ impl PluginHost {
                 action: request.action.clone(),
             })?;
         let mut args = request.args;
+        // PT adds these flags itself, so no caller, such as a page or a row's item ID, can run a
+        // confirm action unconfirmed or with a fingerprint the user never saw.
+        if action.confirm
+            && let Some(flag) = args.iter().find(|arg| {
+                CONFIRM_FLAGS.iter().any(|flag| {
+                    arg.strip_prefix(flag)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+                })
+            })
+        {
+            return Err(PluginError::InvalidRequest(format!(
+                "{} asks to confirm first, so Prompting Time adds --print and --expect itself; its arguments may not hold {flag}.",
+                action.name
+            )));
+        }
         let preview = match (action.confirm, request.confirmed_fingerprint) {
             (false, None) => false,
             (false, Some(_)) => {

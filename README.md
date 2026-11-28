@@ -268,7 +268,8 @@ checks, starts, and stops them, and the window shows them.
   command refused, `exit_code` (null on a signal) and `stderr` (untrimmed, at most its last MiB)
   say how. Prompting Time drops any message that does not fit, refuses an action the manifest does
   not declare, runs an action marked `confirm` only through the confirmation, and refuses
-  `--print` and `--expect` from the page for one. Unasked, the page gets `open {route}` for the item or blocker the user opened and
+  `--print` and `--expect` (or `--print=…`, `--expect=…`) among a confirm action's arguments,
+  whoever passes them: a page, or an item ID a row action passes. Unasked, the page gets `open {route}` for the item or blocker the user opened and
   `changed {files}` when files in the plugin's state folder change, null when more changed than
   one event lists. A call holds at most 64 arguments of at most 64 KiB together.
 - **Status format 2.** A plugin whose manifest has a `status` key, `{"format": 2, "groups": [{"id",
