@@ -1,4 +1,5 @@
 import { fireEvent, screen } from "@testing-library/dom";
+import { createSignal, flush } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import { Checkbox } from "./Checkbox";
 import { NumberField, TextField } from "./Field";
@@ -48,5 +49,35 @@ describe("form controls", () => {
     expect(onInput).toHaveBeenCalledWith("Pre-approving to unblock");
     expect(onSelect).toHaveBeenCalledWith("claude");
     expect(onCheck).toHaveBeenCalledWith(true);
+  });
+  it("keep a select's value when its options are drawn again", () => {
+    // A caller that builds the options on each read, as a settings form does, replaces every
+    // <option>, and a select whose chosen option is removed falls back to its first.
+    const [value, setValue] = createSignal("devin");
+    const [extra, setExtra] = createSignal<string | null>(null);
+    const options = () => [
+      { value: "claude", label: "Claude" },
+      { value: "devin", label: "Devin" },
+      ...(extra() ? [{ value: extra()!, label: extra()! }] : []),
+    ];
+    render(() => <Select label="Agent" options={options()} value={value()} onChange={(event) => setValue(event.currentTarget.value)} />);
+    const select = screen.getByRole("combobox", { name: "Agent" });
+    expect(select).toHaveValue("devin");
+
+    setExtra("codex");
+    flush();
+    expect(select).toHaveValue("devin");
+
+    fireEvent.change(select, { target: { value: "codex" } });
+    flush();
+    expect(select).toHaveValue("codex");
+
+    // A value set before its option exists shows once the option arrives.
+    setExtra(null);
+    setValue("astra");
+    flush();
+    setExtra("astra");
+    flush();
+    expect(select).toHaveValue("astra");
   });
 });

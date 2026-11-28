@@ -64,6 +64,26 @@ describe("a background agent's settings", () => {
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
+  it("shows a chosen option as chosen, after the edit and after the save", async () => {
+    // Claude is the first option, which a select falls back to, so the fixture starts there.
+    const { savePluginSettings, print } = renderSettings(fixturePlugin(), { ...fixtureSettings, jobs: { review: "claude" } });
+    const agent = await screen.findByRole("combobox", { name: "Review agent" });
+    expect(agent).toHaveValue("claude");
+    fireEvent.change(agent, { target: { value: "devin" } });
+    flush();
+    expect(screen.getByRole("combobox", { name: "Review agent" })).toHaveValue("devin");
+    savePluginSettings.mockImplementationOnce(async () => {
+      print({ ...fixtureSettings, jobs: { review: "devin" } });
+      return actionResult();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.getByText("Saved.")).toBeInTheDocument());
+    expect(savePluginSettings).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper", values: JSON.stringify({ jobs: { review: "devin" } }) });
+    expect(screen.getByRole("combobox", { name: "Review agent" })).toHaveValue("devin");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
   it("shows the plugin's refusal in its own words and keeps the edit", async () => {
     const { savePluginSettings } = renderSettings();
     input(await screen.findByRole("spinbutton", { name: "Stop a poll after" }), "3");

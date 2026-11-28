@@ -21,6 +21,8 @@ Whooper's.
   per thread. It draws a file from its old and new contents, or one file of a unified diff parsed
   with the exported `parsePatchFiles`; its Shiki theme is exported as `diffTheme`. `Markdown` parses with `unified` (remark and GitHub's extensions) and highlights code
   with the same Shiki highlighter and Sigil theme as `Diff`, so a page has one highlighter.
+  `Select` keeps showing its `value` when its options change, including options built again on
+  each read, and shows a value given before its option exists once the option arrives.
 
 ## Use
 
