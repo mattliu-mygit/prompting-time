@@ -86,19 +86,46 @@ describe("a background agent's settings", () => {
 
   it("shows the plugin's refusal in its own words and keeps the edit", async () => {
     const { savePluginSettings } = renderSettings();
-    input(await screen.findByRole("spinbutton", { name: "Stop a poll after" }), "3");
-    savePluginSettings.mockResolvedValueOnce(actionResult({ exitCode: 1, stderr: "whooper-settings: settings.poll.timeout_minutes is below 5\n" }));
+    // 7.5 is in the schema's range, so the form sends it; whether an integer is whole is the plugin's check.
+    input(await screen.findByRole("spinbutton", { name: "Stop a poll after" }), "7.5");
+    savePluginSettings.mockResolvedValueOnce(actionResult({ exitCode: 1, stderr: "whooper-settings: settings.poll.timeout_minutes is not of type integer\n" }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("whooper-settings: settings.poll.timeout_minutes is below 5");
-    expect(savePluginSettings).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper", values: JSON.stringify({ poll: { timeout_minutes: 3 } }) });
-    expect(screen.getByRole("spinbutton", { name: "Stop a poll after" })).toHaveValue(3);
+    expect(await screen.findByRole("alert")).toHaveTextContent("whooper-settings: settings.poll.timeout_minutes is not of type integer");
+    expect(savePluginSettings).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper", values: JSON.stringify({ poll: { timeout_minutes: 7.5 } }) });
+    expect(screen.getByRole("spinbutton", { name: "Stop a poll after" })).toHaveValue(7.5);
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Revert" }));
     flush();
     expect(screen.getByRole("spinbutton", { name: "Stop a poll after" })).toHaveValue(10);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("says beside a number outside its schema's range what it must be, and keeps Save off until every field is in range", async () => {
+    const { savePluginSettings } = renderSettings();
+    const answer = await screen.findByRole("spinbutton", { name: "Stop an answer after" });
+    const poll = screen.getByRole("spinbutton", { name: "Stop a poll after" });
+    input(answer, "0");
+    input(poll, "4");
+    expect(answer).toHaveAttribute("aria-invalid", "true");
+    expect(answer).toHaveAccessibleDescription("Must be above 0.");
+    expect(poll).toHaveAccessibleDescription("Must be at least 5.");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(savePluginSettings).not.toHaveBeenCalled();
+
+    input(answer, "0.5");
+    expect(answer).not.toHaveAttribute("aria-invalid");
+    expect(screen.queryByText("Must be above 0.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    input(poll, "5");
+    expect(screen.queryByText("Must be at least 5.")).not.toBeInTheDocument();
+    savePluginSettings.mockResolvedValueOnce(actionResult());
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.getByText("Saved.")).toBeInTheDocument());
+    expect(savePluginSettings).toHaveBeenCalledExactlyOnceWith({ plugin: "whooper", values: JSON.stringify({ poll: { timeout_minutes: 5 }, ask: { timeout_minutes: 0.5 } }) });
   });
 
   it("says where the plugin came from, who runs it, and which programs are missing", async () => {

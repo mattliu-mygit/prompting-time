@@ -200,7 +200,10 @@ checks, starts, and stops them, and the window shows them.
   window's header then shows the plugin's name, its status words, and a ⋯ menu with the same
   controls; Settings and Logs open in the main view as the tabs Logs (the end of its log, with
   search and copy) and Settings (where it came from, who runs it, the programs it needs, and its
-  settings in a form drawn from its settings schema, which the plugin checks and saves), and
+  settings in a form drawn from its settings schema, which the plugin checks and saves; the form
+  itself refuses a number outside the schema's `minimum`, `exclusiveMinimum`, `maximum`, or
+  `exclusiveMaximum`, saying beside it what it must be, such as "Must be above 0.", and keeps Save
+  off until it is in range), and
   Open page in that menu goes back to the page. Everything else the plugin shows, such as its
   history, is on its page. Stop asks first and names the items whose dot says they run now.
   **Add plugin…**, always at the end of the Plugins section, and the palette install a plugin:

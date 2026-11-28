@@ -27,9 +27,11 @@ Whooper's.
   plugin, without its controls, so a plugin page can draw the same form: `settingFields` turns the
   plugin's settings JSON Schema into fields (groups, numbers with a unit taken from a title such as
   "Poll every (minutes)", text, switches, one choice, several choices, and lists); `formValue` and
-  `settingValue` convert between a setting and its control's value; and `changedSettings` gives only
-  the settings a form changed, nested as the settings nest, for the plugin's save-settings. It
-  checks no values; the plugin's save-settings does.
+  `settingValue` convert between a setting and its control's value; `rangeError` says why a number
+  is outside the range of its schema's `minimum`, `exclusiveMinimum`, `maximum`, and
+  `exclusiveMaximum`, such as "Must be above 0.", for the form to show beside the field and to keep
+  Save off; and `changedSettings` gives only the settings a form changed, nested as the settings
+  nest, for the plugin's save-settings, which checks everything else.
 
 ## Use
 

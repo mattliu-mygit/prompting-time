@@ -19,7 +19,7 @@ export function noPlugins(): Pick<AppApi, "listPlugins" | "installPlugin" | "plu
   };
 }
 
-/** An invented settings schema with the shapes of Whooper's: groups, numbers with units, days, choices, a list, and a nested group. */
+/** An invented settings schema with the shapes of Whooper's: groups, numbers with units and ranges, days, choices, a list, and a nested group. */
 export const fixtureSchema = JSON.stringify({
   type: "object",
   properties: {
@@ -58,6 +58,11 @@ export const fixtureSchema = JSON.stringify({
       type: "object",
       properties: { skills: { title: "Review skills", type: "array", items: { type: "string" } } },
     },
+    ask: {
+      title: "Questions about a review",
+      type: "object",
+      properties: { timeout_minutes: { title: "Stop an answer after (minutes)", type: "number", exclusiveMinimum: 0 } },
+    },
   },
 });
 
@@ -68,6 +73,7 @@ export const fixtureSettings = {
   jobs: { review: "devin" },
   agents: { claude: {} },
   review: { skills: ["fixture-review", "fixture-style"] },
+  ask: { timeout_minutes: 2.5 },
 };
 
 /** Whooper's manifest `status` key: its six groups, three of them under Needs you, and its row actions. */

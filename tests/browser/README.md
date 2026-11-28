@@ -88,7 +88,8 @@ reviews for the build it needs) and folds the sidebar to a rail on the left: "»
 status words, and a ⋯ menu (More) with its controls, Settings, and Logs; Settings and Logs open in
 the main view, and Open page in the same menu goes back to the page. Clicking the rail unfolds the
 sidebar and leaves Whooper's page in place; choosing a chat shows the chat. In Settings, change a
-value and Save, or set "Stop a poll after" below 5 to see Whooper's refusal. Pause, Resume, Stop,
+value and Save. Set "Stop a poll after" below 5 to see the form say "Must be at least 5." beside it
+and keep Save off, or set it to 7.5, which is in range, to see Whooper's refusal. Pause, Resume, Stop,
 and Start change the invented Whooper in browser memory; Pause turns the row to "Paused" with
 Resume, and Stop asks first. `?agents=missing` shows Whooper stopped for a missing program.
 `?agents=confirm` opens the submit confirmation over the app with an invented request, and

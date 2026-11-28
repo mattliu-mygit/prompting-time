@@ -1,5 +1,5 @@
 import { createMemo, createSignal, createUniqueId, For, onSettled, Show, untrack } from "solid-js";
-import { Button, changedSettings, Checkbox, fieldKey, formValue, NumberField, Select, settingFields, StatusDot, Textarea, TextField, valueAt, type FormValue, type LeafField, type SettingField } from "@prompting-time/ui";
+import { Button, changedSettings, Checkbox, fieldKey, formValue, leafFields, NumberField, rangeError, Select, settingFields, StatusDot, Textarea, TextField, valueAt, type FormValue, type LeafField, type SettingField } from "@prompting-time/ui";
 import type { PluginSnapshot, PluginSource } from "../../bridge/types";
 import type { PluginActions, PluginStatusRead } from "../../app/store";
 import { describeAgent, missingPrograms } from "./status";
@@ -18,9 +18,8 @@ type Props = {
 /**
  * A background agent's Settings tab: what it is and where it came from, whether its process runs
  * and who started it, the programs it needs, and its settings in a form drawn from its settings
- * schema. The plugin
- * checks and saves the settings; a refusal shows the plugin's own words. The caller makes one per
- * plugin.
+ * schema. The form refuses a number outside its schema's range; the plugin checks the rest and
+ * saves the settings, and a refusal shows the plugin's own words. The caller makes one per plugin.
  */
 export function PluginSettings(props: Props) {
   const name = untrack(() => props.plugin.name);
@@ -37,6 +36,8 @@ export function PluginSettings(props: Props) {
   const changes = createMemo(() => changedSettings(fields(), saved(), draft()));
   const dirty = () => Object.keys(changes()).length > 0;
   const value = (field: LeafField) => draft()[fieldKey(field)] ?? formValue(field, valueAt(saved(), field.path));
+  // Save stays off while a field shows a number outside its schema's range, which the field explains beside it.
+  const canSave = () => dirty() && !saving() && leafFields(fields()).every((field) => rangeError(field, value(field)) === null);
 
   async function readSettings(): Promise<Record<string, unknown>> {
     const result = await props.actions.pluginRequest({ plugin: name, action: GET_SETTINGS, args: [], confirmedFingerprint: null });
@@ -65,7 +66,7 @@ export function PluginSettings(props: Props) {
 
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    if (!dirty() || saving()) return;
+    if (!canSave()) return;
     setSaving(true);
     setSaveError(null);
     setSavedNote(false);
@@ -102,7 +103,7 @@ export function PluginSettings(props: Props) {
   });
 
   return (
-    // novalidate: the plugin checks the values, so a number under the schema's minimum still goes to it and its refusal shows.
+    // novalidate: the form shows its own message for a number outside its schema's range, and leaves every other check, such as whether an integer is whole, to the plugin, whose refusal shows.
     <form class="plugin-settings" aria-label={`${props.plugin.title} settings`} aria-busy={saving() ? "true" : "false"} novalidate onSubmit={(event) => void save(event)}>
       <div class="plugin-scroll">
         <div class="plugin-column">
@@ -146,7 +147,7 @@ export function PluginSettings(props: Props) {
             </Show>
           </div>
           <Button disabled={!dirty() || saving()} onClick={() => { setDraft({}); setSaveError(null); }}>Revert</Button>
-          <Button type="submit" variant="primary" disabled={!dirty() || saving()}>{saving() ? "Saving…" : "Save"}</Button>
+          <Button type="submit" variant="primary" disabled={!canSave()}>{saving() ? "Saving…" : "Save"}</Button>
         </div>
       </Show>
     </form>
@@ -173,7 +174,9 @@ function FieldView(props: { field: SettingField; value: (field: LeafField) => Fo
           label={field.title}
           unit={field.unit ?? undefined}
           hint={hint}
+          error={rangeError(field, props.value(field)) ?? undefined}
           min={field.minimum ?? undefined}
+          max={field.maximum ?? undefined}
           step={field.kind === "integer" ? 1 : "any"}
           value={props.value(field) as string}
           disabled={props.disabled}

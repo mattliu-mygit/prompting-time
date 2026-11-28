@@ -240,7 +240,8 @@ export function withAgentsFixture(base: AppApi): AppApi {
     savePluginSettings: async ({ values }) => {
       const changes = JSON.parse(values) as Record<string, Record<string, unknown>>;
       const timeout = changes.poll?.timeout_minutes;
-      if (typeof timeout === "number" && timeout < 5) return result({ exitCode: 1, stderr: "whooper-settings: settings.poll.timeout_minutes is below 5" });
+      // The form refuses a value under the schema's minimum of 5 itself; whether it is whole is Whooper's check.
+      if (typeof timeout === "number" && !Number.isInteger(timeout)) return result({ exitCode: 1, stderr: "whooper-settings: settings.poll.timeout_minutes is not of type integer" });
       settings = Object.fromEntries(Object.entries(settings).map(([key, group]) => [key, { ...group, ...changes[key] }]));
       return result({});
     },

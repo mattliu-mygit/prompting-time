@@ -4,13 +4,24 @@
 // from these, and a plugin page can draw its own the same way. The form edits these kinds of
 // setting: objects (as groups), numbers and integers, strings, booleans, a string enum, an array
 // of a string enum, and an array of strings; a setting of any other kind is left out of the form
-// and keeps the value the plugin's config gives it. Nothing here checks values: the plugin's
-// save-settings checks them and refuses what it does not take.
+// and keeps the value the plugin's config gives it. The form checks only that a number lies in the
+// range its schema gives (rangeError); the plugin's save-settings checks everything else and
+// refuses what it does not take.
 
 /** One field of the form, or a group of them. `path` is the setting's place in the settings object. */
 export type SettingField =
   | { kind: "group"; path: string[]; title: string; description: string | null; fields: SettingField[] }
-  | { kind: "integer" | "number"; path: string[]; title: string; description: string | null; unit: string | null; minimum: number | null }
+  | {
+      kind: "integer" | "number";
+      path: string[];
+      title: string;
+      description: string | null;
+      unit: string | null;
+      minimum: number | null;
+      exclusiveMinimum: number | null;
+      maximum: number | null;
+      exclusiveMaximum: number | null;
+    }
   | { kind: "text" | "list" | "switch"; path: string[]; title: string; description: string | null }
   | { kind: "choice" | "choices"; path: string[]; title: string; description: string | null; options: string[] };
 
@@ -25,7 +36,10 @@ type Schema = {
   properties?: Record<string, Schema>;
   enum?: unknown[];
   items?: Schema;
-  minimum?: number;
+  minimum?: unknown;
+  exclusiveMinimum?: unknown;
+  maximum?: unknown;
+  exclusiveMaximum?: unknown;
 };
 
 /** The form's top-level fields; an empty list when the schema describes no settings object. */
@@ -57,7 +71,17 @@ function fieldFor(schema: Schema, path: string[], key: string): SettingField | n
     case "number": {
       // "Poll every (minutes)" reads as the label "Poll every" with the unit after the input.
       const unit = /^(.*\S)\s*\(([^()]+)\)$/.exec(title);
-      return { kind: schema.type, path, title: unit?.[1] ?? title, unit: unit?.[2] ?? null, description, minimum: schema.minimum ?? null };
+      return {
+        kind: schema.type,
+        path,
+        title: unit?.[1] ?? title,
+        unit: unit?.[2] ?? null,
+        description,
+        minimum: bound(schema.minimum),
+        exclusiveMinimum: bound(schema.exclusiveMinimum),
+        maximum: bound(schema.maximum),
+        exclusiveMaximum: bound(schema.exclusiveMaximum),
+      };
     }
     case "string":
       return { kind: "text", path, title, description };
@@ -72,6 +96,14 @@ function fieldFor(schema: Schema, path: string[], key: string): SettingField | n
     default:
       return null;
   }
+}
+
+/**
+ * A range keyword's bound in draft 2020-12's form, a number; null when the schema has none or gives
+ * draft 4's boolean `exclusiveMinimum` or `exclusiveMaximum`, which the form leaves to the plugin.
+ */
+function bound(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
 }
 
 function stringOptions(values: unknown[] | undefined): string[] | null {
@@ -128,6 +160,24 @@ export function settingValue(field: LeafField, value: FormValue): unknown {
     case "switch":
       return value === true;
   }
+}
+
+/**
+ * What a number must be when its control holds a value outside the range its schema's `minimum`,
+ * `exclusiveMinimum`, `maximum`, and `exclusiveMaximum` give, such as "Must be above 0." for
+ * `"exclusiveMinimum": 0`; null when the value is in range, the control is empty, or the field holds
+ * no number. Integers and numbers take the same bounds; whether an integer is whole, like every
+ * other check, is the plugin's.
+ */
+export function rangeError(field: LeafField, value: FormValue): string | null {
+  if (field.kind !== "integer" && field.kind !== "number") return null;
+  const number = settingValue(field, value);
+  if (typeof number !== "number") return null;
+  if (field.minimum !== null && number < field.minimum) return `Must be at least ${field.minimum}.`;
+  if (field.exclusiveMinimum !== null && number <= field.exclusiveMinimum) return `Must be above ${field.exclusiveMinimum}.`;
+  if (field.maximum !== null && number > field.maximum) return `Must be at most ${field.maximum}.`;
+  if (field.exclusiveMaximum !== null && number >= field.exclusiveMaximum) return `Must be below ${field.exclusiveMaximum}.`;
+  return null;
 }
 
 /**

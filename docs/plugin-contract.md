@@ -68,8 +68,11 @@ Some names have a meaning of their own. Each is optional, and none may be marked
 | `get-settings` | for the Settings tab, and to decide which prerequisites with `only_when` are needed | print the settings as one JSON object |
 | `save-settings` | with the settings to change as one JSON object argument, from the Settings tab | check and save them, or refuse with a nonzero exit and the reason on stderr |
 
-The Settings tab can edit settings only when both `get-settings` and `save-settings` exist. A
-manifest with a prerequisite's `only_when` must have `get-settings`.
+The Settings tab can edit settings only when both `get-settings` and `save-settings` exist. It
+does not run `save-settings` with a number outside the range of the settings schema's `minimum`,
+`exclusiveMinimum`, `maximum`, and `exclusiveMaximum`, in draft 2020-12's numeric form, and leaves
+every other check to `save-settings`. A manifest with a prerequisite's `only_when` must have
+`get-settings`.
 
 ### Row actions and `--item`
 
