@@ -20,6 +20,12 @@ use super::{PluginError, PluginHostConfig, PluginSource};
 pub(crate) const STAGING_DIR: &str = ".staging";
 /// The largest release archive PT downloads. Whooper's is about 4 MB.
 const MAX_DOWNLOAD_BYTES: &str = "268435456";
+/// The most an unpacked archive may hold; Whooper's checkout, more than its release holds, is about
+/// 16 MB in about 500 files. tar has no limit of its own, so PT checks after unpacking, which bounds
+/// what stays installed but not the space an archive takes while it unpacks; its SHA-256, which the
+/// user gives, already says which archive the user means to install.
+const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_UNPACKED_ENTRIES: usize = 100_000;
 
 /// One installed plugin as PT recorded and read it.
 #[derive(Clone, Debug)]
@@ -320,9 +326,40 @@ async fn unpack(
             finished.status,
         )));
     }
+    check_unpacked_size(&target, MAX_UNPACKED_BYTES, MAX_UNPACKED_ENTRIES)?;
     let folder = single_folder(&target)?;
     let (manifest, settings_schema) = manifest::load(&folder)?;
     Ok((folder, manifest, settings_schema))
+}
+
+/// Refuses an unpacked archive that holds more than `max_bytes` in its files or more than
+/// `max_entries` files, folders, and links. Links are counted, not followed.
+fn check_unpacked_size(root: &Path, max_bytes: u64, max_entries: usize) -> Result<(), PluginError> {
+    let io_error = |source| PluginError::Io {
+        context: format!("could not read {}", root.display()),
+        source,
+    };
+    let (mut bytes, mut entries) = (0u64, 0usize);
+    let mut folders = vec![root.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let metadata = entry.metadata().map_err(io_error)?;
+            entries += 1;
+            if metadata.is_dir() {
+                folders.push(entry.path());
+            } else if metadata.is_file() {
+                bytes = bytes.saturating_add(metadata.len());
+            }
+            if bytes > max_bytes || entries > max_entries {
+                return Err(PluginError::Archive(format!(
+                    "it unpacks to more than {} MiB or {max_entries} files, the most Prompting Time installs",
+                    max_bytes / 1024 / 1024
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
@@ -379,5 +416,33 @@ fn failure_text(stderr: &[u8], status: std::process::ExitStatus) -> String {
         }
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unpacked_archive_over_the_size_or_entry_limit_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("plugin-0.1.0");
+        fs::create_dir_all(folder.join("bin")).unwrap();
+        fs::write(folder.join("bin/run"), vec![b'x'; 600]).unwrap();
+        fs::write(folder.join("README"), vec![b'x'; 400]).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", folder.join("zero")).unwrap();
+
+        // plugin-0.1.0, bin, bin/run, README, and zero: five entries holding 1000 bytes; the link
+        // counts as an entry and its target is not read.
+        check_unpacked_size(root.path(), 1000, 5).unwrap();
+        for (max_bytes, max_entries) in [(999, 5), (1000, 4)] {
+            assert!(
+                matches!(
+                    check_unpacked_size(root.path(), max_bytes, max_entries),
+                    Err(PluginError::Archive(message)) if message.contains("the most Prompting Time installs")
+                ),
+                "{max_bytes} bytes, {max_entries} entries"
+            );
+        }
     }
 }
