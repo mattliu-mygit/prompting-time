@@ -168,9 +168,24 @@ pub(crate) async fn run_lock_holder(state_dir: &Path, start_program: &str) -> Op
         .output()
         .await
         .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .contains(start_program)
-        .then_some(pid)
+    runs_program(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        start_program,
+    )
+    .then_some(pid)
+}
+
+/// Whether `command`, a command line as `ps` prints it, runs `program`: whether it holds `program`
+/// as a whole word or as the last component of a path, such as `/bin/sh /plugins/x/bin/whooper-run`
+/// for a script whose interpreter is argv0. `ps` joins the arguments with spaces, so a path that
+/// holds a space cannot be told from two words; this matches it anyway, and also matches a command
+/// that only names the program's path as an argument, such as an editor open on it.
+fn runs_program(command: &str, program: &str) -> bool {
+    command.match_indices(program).any(|(start, _)| {
+        let before = command[..start].chars().next_back();
+        let after = command[start + program.len()..].chars().next();
+        matches!(before, None | Some('/' | ' ')) && matches!(after, None | Some(' '))
+    })
 }
 
 fn scratch_file(scratch: &Path) -> io::Result<File> {
@@ -200,4 +215,87 @@ fn read_tail(file: &mut File, limit: u64) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Child, Command as StdCommand};
+
+    use super::*;
+
+    struct Killed(Child);
+
+    impl Drop for Killed {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn lock(state_dir: &Path, pid: u32) {
+        fs::create_dir_all(state_dir.join("run.lock")).unwrap();
+        fs::write(state_dir.join("run.lock/pid"), pid.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_command_line_runs_a_program_only_as_a_whole_path_component() {
+        for (command, runs) in [
+            ("/bin/sh /plugins/fake-agent/bin/fake-run", true),
+            (
+                "/bin/bash -e /Library/Application Support/plugins/x/bin/fake-run --once",
+                true,
+            ),
+            ("/plugins/fake-agent/bin/fake-run", true),
+            ("fake-run", true),
+            ("/bin/sh fake-run", true),
+            ("/bin/sh /plugins/fake-agent/bin/fake-runner", false),
+            ("/bin/sh -c sleep 30 fake-run-helper", false),
+            ("/usr/bin/vim notes-fake-run", false),
+            ("/usr/bin/python3 -m fake_run", false),
+            ("/bin/sleep 30 --fake-run", false),
+            ("", false),
+        ] {
+            assert_eq!(runs_program(command, "fake-run"), runs, "{command:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_run_lock_holder_is_a_live_process_running_the_start_program() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        assert_eq!(
+            run_lock_holder(&state_dir, "fake-run").await,
+            None,
+            "no lock"
+        );
+
+        // A script under a folder whose name holds a space, as Application Support's does.
+        let script = root.path().join("Application Support/bin/fake-run");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let holder = Killed(StdCommand::new(&script).spawn().unwrap());
+        lock(&state_dir, holder.0.id());
+        assert_eq!(
+            run_lock_holder(&state_dir, "fake-run").await,
+            Some(holder.0.id())
+        );
+        assert_eq!(run_lock_holder(&state_dir, "other-run").await, None);
+
+        // A reused process ID whose command line merely contains the program's name.
+        let reused = Killed(
+            StdCommand::new("/bin/sh")
+                .args(["-c", "sleep 30", "fake-run-helper"])
+                .spawn()
+                .unwrap(),
+        );
+        lock(&state_dir, reused.0.id());
+        assert_eq!(run_lock_holder(&state_dir, "fake-run").await, None);
+
+        for pid in ["1", "0", "not a pid"] {
+            fs::write(state_dir.join("run.lock/pid"), pid).unwrap();
+            assert_eq!(run_lock_holder(&state_dir, "launchd").await, None, "{pid}");
+        }
+    }
 }
