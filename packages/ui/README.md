@@ -23,6 +23,13 @@ Whooper's.
   with the same Shiki highlighter and Sigil theme as `Diff`, so a page has one highlighter.
   `Select` keeps showing its `value` when its options change, including options built again on
   each read, and shows a value given before its option exists once the option arrives.
+- **Settings form logic:** `src/settingsForm.ts`, the form Prompting Time's Settings tab draws for a
+  plugin, without its controls, so a plugin page can draw the same form: `settingFields` turns the
+  plugin's settings JSON Schema into fields (groups, numbers with a unit taken from a title such as
+  "Poll every (minutes)", text, switches, one choice, several choices, and lists); `formValue` and
+  `settingValue` convert between a setting and its control's value; and `changedSettings` gives only
+  the settings a form changed, nested as the settings nest, for the plugin's save-settings. It
+  checks no values; the plugin's save-settings does.
 
 ## Use
 

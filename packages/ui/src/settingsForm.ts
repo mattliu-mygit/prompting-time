@@ -1,6 +1,11 @@
-// The settings form's fields, drawn from the JSON Schema a plugin ships with its settings, such as
-// Whooper's schemas/settings.json. The form edits the kinds of setting that schema uses; a setting
-// of any other kind is left out of the form and keeps the value the plugin's config gives it.
+// A plugin's settings form without its controls: the fields drawn from the JSON Schema a plugin
+// ships with its settings (its manifest's settings schema), the value each control shows for a
+// setting, and the settings a filled-in form changed. Prompting Time's Settings tab draws its form
+// from these, and a plugin page can draw its own the same way. The form edits these kinds of
+// setting: objects (as groups), numbers and integers, strings, booleans, a string enum, an array
+// of a string enum, and an array of strings; a setting of any other kind is left out of the form
+// and keeps the value the plugin's config gives it. Nothing here checks values: the plugin's
+// save-settings checks them and refuses what it does not take.
 
 /** One field of the form, or a group of them. `path` is the setting's place in the settings object. */
 export type SettingField =
@@ -106,7 +111,7 @@ export function formValue(field: LeafField, value: unknown): FormValue {
 
 /**
  * The setting's value for what the control holds. An emptied number becomes null, and the plugin
- * decides whether it takes that; Prompting Time checks nothing itself.
+ * decides whether it takes that.
  */
 export function settingValue(field: LeafField, value: FormValue): unknown {
   switch (field.kind) {

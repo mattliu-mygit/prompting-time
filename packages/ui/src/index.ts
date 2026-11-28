@@ -15,6 +15,7 @@ export { Markdown, type MarkdownProps } from "./Markdown";
 export { Menu, type MenuItem, type MenuProps } from "./Menu";
 export { Select, type SelectOption, type SelectProps } from "./Select";
 export { StatusDot, type Status, type StatusDotProps } from "./StatusDot";
+export { changedSettings, fieldKey, formValue, leafFields, settingFields, settingValue, valueAt, type FormValue, type LeafField, type SettingField } from "./settingsForm";
 export { Tabs, type Tab, type TabsProps } from "./Tabs";
 export { Textarea, type TextareaProps } from "./Textarea";
 export { tokens } from "./theme/tokens";

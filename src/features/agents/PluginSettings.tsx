@@ -1,9 +1,8 @@
 import { createMemo, createSignal, createUniqueId, For, onSettled, Show, untrack } from "solid-js";
-import { Button, Checkbox, NumberField, Select, StatusDot, Textarea, TextField } from "@prompting-time/ui";
+import { Button, changedSettings, Checkbox, fieldKey, formValue, NumberField, Select, settingFields, StatusDot, Textarea, TextField, valueAt, type FormValue, type LeafField, type SettingField } from "@prompting-time/ui";
 import type { PluginSnapshot, PluginSource } from "../../bridge/types";
 import type { PluginActions, PluginStatusRead } from "../../app/store";
 import { describeAgent, missingPrograms } from "./status";
-import { changedSettings, fieldKey, formValue, settingFields, valueAt, type FormValue, type LeafField, type SettingField } from "./settingsSchema";
 
 /** Prints the settings as one JSON object; the host's convention, as Whooper's whooper-settings get. */
 const GET_SETTINGS = "get-settings";
