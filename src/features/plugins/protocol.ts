@@ -23,6 +23,11 @@ export const PROTOCOL_VERSION = 2;
 /** The most arguments one call passes, and the most characters they hold together. */
 export const MAX_CALL_ARGS = 64;
 export const MAX_CALL_ARGS_LENGTH = 64 * 1024;
+/**
+ * The most calls of one page that run at once, each an action's process and its output in the
+ * window; a call past it gets an error at once. A page's reads in parallel stay well below it.
+ */
+export const MAX_CALLS_IN_FLIGHT = 16;
 
 export type PageMessage =
   | { version: typeof PROTOCOL_VERSION; type: "ready" }

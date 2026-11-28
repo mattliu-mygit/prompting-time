@@ -278,7 +278,8 @@ checks, starts, and stops them, and the window shows them.
   `--print` and `--expect` (or `--print=…`, `--expect=…`) among a confirm action's arguments,
   whoever passes them: a page, or an item ID a row action passes. Unasked, the page gets `open {route}` for the item or blocker the user opened and
   `changed {files}` when files in the plugin's state folder change, null when more changed than
-  one event lists. A call holds at most 64 arguments of at most 64 KiB together.
+  one event lists. A call holds at most 64 arguments of at most 64 KiB together, and a page runs at most 16
+  calls at once; one past that gets an `error` at once.
 - **Status format 2.** A plugin whose manifest has a `status` key, `{"format": 2, "groups": [{"id",
   "title", "needs_you", "order"}], "item_actions": [...]}`, prints the format in
   [`docs/plugin-status-v2.schema.json`](docs/plugin-status-v2.schema.json) from its `status` action:

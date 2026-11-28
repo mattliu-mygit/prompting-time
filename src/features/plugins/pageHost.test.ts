@@ -3,12 +3,16 @@ import type { PluginActionRequest, PluginActionResult } from "../../bridge/types
 import { actionResult, fixtureV2Plugin, fixtureV2Status } from "../../test/plugins";
 import type { ConfirmOutcome } from "../agents/ConfirmActionDialog";
 import { createPageHost } from "./pageHost";
-import { MAX_CALL_ARGS, MAX_CALL_ARGS_LENGTH, readPageMessage } from "./protocol";
+import { MAX_CALL_ARGS, MAX_CALL_ARGS_LENGTH, MAX_CALLS_IN_FLIGHT, readPageMessage } from "./protocol";
 
 const call = (id: number, action: string, args: string[] = []) => ({ version: 2, type: "call", id, action, args });
 
 function setup(confirm: (action: string, args: readonly string[]) => Promise<ConfirmOutcome> = async () => ({ stage: "run", result: actionResult({ stdout: "deleted\n" }) })) {
   const posted: Record<string, unknown>[] = [];
+  let release = () => {};
+  const hanging = new Promise<PluginActionResult>((resolve) => {
+    release = () => resolve(actionResult({ stdout: "done\n" }));
+  });
   const pluginRequest = vi.fn(async (request: PluginActionRequest): Promise<PluginActionResult> => {
     switch (request.action) {
       case "status":
@@ -17,6 +21,7 @@ function setup(confirm: (action: string, args: readonly string[]) => Promise<Con
         if (request.args.includes("missing")) return actionResult({ exitCode: 2, stderr: "fixture-runs: no run missing\n" });
         if (request.args.includes("killed")) return actionResult({ exitCode: null, stdout: "half done\n" });
         if (request.args.includes("unstartable")) throw new Error("Prompting Time could not start fixture-runs.");
+        if (request.args.includes("hang")) return hanging;
         if (request.args.includes("huge")) return actionResult({ stdout: '{"runs": [{"id": "run-1"}, {"id": "ru', stdoutTruncated: true });
         if (request.args.includes("huge-refused")) return actionResult({ exitCode: 3, stdout: "x", stdoutTruncated: true, stderr: "fixture-runs: too much\n" });
         return actionResult({ stdout: "queued again\n" });
@@ -33,6 +38,8 @@ function setup(confirm: (action: string, args: readonly string[]) => Promise<Con
   });
   return {
     host, posted, pluginRequest, confirm: confirmSpy,
+    /** Ends every call that hangs. */
+    release: () => release(),
     /** Sends a message from the page and waits for what it starts. */
     async send(message: unknown) {
       host.receive(message);
@@ -131,6 +138,21 @@ describe("the page host", () => {
     // A refusal still says how the plugin refused.
     await page.send(call(3, "rerun", ["--item", "huge-refused"]));
     expect(page.posted.at(-1)).toEqual({ version: 2, type: "error", reply_to: 3, message: "fixture-runs: too much", stage: "run", exit_code: 3, stderr: "fixture-runs: too much\n" });
+  });
+
+  it("runs at most a few of a page's calls at once and refuses the rest until one ends", async () => {
+    const page = setup();
+    for (let id = 1; id <= MAX_CALLS_IN_FLIGHT; id += 1) await page.send(call(id, "rerun", ["hang"]));
+    expect(page.posted).toEqual([]);
+    await page.send(call(100, "rerun"));
+    expect(page.posted).toEqual([{ version: 2, type: "error", reply_to: 100, message: `Prompting Time runs at most ${MAX_CALLS_IN_FLIGHT} of a page's calls at once; call again when one ends.` }]);
+    expect(page.pluginRequest).toHaveBeenCalledTimes(MAX_CALLS_IN_FLIGHT);
+
+    page.release();
+    for (let round = 0; round < 10; round += 1) await Promise.resolve();
+    expect(page.posted).toHaveLength(MAX_CALLS_IN_FLIGHT + 1);
+    await page.send(call(101, "rerun"));
+    expect(page.posted.at(-1)).toEqual({ version: 2, type: "result", reply_to: 101, json: "queued again\n" });
   });
 
   it("refuses an action the manifest does not declare, with an error and nothing run", async () => {

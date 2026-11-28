@@ -1,7 +1,7 @@
 import type { PluginActions } from "../../app/store";
 import { PLUGIN_ACTION_OUTPUT_LIMIT, type PluginActionResult, type PluginSnapshot } from "../../bridge/types";
 import type { ConfirmOutcome } from "../agents/ConfirmActionDialog";
-import { PROTOCOL_VERSION, readPageMessage, type ActionFailure, type ActionStage, type HostMessage, type HostUpdate } from "./protocol";
+import { MAX_CALLS_IN_FLIGHT, PROTOCOL_VERSION, readPageMessage, type ActionFailure, type ActionStage, type HostMessage, type HostUpdate } from "./protocol";
 
 export type PageHostOptions = {
   /** The plugin's latest snapshot: its title and declared actions, each with its confirm flag. */
@@ -51,6 +51,7 @@ export function createPageHost(options: PageHostOptions): PageHost {
   let ready = false;
   let disposed = false;
   let route: string | null = null;
+  let inFlight = 0;
 
   function post(update: HostUpdate) {
     if (!disposed) options.post({ ...update, version: PROTOCOL_VERSION });
@@ -109,10 +110,19 @@ export function createPageHost(options: PageHostOptions): PageHost {
         if (route !== null) post({ type: "open", route });
         return;
       }
-      call(message.action, message.args).then(
-        (json) => post({ type: "result", reply_to: message.id, json }),
-        (reason) => post({ type: "error", reply_to: message.id, message: messageFor(reason), ...(reason instanceof CallError ? reason.failure : {}) }),
-      );
+      if (inFlight >= MAX_CALLS_IN_FLIGHT) {
+        post({ type: "error", reply_to: message.id, message: `Prompting Time runs at most ${MAX_CALLS_IN_FLIGHT} of a page's calls at once; call again when one ends.` });
+        return;
+      }
+      inFlight += 1;
+      call(message.action, message.args)
+        .then(
+          (json) => post({ type: "result", reply_to: message.id, json }),
+          (reason) => post({ type: "error", reply_to: message.id, message: messageFor(reason), ...(reason instanceof CallError ? reason.failure : {}) }),
+        )
+        .finally(() => {
+          inFlight -= 1;
+        });
     },
     open(next) {
       route = next;
