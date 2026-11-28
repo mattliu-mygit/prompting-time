@@ -7,6 +7,10 @@ use std::path::{Component, Path};
 
 use super::PluginHost;
 
+/// The largest page file PT serves, read whole into memory for each request. A page's scripts and
+/// fonts are a few MiB at most; raise this for a page that ships something larger, such as WASM.
+pub const PAGE_FILE_LIMIT: u64 = 64 * 1024 * 1024;
+
 /// Why PT does not serve a page file.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PageFileError {
@@ -17,6 +21,8 @@ pub enum PageFileError {
     Outside(String),
     #[error("the plugin's page has no file {0}")]
     NotFound(String),
+    #[error("{0} is larger than the {limit} MiB Prompting Time serves", limit = PAGE_FILE_LIMIT / 1024 / 1024)]
+    TooLarge(String),
 }
 
 impl PluginHost {
@@ -48,7 +54,14 @@ impl PluginHost {
         if !file.starts_with(&folder) {
             return Err(PageFileError::Outside(path.to_owned()));
         }
-        // A folder fails to read, so it counts as not found.
+        let metadata = fs::metadata(&file).map_err(not_found)?;
+        // A folder is not a page file.
+        if !metadata.is_file() {
+            return Err(PageFileError::NotFound(path.to_owned()));
+        }
+        if metadata.len() > PAGE_FILE_LIMIT {
+            return Err(PageFileError::TooLarge(path.to_owned()));
+        }
         fs::read(&file).map_err(not_found)
     }
 }

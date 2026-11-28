@@ -255,7 +255,7 @@ checks, starts, and stops them, and the window shows them.
   `?pt=<token>`, a token Prompting Time makes for each plugin when it runs and puts only in the
   address it gives the plugin's frame, so a page can reload itself but cannot navigate its frame to
   another plugin's page, which the window would take for its own. Prompting Time serves only files inside
-  that folder (403 for `..` or a symlink out of it), each with `Access-Control-Allow-Origin: null`,
+  that folder (403 for `..` or a symlink out of it), of at most 64 MiB each, each with `Access-Control-Allow-Origin: null`,
   for the page's module scripts and fonts, and a Content Security Policy that allows the page's own
   files, inline styles, and data URLs, and no fetches. The window has its own policy, in
   `tauri.conf.json`, which frames only `pt-plugin:`; the Vite server sends it too, so development

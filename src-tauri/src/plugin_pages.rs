@@ -156,7 +156,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::Path;
 
-    use prompting_time_core::plugins::{PluginHostConfig, PluginSource};
+    use prompting_time_core::plugins::{PAGE_FILE_LIMIT, PluginHostConfig, PluginSource};
 
     use super::*;
 
@@ -195,6 +195,11 @@ mod tests {
         )
         .unwrap();
         fs::write(folder.join("page/dist/assets/index.js"), "export {};").unwrap();
+        // Sparse, so it takes no space.
+        fs::File::create(folder.join("page/dist/huge.wasm"))
+            .unwrap()
+            .set_len(PAGE_FILE_LIMIT + 1)
+            .unwrap();
         fs::write(folder.join("page/dist/assets/two words.css"), "body {}").unwrap();
         fs::write(folder.join("secret.txt"), "not for the page").unwrap();
         symlink("../../secret.txt", folder.join("page/dist/escape.txt")).unwrap();
@@ -300,6 +305,7 @@ mod tests {
         for uri in [
             "pt-plugin://page-agent/missing.js",
             "pt-plugin://page-agent/missing.html",
+            "pt-plugin://page-agent/huge.wasm",
             "pt-plugin://page-agent/assets",
             "pt-plugin://page-agent/",
             "pt-plugin://other-agent/index.html",

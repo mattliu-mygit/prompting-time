@@ -46,7 +46,7 @@ use crate::owned_process::OwnedProcess;
 use crate::providers::child_path;
 use install::{Installed, STAGING_DIR};
 pub use manifest::{GET_SETTINGS_ACTION, Manifest, ManifestError, SAVE_SETTINGS_ACTION};
-pub use page::PageFileError;
+pub use page::{PAGE_FILE_LIMIT, PageFileError};
 pub use prerequisites::PrerequisiteStatus;
 pub use run::ACTION_OUTPUT_LIMIT;
 use watcher::StateWatcher;
