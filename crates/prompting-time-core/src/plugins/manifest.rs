@@ -112,11 +112,11 @@ pub struct ManifestError(pub String);
 
 impl Page {
     /// The folder of the page's files, relative to the plugin's folder: the entry's folder, such as
-    /// `page/dist` for `page/dist/index.html`.
+    /// `page/dist` for `page/dist/index.html`, never the plugin's folder itself.
     pub fn folder(&self) -> &Path {
         Path::new(&self.entry)
             .parent()
-            .expect("validated paths have a parent, if only the empty one")
+            .expect("validated entries are in a folder")
     }
 
     /// The entry's path in the page's folder, such as `index.html`.
@@ -180,6 +180,14 @@ impl Manifest {
             ));
         }
         check_relative("page.entry", &self.page.entry)?;
+        // PT serves every file in the entry's folder to the page, so that folder cannot be the
+        // plugin's own, which holds its commands and manifest.
+        if Path::new(&self.page.entry).components().count() < 2 {
+            return invalid(format!(
+                "page.entry names {:?}, which must be in a folder of its own inside the plugin's folder, such as page/dist/index.html",
+                self.page.entry
+            ));
+        }
         check_relative("settings", &self.settings)?;
         let mut names = HashSet::new();
         for action in &self.actions {
@@ -433,6 +441,12 @@ mod tests {
             }),
             ("program name", |m| {
                 m["prerequisites"][0]["command"] = "bin/gh".into()
+            }),
+            ("folder of its own", |m| {
+                m["page"]["entry"] = "index.html".into()
+            }),
+            ("inside the plugin's folder", |m| {
+                m["page"]["entry"] = "page/../index.html".into()
             }),
             ("page protocol 2", |m| m["page"]["protocol"] = 0.into()),
             ("page protocol 2", |m| m["page"]["protocol"] = 1.into()),

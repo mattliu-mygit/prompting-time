@@ -245,7 +245,9 @@ checks, starts, and stops them, and the window shows them.
   `~/.local/state/<name>`). Prompting Time passes its `XDG_STATE_HOME` to plugin commands, watches
   that folder, and sends the window a `pluginChanged` event naming the files that changed.
 
-- **Pages.** A plugin's page is the folder that holds its manifest's `page.entry`. The window loads
+- **Pages.** A plugin's page is the folder that holds its manifest's `page.entry`, which must be a
+  folder inside the plugin's folder, such as `page/dist/` for `page/dist/index.html`, so the page
+  never reads the plugin's commands or manifest. The window loads
   it from `pt-plugin://<name>/<path>` in an iframe sandboxed to scripts only, so the page has the
   origin "null" and reaches neither the window nor Tauri. Prompting Time serves only files inside
   that folder (403 for `..` or a symlink out of it), each with `Access-Control-Allow-Origin: null`,
