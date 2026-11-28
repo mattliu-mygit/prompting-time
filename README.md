@@ -308,7 +308,16 @@ checks, starts, and stops them, and the window shows them.
   choose what it lists: All, Chats, or one plugin's, each with its count. Command-J and search
   keep to the chosen chip; Command-J, the menu bar's count, and opening the next item skip what
   is hidden. A chat that is hidden or filtered out shows with its folder's chats. This device
-  remembers what it hides and the chosen chip. An item or blocker that does not fit is left out, as are row actions the manifest
+  remembers what it hides and the chosen chip. Each Needs you row has a checkbox in its icon's
+  place, shown on the open or focused row and on every row while any is checked, never on
+  pointing: a click checks it, Shift+click checks the rows between it and the last one clicked, x
+  checks the focused row, Command-A on a row checks all the chip lists, and Escape unchecks them.
+  While any is checked, a bar at the bottom of the sidebar says how many and offers Hide ("Hid N"
+  with Undo) and the row actions every checked entry lists, when all are items of one plugin. Such
+  an action runs once per item with `--item <id>`, one after another, an action marked `confirm`
+  through its confirmation for each item, where Cancel stops the rest; a notice then says what
+  happened, such as "Rerun ran on 2, failed on 1". A checked entry that leaves what Needs you lists
+  is unchecked. An item or blocker that does not fit is left out, as are row actions the manifest
   does not allow. A click on an item or blocker, Command-J landing on one, or choosing one in the
   palette opens the plugin's page at its `route`, with the sidebar folded to its rail, keeping
   the page loaded from one row to the next. When the item or blocker the page shows leaves Needs you, because the plugin's status

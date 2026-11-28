@@ -37,6 +37,13 @@ type Props = {
   onHide(entry: HiddenEntry, title: string): void;
   /** Show again in the "Hidden" fold, by the entry's key. */
   onShowAgain(key: string): void;
+  /** The keys of the Needs you entries checked for a bulk action. */
+  checked: readonly string[];
+  /**
+   * The keys checked now, in list order: after a checkbox's click, Shift+click's range, x, Command-A,
+   * or Escape, and when checked entries leave what Needs you lists.
+   */
+  onCheck(keys: string[]): void;
   /** Which entries Needs you lists; search finds only those too. */
   filter: NeedsYouFilter;
   onFilter(filter: NeedsYouFilter): void;
@@ -46,13 +53,17 @@ type Props = {
   onLoadChildPage(id: string, restart: boolean): void;
 };
 export type WorkGroup = { key: string; label: string; path: string | null; conversations: ConversationSummary[] };
-/** A conversation; a search result shows its folder and no children (`found`), and a root waiting on you under Needs you has a ⋯ menu with Hide (`hideable`). */
-type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number; found?: boolean; hideable?: boolean };
+/**
+ * A conversation; a search result shows its folder and no children (`found`), and a root waiting on
+ * you under Needs you has a ⋯ menu with Hide (`hideable`). Every Needs you row but a chat's children
+ * has a checkbox for bulk actions (`checkable`).
+ */
+type ConversationRow = { kind: "conversation"; key: string; conversation: ConversationSummary; depth: number; found?: boolean; hideable?: boolean; checkable?: boolean };
 /**
  * An item or a blocker of a plugin that prints status format 2. `reason` is why it needs you: its
  * Needs you group's title, such as "Run failed", or "blocks every job" for a blocker.
  */
-type EntryRow = { kind: "entry"; key: string; plugin: string; pluginTitle: string; reason: string; entry: { item: StatusV2Item } | { blocker: StatusV2Blocker }; depth: 0 };
+type EntryRow = { kind: "entry"; key: string; plugin: string; pluginTitle: string; reason: string; entry: { item: StatusV2Item } | { blocker: StatusV2Blocker }; depth: 0; checkable?: boolean };
 type Row = ConversationRow | EntryRow;
 /** One item of a part: a plugin's item or blocker, or a root with its loaded children. */
 type Entry = Row[];
@@ -177,7 +188,9 @@ function readOpenSections(): Record<string, boolean> {
  * 2, the items of their groups marked `needs_you`, each saying why it needs you and its plugin's
  * name, and the roots waiting on you. Chips above it choose all, the chats, or one plugin's, and
  * every row's ⋯ menu has Hide, after an item's or blocker's actions; the hidden entries wait in a
- * folded "Hidden · N" line at its end, each with Show again. Then the chats of each project and
+ * folded "Hidden · N" line at its end, each with Show again. Each Needs you row's checkbox, on the
+ * open or focused row and on all of them while any is checked, chooses entries for the bulk bar App
+ * draws: a click, Shift+click for a range, x, Command-A, and Escape. Then the chats of each project and
  * those without a folder, each root followed by its loaded children, folded until opened; a waiting
  * root that is hidden or filtered out of Needs you shows with its project's.
  * The sections the user opens or folds stay so across launches. The rows are a tree for keyboard
@@ -240,7 +253,8 @@ export function AllWork(props: Props) {
     const shownWork = narrowWork(work, hidden, filter);
     const shownChats = groups.find((group) => group.key === "needs-you")?.conversations ?? [];
     const needsYou = [...blockerEntries(shownWork.blockers), ...shownWork.needsYou.flatMap(groupEntries),
-      ...chatEntries(shownChats).map((entry) => entry.map((row) => (row.kind === "conversation" && row.depth === 0 ? { ...row, hideable: true } : row)))];
+      ...chatEntries(shownChats).map((entry) => entry.map((row) => (row.kind === "conversation" && row.depth === 0 ? { ...row, hideable: true } : row)))]
+      .map(([first, ...children]) => [{ ...first!, checkable: true }, ...children]);
     const single = (key: string, entries: Entry[]): Part[] => (entries.length > 0 ? [{ key, label: null, entries }] : []);
     const hiddenRows: HiddenRow[] = [
       ...blockerEntries(work.blockers.filter(({ plugin, blocker }) => isHidden(hidden, blockerKey(plugin, blocker.id), blockerVersion(blocker)))),
@@ -280,6 +294,72 @@ export function AllWork(props: Props) {
     : openList().flatMap((section) => section.parts.flatMap((part) => part.entries.flat()))));
   const tabStop = () => (rows().some((row) => row.key === focusedId()) ? focusedId() : rows()[0]?.key);
 
+  /** The keys of the rows with a checkbox, in list order: what Needs you lists now. */
+  const checkable = createMemo(() => sections().find((section) => section.key === "needs-you")?.parts.flatMap((part) => part.entries.map((entry) => entry[0]!.key)) ?? []);
+  const checkedKeys = createMemo(() => new Set(props.checked));
+  /** While any row is checked, every Needs you row shows its checkbox. */
+  const selecting = () => props.checked.length > 0;
+  // The row Shift+click's range starts from: the last one checked or unchecked.
+  let anchor: string | null = null;
+
+  // A checked entry that leaves what Needs you lists, as when the user hides it, acts on it, or
+  // chooses another chip, is no longer checked.
+  createEffect(() => props.checked.filter((key) => checkable().includes(key)), (kept) => {
+    if (kept.length !== untrack(() => props.checked.length)) props.onCheck(kept);
+  });
+
+  /** Checks or unchecks a row, with Shift (`range`) every row from the anchor to it too, all as the row becomes. */
+  function toggleCheck(key: string, range: boolean) {
+    const order = checkable();
+    const next = new Set(props.checked);
+    const on = !next.has(key);
+    const from = range && anchor !== null ? order.indexOf(anchor) : -1;
+    const to = order.indexOf(key);
+    const keys = from === -1 ? [key] : order.slice(Math.min(from, to), Math.max(from, to) + 1);
+    keys.forEach((each) => (on ? next.add(each) : next.delete(each)));
+    anchor = key;
+    props.onCheck(order.filter((each) => next.has(each)));
+  }
+
+  /** x checks or unchecks the focused row, Command-A checks every row Needs you lists, and Escape unchecks them all; true when the key did one. */
+  function checkKey(event: KeyboardEvent, row: Row): boolean {
+    if (event.key === "Escape" && selecting()) {
+      props.onCheck([]);
+      anchor = null;
+    } else if (!row.checkable || event.altKey) {
+      return false;
+    } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+      props.onCheck(checkable());
+    } else if (event.key === "x" && !event.metaKey && !event.ctrlKey) {
+      toggleCheck(row.key, false);
+    } else {
+      return false;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  /** A Needs you row's checkbox. It takes no tab stop, as x checks the focused row; a click leaves the focus on the row. */
+  function checkbox(key: string, title: () => string) {
+    return (
+      <input
+        type="checkbox"
+        class="work-check"
+        tabindex={-1}
+        aria-label={`Select ${title()}`}
+        checked={checkedKeys().has(key)}
+        onClick={(event) => {
+          event.stopPropagation();
+          toggleCheck(key, event.shiftKey);
+          items.get(key)?.focus();
+        }}
+      />
+    );
+  }
+  /** A checkable row's aria-checked while any row is checked. */
+  const ariaChecked = (row: Row) => (row.checkable && selecting() ? (checkedKeys().has(row.key) ? "true" : "false") : undefined);
+
   function focus(id: string | null | undefined) {
     if (!id) return;
     setFocusedId(id);
@@ -291,6 +371,7 @@ export function AllWork(props: Props) {
   }
 
   function navigate(event: KeyboardEvent, row: Row) {
+    if (checkKey(event, row)) return;
     const all = rows();
     const index = all.findIndex((item) => item.key === row.key);
     switch (event.key) {
@@ -371,9 +452,11 @@ export function AllWork(props: Props) {
           aria-label={`${title()}, ${meta()}`}
           aria-level={1}
           aria-selected={props.selectedEntry === first.key ? "true" : "false"}
+          aria-checked={ariaChecked(current())}
           class="work-row work-entry"
           style={{ "--work-depth": "0" }}
           icon={isBlocker ? <AlertIcon /> : <BotIcon />}
+          leading={first.checkable ? checkbox(first.key, title) : undefined}
           title={title()}
           status={item()?.dot ?? blocker()?.dot ?? "idle"}
           meta={meta()}
@@ -413,9 +496,11 @@ export function AllWork(props: Props) {
         aria-level={row().depth + 1}
         aria-selected={props.selectedId === id ? "true" : "false"}
         aria-expanded={expandable() ? (expanded() ? "true" : "false") : undefined}
+        aria-checked={ariaChecked(row())}
         class="work-row"
         style={{ "--work-depth": String(Math.min(row().depth, 8)) }}
         icon={<ChatIcon />}
+        leading={first.checkable ? checkbox(id, () => conversation().title) : undefined}
         title={conversation().title}
         status={state().status}
         meta={meta()}
@@ -541,7 +626,7 @@ export function AllWork(props: Props) {
   }
 
   return (
-    <div class="all-work">
+    <div class={["all-work", { "work-selecting": selecting() }]}>
       <Show when={searching()}>
         <section
           class="work-results"

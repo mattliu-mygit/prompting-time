@@ -10,14 +10,15 @@ import { menuBarRequest, readMenuBarEnabled, saveMenuBarEnabled } from "../featu
 import { PluginInspector } from "../features/agents/PluginSettings";
 import { describeAgent } from "../features/agents/status";
 import { blockerKey, itemKey, NO_STATUS_V2_WORK, readStatusV2, statusV2Work, type StatusV2Work } from "../features/agents/statusV2";
-import { ConfirmActionDialog } from "../features/agents/ConfirmActionDialog";
+import { ConfirmActionDialog, type ConfirmOutcome } from "../features/agents/ConfirmActionDialog";
 import { ConversationNavigation } from "../features/conversations/ConversationNavigation";
 import { PluginPage } from "../features/plugins/PluginPage";
 import { Inspector } from "../features/inspector/Inspector";
 import { Composer } from "../features/timeline/Composer";
 import { Timeline, type TimelineViewState } from "../features/timeline/Timeline";
 import { AllWork, conversationState, searchWork, waitingRoots } from "../features/work/AllWork";
-import { inFilter, isHidden, keepHidden, narrowWork, needsYouEntries, readFilter, readHidden, saveFilter, saveHidden, type HiddenEntry, type NeedsYouEntry, type NeedsYouFilter } from "../features/work/needsYou";
+import { bulkSummary, inFilter, isHidden, keepHidden, narrowWork, needsYouEntries, readFilter, readHidden, saveFilter, saveHidden, sharedActions, type HiddenEntry, type NeedsYouEntry, type NeedsYouFilter } from "../features/work/needsYou";
+import { BulkBar } from "../features/work/BulkBar";
 import { NewConversationDialog } from "./NewConversationDialog";
 import { readSidebarWidth, SidebarResizer } from "./SidebarResizer";
 import { createSnapshot, selectVisibleConversations, type AppSnapshot, type AppStore, type StatusFilter } from "./store";
@@ -47,8 +48,11 @@ const NOTICE_MS = 8000;
 type PluginView =
   | { kind: "agent"; plugin: string; tab: AgentTab }
   | { kind: "page"; plugin: string; entry: string | null; target: { route: string } };
-/** A row action of a format-2 plugin that waits for the user's confirmation. */
-type EntryConfirmation = { plugin: string; action: string; args: string[] };
+/**
+ * A row action of a format-2 plugin that waits for the user's confirmation; for one of a bulk
+ * action's entries, which one (`subject`) and what hears how it ended (`done`).
+ */
+type EntryConfirmation = { plugin: string; action: string; args: string[]; subject?: string; done?: (outcome: ConfirmOutcome) => void };
 
 /**
  * The command center: the All work sidebar (Needs you, the chats, and the Plugins section), the
@@ -125,6 +129,18 @@ export function App(props: { store: AppStore }) {
   const waitingChats = () => waitingRoots(snapshot().conversationIds.flatMap((id) => snapshot().conversationsById[id] ?? []));
   /** Everything under Needs you in Command-J's order, hidden entries included. */
   const needsYou = createMemo(() => needsYouEntries(pluginWork(), waitingChats()));
+  /** The keys of the Needs you entries checked for a bulk action; All work drops those it no longer lists. */
+  const [checked, setChecked] = createSignal<readonly string[]>([]);
+  /** The checked entries, in Command-J's order. */
+  const checkedEntries = createMemo(() => needsYou().filter(({ key }) => checked().includes(key)));
+  /** The row actions every checked entry offers, with the manifest's titles, for the bulk bar. */
+  const bulkActions = () => {
+    const shared = sharedActions(checkedEntries());
+    const plugin = shared && pluginNamed(shared.plugin);
+    return plugin ? shared.actions.flatMap((name) => plugin.actions.filter((item) => item.name === name).map(({ title }) => ({ name, title }))) : [];
+  };
+  /** What the bulk action running now says, such as "Rerun · 2 of 3", or null. */
+  const [bulkProgress, setBulkProgress] = createSignal<string | null>(null);
   /** What needs you less what the user hid: what the menu bar counts and auto-advance watches. */
   const unhidden = createMemo(() => needsYou().filter(({ key, version }) => !isHidden(hidden(), key, version)));
   const openNeedsYou = (entry: NeedsYouEntry) => (entry.plugin === null ? selectConversation(entry.key) : openEntry(entry.plugin, entry.key, entry.route!));
@@ -236,6 +252,57 @@ export function App(props: { store: AppStore }) {
     const next = [...hidden().filter(({ key }) => key !== entry.key), entry];
     changeHidden(next);
     notify({ text: `Hidden ${title}`, undo: () => showAgain(entry.key) });
+  }
+
+  /** Hide in the bulk bar: the checked entries leave Needs you, and a notice offers Undo for all of them. */
+  function hideChecked() {
+    const entries = checkedEntries();
+    const keys = new Set(entries.map(({ key }) => key));
+    changeHidden([...hidden().filter(({ key }) => !keys.has(key)), ...entries.map(({ key, plugin, version }) => ({ key, plugin, version }))]);
+    setChecked([]);
+    notify({ text: `Hid ${entries.length}`, undo: () => changeHidden(hidden().filter(({ key }) => !keys.has(key))) });
+  }
+
+  /** Opens an entry's confirmation and resolves with how it ended. */
+  const confirmEntry = (confirmation: Omit<EntryConfirmation, "done">) => new Promise<ConfirmOutcome>((done) => setEntryConfirmation({ ...confirmation, done }));
+
+  /**
+   * A row action in the bulk bar: it runs once for each checked item, one after another, with
+   * `--item <id>`; an action marked confirm opens its confirmation for each, and Cancel stops the
+   * rest. A notice then says how many it ran on, failed on, and the user cancelled.
+   */
+  async function runChecked(action: string) {
+    const entries = checkedEntries();
+    const plugin = pluginNamed(sharedActions(entries)?.plugin ?? "");
+    const declared = plugin?.actions.find((item) => item.name === action);
+    if (!plugin || !declared || bulkProgress() !== null) return;
+    const counts = { ran: 0, failed: 0, cancelled: 0 };
+    let failure: string | null = null;
+    for (const [index, entry] of entries.entries()) {
+      const args = ["--item", entry.itemId!];
+      setBulkProgress(`${declared.title} · ${index + 1} of ${entries.length}`);
+      if (declared.confirm) {
+        const outcome = await confirmEntry({ plugin: plugin.name, action, args, subject: `${index + 1} of ${entries.length} · ${entry.title}` });
+        if (outcome.stage === "cancelled") {
+          counts.cancelled = entries.length - index;
+          break;
+        }
+        if ("result" in outcome && outcome.stage === "run" && outcome.result.exitCode === 0) counts.ran += 1;
+        else counts.failed += 1;
+        continue;
+      }
+      try {
+        await runPluginAction(store.pluginActions, plugin, action, args);
+        counts.ran += 1;
+      } catch (reason) {
+        counts.failed += 1;
+        failure ??= messageOf(reason);
+      }
+    }
+    setBulkProgress(null);
+    setChecked([]);
+    void store.refreshPlugins();
+    notify({ text: `${bulkSummary(declared.title, counts)}${failure ? `: ${failure}` : ""}`, alert: counts.failed > 0 });
   }
 
   function showAgain(key: string) {
@@ -618,6 +685,8 @@ export function App(props: { store: AppStore }) {
               hidden={hidden()}
               onHide={hide}
               onShowAgain={showAgain}
+              checked={checked()}
+              onCheck={setChecked}
               filter={filter()}
               onFilter={chooseFilter}
               pluginTitle={(plugin) => pluginNamed(plugin)?.title ?? plugin}
@@ -639,6 +708,16 @@ export function App(props: { store: AppStore }) {
               onAction={(name, action) => void runAgentAction(name, action)}
               onInstall={(kind) => void startInstall(kind)}
             />
+            <Show when={checkedEntries().length > 0 || bulkProgress() !== null}>
+              <BulkBar
+                count={checkedEntries().length}
+                actions={bulkActions()}
+                progress={bulkProgress()}
+                onHide={hideChecked}
+                onAction={(action) => void runChecked(action)}
+                onClear={() => setChecked([])}
+              />
+            </Show>
             <SidebarResizer width={sidebarWidth()} onResize={setSidebarWidth} />
           </aside>
 
@@ -774,9 +853,11 @@ export function App(props: { store: AppStore }) {
                   action={confirmation.action}
                   args={confirmation.args}
                   actions={store.pluginActions}
+                  subject={confirmation.subject}
                   onClose={(outcome) => {
                     setEntryConfirmation(null);
                     if ("result" in outcome && outcome.stage === "run" && outcome.result.exitCode === 0) void store.refreshPlugins();
+                    confirmation.done?.(outcome);
                   }}
                 />
               )}

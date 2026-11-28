@@ -802,6 +802,94 @@ describe("status format 2", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
+  describe("bulk actions", () => {
+    const second = { ...fixtureV2Status().items[0]!, id: "run-second", title: "Score last week's sessions", route: "/runs/run-second" };
+    const status = () => actionResult({ stdout: JSON.stringify(fixtureV2Status({ items: [...fixtureV2Status().items, second] })) });
+    const bar = () => screen.getByRole("group", { name: "Checked in Needs you" });
+    const buttons = () => within(bar()).getAllByRole("button").map((button) => button.textContent || button.getAttribute("aria-label"));
+    const check = (title: string, init: MouseEventInit = {}) => {
+      fireEvent.click(screen.getByRole("checkbox", { name: `Select ${title}` }), init);
+      flush();
+    };
+    const notice = () => document.querySelector(".app-notice");
+
+    it("offers Hide for any checked entries and the row actions all checked items of one plugin share", async () => {
+      const { api } = v2Api(status);
+      renderApp(api);
+      await screen.findByRole("treeitem", { name: /^Score last week's sessions/ });
+      expect(screen.queryByRole("group", { name: "Checked in Needs you" })).not.toBeInTheDocument();
+      check(failedTitle);
+      expect(within(bar()).getByRole("status")).toHaveTextContent("1 selected");
+      expect(buttons()).toEqual(["Hide", "Rerun", "Delete run", "Clear selection"]);
+      // Tighten upload retries offers only Delete run.
+      check("Tighten upload retries");
+      expect(within(bar()).getByRole("status")).toHaveTextContent("2 selected");
+      expect(buttons()).toEqual(["Hide", "Delete run", "Clear selection"]);
+      // A blocker runs its action with no item, so with one checked only Hide applies.
+      check("Codex is signed out");
+      expect(buttons()).toEqual(["Hide", "Clear selection"]);
+      expect(await axeViolations()).toEqual([]);
+      fireEvent.keyDown(within(bar()).getByRole("button", { name: "Hide" }), { key: "Escape" });
+      flush();
+      expect(screen.queryByRole("group", { name: "Checked in Needs you" })).not.toBeInTheDocument();
+    });
+
+    it("hides every checked entry with one Undo", async () => {
+      const { api } = v2Api(status);
+      renderApp(api);
+      await screen.findByRole("treeitem", { name: /^Score last week's sessions/ });
+      check("Codex is signed out");
+      check("Tighten upload retries", { shiftKey: true });
+      click(within(bar()).getByRole("button", { name: "Hide" }));
+      await waitFor(() => expect(notice()).toHaveTextContent("Hid 4"));
+      expect(screen.queryByRole("group", { name: "Checked in Needs you" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("tree", { name: "Needs you" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Hidden · 4" })).toBeInTheDocument();
+      click(within(notice() as HTMLElement).getByRole("button", { name: "Undo" }));
+      expect(within(screen.getByRole("tree", { name: "Needs you" })).getAllByRole("treeitem")).toHaveLength(4);
+    });
+
+    it("runs an action once per checked item and says how many it ran and failed on", async () => {
+      const { api, pluginRequest } = v2Api(status);
+      const rerun = vi.fn(async (sent: PluginActionRequest) => (sent.args.includes("run-second")
+        ? actionResult({ exitCode: 3, stderr: "fixture-runs: Codex is signed out\n" })
+        : actionResult({ stdout: "queued again\n" })));
+      pluginRequest.mockImplementation(async (sent) => (sent.action === "rerun" ? rerun(sent) : status()));
+      renderApp(api);
+      await screen.findByRole("treeitem", { name: /^Score last week's sessions/ });
+      check(failedTitle);
+      check("Score last week's sessions");
+      click(within(bar()).getByRole("button", { name: "Rerun" }));
+      await waitFor(() => expect(notice()).toHaveTextContent("Rerun ran on 1, failed on 1: fixture-runs: Codex is signed out"));
+      expect(notice()).toHaveAttribute("role", "alert");
+      expect(rerun.mock.calls.map(([sent]) => sent.args)).toEqual([["--item", "run-74c91b1d"], ["--item", "run-second"]]);
+      expect(screen.queryByRole("group", { name: "Checked in Needs you" })).not.toBeInTheDocument();
+    });
+
+    it("confirms a confirm action once per item, and Cancel stops the rest", async () => {
+      const { api, pluginRequest } = v2Api(status);
+      renderApp(api);
+      await screen.findByRole("treeitem", { name: /^Score last week's sessions/ });
+      check(failedTitle);
+      check("Score last week's sessions");
+      check("Tighten upload retries");
+      click(within(bar()).getByRole("button", { name: "Delete run" }));
+      let dialog = await screen.findByRole("alertdialog", { name: "Delete run" });
+      expect(dialog).toHaveTextContent(`1 of 3 · ${failedTitle}`);
+      expect(within(bar()).getByRole("status")).toHaveTextContent("Delete run · 1 of 3");
+      const confirm = within(dialog).getByRole("button", { name: "Delete run" });
+      await waitFor(() => expect(confirm).toBeEnabled());
+      fireEvent.click(confirm);
+      await waitFor(() => expect(screen.getByRole("alertdialog", { name: "Delete run" })).toHaveTextContent("2 of 3 · Score last week's sessions"));
+      dialog = screen.getByRole("alertdialog", { name: "Delete run" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(notice()).toHaveTextContent("Delete run ran on 1, cancelled 2"));
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      const deletes = pluginRequest.mock.calls.map(([sent]) => sent).filter((sent) => sent.action === "delete");
+      expect(deletes.map((sent) => [sent.args[1], sent.confirmedFingerprint !== null])).toEqual([["run-74c91b1d", false], ["run-74c91b1d", true], ["run-second", false]]);
+    });
+  });
+
   it("opens a clicked row in the plugin's sandboxed page at its route, and sends Command-J's next row to the same page", async () => {
     const { api } = v2Api();
     renderApp(api);

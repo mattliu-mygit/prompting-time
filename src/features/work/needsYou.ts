@@ -17,6 +17,10 @@ export type NeedsYouEntry = {
   title: string;
   /** Where its plugin's page shows it; null for a chat. */
   route: string | null;
+  /** An item's ID, which its row actions get as `--item <id>`; null for a blocker or a chat. */
+  itemId: string | null;
+  /** An item's row actions; none for a blocker or a chat. */
+  actions: readonly string[];
 };
 
 /** An entry the user hid, which stays out of Needs you while it is there with the same `version`. */
@@ -37,12 +41,12 @@ export const blockerVersion = (blocker: StatusV2Blocker) => `${blocker.dot} ${bl
 export function needsYouEntries(work: StatusV2Work, chats: readonly ConversationSummary[]): NeedsYouEntry[] {
   return [
     ...work.blockers.map(({ plugin, pluginTitle, blocker }): NeedsYouEntry => ({
-      kind: "blocker", key: blockerKey(plugin, blocker.id), plugin, pluginTitle, version: blockerVersion(blocker), title: blocker.title, route: blocker.route,
+      kind: "blocker", key: blockerKey(plugin, blocker.id), plugin, pluginTitle, version: blockerVersion(blocker), title: blocker.title, route: blocker.route, itemId: null, actions: [],
     })),
     ...work.needsYou.flatMap(({ plugin, pluginTitle, items }) => items.map((item): NeedsYouEntry => ({
-      kind: "item", key: itemKey(plugin, item.id), plugin, pluginTitle, version: itemVersion(item), title: item.title, route: item.route,
+      kind: "item", key: itemKey(plugin, item.id), plugin, pluginTitle, version: itemVersion(item), title: item.title, route: item.route, itemId: item.id, actions: item.actions,
     }))),
-    ...chats.map((chat): NeedsYouEntry => ({ kind: "chat", key: chat.id, plugin: null, pluginTitle: null, version: "", title: chat.title, route: null })),
+    ...chats.map((chat): NeedsYouEntry => ({ kind: "chat", key: chat.id, plugin: null, pluginTitle: null, version: "", title: chat.title, route: null, itemId: null, actions: [] })),
   ];
 }
 
@@ -100,4 +104,21 @@ export function readFilter(): NeedsYouFilter {
 
 export function saveFilter(filter: NeedsYouFilter): void {
   savePreference(FILTER_PREFERENCE, filter);
+}
+
+/**
+ * The row actions that apply to every one of `entries`, which a bulk action runs once per entry:
+ * when all of them are items of one plugin, the actions each lists, in the first's order; otherwise
+ * none. Hide applies to every kind, so it is not among them.
+ */
+export function sharedActions(entries: readonly NeedsYouEntry[]): { plugin: string; actions: string[] } | null {
+  const [first] = entries;
+  if (!first?.plugin || entries.some(({ kind, plugin }) => kind !== "item" || plugin !== first.plugin)) return null;
+  return { plugin: first.plugin, actions: first.actions.filter((action) => entries.every(({ actions }) => actions.includes(action))) };
+}
+
+/** What a bulk action did, for its notice: "Rerun ran on 2, failed on 1", and "cancelled 1" for confirmations the user cancelled. */
+export function bulkSummary(title: string, { ran, failed, cancelled }: { ran: number; failed: number; cancelled: number }): string {
+  const parts = [`ran on ${ran}`, failed > 0 && `failed on ${failed}`, cancelled > 0 && `cancelled ${cancelled}`].filter(Boolean);
+  return `${title} ${parts.join(", ")}`;
 }

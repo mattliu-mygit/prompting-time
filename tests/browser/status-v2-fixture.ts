@@ -96,6 +96,9 @@ export function answerV2Action(sent: PluginActionRequest, changed: (files: strin
       changed(["providers.json"]);
       return result({ stdout: "codex: signed in\n" });
     case "rerun":
+      // The run that failed because Codex is signed out can't run again until it signs in, so a bulk
+      // Rerun of both failed runs runs on one and fails on the other.
+      if (id === "run-5e02aa10" && codexSignedOut) return result({ exitCode: 3, stderr: "fixture-runs: Codex is signed out; check providers first\n" });
       items = items.map((item) => (item.id === id ? { ...item, group: "running", dot: "running", detail: "Queued again", updated_at: new Date().toISOString(), actions: [] } : item));
       changed([`runs/${id}/run.json`]);
       return result({ stdout: `queued ${id} again\n` });

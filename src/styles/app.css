@@ -1667,3 +1667,49 @@ body {
   inline-size: var(--s-space-16);
   block-size: var(--s-space-16);
 }
+
+/* A Needs you row's checkbox sits in its icon's place: on the open or focused row, and on every
+   row while any is checked. Pointing at a row never shows it. */
+.work-check {
+  margin: 0;
+  accent-color: var(--s-primary);
+  cursor: pointer;
+}
+
+.all-work:not(.work-selecting) .work-row:not(:focus-within, [aria-selected="true"]) .pt-list-row-leading {
+  visibility: hidden;
+}
+
+.work-selecting .work-row:has(> .pt-list-row-leading) > .pt-list-row-icon,
+.work-row:is(:focus-within, [aria-selected="true"]):has(> .pt-list-row-leading) > .pt-list-row-icon {
+  visibility: hidden;
+}
+
+/* While Needs you entries are checked, the bar at the bottom of the sidebar with what applies to all of them. */
+.work-bulk {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12);
+  border-block-start: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  background: var(--s-surface-elevated);
+}
+
+.work-bulk-count {
+  color: var(--s-text);
+  font-size: var(--s-size-sm);
+}
+
+.work-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.plugin-confirm-subject {
+  color: var(--s-text-muted);
+}

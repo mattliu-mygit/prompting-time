@@ -106,8 +106,19 @@ uploads" ("Needs a look · Whooper"), and one "Review needed · Fixture runs", t
 the chats waiting on you. Its Running run and six Done runs stay out of the sidebar; they are the
 plugin's page's to show (the palette's Work group still finds them). Command-J steps through the
 blocker, those four items, and the waiting chats. Each row's ⋯ menu opens on a click: Rerun moves
-a run to Running, Delete run opens the confirmation with the invented request and deletes the run
+a run to Running, except "Score last week's sessions", which Fixture runs refuses while Codex is
+signed out, Delete run opens the confirmation with the invented request and deletes the run
 after Confirm, and the blocker's Check providers clears it. Everything answers in browser memory.
+
+Each Needs you row has a checkbox in its icon's place, shown on the open or focused row and on every
+row once one is checked; pointing at a row shows none. Check one (or press x on the focused row),
+Shift+click another for the rows between, or press Command-A on a row for all the chip lists;
+Escape unchecks them. The bar at the bottom of the sidebar says "N selected" with Hide, and the
+row actions every checked item offers when all are Fixture runs items: check both failed runs for
+Rerun and Delete run, add "Tighten upload retries" and only Delete run is left, add the blocker or
+a chat and only Hide. Rerun on both failed runs ends with "Rerun ran on 1, failed on 1" and Fixture
+runs' words; Delete run opens one confirmation per run, "1 of 2 · <title>", and Cancel stops the
+rest; Hide shows "Hid N" with Undo.
 
 With `?agents=v2&work=1`, chips above Needs you read "All 7", "Chats 2", "Fixture runs 4", and
 "Whooper 1"; a click on one lists only its entries, and the choice stays after a reload. Under

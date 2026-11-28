@@ -37,6 +37,7 @@ type Options = {
   pluginWork?: StatusV2Work;
   hidden?: HiddenEntry[];
   filter?: NeedsYouFilter;
+  checked?: string[];
 };
 const SECTIONS = "prompting-time.sidebar-sections";
 
@@ -61,6 +62,8 @@ function renderWork(options: Options = {}) {
   const onHide = vi.fn((entry: HiddenEntry) => setHidden((current) => [...current, entry]));
   const onShowAgain = vi.fn((key: string) => setHidden((current) => current.filter((entry) => entry.key !== key)));
   const onFilter = vi.fn((next: NeedsYouFilter) => setFilter(next));
+  const [checked, setChecked] = createSignal<string[]>(options.checked ?? []);
+  const onCheck = vi.fn((keys: string[]) => setChecked(keys));
   const view = render(() => (
     <AllWork
       selectedEntry={options.selectedEntry ?? null}
@@ -72,6 +75,8 @@ function renderWork(options: Options = {}) {
       hidden={hidden()}
       onHide={onHide}
       onShowAgain={onShowAgain}
+      checked={checked()}
+      onCheck={onCheck}
       filter={filter()}
       onFilter={onFilter}
       pluginTitle={(plugin) => plugin}
@@ -91,7 +96,7 @@ function renderWork(options: Options = {}) {
     setQuery(text);
     flush();
   };
-  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenEntry, onEntryAction, onHide, onShowAgain, onFilter, hidden, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
+  return { ...view, onSelect, onToggle, onLoadChildPage, onOpenEntry, onEntryAction, onHide, onShowAgain, onFilter, onCheck, checked, setFilter, hidden, setConversations, setExpanded, setSelected, setSelectedPath, setChildPages, search };
 }
 const press = (element: HTMLElement, key: string) => {
   fireEvent.keyDown(element, { key });
@@ -587,5 +592,100 @@ describe("AllWork", () => {
       childPagesById: { root: page(["child", "child", "grandchild", "sibling", "archived", "missing"]) }, expandedById: { root: true } });
     expect(screen.getAllByRole("treeitem")).toHaveLength(2);
     expect(screen.getByRole("treeitem", { name: /API reviewer/ })).toBeVisible();
+  });
+  describe("checking Needs you entries for bulk actions", () => {
+    const evaluation = node("waiting", "Evaluation rows", null, { runStatus: "waiting", rollupStatus: "needsAttention", hasChildren: true });
+    const KEYS = ["item:whooper:run-101", "item:whooper:run-77", "item:whooper:run-55", "waiting"];
+    const renderChecks = (options: Options = {}) => renderWork({
+      conversations: [evaluation, sibling], conversationsById: { waiting: evaluation, child: { ...child, parentId: "waiting" }, sibling },
+      expandedById: { waiting: true }, childPagesById: { waiting: page(["child"]) }, pluginWork: whooperWork(), open: { "chats:no-folder": true }, ...options,
+    });
+    const box = (title: string) => screen.getByRole("checkbox", { name: `Select ${title}` });
+    const row = (title: string) => screen.getByRole("treeitem", { name: new RegExp(`^${title}`) });
+    const selecting = () => document.querySelector(".all-work")!.classList.contains("work-selecting");
+    const click = (element: HTMLElement, init: MouseEventInit = {}) => {
+      fireEvent.click(element, init);
+      flush();
+    };
+
+    it("gives each Needs you row a checkbox, but not a chat's children, the other chats, or search results", () => {
+      const view = renderChecks();
+      const needsYou = screen.getByRole("tree", { name: "Needs you" });
+      expect(within(needsYou).getAllByRole("checkbox").map((element) => element.getAttribute("aria-label"))).toEqual([
+        "Select separate cache configuration", "Select add the tags package", "Select move the projection", "Select Evaluation rows",
+      ]);
+      expect(within(row("API reviewer")).queryByRole("checkbox")).not.toBeInTheDocument();
+      expect(within(screen.getByRole("tree", { name: "Chats · no folder" })).queryByRole("checkbox")).not.toBeInTheDocument();
+      // A checkbox takes no tab stop, and nothing is checked yet, so only the focused or open row shows one.
+      expect(box("add the tags package")).toHaveAttribute("tabindex", "-1");
+      expect(selecting()).toBe(false);
+      expect(row("add the tags package")).not.toHaveAttribute("aria-checked");
+      view.search("tags");
+      expect(within(screen.getByRole("region", { name: "Search results" })).queryByRole("checkbox")).not.toBeInTheDocument();
+    });
+
+    it("checks a row on a click without opening it, a range with Shift+click, and shows every checkbox while any is checked", async () => {
+      const view = renderChecks();
+      click(box("add the tags package"));
+      expect(view.onCheck).toHaveBeenLastCalledWith(["item:whooper:run-77"]);
+      expect(view.onOpenEntry).not.toHaveBeenCalled();
+      expect(row("add the tags package")).toHaveFocus();
+      expect(selecting()).toBe(true);
+      expect(row("add the tags package")).toHaveAttribute("aria-checked", "true");
+      expect(row("separate cache configuration")).toHaveAttribute("aria-checked", "false");
+      expect(box("add the tags package")).toBeChecked();
+
+      click(box("Evaluation rows"), { shiftKey: true });
+      expect(view.checked()).toEqual(["item:whooper:run-77", "item:whooper:run-55", "waiting"]);
+      expect(view.onSelect).not.toHaveBeenCalled();
+      // Shift+click on a checked row unchecks the range back to the last one clicked.
+      click(box("move the projection"), { shiftKey: true });
+      expect(view.checked()).toEqual(["item:whooper:run-77"]);
+      click(box("add the tags package"));
+      expect(view.checked()).toEqual([]);
+      expect(selecting()).toBe(false);
+      expect(await axeViolations()).toEqual([]);
+    });
+
+    it("toggles the focused row with x, checks all that the filter lists with Command-A, and unchecks all with Escape", () => {
+      const view = renderChecks();
+      const focused = row("add the tags package");
+      focused.focus();
+      press(focused, "x");
+      expect(view.checked()).toEqual(["item:whooper:run-77"]);
+      press(focused, "x");
+      expect(view.checked()).toEqual([]);
+      fireEvent.keyDown(focused, { key: "a", metaKey: true });
+      flush();
+      expect(view.checked()).toEqual(KEYS);
+      press(focused, "Escape");
+      expect(view.checked()).toEqual([]);
+
+      // Under a chip, Command-A checks only what it lists; x and Command-A do nothing on a chat's child.
+      view.setFilter("plugin:whooper");
+      flush();
+      fireEvent.keyDown(row("separate cache configuration"), { key: "a", ctrlKey: true });
+      flush();
+      expect(view.checked()).toEqual(KEYS.slice(0, 3));
+      press(focused, "Escape");
+      view.setFilter("all");
+      flush();
+      press(row("API reviewer"), "x");
+      fireEvent.keyDown(row("API reviewer"), { key: "a", metaKey: true });
+      flush();
+      expect(view.checked()).toEqual([]);
+    });
+
+    it("unchecks entries that leave what Needs you lists, as when hidden or outside the chosen chip", async () => {
+      const view = renderChecks({ checked: KEYS });
+      flush();
+      expect(view.checked()).toEqual(KEYS);
+      fireEvent.click(screen.getByRole("button", { name: "Actions for move the projection" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Hide" }));
+      await waitFor(() => expect(view.checked()).toEqual(["item:whooper:run-101", "item:whooper:run-77", "waiting"]));
+      view.setFilter("chats");
+      flush();
+      expect(view.checked()).toEqual(["waiting"]);
+    });
   });
 });
