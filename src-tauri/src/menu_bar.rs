@@ -91,11 +91,14 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         Some(Choice::Open) => show_window(app),
         Some(Choice::Quit) => app.exit(0),
         Some(Choice::Window(command)) => {
-            // Pause, Resume, Start, and Poll now run without taking the user away from what they do.
-            if !matches!(command, MenuBarCommand::Agent { .. }) {
+            // Pause, Resume, Start, and Poll now run without taking the user away from what they
+            // do, unless the window cannot hear the command; then it comes forward, so the click
+            // does not silently do nothing. The window always exists while the menu bar extra
+            // does: closing it quits Prompting Time.
+            let delivered = app.emit(MENU_BAR_EVENT, &command).is_ok();
+            if !delivered || !matches!(command, MenuBarCommand::Agent { .. }) {
                 show_window(app);
             }
-            let _ = app.emit(MENU_BAR_EVENT, command);
         }
         None => {}
     }
