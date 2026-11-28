@@ -2,16 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mattliu-mygit/prompting-time/docs/plugin-status-v2.schema.json",
   "title": "Prompting Time plugin status, format 2",
-  "description": "What a plugin's `status` action prints when its manifest declares `\"status\": {\"format\": 2, ...}`. Prompting Time draws the plugin's agent row in the sidebar's Plugins section and the menu bar from this output, and lists its blockers and the items of its `needs_you` groups in the Needs you inbox, which Command-J steps through. Every blocker and item is reachable in the plugin's page and in Command-K's Work group. An item's `group` must be one of the manifest's `status.groups` ids, and its `actions` must be among the manifest's `status.item_actions`. Prompting Time drops an item or blocker that does not fit this schema, an item whose group the manifest does not declare, and an item past the 50th or with an id already listed; it ignores row actions the manifest does not allow and a blocker action the manifest does not declare, and keeps the rest. The output may hold other top-level fields, such as data the plugin's own page reads; Prompting Time ignores them. The whole output must fit in 8 MiB, the most Prompting Time reads of an action's output; a larger status fails to read, with an error saying so. The agent, blockers, and items allow only the fields listed here.",
+  "description": "What a plugin's `status` action prints when its manifest declares `\"status\": {\"format\": 2, ...}`. Prompting Time draws the plugin's agent row in the sidebar's Plugins section and the menu bar from this output, and lists its blockers and the items of its `needs_you` groups in the Needs you inbox, which Command-J steps through. Every blocker and item is reachable in the plugin's page and in Command-K's Work group. An item's `group` must be one of the manifest's `status.groups` ids, and its `actions` must be among the manifest's `status.item_actions`. Prompting Time drops an item or blocker that does not fit this schema, an item whose group the manifest does not declare, and an item past the 50th or with an id already listed; it ignores row actions the manifest does not allow and a blocker action the manifest does not declare, and keeps the rest. The output may hold other top-level fields, such as data the plugin's own page reads; Prompting Time ignores them. The whole output must fit in 8 MiB, the most Prompting Time reads of an action's output; a larger status fails to read, with an error saying so. The agent, each blocker, and each item may hold other fields too, which Prompting Time ignores; an output without a fitting `agent` still lists its blockers and items, and the plugin's row then shows only whether its process runs.",
   "type": "object",
-  "required": ["format", "agent", "blockers", "items", "truncated"],
+  "required": ["format", "blockers", "items", "truncated"],
   "properties": {
     "format": { "const": 2 },
     "agent": {
       "description": "The plugin's row: a few status words and a dot.",
       "type": "object",
       "required": ["words", "dot"],
-      "additionalProperties": false,
       "properties": {
         "words": { "type": "string", "description": "Such as \"Polling every 10 min\" or \"Idle · last run 2 min ago\"." },
         "dot": { "$ref": "#/$defs/dot" }
@@ -23,13 +22,12 @@
       "items": {
         "type": "object",
         "required": ["id", "title", "dot", "route"],
-        "additionalProperties": false,
         "properties": {
           "id": { "$ref": "#/$defs/id" },
           "title": { "type": "string", "minLength": 1, "description": "Such as \"Codex is signed out\"." },
           "dot": { "$ref": "#/$defs/dot" },
           "route": { "$ref": "#/$defs/route" },
-          "action": { "type": "string", "minLength": 1, "description": "One of the manifest's actions that fixes or rechecks the blocker; it runs with no extra arguments." }
+          "action": { "type": ["string", "null"], "description": "One of the manifest's actions that fixes or rechecks the blocker; it runs with no extra arguments. Null or empty when there is none." }
         }
       }
     },
@@ -40,7 +38,6 @@
       "items": {
         "type": "object",
         "required": ["id", "group", "title", "dot", "updated_at", "route"],
-        "additionalProperties": false,
         "properties": {
           "id": { "$ref": "#/$defs/id", "description": "Unique among the items; row actions receive it as `--item <id>`." },
           "group": { "type": "string", "minLength": 1, "description": "One of the manifest's `status.groups` ids." },
